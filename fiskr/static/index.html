@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fiskr - Moteur de Criblage LBA-CFT & Personnes Politiquement Exposées (PEP)</title>
+    <meta name="description" content="Solution bancaire de criblage de sanctions et de personnes politiquement exposées en temps réel et en mode batch.">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo-container">
+                <span class="logo-icon">⚓</span>
+                <span class="logo-text">FISKR</span>
+            </div>
+            <nav class="sidebar-nav">
+                <ul>
+                    <li>
+                        <button id="nav-btn-sandbox" class="nav-item active" onclick="switchTab('sandbox')">
+                            <span class="nav-icon">🔍</span> Sandbox Temps Réel
+                        </button>
+                    </li>
+                    <li>
+                        <button id="nav-btn-batch" class="nav-item" onclick="switchTab('batch')">
+                            <span class="nav-icon">📊</span> Mode Batch
+                        </button>
+                    </li>
+                    <li>
+                        <button id="nav-btn-watchlist" class="nav-item" onclick="switchTab('watchlist')">
+                            <span class="nav-icon">📋</span> Watchlist active
+                        </button>
+                    </li>
+                    <li>
+                        <button id="nav-btn-history" class="nav-item" onclick="switchTab('history')">
+                            <span class="nav-icon">📜</span> Piste d'Audit
+                        </button>
+                    </li>
+                </ul>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="watchlist-info">
+                    <p>Watchlist Hash :</p>
+                    <span id="sidebar-wl-hash" class="hash-badge">Loading...</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="app-header">
+                <h1>Fiskr Compliance Screening Engine</h1>
+                <div class="system-status">
+                    <span class="status-indicator online"></span>
+                    <span class="status-text">Moteur opérationnel</span>
+                </div>
+            </header>
+
+            <!-- SECTION 1: SANDBOX TEMPS REEL -->
+            <section id="sec-sandbox" class="tab-content active">
+                <div class="grid-layout">
+                    <!-- Column 1: Client Input Form -->
+                    <div class="card form-card">
+                        <h2>Saisie du Profil Client</h2>
+                        <p class="section-desc">Entrez les informations du tiers pour évaluer son niveau de risque et de correspondance.</p>
+                        
+                        <form id="screening-form" onsubmit="handleScreening(event)">
+                            <div class="form-group">
+                                <label for="client-name">Nom Complet / Raison Sociale *</label>
+                                <input type="text" id="client-name" required placeholder="Ex: Vladimir Putin, MULLER Jean-Marc">
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="client-type">Type d'Entité *</label>
+                                    <select id="client-type" required onchange="toggleFormFields()">
+                                        <option value="PP">Personne Physique (PP)</option>
+                                        <option value="PM">Personne Morale (PM)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="client-gender">Genre</label>
+                                    <select id="client-gender">
+                                        <option value="U">Non spécifié (U)</option>
+                                        <option value="M">Masculin (M)</option>
+                                        <option value="F">Féminin (F)</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="form-group" id="dob-group">
+                                <label for="client-dob">Date de Naissance (DOB)</label>
+                                <input type="date" id="client-dob">
+                            </div>
+
+                            <div class="form-group">
+                                <label for="client-countries">Pays (Codes ISO2 séparés par virgules)</label>
+                                <input type="text" id="client-countries" placeholder="Ex: FR, RU, US">
+                            </div>
+
+                            <div class="form-group">
+                                <label for="client-aliases">Alias / Noms secondaires (séparés par virgules)</label>
+                                <input type="text" id="client-aliases" placeholder="Ex: Vlad Putin, Putin V.">
+                            </div>
+
+                            <button type="submit" id="submit-screen-btn" class="btn btn-primary">
+                                Launch Screening Engine
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Column 2: Results Display -->
+                    <div class="card result-card" id="screening-results-placeholder">
+                        <div class="placeholder-content">
+                            <span class="placeholder-icon">🔍</span>
+                            <h3>En attente de saisie</h3>
+                            <p>Remplissez le formulaire de gauche et lancez le screening pour analyser les résultats.</p>
+                        </div>
+                    </div>
+
+                    <div class="card result-card hidden" id="screening-results-card">
+                        <div class="result-header">
+                            <h2>Résultats du Screening</h2>
+                            <div id="badge-compliance-status" class="status-badge alert">ALERT</div>
+                        </div>
+
+                        <!-- Main Score display -->
+                        <div class="score-display-container">
+                            <div class="gauge-wrapper">
+                                <svg class="score-gauge" viewBox="0 0 100 100">
+                                    <circle class="gauge-bg" cx="50" cy="50" r="45"></circle>
+                                    <circle id="gauge-progress" class="gauge-progress" cx="50" cy="50" r="45"></circle>
+                                </svg>
+                                <div class="gauge-text">
+                                    <span id="gauge-score-value">0.0%</span>
+                                    <span class="score-label">Score Final</span>
+                                </div>
+                            </div>
+                            
+                            <div class="score-metrics">
+                                <div class="metric">
+                                    <span class="metric-label">Score de base textuel</span>
+                                    <span id="metric-base-score" class="metric-value">0.0%</span>
+                                </div>
+                                <div class="metric">
+                                    <span class="metric-label">Candidats évalués</span>
+                                    <span id="metric-candidates" class="metric-value">0</span>
+                                </div>
+                                <div class="metric">
+                                    <span class="metric-label">Clés de blocking générées</span>
+                                    <span id="metric-blocking-keys" class="metric-value">-</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Data Quality Section -->
+                        <div class="result-section">
+                            <h3>Data Quality Gate</h3>
+                            <div id="quality-gate-status" class="quality-gate-report">
+                                <span class="status-dot green"></span> Validé
+                            </div>
+                            <div id="quality-gate-anomalies" class="anomalies-list"></div>
+                        </div>
+
+                        <!-- Decision Tree Accordion -->
+                        <div class="result-section">
+                            <h3>Arbre de Décision de la Fiche Match</h3>
+                            <div id="match-details-container" class="match-details">
+                                <div class="detail-row">
+                                    <span>Nom Client Apparié :</span>
+                                    <strong id="best-match-cname">-</strong>
+                                </div>
+                                <div class="detail-row">
+                                    <span>Nom Watchlist Apparié :</span>
+                                    <strong id="best-match-wname">-</strong>
+                                </div>
+                                <div class="detail-row">
+                                    <span>Fiche Watchlist Source :</span>
+                                    <strong id="best-match-wid">-</strong>
+                                </div>
+                                
+                                <div class="adjustments-tree">
+                                    <h4>Ajustements Contextuels</h4>
+                                    <ul>
+                                        <li>
+                                            <span class="adj-name">Date de Naissance (DOB)</span>
+                                            <span id="adj-dob-val" class="adj-val">0</span>
+                                            <div id="adj-dob-desc" class="adj-desc">-</div>
+                                        </li>
+                                        <li>
+                                            <span class="adj-name">Genre</span>
+                                            <span id="adj-gender-val" class="adj-val">0</span>
+                                            <div id="adj-gender-desc" class="adj-desc">-</div>
+                                        </li>
+                                        <li>
+                                            <span class="adj-name">Géographie (Pays)</span>
+                                            <span id="adj-geo-val" class="adj-val">0</span>
+                                            <div id="adj-geo-desc" class="adj-desc">-</div>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION 2: BATCH SCREENING -->
+            <section id="sec-batch" class="tab-content">
+                <div class="card">
+                    <h2>Simulateur de Screening de Masse (Batch Engine)</h2>
+                    <p class="section-desc">Soumettez une liste de clients pour exécuter le criblage par blocage et extraire les alertes (simule le traitement distribué Spark).</p>
+                    
+                    <div class="batch-actions">
+                        <div class="textarea-input">
+                            <label for="batch-json-input">Données Clients (Format JSON Array) :</label>
+                            <textarea id="batch-json-input" rows="8" placeholder='[
+  {
+    "entity_id": "CLI-B1",
+    "entity_type": "PP",
+    "primary_name": "Vladimir PUTIN",
+    "dates_of_birth": ["1952-10-07"],
+    "genders": ["M"],
+    "countries": {"citizenship": ["RU"]}
+  },
+  {
+    "entity_id": "CLI-B2",
+    "entity_type": "PP",
+    "primary_name": "Jean-Marc Dupont",
+    "dates_of_birth": ["1984-03-15"],
+    "genders": ["M"],
+    "countries": {"residence": ["FR"]}
+  }
+]'></textarea>
+                        </div>
+                        <div class="btn-container">
+                            <button id="run-batch-btn" class="btn btn-primary" onclick="runBatchScreening()">
+                                Lancer le Batch Screening
+                            </button>
+                            <button class="btn btn-secondary" onclick="loadSampleBatchJSON()">
+                                Charger Exemples
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="batch-results-container" class="batch-results hidden">
+                        <hr>
+                        <h3>Résultats du Batch : <span id="batch-alerts-count">0</span> alerte(s) détectée(s)</h3>
+                        <div class="table-container">
+                            <table id="batch-results-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID Client</th>
+                                        <th>Nom Client</th>
+                                        <th>ID Watchlist Match</th>
+                                        <th>Nom Watchlist Match</th>
+                                        <th>Score Final</th>
+                                        <th>Statut</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION 3: WATCHLIST ACTIVE -->
+            <section id="sec-watchlist" class="tab-content">
+                <div class="grid-layout">
+                    <!-- Column 1: Add new watchlist record -->
+                    <div class="card form-card">
+                        <h2>Ajouter une Fiche de Sanction / PEP</h2>
+                        <form id="add-watchlist-form" onsubmit="handleAddWatchlist(event)">
+                            <div class="form-group">
+                                <label for="wl-id">ID Unique Fiche *</label>
+                                <input type="text" id="wl-id" required placeholder="Ex: WL-9921">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="wl-name">Nom Principal / Raison Sociale *</label>
+                                <input type="text" id="wl-name" required placeholder="Ex: Saddam Hussein">
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="wl-type">Type d'Entité *</label>
+                                    <select id="wl-type" required>
+                                        <option value="PP">Personne Physique (PP)</option>
+                                        <option value="PM">Personne Morale (PM)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="wl-gender">Genre</label>
+                                    <select id="wl-gender">
+                                        <option value="U">Non spécifié (U)</option>
+                                        <option value="M">Masculin (M)</option>
+                                        <option value="F">Féminin (F)</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="wl-dob">Date de Naissance (DOB - YYYY-MM-DD)</label>
+                                <input type="text" id="wl-dob" placeholder="Ex: 1937-04-28">
+                            </div>
+
+                            <div class="form-group">
+                                <label for="wl-countries">Pays (ISO2 séparés par virgules)</label>
+                                <input type="text" id="wl-countries" placeholder="Ex: IQ, SY">
+                            </div>
+
+                            <div class="form-group">
+                                <label for="wl-aliases">Alias (séparés par virgules)</label>
+                                <input type="text" id="wl-aliases" placeholder="Ex: Hussein Saddam">
+                            </div>
+
+                            <button type="submit" id="add-wl-btn" class="btn btn-secondary">
+                                Ajouter et Indexer
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Column 2: Watchlist list -->
+                    <div class="card result-card">
+                        <h2>Fiches Indexées en Mémoire Vive</h2>
+                        <p class="section-desc">Liste complète des PEP et personnes sanctionnées chargées dans le cache du moteur.</p>
+                        
+                        <div class="search-box">
+                            <input type="text" id="wl-search-input" placeholder="Filtrer par nom ou ID..." onkeyup="filterWatchlist()">
+                        </div>
+
+                        <div class="table-container max-height-table">
+                            <table id="watchlist-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Type</th>
+                                        <th>Nom Principal</th>
+                                        <th>Pays</th>
+                                        <th>DOB</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION 4: PISTE D'AUDIT -->
+            <section id="sec-history" class="tab-content">
+                <div class="card">
+                    <h2>Piste d'Audit réglementaire (Compliance Audit Trail)</h2>
+                    <p class="section-desc">Historique immuable de toutes les décisions de criblage émises par le moteur. Conforme aux standards ACPR/AMF.</p>
+
+                    <div class="table-container">
+                        <table id="audit-table">
+                            <thead>
+                                <tr>
+                                    <th>Horodatage</th>
+                                    <th>Client</th>
+                                    <th>Fiche Matchée</th>
+                                    <th>Score Final</th>
+                                    <th>Statut</th>
+                                    <th>Détail</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Audit Log Modal -->
+    <div id="audit-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeAuditModal()">&times;</span>
+            <h2>Détail Linear Audit Trail & Décision</h2>
+            
+            <div id="modal-audit-details" class="modal-body-content">
+                <!-- Populated dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Script -->
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+[
+  {
+    "entity_id": "WL-001",
+    "entity_type": "PP",
+    "primary_name": "Vladimir Putin",
+    "aliases": ["PUTIN Vladimir", "Vladimir Vladimirovich Putin"],
+    "dates_of_birth": ["1952-10-07"],
+    "genders": ["M"],
+    "countries": {
+      "citizenship": ["RU"],
+      "residence": ["RU"],
+      "birth_country": ["RU"]
+    }
+  },
+  {
+    "entity_id": "WL-002",
+    "entity_type": "PM",
+    "primary_name": "Rosneft Oil Company",
+    "aliases": ["Rosneft PJSC", "OJSC Rosneft Oil Company"],
+    "dates_of_birth": [],
+    "genders": [],
+    "countries": {
+      "citizenship": [],
+      "residence": ["RU"],
+      "birth_country": []
+    }
+  },
+  {
+    "entity_id": "WL-003",
+    "entity_type": "PP",
+    "primary_name": "Muammar Gaddafi",
+    "aliases": ["Kadafi Muammar", "Qadhafi Muammar"],
+    "dates_of_birth": ["1942-06-07"],
+    "genders": ["M"],
+    "countries": {
+      "citizenship": ["LY"],
+      "residence": ["LY"],
+      "birth_country": ["LY"]
+    }
+  },
+  {
+    "entity_id": "WL-004",
+    "entity_type": "PP",
+    "primary_name": "Alexander Lukashenko",
+    "aliases": ["Lukashenka Aliaksandr"],
+    "dates_of_birth": ["1954-08-30"],
+    "genders": ["M"],
+    "countries": {
+      "citizenship": ["BY"],
+      "residence": ["BY"],
+      "birth_country": ["BY"]
+    }
+  },
+  {
+    "entity_id": "WL-005",
+    "entity_type": "PM",
+    "primary_name": "Almaz-Antey Corporation",
+    "aliases": ["JSC Concern VKO Almaz-Antey"],
+    "dates_of_birth": [],
+    "genders": [],
+    "countries": {
+      "citizenship": [],
+      "residence": ["RU"],
+      "birth_country": []
+    }
+  }
+]
