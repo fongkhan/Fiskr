@@ -16,3 +16,5 @@ build/
 spark-warehouse/
 metastore_db/
 derby.log
+clients_*.csv
+temp_ingestion/

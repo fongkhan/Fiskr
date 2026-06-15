@@ -22,16 +22,19 @@ def test_get_watchlist(client):
     assert "hash" in data
 
 def test_screen_valid_client(client):
-    # Screen Vladimir Putin - should trigger an alert against WL-001
+    # Screen Vladimir Putin - should trigger an alert against WL-001 (seeded watchlist item)
     payload = {
-        "entity_type": "PP",
-        "primary_name": "Vladimir Putin",
-        "dates_of_birth": ["1952-10-07"],
-        "genders": ["M"],
-        "countries": {
-            "citizenship": ["RU"],
+        "client_id": "CUST-0091",
+        "client_type": "PP",
+        "client_first_name": "Vladimir",
+        "client_last_name": "Putin",
+        "client_dob": "1952-10-07",
+        "client_gender": "M",
+        "client_countries": {
+            "nationality": ["RU"],
             "residence": [],
-            "birth_country": []
+            "birth_country": [],
+            "registration_country": []
         }
     }
     response = client.post("/api/screen", json=payload)
@@ -43,16 +46,19 @@ def test_screen_valid_client(client):
     assert data["best_match"]["final_score"] >= 75.0
 
 def test_screen_rejected_by_quality_gate(client):
-    # Empty name should fail quality check with HTTP 400
+    # Empty first & last name should fail quality check with HTTP 400
     payload = {
-        "entity_type": "PP",
-        "primary_name": "  ",
-        "dates_of_birth": ["1952-10-07"],
-        "genders": ["M"],
-        "countries": {
-            "citizenship": ["RU"],
+        "client_id": "CUST-0092",
+        "client_type": "PP",
+        "client_first_name": " ",
+        "client_last_name": "  ",
+        "client_dob": "1952-10-07",
+        "client_gender": "M",
+        "client_countries": {
+            "nationality": ["RU"],
             "residence": [],
-            "birth_country": []
+            "birth_country": [],
+            "registration_country": []
         }
     }
     response = client.post("/api/screen", json=payload)
@@ -60,7 +66,7 @@ def test_screen_rejected_by_quality_gate(client):
     data = response.json()
     assert "detail" in data
     assert "errors" in data["detail"]
-    assert any("Rule_B01" in err for err in data["detail"]["errors"])
+    assert any("Rule_B04" in err for err in data["detail"]["errors"])
 
 def test_get_history(client):
     # Get screening audit trail

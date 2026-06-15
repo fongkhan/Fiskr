@@ -1,51 +1,293 @@
-// Fiskr - Dashboard Controller
+// Fiskr - Dashboard Controller v2.0
 
 let activeWatchlist = [];
 let auditHistory = [];
+let activeSnapshots = [];
 
 document.addEventListener("DOMContentLoaded", () => {
     // Initial data loading
     fetchWatchlist();
     fetchAuditHistory();
+    fetchSnapshots();
     fetchConfig();
 });
 
 // Tab navigation
 function switchTab(tabId) {
-    // Update nav items
     document.querySelectorAll(".nav-item").forEach(item => {
         item.classList.remove("active");
     });
     const activeBtn = document.getElementById(`nav-btn-${tabId}`);
     if (activeBtn) activeBtn.classList.add("active");
     
-    // Update view sections
     document.querySelectorAll(".tab-content").forEach(sec => {
         sec.classList.remove("active");
     });
     document.getElementById(`sec-${tabId}`).classList.add("active");
     
-    // Refresh lists on tab click
+    // Refresh tab-specific data
     if (tabId === "watchlist") {
         fetchWatchlist();
     } else if (tabId === "history") {
         fetchAuditHistory();
+    } else if (tabId === "snapshots") {
+        fetchSnapshots();
     }
 }
 
 // Toggle fields based on entity type PP/PM
 function toggleFormFields() {
     const entityType = document.getElementById("client-type").value;
-    const dobGroup = document.getElementById("dob-group");
+    const ppFields = document.getElementById("pp-fields");
+    const pmFields = document.getElementById("pm-fields");
     
     if (entityType === "PM") {
-        dobGroup.style.display = "none";
+        ppFields.classList.add("hidden");
+        pmFields.classList.remove("hidden");
     } else {
-        dobGroup.style.display = "block";
+        ppFields.classList.remove("hidden");
+        pmFields.classList.add("hidden");
     }
 }
 
-// Fetch Watchlist data
+// Collapsible Accordion Utility
+function toggleAccordion(id) {
+    const content = document.getElementById(id);
+    const header = content.previousElementSibling;
+    const section = content.parentElement;
+    
+    if (content.classList.contains("hidden")) {
+        content.classList.remove("hidden");
+        section.classList.add("active");
+    } else {
+        content.classList.add("hidden");
+        section.classList.remove("active");
+    }
+}
+
+// Fetch Snapshots List
+async function fetchSnapshots() {
+    try {
+        const response = await fetch("/api/snapshots");
+        activeSnapshots = await response.json();
+        
+        renderSnapshotsTable(activeSnapshots);
+        populateCompareSelects(activeSnapshots);
+    } catch (e) {
+        console.error("Error fetching snapshots:", e);
+    }
+}
+
+// Render Snapshots Table
+function renderSnapshotsTable(snaps) {
+    const tbody = document.querySelector("#snapshots-table tbody");
+    tbody.innerHTML = "";
+    
+    if (snaps.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Aucun snapshot importé</td></tr>';
+        return;
+    }
+    
+    snaps.forEach(snap => {
+        const dateStr = new Date(snap.uploaded_at).toLocaleString("fr-FR");
+        const tr = document.createElement("tr");
+        
+        let typeBadge = "";
+        if (snap.file_type === "WATCHLIST_OFAC") typeBadge = '<span class="status-badge alert">OFAC XML</span>';
+        else if (snap.file_type === "WATCHLIST_EU") typeBadge = '<span class="status-badge warning">EU CSV/PDF</span>';
+        else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
+        
+        tr.innerHTML = `
+            <td>${escapeHtml(dateStr)}</td>
+            <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}...</small></td>
+            <td>${typeBadge}</td>
+            <td>${snap.record_count}</td>
+            <td><span class="status-dot ${snap.status === 'READY' ? 'green' : 'orange'}"></span> ${snap.status}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// Populate compare dropdown selectors
+function populateCompareSelects(snaps) {
+    const oldSelect = document.getElementById("compare-old-snap");
+    const newSelect = document.getElementById("compare-new-snap");
+    
+    const oldVal = oldSelect.value;
+    const newVal = newSelect.value;
+    
+    oldSelect.innerHTML = '<option value="">Sélectionnez un snapshot...</option>';
+    newSelect.innerHTML = '<option value="">Sélectionnez un snapshot...</option>';
+    
+    snaps.forEach(snap => {
+        const dateStr = new Date(snap.uploaded_at).toLocaleString("fr-FR");
+        const optionText = `${snap.file_name} (${snap.file_type}) - ${dateStr}`;
+        
+        const opt1 = document.createElement("option");
+        opt1.value = snap.snapshot_id;
+        opt1.textContent = optionText;
+        oldSelect.appendChild(opt1);
+        
+        const opt2 = document.createElement("option");
+        opt2.value = snap.snapshot_id;
+        opt2.textContent = optionText;
+        newSelect.appendChild(opt2);
+    });
+    
+    oldSelect.value = oldVal;
+    newSelect.value = newVal;
+}
+
+// Handle Snapshot Ingestion (Upload file)
+async function handleIngestion(event) {
+    event.preventDefault();
+    
+    const fileType = document.getElementById("ingest-file-type").value;
+    const fileInput = document.getElementById("ingest-file");
+    const delimiter = document.getElementById("ingest-delimiter").value.trim();
+    const btn = document.getElementById("submit-ingest-btn");
+    
+    if (fileInput.files.length === 0) {
+        alert("Veuillez sélectionner un fichier.");
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append("file_type", fileType);
+    formData.append("file", fileInput.files[0]);
+    formData.append("delimiter", delimiter || ",");
+    
+    btn.disabled = true;
+    btn.textContent = "Importation en cours...";
+    
+    try {
+        const response = await fetch("/api/ingest", {
+            method: "POST",
+            body: formData
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            alert(`Erreur d'importation : ${data.detail || JSON.stringify(data)}`);
+            return;
+        }
+        
+        const data = await response.json();
+        alert(`Instantané importé avec succès ! ${data.message}`);
+        fileInput.value = "";
+        fetchSnapshots();
+        fetchWatchlist();
+    } catch (e) {
+        console.error("Error ingesting snapshot:", e);
+        alert("Erreur réseau de communication.");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Charger & Archiver";
+    }
+}
+
+// Handle Delta Snapshot Comparison
+async function handleCompareSnapshots(event) {
+    event.preventDefault();
+    
+    const oldId = document.getElementById("compare-old-snap").value;
+    const newId = document.getElementById("compare-new-snap").value;
+    const btn = document.getElementById("submit-compare-btn");
+    
+    if (!oldId || !newId) {
+        alert("Sélectionnez deux snapshots différents pour comparer.");
+        return;
+    }
+    
+    btn.disabled = true;
+    btn.textContent = "Calcul des écarts...";
+    
+    try {
+        const response = await fetch("/api/snapshots/compare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                snapshot_old_id: oldId,
+                snapshot_new_id: newId
+            })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            alert(`Erreur de comparaison : ${data.detail || JSON.stringify(data)}`);
+            return;
+        }
+        
+        const report = await response.json();
+        
+        // Show delta result block
+        document.getElementById("delta-results-card").classList.remove("hidden");
+        
+        // Populate Counts
+        document.getElementById("delta-added-count").textContent = report.summary.added_count;
+        document.getElementById("delta-removed-count").textContent = report.summary.removed_count;
+        document.getElementById("delta-modified-count").textContent = report.summary.modified_count;
+        
+        // Populate ADDED details
+        const addedItems = document.getElementById("delta-added-items");
+        addedItems.innerHTML = "";
+        if (report.details.added.length === 0) {
+            addedItems.innerHTML = '<li>Aucun élément ajouté.</li>';
+        } else {
+            report.details.added.forEach(item => {
+                const li = document.createElement("li");
+                li.innerHTML = `🟢 ID: <code>${escapeHtml(item.id)}</code> | Nom: <strong>${escapeHtml(item.primary_name)}</strong> | Type: <span class="status-badge no_match">${item.type}</span>`;
+                addedItems.appendChild(li);
+            });
+        }
+        
+        // Populate REMOVED details
+        const removedItems = document.getElementById("delta-removed-items");
+        removedItems.innerHTML = "";
+        if (report.details.removed.length === 0) {
+            removedItems.innerHTML = '<li>Aucun élément supprimé.</li>';
+        } else {
+            report.details.removed.forEach(item => {
+                const li = document.createElement("li");
+                li.innerHTML = `🔴 ID: <code>${escapeHtml(item.id)}</code> | Nom: <strong>${escapeHtml(item.primary_name)}</strong> | Type: <span class="status-badge alert">${item.type}</span>`;
+                removedItems.appendChild(li);
+            });
+        }
+        
+        // Populate MODIFIED details
+        const modifiedTbody = document.querySelector("#delta-modified-table tbody");
+        modifiedTbody.innerHTML = "";
+        if (report.details.modified.length === 0) {
+            modifiedTbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted)">Aucune modification détectée</td></tr>';
+        } else {
+            report.details.modified.forEach(item => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td><code>${escapeHtml(item.id)}</code></td>
+                    <td><strong>${escapeHtml(item.primary_name)}</strong></td>
+                    <td><span class="status-badge warning">${escapeHtml(item.changes_detected.join(", "))}</span></td>
+                    <td><pre class="pre-block" style="font-size:0.7rem;">${escapeHtml(JSON.stringify(item.before, null, 1))}</pre></td>
+                    <td><pre class="pre-block" style="font-size:0.7rem;">${escapeHtml(JSON.stringify(item.after, null, 1))}</pre></td>
+                `;
+                modifiedTbody.appendChild(tr);
+            });
+        }
+        
+        // Expand Accordions automatically to show data
+        document.getElementById("delta-added-list").classList.remove("hidden");
+        document.getElementById("delta-removed-list").classList.remove("hidden");
+        document.getElementById("delta-modified-list").classList.remove("hidden");
+        
+    } catch (e) {
+        console.error("Comparison failed:", e);
+        alert("Erreur lors de la comparaison des versions.");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Comparer les versions";
+    }
+}
+
+// Fetch Watchlist
 async function fetchWatchlist() {
     try {
         const response = await fetch("/api/watchlist");
@@ -53,16 +295,15 @@ async function fetchWatchlist() {
         
         activeWatchlist = data.items || [];
         
-        // Update hash in sidebar
         const hashEl = document.getElementById("sidebar-wl-hash");
         if (hashEl) {
-            hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "N/A";
+            hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "NONE";
             hashEl.title = data.hash;
         }
         
         renderWatchlistTable(activeWatchlist);
-    } catch (error) {
-        console.error("Error fetching watchlist:", error);
+    } catch (e) {
+        console.error("Error loading watchlist:", e);
     }
 }
 
@@ -72,7 +313,7 @@ function renderWatchlistTable(items) {
     tbody.innerHTML = "";
     
     if (items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Aucune fiche chargée</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted)">Aucune entité de sanctions active chargée</td></tr>';
         return;
     }
     
@@ -84,24 +325,37 @@ function renderWatchlistTable(items) {
         const citizenship = countriesDict.citizenship || [];
         const residence = countriesDict.residence || [];
         const birth = countriesDict.birth_country || [];
-        const allCountries = [...new Set([...citizenship, ...residence, ...birth])].join(", ") || "-";
+        const juris = countriesDict.jurisdiction_country || [];
+        const allCountries = [...new Set([...citizenship, ...residence, ...birth, ...juris])].join(", ") || "-";
         
-        // Format DOB
-        const dobs = item.dates_of_birth || [];
-        const dobStr = dobs.join(", ") || "-";
+        const dobStr = (item.dates_of_birth || []).join(", ") || "-";
+        const decStr = item.is_deceased ? "🪦 Mort" : "Vivant";
+        
+        let typeBadge = "";
+        if (item.entity_type === "I") typeBadge = '<span class="status-badge no_match">I (Indiv)</span>';
+        else if (item.entity_type === "E") typeBadge = '<span class="status-badge alert">E (Entity)</span>';
+        else if (item.entity_type === "V") typeBadge = '<span class="status-badge warning">V (Vessel)</span>';
+        else typeBadge = '<span class="status-badge">O (Other)</span>';
         
         tr.innerHTML = `
             <td><code>${escapeHtml(item.entity_id)}</code></td>
-            <td><span class="status-badge ${item.entity_type === "PP" ? "no_match" : "alert"}">${item.entity_type}</span></td>
-            <td><strong>${escapeHtml(item.primary_name)}</strong>${item.aliases && item.aliases.length > 0 ? ` <small style="color: var(--text-muted)">(${item.aliases.join(', ')})</small>` : ''}</td>
+            <td>${typeBadge}</td>
+            <td>
+                <strong>${escapeHtml(item.primary_name)}</strong>
+                ${item.lei_number ? `<br><small style="color:var(--color-accent)">LEI: ${item.lei_number}</small>` : ''}
+                ${item.imo_number ? `<br><small style="color:var(--color-accent)">IMO: ${item.imo_number}</small>` : ''}
+            </td>
             <td>${escapeHtml(allCountries)}</td>
-            <td>${escapeHtml(dobStr)}</td>
+            <td>
+                <small style="color:var(--text-muted)">DOB: ${escapeHtml(dobStr)}</small><br>
+                <small>${decStr} | ${item.gender}</small>
+            </td>
         `;
         tbody.appendChild(tr);
     });
 }
 
-// Filter Watchlist items
+// Filter Watchlist active items
 function filterWatchlist() {
     const query = document.getElementById("wl-search-input").value.toLowerCase().trim();
     if (!query) {
@@ -112,89 +366,63 @@ function filterWatchlist() {
     const filtered = activeWatchlist.filter(item => {
         const id = (item.entity_id || "").toLowerCase();
         const name = (item.primary_name || "").toLowerCase();
-        const aliases = (item.aliases || []).join(" ").toLowerCase();
-        return id.includes(query) || name.includes(query) || aliases.includes(query);
+        const lei = (item.lei_number || "").toLowerCase();
+        const imo = (item.imo_number || "").toLowerCase();
+        return id.includes(query) || name.includes(query) || lei.includes(query) || imo.includes(query);
     });
     
     renderWatchlistTable(filtered);
 }
 
-// Add Item to Watchlist
-async function handleAddWatchlist(event) {
-    event.preventDefault();
-    
-    const wlId = document.getElementById("wl-id").value.trim();
-    const wlName = document.getElementById("wl-name").value.trim();
-    const wlType = document.getElementById("wl-type").value;
-    const wlGender = document.getElementById("wl-gender").value;
-    const wlDob = document.getElementById("wl-dob").value.trim();
-    const wlCountriesStr = document.getElementById("wl-countries").value.trim();
-    const wlAliasesStr = document.getElementById("wl-aliases").value.trim();
-    
-    const countriesList = wlCountriesStr ? wlCountriesStr.split(",").map(c => c.trim().toUpperCase()) : [];
-    const aliasesList = wlAliasesStr ? wlAliasesStr.split(",").map(a => a.trim()) : [];
-    
-    const payload = {
-        entity_id: wlId,
-        entity_type: wlType,
-        primary_name: wlName,
-        aliases: aliasesList,
-        dates_of_birth: wlDob ? [wlDob] : [],
-        genders: wlGender !== "U" ? [wlGender] : [],
-        countries: {
-            citizenship: wlType === "PP" ? countriesList : [],
-            residence: countriesList,
-            birth_country: []
-        }
-    };
-    
-    try {
-        const response = await fetch("/api/watchlist", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-        
-        if (!response.ok) {
-            const errData = await response.json();
-            alert(`Erreur : ${errData.detail || JSON.stringify(errData)}`);
-            return;
-        }
-        
-        alert("Fiche ajoutée et indexée dans le moteur avec succès !");
-        document.getElementById("add-watchlist-form").reset();
-        fetchWatchlist();
-    } catch (error) {
-        console.error("Error adding to watchlist:", error);
-        alert("Erreur réseau de communication avec l'API.");
-    }
-}
-
-// Handle Real-Time Screening
+// Handle Real-Time Sandbox Screening
 async function handleScreening(event) {
     event.preventDefault();
     
-    const clientName = document.getElementById("client-name").value.trim();
     const clientType = document.getElementById("client-type").value;
     const clientGender = document.getElementById("client-gender").value;
-    const clientDob = document.getElementById("client-dob").value;
-    const clientCountriesStr = document.getElementById("client-countries").value.trim();
-    const clientAliasesStr = document.getElementById("client-aliases").value.trim();
     
-    const countriesList = clientCountriesStr ? clientCountriesStr.split(",").map(c => c.trim().toUpperCase()) : [];
-    const aliasesList = clientAliasesStr ? clientAliasesStr.split(",").map(a => a.trim()) : [];
+    // Get correct names based on type
+    const firstName = document.getElementById("client-firstname").value.trim();
+    const lastName = document.getElementById("client-lastname").value.trim();
+    const maidenName = document.getElementById("client-maidenname").value.trim();
+    const companyName = document.getElementById("client-companyname").value.trim();
+    const dob = document.getElementById("client-dob").value;
+    
+    const countriesStr = document.getElementById("client-countries").value.trim();
+    const aliasesStr = document.getElementById("client-aliases").value.trim();
+    
+    const countriesList = countriesStr ? countriesStr.split(",").map(c => c.trim().toUpperCase()) : [];
+    const aliasesList = aliasesStr ? aliasesStr.split(",").map(a => a.trim()) : [];
+    
+    // Hard Match fields
+    const lei = document.getElementById("client-lei").value.trim();
+    const imo = document.getElementById("client-imo").value.trim();
+    const aircraft = document.getElementById("client-aircraft").value.trim();
+    const passportNum = document.getElementById("client-passport-num").value.trim();
+    const passportCountry = document.getElementById("client-passport-country").value.trim();
+    const nationalId = document.getElementById("client-national-id").value.trim();
     
     const payload = {
-        entity_type: clientType,
-        primary_name: clientName,
-        aliases: aliasesList,
-        dates_of_birth: clientDob ? [clientDob] : [],
-        genders: [clientGender],
-        countries: {
-            citizenship: countriesList,
+        client_type: clientType,
+        client_first_name: clientType === "PP" ? firstName : "",
+        client_last_name: clientType === "PP" ? lastName : "",
+        client_maiden_name: clientType === "PP" ? maidenName : "",
+        client_company_name: clientType === "PM" ? companyName : "",
+        client_dob: dob || null,
+        client_gender: clientGender,
+        client_is_deceased: false,
+        client_countries: {
+            nationality: countriesList,
             residence: countriesList,
-            birth_country: []
-        }
+            birth_country: [],
+            registration_country: clientType === "PM" ? countriesList : []
+        },
+        client_lei_number: lei || null,
+        transaction_vessel_imo: imo || null,
+        transaction_aircraft_registration: aircraft || null,
+        client_passport_documents: passportNum ? [{ "number": passportNum, "issuing_country": passportCountry || "XX" }] : [],
+        client_national_id_documents: nationalId ? [{ "number": nationalId, "issuing_country": "XX" }] : [],
+        client_other_id_documents: []
     };
     
     const placeholder = document.getElementById("screening-results-placeholder");
@@ -214,20 +442,19 @@ async function handleScreening(event) {
         if (!response.ok) {
             const errData = await response.json();
             const errors = errData.detail && errData.detail.errors ? errData.detail.errors.join(", ") : JSON.stringify(errData);
-            alert(`Criblage bloqué (Data Quality Gate) : ${errors}`);
+            alert(`Criblage rejeté par le Data Quality Gate : ${errors}`);
             return;
         }
         
         const data = await response.json();
         
-        // Hide placeholder and show results
         placeholder.classList.add("hidden");
         resultsCard.classList.remove("hidden");
         
         renderScreeningResult(data);
-    } catch (error) {
-        console.error("Error running screening:", error);
-        alert("Erreur lors de l'exécution du criblage.");
+    } catch (e) {
+        console.error("Error screening:", e);
+        alert("Erreur réseau lors de l'appel au moteur.");
     } finally {
         submitBtn.disabled = false;
         submitBtn.textContent = "Launch Screening Engine";
@@ -236,28 +463,23 @@ async function handleScreening(event) {
 
 // Render Screening Result
 function renderScreeningResult(data) {
-    const qualityReport = data.client_quality_report;
-    const bestMatch = data.best_match;
+    const report = data.client_quality_report;
+    const best = data.best_match;
     const keys = data.blocking_keys_generated || [];
     
-    // 1. Data Quality Gate Render
-    const qStatusDot = document.querySelector("#quality-gate-status .status-dot");
+    // 1. Data Quality Gate report
     const qStatusText = document.querySelector("#quality-gate-status");
     const qAnomalies = document.getElementById("quality-gate-anomalies");
-    
     qAnomalies.innerHTML = "";
     
-    qStatusDot.className = "status-dot";
-    if (qualityReport.status === "OK") {
-        qStatusDot.classList.add("green");
+    if (report.status === "OK") {
         qStatusText.innerHTML = '<span class="status-dot green"></span> Conforme (OK)';
     } else {
-        qStatusDot.classList.add("orange");
         qStatusText.innerHTML = '<span class="status-dot orange"></span> Qualité Dégradée';
     }
     
-    if (qualityReport.warnings && qualityReport.warnings.length > 0) {
-        qualityReport.warnings.forEach(w => {
+    if (report.warnings && report.warnings.length > 0) {
+        report.warnings.forEach(w => {
             const div = document.createElement("div");
             div.className = "anomaly-item warning";
             div.textContent = w;
@@ -267,106 +489,78 @@ function renderScreeningResult(data) {
         const div = document.createElement("div");
         div.className = "anomaly-item";
         div.style.color = "var(--text-muted)";
-        div.textContent = "Aucune anomalie détectée.";
+        div.textContent = "Aucune anomalie de conformité de structure détectée.";
         qAnomalies.appendChild(div);
     }
     
-    // 2. Metrics Render
+    // 2. Metrics
     document.getElementById("metric-blocking-keys").textContent = keys.join(", ");
+    document.getElementById("metric-blocking-keys").title = keys.join(", ");
     document.getElementById("metric-candidates").textContent = data.candidates_count;
     
-    // 3. Score Gauge & Alert Status
+    // 3. Gauge score & compliance status
     const statusBadge = document.getElementById("badge-compliance-status");
-    const finalScore = bestMatch ? bestMatch.final_score : 0.0;
-    const baseScore = bestMatch ? bestMatch.base_score : 0.0;
+    const finalScore = best ? best.final_score : 0.0;
+    const baseScore = best ? best.base_score : 0.0;
     
     document.getElementById("metric-base-score").textContent = `${baseScore.toFixed(1)}%`;
     document.getElementById("gauge-score-value").textContent = `${finalScore.toFixed(1)}%`;
     
-    // Animate Gauge
-    const progressCircle = document.getElementById("gauge-progress");
-    const radius = progressCircle.r.baseVal.value;
-    const circumference = 2 * Math.PI * radius;
+    const progress = document.getElementById("gauge-progress");
+    const circumference = 2 * Math.PI * 45;
     const offset = circumference - (finalScore / 100) * circumference;
-    progressCircle.style.strokeDasharray = `${circumference}`;
-    progressCircle.style.strokeDashoffset = `${offset}`;
+    progress.style.strokeDasharray = `${circumference}`;
+    progress.style.strokeDashoffset = `${offset}`;
     
-    // Match colors
-    if (bestMatch && bestMatch.status === "ALERT") {
+    if (best && best.status === "ALERT") {
         statusBadge.textContent = "ALERT";
         statusBadge.className = "status-badge alert";
-        progressCircle.style.stroke = "var(--color-alert)";
+        progress.style.stroke = "var(--color-alert)";
     } else {
         statusBadge.textContent = "NO_MATCH";
         statusBadge.className = "status-badge no_match";
-        progressCircle.style.stroke = "var(--color-safe)";
+        progress.style.stroke = "var(--color-safe)";
     }
     
     // 4. Decision Tree
-    const treeContainer = document.getElementById("match-details-container");
+    const hardMatchNotice = document.getElementById("hard-match-notice");
+    const adjustmentsSection = document.getElementById("adjustments-section");
     
-    if (!bestMatch) {
-        treeContainer.innerHTML = `
-            <div style="text-align: center; padding: 1.5rem; color: var(--text-muted)">
-                Aucune fiche watchlist ne correspond aux clés de blocking générées (Pas de calcul de score).
-            </div>
-        `;
+    if (!best) {
+        hardMatchNotice.classList.add("hidden");
+        adjustmentsSection.classList.remove("hidden");
+        document.getElementById("best-match-cname").textContent = report.cleansed_name || "-";
+        document.getElementById("best-match-wname").textContent = "Aucune fiche correspondante";
+        document.getElementById("best-match-wid").textContent = "NONE";
         return;
     }
     
-    // Restore base html structure
-    treeContainer.innerHTML = `
-        <div class="detail-row">
-            <span>Nom Client Apparié :</span>
-            <strong>${escapeHtml(bestMatch.best_client_name)}</strong>
-        </div>
-        <div class="detail-row">
-            <span>Nom Watchlist Apparié :</span>
-            <strong>${escapeHtml(bestMatch.best_watchlist_name)}</strong>
-        </div>
-        <div class="detail-row">
-            <span>Fiche Watchlist Source :</span>
-            <strong><code>${escapeHtml(bestMatch.watchlist_entity.entity_id)}</code></strong>
-        </div>
+    document.getElementById("best-match-cname").textContent = best.best_client_name;
+    document.getElementById("best-match-wname").textContent = best.best_watchlist_name;
+    document.getElementById("best-match-wid").textContent = best.watchlist_entity.entity_id;
+    
+    if (best.hard_match_triggered) {
+        hardMatchNotice.classList.remove("hidden");
+        hardMatchNotice.textContent = `⚡ HARD MATCH : ${best.hard_match_details}`;
+        adjustmentsSection.classList.add("hidden");
+    } else {
+        hardMatchNotice.classList.add("hidden");
+        adjustmentsSection.classList.remove("hidden");
         
-        <div class="adjustments-tree">
-            <h4>Ajustements Contextuels</h4>
-            <ul>
-                <li>
-                    <span class="adj-name">Date de Naissance (DOB)</span>
-                    <span id="adj-dob-val" class="adj-val">0</span>
-                    <div id="adj-dob-desc" class="adj-desc">-</div>
-                </li>
-                <li>
-                    <span class="adj-name">Genre</span>
-                    <span id="adj-gender-val" class="adj-val">0</span>
-                    <div id="adj-gender-desc" class="adj-desc">-</div>
-                </li>
-                <li>
-                    <span class="adj-name">Géographie (Pays)</span>
-                    <span id="adj-geo-val" class="adj-val">0</span>
-                    <div id="adj-geo-desc" class="adj-desc">-</div>
-                </li>
-            </ul>
-        </div>
-    `;
-    
-    // Populate adjustments
-    const dobAdj = bestMatch.adjustments.dob;
-    const genderAdj = bestMatch.adjustments.gender;
-    const geoAdj = bestMatch.adjustments.geography;
-    
-    formatAdjustment("adj-dob-val", "adj-dob-desc", dobAdj.score, dobAdj.description);
-    formatAdjustment("adj-gender-val", "adj-gender-desc", genderAdj.score, genderAdj.description);
-    formatAdjustment("adj-geo-val", "adj-geo-desc", geoAdj.score, geoAdj.description);
+        const dob = best.adjustments.dob;
+        const gender = best.adjustments.gender;
+        const geo = best.adjustments.geography;
+        
+        formatAdjustment("adj-dob-val", "adj-dob-desc", dob.score, dob.description);
+        formatAdjustment("adj-gender-val", "adj-gender-desc", gender.score, gender.description);
+        formatAdjustment("adj-geo-val", "adj-geo-desc", geo.score, geo.description);
+    }
 }
 
 function formatAdjustment(valId, descId, score, desc) {
     const valEl = document.getElementById(valId);
     const descEl = document.getElementById(descId);
-    
     descEl.textContent = desc;
-    
     if (score > 0) {
         valEl.textContent = `+${score}`;
         valEl.className = "adj-val plus";
@@ -379,68 +573,71 @@ function formatAdjustment(valId, descId, score, desc) {
     }
 }
 
-// Load sample JSON into Batch Area
+// Load sample client CSV records into Batch Area
 function loadSampleBatchJSON() {
     const samples = [
         {
-            entity_id: "BATCH-CLI-01",
-            entity_type: "PP",
-            primary_name: "Vladimir Putin",
-            dates_of_birth: ["1952-10-07"],
-            genders: ["M"],
-            countries: { citizenship: ["RU"] }
+            client_id: "BATCH-CLI-01",
+            client_type: "PP",
+            client_first_name: "VLADIMIR",
+            client_last_name: "PUTIN",
+            client_dob: "1952-10-07",
+            client_gender: "M",
+            client_countries: { nationality: ["RU"], residence: ["RU"] }
         },
         {
-            entity_id: "BATCH-CLI-02",
-            entity_type: "PM",
-            primary_name: "Rosneft SA",
-            dates_of_birth: [],
-            genders: [],
-            countries: { residence: ["RU"] }
+            client_id: "BATCH-CLI-02",
+            client_type: "PP",
+            client_first_name: "HANZ",
+            client_last_name: "MUTLER",
+            client_dob: "1975-12-15",
+            client_gender: "M",
+            client_countries: { nationality: ["DE"], residence: ["FR"] }
         },
         {
-            entity_id: "BATCH-CLI-03",
-            entity_type: "PP",
-            primary_name: "John Smith",
-            dates_of_birth: ["1980-05-12"],
-            genders: ["M"],
-            countries: { residence: ["US"] }
+            client_id: "BATCH-CLI-03",
+            client_type: "PM",
+            client_company_name: "SOCIETE GENERALE",
+            client_countries: { residence: ["FR"], registration_country: ["FR"] },
+            client_lei_number: "96950058N5D982K5G550" // Trigger Hard Match corporate
         },
         {
-            entity_id: "BATCH-CLI-04",
-            entity_type: "PP",
-            primary_name: "Kadafi Mouammar",
-            dates_of_birth: ["1942-06-07"],
-            genders: ["M"],
-            countries: { citizenship: ["LY"] }
+            client_id: "BATCH-CLI-04",
+            client_type: "PP",
+            client_first_name: "ALEXANDRA",
+            client_last_name: "SMITH",
+            client_maiden_name: "MULLER",
+            client_dob: "1988-04-23",
+            client_gender: "F",
+            client_countries: { nationality: ["US"] }
         }
     ];
     document.getElementById("batch-json-input").value = JSON.stringify(samples, null, 2);
 }
 
-// Run Batch Screening Simulation
+// Run batch simulation in loop
 async function runBatchScreening() {
-    const inputText = document.getElementById("batch-json-input").value.trim();
-    if (!inputText) {
-        alert("Veuillez saisir un tableau de profils clients.");
+    const text = document.getElementById("batch-json-input").value.trim();
+    if (!text) {
+        alert("Saisissez des clients.");
         return;
     }
     
     let clients = [];
     try {
-        clients = JSON.parse(inputText);
+        clients = JSON.parse(text);
         if (!Array.isArray(clients)) {
-            alert("Le format de données doit être un tableau JSON.");
+            alert("Format attendu : Tableau JSON");
             return;
         }
     } catch (e) {
-        alert(`Erreur de syntaxe JSON : ${e.message}`);
+        alert(`Erreur JSON : ${e.message}`);
         return;
     }
     
     const btn = document.getElementById("run-batch-btn");
     btn.disabled = true;
-    btn.textContent = "Exécution du Batch...";
+    btn.textContent = "Exécution...";
     
     const resultsContainer = document.getElementById("batch-results-container");
     const tbody = document.querySelector("#batch-results-table tbody");
@@ -450,8 +647,6 @@ async function runBatchScreening() {
     
     try {
         for (const client of clients) {
-            // We run each client through real screening endpoint.
-            // This allows demonstrating the screening algorithm.
             const response = await fetch("/api/screen", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -461,14 +656,13 @@ async function runBatchScreening() {
             const tr = document.createElement("tr");
             
             if (!response.ok) {
-                // If Quality Gate rejected, show as REJECT
                 const errData = await response.json();
-                const errors = errData.detail && errData.detail.errors ? errData.detail.errors.join(", ") : "Qualité Invalide";
+                const errors = errData.detail && errData.detail.errors ? errData.detail.errors.join(", ") : "Rejeté";
                 
                 tr.innerHTML = `
-                    <td><code>${escapeHtml(client.entity_id || "-")}</code></td>
-                    <td><strong>${escapeHtml(client.primary_name || "-")}</strong></td>
-                    <td colspan="3" style="color: var(--color-alert)"><strong>REJETE : Data Quality Gate</strong> (${errors})</td>
+                    <td><code>${escapeHtml(client.client_id || "-")}</code></td>
+                    <td><strong>${escapeHtml(client.client_company_name || client.client_last_name || "-")}</strong></td>
+                    <td colspan="3" style="color:var(--color-alert)"><strong>REJETE (Quality Gate)</strong> : ${escapeHtml(errors)}</td>
                     <td><span class="status-badge alert">REJECT</span></td>
                 `;
                 tbody.appendChild(tr);
@@ -481,17 +675,17 @@ async function runBatchScreening() {
             if (best && best.status === "ALERT") {
                 alertsCount++;
                 tr.innerHTML = `
-                    <td><code>${escapeHtml(client.entity_id || "-")}</code></td>
-                    <td><strong>${escapeHtml(client.primary_name || "-")}</strong></td>
+                    <td><code>${escapeHtml(client.client_id || "-")}</code></td>
+                    <td><strong>${escapeHtml(best.best_client_name)}</strong></td>
                     <td><code>${escapeHtml(best.watchlist_entity.entity_id)}</code></td>
                     <td><strong>${escapeHtml(best.best_watchlist_name)}</strong></td>
-                    <td style="color: var(--color-alert); font-weight:700">${best.final_score.toFixed(1)}%</td>
+                    <td style="color:var(--color-alert); font-weight:700">${best.final_score.toFixed(1)}%</td>
                     <td><span class="status-badge alert">ALERT</span></td>
                 `;
             } else {
                 tr.innerHTML = `
-                    <td><code>${escapeHtml(client.entity_id || "-")}</code></td>
-                    <td><strong>${escapeHtml(client.primary_name || "-")}</strong></td>
+                    <td><code>${escapeHtml(client.client_id || "-")}</code></td>
+                    <td><strong>${escapeHtml(client.client_company_name || client.client_last_name || "-")}</strong></td>
                     <td>${best ? `<code>${escapeHtml(best.watchlist_entity.entity_id)}</code>` : "-"}</td>
                     <td>${best ? escapeHtml(best.best_watchlist_name) : "Aucun match (Bloqué)"}</td>
                     <td>${best ? `${best.final_score.toFixed(1)}%` : "0.0%"}</td>
@@ -503,49 +697,43 @@ async function runBatchScreening() {
         
         document.getElementById("batch-alerts-count").textContent = alertsCount;
         resultsContainer.classList.remove("hidden");
-        
-    } catch (error) {
-        console.error("Error running batch screening:", error);
+    } catch (e) {
+        console.error("Batch failure:", e);
         alert("Erreur lors de l'exécution du batch.");
     } finally {
         btn.disabled = false;
         btn.textContent = "Lancer le Batch Screening";
-        // Refresh audit log history
         fetchAuditHistory();
     }
 }
 
-// Fetch Audit History logs
+// Fetch Audit history
 async function fetchAuditHistory() {
     try {
         const response = await fetch("/api/history");
         auditHistory = await response.json();
-        
         renderAuditHistoryTable(auditHistory);
-    } catch (error) {
-        console.error("Error fetching audit logs:", error);
+    } catch (e) {
+        console.error("Error loading history:", e);
     }
 }
 
-// Render Audit History table
 function renderAuditHistoryTable(logs) {
     const tbody = document.querySelector("#audit-table tbody");
     tbody.innerHTML = "";
     
     if (logs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Aucune décision auditée</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucun audit log disponible</td></tr>';
         return;
     }
     
     logs.forEach(log => {
-        const tr = document.createElement("tr");
-        
-        // Parse timestamp
         const dateStr = new Date(log.timestamp + "Z").toLocaleString("fr-FR");
+        const tr = document.createElement("tr");
         
         tr.innerHTML = `
             <td>${escapeHtml(dateStr)}</td>
-            <td><strong>${escapeHtml(log.client_name)}</strong> <span style="font-size:0.75rem" class="status-badge">${log.client_type}</span></td>
+            <td><strong>${escapeHtml(log.client_name)}</strong> <span class="status-badge">${log.client_type}</span></td>
             <td><code>${escapeHtml(log.watchlist_id)}</code> - <strong>${escapeHtml(log.watchlist_name)}</strong></td>
             <td style="font-weight: 700; color: ${log.status === "ALERT" ? "var(--color-alert)" : "var(--color-safe)"}">${log.final_score.toFixed(1)}%</td>
             <td><span class="status-badge ${log.status === "ALERT" ? "alert" : "no_match"}">${log.status}</span></td>
@@ -555,22 +743,21 @@ function renderAuditHistoryTable(logs) {
     });
 }
 
-// View Audit Log Detail Modal
 function viewAuditLogDetail(logId) {
     const log = auditHistory.find(item => item.id === logId);
     if (!log) return;
     
     const modal = document.getElementById("audit-modal");
     const content = document.getElementById("modal-audit-details");
-    
     const dateStr = new Date(log.timestamp + "Z").toLocaleString("fr-FR");
     
-    // Parse decision tree
     let tree = typeof log.decision_tree === "string" ? JSON.parse(log.decision_tree) : log.decision_tree;
     let configState = typeof log.config_state === "string" ? JSON.parse(log.config_state) : log.config_state;
     
     let adjHtml = "";
-    if (tree && tree.adjustments) {
+    if (tree.hard_match_triggered) {
+        adjHtml = `<p style="color:var(--color-warning); font-weight:700">⚡ HARD MATCH déclenché : ${tree.hard_match_details}</p>`;
+    } else if (tree && tree.adjustments) {
         adjHtml = `
             <ul>
                 <li>Date de Naissance : <strong>${tree.adjustments.dob.score} points</strong> (${tree.adjustments.dob.description})</li>
@@ -578,8 +765,6 @@ function viewAuditLogDetail(logId) {
                 <li>Géographie : <strong>${tree.adjustments.geography.score} points</strong> (${tree.adjustments.geography.description})</li>
             </ul>
         `;
-    } else {
-        adjHtml = "<p>Aucun ajustement appliqué.</p>";
     }
     
     content.innerHTML = `
@@ -587,34 +772,34 @@ function viewAuditLogDetail(logId) {
             <h4>Informations Générales</h4>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.85rem">
                 <div>Horodatage : <strong>${escapeHtml(dateStr)}</strong></div>
-                <div>Statut Décision : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${log.status}</strong></div>
-                <div>Fiche Watchlist : <strong><code>${escapeHtml(log.watchlist_id)}</code> - ${escapeHtml(log.watchlist_name)}</strong></div>
-                <div>Client Criblé : <strong>${escapeHtml(log.client_name)} (${log.client_type})</strong></div>
+                <div>Statut : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${log.status}</strong></div>
+                <div>Watchlist : <strong><code>${escapeHtml(log.watchlist_id)}</code> - ${escapeHtml(log.watchlist_name)}</strong></div>
+                <div>Client : <strong>${escapeHtml(log.client_name)} (${log.client_type})</strong></div>
             </div>
         </div>
         
         <div class="modal-section">
-            <h4>Détail Algorithmique</h4>
+            <h4>Analyse Algorithmique</h4>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.85rem">
-                <div>Score de Base Textuel : <strong>${log.base_score.toFixed(1)}%</strong></div>
-                <div>Score Final Calculé : <strong>${log.final_score.toFixed(1)}%</strong></div>
+                <div>Score Textuel : <strong>${log.base_score.toFixed(1)}%</strong></div>
+                <div>Score Final : <strong>${log.final_score.toFixed(1)}%</strong></div>
             </div>
             <div style="margin-top:0.75rem; font-size:0.85rem">
-                <h5>Ajustements Linéaires appliqués :</h5>
+                <h5>Raison / Détail linéaire :</h5>
                 ${adjHtml}
             </div>
         </div>
         
         <div class="modal-section">
-            <h4>Version Watchlist & Intégrité</h4>
+            <h4>Source & Intégrité</h4>
             <div style="font-size:0.85rem">
-                Version de la Liste : <strong>${escapeHtml(log.watchlist_version)}</strong><br>
-                SHA-256 Hash Liste : <code class="hash-badge" style="display:block; margin-top:0.25rem">${escapeHtml(log.watchlist_hash)}</code>
+                Version Listes : <strong>${escapeHtml(log.watchlist_version)}</strong><br>
+                SHA-256 Hash : <code class="hash-badge" style="display:block; margin-top:0.25rem">${escapeHtml(log.watchlist_hash)}</code>
             </div>
         </div>
         
         <div class="modal-section">
-            <h4>Paramètres de Configuration Utilisés</h4>
+            <h4>Snapshot Configuration</h4>
             <pre class="pre-block">${escapeHtml(JSON.stringify(configState, null, 2))}</pre>
         </div>
     `;
@@ -626,19 +811,18 @@ function closeAuditModal() {
     document.getElementById("audit-modal").style.display = "none";
 }
 
-// Fetch global config
 async function fetchConfig() {
     try {
         const response = await fetch("/api/config");
         const configData = await response.json();
-        console.log("Active configuration:", configData);
+        console.log("Active configuration loaded:", configData);
     } catch (e) {
-        console.error("Error fetching config:", e);
+        console.error("Error loading config:", e);
     }
 }
 
 // Escape HTML utility
-def_escape = {
+const def_escape = {
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',
@@ -650,7 +834,6 @@ function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, function(m) { return def_escape[m]; });
 }
 
-// Window click to close modal
 window.onclick = function(event) {
     const modal = document.getElementById("audit-modal");
     if (event.target == modal) {

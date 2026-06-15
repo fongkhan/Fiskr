@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fiskr - Moteur de Criblage LBA-CFT & Personnes Politiquement Exposées (PEP)</title>
-    <meta name="description" content="Solution bancaire de criblage de sanctions et de personnes politiquement exposées en temps réel et en mode batch.">
+    <title>Fiskr - Solution LBA-CFT & Moteur Différentiel Sanctions (PEP)</title>
+    <meta name="description" content="Solution bancaire de criblage de sanctions et de personnes politiquement exposées en temps réel et comparateur de versions.">
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -33,8 +33,13 @@
                         </button>
                     </li>
                     <li>
+                        <button id="nav-btn-snapshots" class="nav-item" onclick="switchTab('snapshots')">
+                            <span class="nav-icon">💾</span> Versions & Delta
+                        </button>
+                    </li>
+                    <li>
                         <button id="nav-btn-watchlist" class="nav-item" onclick="switchTab('watchlist')">
-                            <span class="nav-icon">📋</span> Watchlist active
+                            <span class="nav-icon">📋</span> Watchlist Active
                         </button>
                     </li>
                     <li>
@@ -46,7 +51,7 @@
             </nav>
             <div class="sidebar-footer">
                 <div class="watchlist-info">
-                    <p>Watchlist Hash :</p>
+                    <p>Hash Actif :</p>
                     <span id="sidebar-wl-hash" class="hash-badge">Loading...</span>
                 </div>
             </div>
@@ -55,7 +60,7 @@
         <!-- Main Content Area -->
         <main class="main-content">
             <header class="app-header">
-                <h1>Fiskr Compliance Screening Engine</h1>
+                <h1>Fiskr Compliance Control Room</h1>
                 <div class="system-status">
                     <span class="status-indicator online"></span>
                     <span class="status-text">Moteur opérationnel</span>
@@ -68,14 +73,9 @@
                     <!-- Column 1: Client Input Form -->
                     <div class="card form-card">
                         <h2>Saisie du Profil Client</h2>
-                        <p class="section-desc">Entrez les informations du tiers pour évaluer son niveau de risque et de correspondance.</p>
+                        <p class="section-desc">Renseignez les données du tiers pour évaluer son niveau de risque et de correspondance.</p>
                         
                         <form id="screening-form" onsubmit="handleScreening(event)">
-                            <div class="form-group">
-                                <label for="client-name">Nom Complet / Raison Sociale *</label>
-                                <input type="text" id="client-name" required placeholder="Ex: Vladimir Putin, MULLER Jean-Marc">
-                            </div>
-
                             <div class="form-row">
                                 <div class="form-group">
                                     <label for="client-type">Type d'Entité *</label>
@@ -94,22 +94,90 @@
                                 </div>
                             </div>
 
-                            <div class="form-group" id="dob-group">
-                                <label for="client-dob">Date de Naissance (DOB)</label>
-                                <input type="date" id="client-dob">
+                            <!-- fields for PP -->
+                            <div id="pp-fields">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="client-firstname">Prénom *</label>
+                                        <input type="text" id="client-firstname" placeholder="Ex: Vladimir">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="client-lastname">Nom de Famille *</label>
+                                        <input type="text" id="client-lastname" placeholder="Ex: Putin">
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="client-maidenname">Nom de Jeune Fille</label>
+                                        <input type="text" id="client-maidenname" placeholder="Ex: Muller">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="client-dob">Date de Naissance (DOB)</label>
+                                        <input type="date" id="client-dob">
+                                    </div>
+                                </div>
                             </div>
 
-                            <div class="form-group">
-                                <label for="client-countries">Pays (Codes ISO2 séparés par virgules)</label>
-                                <input type="text" id="client-countries" placeholder="Ex: FR, RU, US">
+                            <!-- fields for PM -->
+                            <div id="pm-fields" class="hidden">
+                                <div class="form-group">
+                                    <label for="client-companyname">Raison Sociale / Nom PM *</label>
+                                    <input type="text" id="client-companyname" placeholder="Ex: ROSNEFT OIL COMPANY">
+                                </div>
                             </div>
 
-                            <div class="form-group">
-                                <label for="client-aliases">Alias / Noms secondaires (séparés par virgules)</label>
-                                <input type="text" id="client-aliases" placeholder="Ex: Vlad Putin, Putin V.">
+                            <!-- Common Fields -->
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="client-countries">Pays (Codes ISO2 séparés par virgules)</label>
+                                    <input type="text" id="client-countries" placeholder="Ex: FR, RU, US">
+                                </div>
+                                <div class="form-group">
+                                    <label for="client-aliases">Alias (séparés par virgules)</label>
+                                    <input type="text" id="client-aliases" placeholder="Ex: Vlad, PUTIN Vladimir">
+                                </div>
                             </div>
 
-                            <button type="submit" id="submit-screen-btn" class="btn btn-primary">
+                            <!-- Accordion: Identifiants Uniques / Hard Match -->
+                            <div class="accordion-section">
+                                <button type="button" class="accordion-header" onclick="toggleAccordion('hard-match-fields')">
+                                    🔑 Identifiants Uniques & Transports (Hard Match) <span class="accordion-arrow">▼</span>
+                                </button>
+                                <div id="hard-match-fields" class="accordion-content hidden">
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="client-lei">Legal Entity Identifier (LEI - 20 chars)</label>
+                                            <input type="text" id="client-lei" placeholder="Ex: 96950058N5D982K5G550">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="client-imo">Numéro IMO Navire (7 chiffres)</label>
+                                            <input type="text" id="client-imo" placeholder="Ex: 9941235">
+                                        </div>
+                                    </div>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="client-aircraft">Immatriculation Aéronef (Tail Number)</label>
+                                            <input type="text" id="client-aircraft" placeholder="Ex: N732MA">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="client-passport-num">Passeport : Numéro</label>
+                                            <input type="text" id="client-passport-num" placeholder="Ex: 12BB98421">
+                                        </div>
+                                    </div>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="client-passport-country">Passeport : Pays (ISO2)</label>
+                                            <input type="text" id="client-passport-country" placeholder="Ex: RU">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="client-national-id">CNI : Numéro</label>
+                                            <input type="text" id="client-national-id" placeholder="Ex: 9901421298">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button type="submit" id="submit-screen-btn" class="btn btn-primary" style="margin-top: 1.5rem;">
                                 Launch Screening Engine
                             </button>
                         </form>
@@ -153,8 +221,8 @@
                                     <span id="metric-candidates" class="metric-value">0</span>
                                 </div>
                                 <div class="metric">
-                                    <span class="metric-label">Clés de blocking générées</span>
-                                    <span id="metric-blocking-keys" class="metric-value">-</span>
+                                    <span class="metric-label">Clés de blocking</span>
+                                    <span id="metric-blocking-keys" class="metric-value" style="font-size: 0.7rem; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">-</span>
                                 </div>
                             </div>
                         </div>
@@ -172,6 +240,9 @@
                         <div class="result-section">
                             <h3>Arbre de Décision de la Fiche Match</h3>
                             <div id="match-details-container" class="match-details">
+                                <div id="hard-match-notice" class="anomaly-item warning hidden" style="margin-bottom: 1rem; font-weight: 600;">
+                                    ⚡ HARD MATCH déclenché !
+                                </div>
                                 <div class="detail-row">
                                     <span>Nom Client Apparié :</span>
                                     <strong id="best-match-cname">-</strong>
@@ -185,7 +256,7 @@
                                     <strong id="best-match-wid">-</strong>
                                 </div>
                                 
-                                <div class="adjustments-tree">
+                                <div id="adjustments-section" class="adjustments-tree">
                                     <h4>Ajustements Contextuels</h4>
                                     <ul>
                                         <li>
@@ -219,25 +290,8 @@
                     
                     <div class="batch-actions">
                         <div class="textarea-input">
-                            <label for="batch-json-input">Données Clients (Format JSON Array) :</label>
-                            <textarea id="batch-json-input" rows="8" placeholder='[
-  {
-    "entity_id": "CLI-B1",
-    "entity_type": "PP",
-    "primary_name": "Vladimir PUTIN",
-    "dates_of_birth": ["1952-10-07"],
-    "genders": ["M"],
-    "countries": {"citizenship": ["RU"]}
-  },
-  {
-    "entity_id": "CLI-B2",
-    "entity_type": "PP",
-    "primary_name": "Jean-Marc Dupont",
-    "dates_of_birth": ["1984-03-15"],
-    "genders": ["M"],
-    "countries": {"residence": ["FR"]}
-  }
-]'></textarea>
+                            <label for="batch-json-input">Données Clients (Format JSON Array conforme au Schéma Miroir) :</label>
+                            <textarea id="batch-json-input" rows="8" placeholder="[ ... ]"></textarea>
                         </div>
                         <div class="btn-container">
                             <button id="run-batch-btn" class="btn btn-primary" onclick="runBatchScreening()">
@@ -273,66 +327,159 @@
                 </div>
             </section>
 
-            <!-- SECTION 3: WATCHLIST ACTIVE -->
-            <section id="sec-watchlist" class="tab-content">
+            <!-- SECTION 3: SNAPSHOTS & COMPARATEUR -->
+            <section id="sec-snapshots" class="tab-content">
                 <div class="grid-layout">
-                    <!-- Column 1: Add new watchlist record -->
+                    <!-- Ingest Snapshot Card -->
                     <div class="card form-card">
-                        <h2>Ajouter une Fiche de Sanction / PEP</h2>
-                        <form id="add-watchlist-form" onsubmit="handleAddWatchlist(event)">
+                        <h2>Importer un Instantané (Snapshot)</h2>
+                        <p class="section-desc">Téléversez un fichier de watchlist ou de clients dans la base de données relationnelle.</p>
+                        
+                        <form id="ingest-form" onsubmit="handleIngestion(event)">
                             <div class="form-group">
-                                <label for="wl-id">ID Unique Fiche *</label>
-                                <input type="text" id="wl-id" required placeholder="Ex: WL-9921">
+                                <label for="ingest-file-type">Type de Fichier *</label>
+                                <select id="ingest-file-type" required>
+                                    <option value="WATCHLIST_OFAC">Watchlist OFAC (XML)</option>
+                                    <option value="WATCHLIST_EU">Watchlist Européenne / Gels d'avoirs (CSV ou PDF)</option>
+                                    <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
+                                </select>
                             </div>
-                            
-                            <div class="form-group">
-                                <label for="wl-name">Nom Principal / Raison Sociale *</label>
-                                <input type="text" id="wl-name" required placeholder="Ex: Saddam Hussein">
-                            </div>
-
                             <div class="form-row">
                                 <div class="form-group">
-                                    <label for="wl-type">Type d'Entité *</label>
-                                    <select id="wl-type" required>
-                                        <option value="PP">Personne Physique (PP)</option>
-                                        <option value="PM">Personne Morale (PM)</option>
-                                    </select>
+                                    <label for="ingest-file">Fichier *</label>
+                                    <input type="file" id="ingest-file" required style="border: none; padding: 0.5rem 0;">
                                 </div>
                                 <div class="form-group">
-                                    <label for="wl-gender">Genre</label>
-                                    <select id="wl-gender">
-                                        <option value="U">Non spécifié (U)</option>
-                                        <option value="M">Masculin (M)</option>
-                                        <option value="F">Féminin (F)</option>
-                                    </select>
+                                    <label for="ingest-delimiter">Délimiteur CSV</label>
+                                    <input type="text" id="ingest-delimiter" value="," placeholder="," style="text-align: center;">
                                 </div>
                             </div>
+                            <button type="submit" id="submit-ingest-btn" class="btn btn-secondary" style="margin-top: 1rem;">
+                                Charger & Archiver
+                            </button>
+                        </form>
 
+                        <hr style="margin: 2rem 0; border: 0; border-top: 1px solid var(--border-color);">
+
+                        <h2>Comparateur de Versions (Delta Engine)</h2>
+                        <p class="section-desc">Identifiez les modifications structurelles (ADDED, REMOVED, MODIFIED) entre deux versions de snapshots.</p>
+                        
+                        <form id="compare-form" onsubmit="handleCompareSnapshots(event)">
                             <div class="form-group">
-                                <label for="wl-dob">Date de Naissance (DOB - YYYY-MM-DD)</label>
-                                <input type="text" id="wl-dob" placeholder="Ex: 1937-04-28">
+                                <label for="compare-old-snap">Snapshot de Référence (Ancien) *</label>
+                                <select id="compare-old-snap" required>
+                                    <option value="">Sélectionnez un snapshot...</option>
+                                </select>
                             </div>
-
                             <div class="form-group">
-                                <label for="wl-countries">Pays (ISO2 séparés par virgules)</label>
-                                <input type="text" id="wl-countries" placeholder="Ex: IQ, SY">
+                                <label for="compare-new-snap">Snapshot Cible (Nouveau) *</label>
+                                <select id="compare-new-snap" required>
+                                    <option value="">Sélectionnez un snapshot...</option>
+                                </select>
                             </div>
-
-                            <div class="form-group">
-                                <label for="wl-aliases">Alias (séparés par virgules)</label>
-                                <input type="text" id="wl-aliases" placeholder="Ex: Hussein Saddam">
-                            </div>
-
-                            <button type="submit" id="add-wl-btn" class="btn btn-secondary">
-                                Ajouter et Indexer
+                            <button type="submit" id="submit-compare-btn" class="btn btn-primary" style="margin-top: 1rem;">
+                                Comparer les versions
                             </button>
                         </form>
                     </div>
 
-                    <!-- Column 2: Watchlist list -->
+                    <!-- Snapshot History List -->
                     <div class="card result-card">
-                        <h2>Fiches Indexées en Mémoire Vive</h2>
-                        <p class="section-desc">Liste complète des PEP et personnes sanctionnées chargées dans le cache du moteur.</p>
+                        <h2>Historique des Snapshots Archives</h2>
+                        <p class="section-desc">Liste de tous les instantanés et versions importés dans la base de données relationnelle.</p>
+                        <div class="table-container max-height-table">
+                            <table id="snapshots-table">
+                                <thead>
+                                    <tr>
+                                        <th>Date d'Import</th>
+                                        <th>Nom du Fichier</th>
+                                        <th>Type</th>
+                                        <th>Lignes</th>
+                                        <th>Statut</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Delta Results Panel -->
+                <div class="card hidden" id="delta-results-card" style="margin-top: 2rem;">
+                    <h2>Rapport Comparatif d'Écart (Delta Report)</h2>
+                    
+                    <div class="score-metrics" style="flex-direction: row; gap: 2rem; margin-bottom: 2rem;">
+                        <div class="metric" style="flex: 1; background: rgba(16, 185, 129, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <span class="metric-label" style="color: var(--color-safe); font-weight: 600;">ADDED (Ajouts)</span>
+                            <span id="delta-added-count" class="metric-value" style="font-size: 1.5rem; color: var(--color-safe);">0</span>
+                        </div>
+                        <div class="metric" style="flex: 1; background: rgba(239, 68, 68, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.15);">
+                            <span class="metric-label" style="color: var(--color-alert); font-weight: 600;">REMOVED (Suppressions)</span>
+                            <span id="delta-removed-count" class="metric-value" style="font-size: 1.5rem; color: var(--color-alert);">0</span>
+                        </div>
+                        <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.15);">
+                            <span class="metric-label" style="color: var(--color-warning); font-weight: 600;">MODIFIED (Modifications)</span>
+                            <span id="delta-modified-count" class="metric-value" style="font-size: 1.5rem; color: var(--color-warning);">0</span>
+                        </div>
+                    </div>
+
+                    <div class="accordion-section" style="margin-bottom: 1rem;">
+                        <button type="button" class="accordion-header" onclick="toggleAccordion('delta-added-list')">
+                            🟢 Détail des Ajouts <span class="accordion-arrow">▼</span>
+                        </button>
+                        <div id="delta-added-list" class="accordion-content hidden" style="padding-top: 1rem;">
+                            <ul class="pre-block" id="delta-added-items" style="list-style: none; display: flex; flex-direction: column; gap: 0.5rem;">
+                                <!-- populated dynamically -->
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="accordion-section" style="margin-bottom: 1rem;">
+                        <button type="button" class="accordion-header" onclick="toggleAccordion('delta-removed-list')">
+                            🔴 Détail des Suppressions <span class="accordion-arrow">▼</span>
+                        </button>
+                        <div id="delta-removed-list" class="accordion-content hidden" style="padding-top: 1rem;">
+                            <ul class="pre-block" id="delta-removed-items" style="list-style: none; display: flex; flex-direction: column; gap: 0.5rem;">
+                                <!-- populated dynamically -->
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="accordion-section">
+                        <button type="button" class="accordion-header" onclick="toggleAccordion('delta-modified-list')">
+                            🟡 Détail des Modifications <span class="accordion-arrow">▼</span>
+                        </button>
+                        <div id="delta-modified-list" class="accordion-content hidden" style="padding-top: 1rem;">
+                            <div class="table-container">
+                                <table id="delta-modified-table">
+                                    <thead>
+                                        <tr>
+                                            <th>ID</th>
+                                            <th>Nom / Label</th>
+                                            <th>Attributs Modifiés</th>
+                                            <th>Valeur Avant (Before)</th>
+                                            <th>Valeur Après (After)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- populated dynamically -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION 4: WATCHLIST ACTIVE -->
+            <section id="sec-watchlist" class="tab-content">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <!-- Watchlist list -->
+                    <div class="card result-card">
+                        <h2>Fiches Indexées dans la Cache du Moteur Actif</h2>
+                        <p class="section-desc">Liste complète des fiches chargées depuis la base de données relationnelle et indexées par blocage.</p>
                         
                         <div class="search-box">
                             <input type="text" id="wl-search-input" placeholder="Filtrer par nom ou ID..." onkeyup="filterWatchlist()">
@@ -344,9 +491,9 @@
                                     <tr>
                                         <th>ID</th>
                                         <th>Type</th>
-                                        <th>Nom Principal</th>
-                                        <th>Pays</th>
-                                        <th>DOB</th>
+                                        <th>Nom Principal / Raison Sociale</th>
+                                        <th>Pays Rattachés</th>
+                                        <th>Genders / Gels</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -358,10 +505,10 @@
                 </div>
             </section>
 
-            <!-- SECTION 4: PISTE D'AUDIT -->
+            <!-- SECTION 5: PISTE D'AUDIT -->
             <section id="sec-history" class="tab-content">
                 <div class="card">
-                    <h2>Piste d'Audit réglementaire (Compliance Audit Trail)</h2>
+                    <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
                     <p class="section-desc">Historique immuable de toutes les décisions de criblage émises par le moteur. Conforme aux standards ACPR/AMF.</p>
 
                     <div class="table-container">
@@ -391,7 +538,6 @@
         <div class="modal-content">
             <span class="close-modal" onclick="closeAuditModal()">&times;</span>
             <h2>Détail Linear Audit Trail & Décision</h2>
-            
             <div id="modal-audit-details" class="modal-body-content">
                 <!-- Populated dynamically -->
             </div>

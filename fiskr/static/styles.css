@@ -1,4 +1,4 @@
-/* Fiskr - Modern Compliance UI Design System */
+/* Fiskr - Modern Compliance UI Design System v2.0 */
 
 :root {
     --bg-main: #0b0c10;
@@ -289,6 +289,51 @@ textarea {
     resize: vertical;
 }
 
+/* Accordions */
+.accordion-section {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    background: rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+}
+
+.accordion-header {
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    padding: 1rem 1.25rem;
+    text-align: left;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: var(--transition-fast);
+}
+
+.accordion-header:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.accordion-arrow {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    transition: transform 0.3s;
+}
+
+.accordion-section.active .accordion-arrow {
+    transform: rotate(180deg);
+}
+
+.accordion-content {
+    padding: 0 1.25rem 1.25rem 1.25rem;
+    border-top: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.01);
+}
+
 /* Buttons */
 .btn {
     display: inline-flex;
@@ -407,7 +452,7 @@ textarea {
     stroke: var(--color-primary);
     stroke-width: 8;
     stroke-linecap: round;
-    stroke-dasharray: 283; /* 2 * PI * r */
+    stroke-dasharray: 283;
     stroke-dashoffset: 283;
     transition: stroke-dashoffset 0.8s ease-out;
 }
@@ -716,4 +761,5 @@ tr:hover td {
     font-family: monospace;
     font-size: 0.8rem;
     color: var(--color-accent);
+    max-height: 250px;
 }

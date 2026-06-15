@@ -2,7 +2,7 @@
 
 Fiskr est un moteur de criblage (Screening Engine) de nouvelle génération destiné aux institutions financières. Il permet de confronter le référentiel tiers (clients, mandataires, bénéficiaires effectifs) aux listes de sanctions et de Personnes Politiquement Exposées (PEP) fournies par les éditeurs officiels (OFAC, UE, ONU, Dow Jones, World-Check) conformément aux exigences réglementaires ACPR/AMF.
 
-Le projet propose une API temps réel asynchrone, un script de traitement de masse (Batch) optimisé sous Apache Spark, et un tableau de bord interactif pour les agents de conformité.
+Le projet propose une API temps réel asynchrone, un script de traitement de masse (Batch) sous Apache Spark, un comparateur de snapshots historiques (Delta Engine), et un tableau de bord interactif pour les agents de conformité.
 
 ---
 
@@ -11,9 +11,9 @@ Le projet propose une API temps réel asynchrone, un script de traitement de mas
 Le système est structuré autour des modules définis dans le Document d'Architecture Technique (DAT) :
 
 1. **Module 1 : Data Quality Gate & Nettoyage (`fiskr/quality.py`)**
-   * **Niveau 1 (Bloquant/Rejet)** : Vérification des champs vides (`Rule_B01`), longueur insuffisante (`Rule_B02`), et type d'entité inconnu (`Rule_B03`).
-   * **Niveau 2 (Alerte/Dégradé)** : Absence de pays rattaché (`Rule_M01`), absence de DOB pour les individus (`Rule_M02`), et détection de caractères non translittérés (`Rule_M03`).
-   * **Nettoyage Automatique** : Normalisation de la casse, aplatissement ASCII (diacritiques/accents Müller -> MULLER) et suppression des suffixes légaux corporatifs (SA, SARL, LLC, GMBH, etc.) pour les personnes morales via expressions régulières.
+   * **Niveau 1 (Bloquant/Rejet)** : Vérification des champs vides (`Rule_B01`), types d'entités invalides (`Rule_B02`), structure individu invalide (`Rule_B04` - prénom/nom absents après parsing), et longueur de nom insuffisante (`Rule_B05` - moins de 2 caractères).
+   - **Niveau 2 (Alerte/Dégradé)** : Absence de pays rattaché (`Rule_M01`), absence de DOB pour les individus vivants (`Rule_M02`), caractères non translittérés (`Rule_M03`), contradiction de statut vital (`Rule_M04` - décès avec date mais booléen à faux), formats de date invalides (`Rule_M05`), numéro de passeport suspect (`Rule_M06`), structure LEI invalide (`Rule_M07`), et score d'extraction PDF faible (`Rule_M08`).
+   - **Nettoyage Automatique & Niveau 3** : Normalisation de la casse, aplatissement ASCII (diacritiques/accents Müller -> MULLER), gestion d'incohérence de genre multi-valuée (`Rule_I03` - repli sur `U`), et suppression des suffixes légaux corporatifs (SA, SARL, LLC, GMBH, LTD, SOCIETE) pour les personnes morales via expressions régulières.
 
 2. **Module 2 : Custom Blocking Engine (`fiskr/blocking.py`)**
    * Partitionnement par clé configurable (`config.yaml`) pour éviter le produit cartésien.
@@ -21,11 +21,20 @@ Le système est structuré autour des modules définis dans le Document d'Archit
    * Gestion automatique des valeurs manquantes avec des clés de secours (`XX`).
    * Produit cartésien des clés en cas d'alias multiples ou pays multiples pour garantir un criblage sans omission.
 
-3. **Module 3 : Moteur de Scoring & Ajustements (`fiskr/scoring.py`)**
-   * **Score Textuel de Base** : Moyenne pondérée hybride : $S_{base} = (0.4 \times JW) + (0.4 \times DL) + (0.2 \times TS)$
+3. **Module 3 : Moteur de Scoring, Hard Match & Ajustements (`fiskr/scoring.py`)**
+   * **Priorité Absolue (Hard Match)** : Raccourci exact sur identifiants par ordre de priorité :
+     1. Numéro LEI (Personnes Morales - 20 caractères structurels).
+     2. Numéro de Passeport + pays émetteur (Personnes Physiques).
+     3. Registres Nationaux d'Entreprises (SIREN, TVA, Tax ID) + pays.
+     4. Cartes Nationales d'Identité + pays.
+     5. Moyens de Transport (Vessel IMO à 7 chiffres, Aircraft Tail registration).
+     6. Autres documents d'identité et codes (SWIFT, SWIFT-BIC, etc.).
+     * Si l'un des contrôles correspond, le score est verrouillé à `100.0%` avec statut `ALERT`.
+   * **Score Textuel de Base (Fuzzy)** : Moyenne pondérée hybride : $S_{base} = (0.4 \times JW) + (0.4 \times DL) + (0.2 \times TS)$
      * *Jaro-Winkler (JW)* : Fautes d'orthographe en début de chaîne.
      * *Damerau-Levenshtein (DL)* : Inversions, omissions et insertions.
      * *Token Sort (TS)* : Inversions de mots (ex: *PUTIN Vladimir* vs *Vladimir PUTIN*).
+   * **Alias Risk Categorization** : Ingestion dynamique séparant les alias en `high_priority` (inclus dans le fuzzy scoring) et `low_priority` (exclus du scoring, stockés pour consultation humaine).
    * **Ajustements Contextuels (Bonus/Malus)** :
      * Date de Naissance (DOB) : Match exact (`+15`), dans la fenêtre de tolérance (`+5`), hors tolérance (`-15`).
      * Genre : Contradiction homme/femme (`-20`).
@@ -34,30 +43,43 @@ Le système est structuré autour des modules définis dans le Document d'Archit
 
 4. **Module 4 & 6 : API Temps Réel & Piste d'Audit (`fiskr/api.py`, `fiskr/database.py`)**
    * Service API asynchrone écrit en **FastAPI**.
-   * Indexation et mise en cache des watchlists en mémoire vive à l'initialisation de l'application pour des performances optimales (latence $\le 200\text{ms}$).
-   * Persistance immuable (SQLAlchemy) avec connexion PostgreSQL cible et **failover automatique sur base SQLite locale** (`fiskr.sqlite3`) pour faciliter les tests locaux. Sauvegarde de la version/hash de liste, de la configuration et de l'arbre de décision de conformité.
+   * Indexation et mise en cache des watchlists en mémoire vive à l'initialisation pour des performances optimales (latence $\le 200\text{ms}$).
+   * Persistance immuable (SQLAlchemy) avec connexion PostgreSQL cible et **failover automatique sur base SQLite locale** (`fiskr.sqlite3`).
 
 5. **Module 5 : PySpark Batch Engine (`fiskr/batch.py`)**
-   * Algorithme Spark optimisé par **Broadcast Join** pour la watchlist afin d'éviter les shuffles réseau lors de traitements de masse.
+   * Algorithme Spark de traitement de masse optimisé par **Broadcast Join** pour éliminer le produit cartésien sur le réseau de clusters.
+
+6. **Module 8 : Versioning & Delta Engine (`fiskr/delta.py`)**
+   * Tableaux d'historiques d'instantanés (Snapshots) immuables.
+   * Analyse différentielle calculant les états `ADDED`, `REMOVED` et `MODIFIED` par comparaison de hashs de lignes (`entity_checksum`).
+   * Détection récursive des différences colonnes/nœuds imbriqués ramenée sous forme de dot-path (ex: `countries.residence`) avec affichage d'état *before* et *after*.
 
 ---
 
-## 🚀 Installation
+## 🏃 Ingestion & Connecteurs d'Entrée (`fiskr/ingest.py`)
+
+L'outil intègre trois types de connecteurs pour charger les listes sources :
+* **OFAC XML Connector** : Lecture et traitement séquentiels d'un flux XML via `ElementTree.iterparse` pour éviter la saturation de la mémoire vive.
+* **CSV Connector** : Parseur de fichiers délimités personnalisables (délimiteur et dictionnaire de colonnes).
+* **PDF Connector** : Extracteur textuel via `pypdf` avec analyseur heuritique NER (Named Entity Recognition) pour isoler les navires, identifiants et caractéristiques.
+
+---
+
+## 🚀 Installation & Lancement
 
 ### Prérequis
 * Python 3.10 ou supérieur (développé et validé sous Python 3.13.1)
-* *Optionnel* : Base de données PostgreSQL (si configurée), environnement Spark (pour exécuter le mode batch natif)
+* Dépendances principales : `fastapi`, `uvicorn`, `sqlalchemy`, `pydantic`, `pyyaml`, `python-multipart`, `pypdf`, `faker`, `pytest`.
 
 ### Déploiement local
-1. Clonez le projet dans votre répertoire local.
-2. Installez les dépendances python :
+1. Installez les dépendances :
    ```bash
    pip install -r requirements.txt
    ```
-
----
-
-## 🏃 Exécution du Projet
+2. Installez également `python-multipart` et `faker` si besoin :
+   ```bash
+   pip install python-multipart faker
+   ```
 
 ### 1. Démarrer le Serveur et le Dashboard
 Lancez le serveur web avec Uvicorn :
@@ -66,43 +88,15 @@ python -m uvicorn fiskr.api:app --host 127.0.0.1 --port 8000 --reload
 ```
 Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
-Le dashboard interactif se compose de 4 onglets :
-* **Sandbox Temps Réel** : Testez unitairement des profils clients, affichez les jauges de conformité, visualisez le rapport Data Quality Gate et inspectez l'arbre de décision bonus/malus.
-* **Mode Batch** : Simulez des scans de masse en envoyant des listes JSON de clients.
-* **Watchlist active** : Consultez, recherchez ou ajoutez des fiches de sanctions indexées en mémoire.
-* **Piste d'Audit** : Historique réglementaire complet des décisions avec un inspecteur de logs intégrant la configuration de criblage figée.
+Le dashboard interactif se compose de 5 onglets :
+* **Sandbox Temps Réel** : Testez unitairement des profils clients avec les nouveaux champs (LEI, CNI, Passeport, IMO).
+* **Mode Batch** : Simulez des scans de masse.
+* **Versions & Delta** : Importez des snapshots de listes (XML, CSV, PDF) et visualisez le rapport comparatif du **Delta Engine**.
+* **Watchlist active** : Consultez et recherchez les fiches de sanctions indexées en cache.
+* **Piste d'Audit** : Historique réglementaire complet conforme ACPR/AMF.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite de tests automatisés avec pytest :
+Exécutez la suite complète de 42 tests avec pytest :
 ```bash
 python -m pytest
-```
-
----
-
-## ⚙️ Configuration (`config.yaml`)
-
-Le fichier `config.yaml` à la racine vous permet d'administrer le moteur de filtrage :
-```yaml
-blocking:
-  strategy: "standard_performance"
-  custom_key_layout:
-    - "COUNTRY_ISO"
-    - "ENTITY_TYPE"
-    - "PHONETIC_FIRST"
-
-scoring:
-  cut_off_threshold: 75.0
-  weights:
-    jaro_winkler: 0.4
-    damerau_levenshtein: 0.4
-    token_sort: 0.2
-  contextual_rules:
-    dob_tolerance_window: 2          # ans d'écart tolérés
-    dob_exact_bonus: 15
-    dob_tolerance_bonus: 5
-    dob_out_of_window_malus: -15
-    gender_conflict_malus: -20
-    geography_match_bonus: 10
-    geography_no_match_malus: -10
 ```

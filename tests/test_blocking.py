@@ -12,8 +12,8 @@ def test_double_metaphone():
     p3, s3 = double_metaphone("Smith")
     assert p3 == "SM0" or s3 == "XMT"
 
-def test_blocking_key_generation():
-    # Test generating standard blocking key [COUNTRY_ISO, ENTITY_TYPE, PHONETIC_FIRST]
+def test_blocking_key_generation_watchlist():
+    # Test generating standard blocking key for Watchlist entity
     config = {
         "blocking": {
             "custom_key_layout": ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
@@ -22,7 +22,7 @@ def test_blocking_key_generation():
     
     entity = {
         "primary_name": "Jean-Marc Muller",
-        "entity_type": "PP",
+        "entity_type": "I", # Watchlist individual
         "countries": {
             "citizenship": ["FR"],
             "residence": ["DE"]
@@ -30,13 +30,38 @@ def test_blocking_key_generation():
     }
     
     keys = generate_blocking_keys(entity, config)
-    # Double metaphone for "Jean-Marc" (first word "Jean") -> "JN"
-    # Entity type -> "PP"
-    # Countries -> "FR", "DE"
-    # Expected combinations: FR_PP_JN, DE_PP_JN
+    # Double metaphone for "Jean" (first word) -> "JN", "AN"
+    # Entity type "I" maps to "PP"
+    # Countries -> FR, DE
+    # Expected: FR_PP_JN, DE_PP_JN, FR_PP_AN, DE_PP_AN
     assert "FR_PP_JN" in keys
     assert "DE_PP_JN" in keys
     assert len(keys) == 4
+
+def test_blocking_key_generation_client():
+    # Test generating standard blocking key for Client entity
+    config = {
+        "blocking": {
+            "custom_key_layout": ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
+        }
+    }
+    
+    entity = {
+        "client_id": "CUST-001",
+        "client_type": "PP", # Client Individual
+        "client_first_name": "Jean-Marc",
+        "client_last_name": "Muller",
+        "client_countries": {
+            "nationality": ["FR"],
+            "residence": ["DE"]
+        }
+    }
+    
+    keys = generate_blocking_keys(entity, config)
+    # Expected combinations with PP, FR/DE and JN/AN/MLR phonetics
+    assert "FR_PP_JN" in keys
+    assert "DE_PP_JN" in keys
+    assert len(keys) == 6
 
 def test_blocking_key_fallback():
     config = {
@@ -48,7 +73,7 @@ def test_blocking_key_fallback():
     # Missing countries -> should fallback to 'XX'
     entity = {
         "primary_name": "Muller",
-        "entity_type": "PP",
+        "entity_type": "I",
         "countries": {}
     }
     
