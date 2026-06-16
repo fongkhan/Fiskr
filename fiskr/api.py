@@ -339,6 +339,13 @@ async def ingest_file(
             content = f.read()
             fhash = hashlib.sha256(content).hexdigest()
             
+        # Clean up any existing failed snapshots with the same hash
+        failed_snapshots = db.query(Snapshot).filter(Snapshot.file_hash == fhash, Snapshot.status == "ERROR").all()
+        for fs in failed_snapshots:
+            db.delete(fs)
+        if failed_snapshots:
+            db.commit()
+            
         # Validate that snapshot hash doesn't already exist to prevent redundant work
         exists = db.query(Snapshot).filter(Snapshot.file_hash == fhash).first()
         if exists:
