@@ -120,7 +120,7 @@ def test_pdf_connector_simulation(tmp_path):
 
 MOCK_XML_WITH_NAMESPACES_AND_CASING = """<?xml version="1.0" encoding="utf-8"?>
 <Sanctions xmlns="http://tempuri.org" xmlns:ns="http://tempuri.org/namespace">
-    <DistinctParty ns:ID="9992">
+    <DistinctParty ns:fixedRef="9992">
         <Profile>
             <PartySubType partytypeid="151"/>
             <Identity docnamestatusid="1">

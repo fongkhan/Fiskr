@@ -163,7 +163,8 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             other_ids = []
             
             # Get DistinctParty ID
-            current_party = {"entity_id": get_attrib_insensitive(elem, "ID")}
+            ent_id = get_attrib_insensitive(elem, "fixedRef") or get_attrib_insensitive(elem, "ID")
+            current_party = {"entity_id": ent_id}
             
         elif event == "start" and current_party is not None and tag == "Location":
             current_location_type = ""
