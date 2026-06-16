@@ -68,6 +68,19 @@ def categorize_aliases(alias_list: List[Dict[str, str]]) -> Dict[str, List[str]]
 
 # ------------------ XML OFAC CONNECTOR (iterparse) ------------------
 
+def get_attrib_insensitive(elem: Any, attr_name: str) -> Any:
+    """
+    Looks up an attribute in elem.attrib ignoring namespaces and case.
+    """
+    if elem is None or not hasattr(elem, "attrib"):
+        return None
+    target = attr_name.lower()
+    for k, v in elem.attrib.items():
+        local_key = k.split("}")[-1].lower() if "}" in k else k.lower()
+        if local_key == target:
+            return v
+    return None
+
 def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
     """
     Sequentially parses the OFAC Advanced XML using ElementTree.iterparse
@@ -150,7 +163,7 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             other_ids = []
             
             # Get DistinctParty ID
-            current_party = {"entity_id": elem.get("ID")}
+            current_party = {"entity_id": get_attrib_insensitive(elem, "ID")}
             
         elif event == "start" and current_party is not None and tag == "Location":
             current_location_type = ""
@@ -162,7 +175,7 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             # Entity Type Mapping (Section 2 of OFAC Annex)
             if tag == "PartySubType":
                 # PartyTypeID determines Individual (151), Entity (152), Vessel (154), Aircraft (153)
-                ptype = elem.get("PartyTypeID")
+                ptype = get_attrib_insensitive(elem, "PartyTypeID")
                 if ptype == "151":
                     entity_type_id = "I"
                 elif ptype == "152":
@@ -175,12 +188,12 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             # Names and Aliases (Section 3 of OFAC Annex)
             elif tag == "DocumentedName":
                 # Check for aliases and primary names
-                is_primary = elem.get("DocNameStatusID") == "1" # Primary
+                is_primary = get_attrib_insensitive(elem, "DocNameStatusID") == "1" # Primary
                 # Loop child parts
                 name_parts = []
                 for part in elem.findall(".//{*}DocumentedNamePart"):
                     part_val = part.find(".//{*}Value")
-                    part_type = part.get("NamePartTypeID")
+                    part_type = get_attrib_insensitive(part, "NamePartTypeID")
                     
                     if part_val is not None and part_val.text:
                         text = part_val.text.strip()
@@ -196,13 +209,13 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
                 if is_primary:
                     primary_name = full_name_resolved
                 else:
-                    alias_type = elem.get("AliasTypeID")
+                    alias_type = get_attrib_insensitive(elem, "AliasTypeID")
                     type_str = "Strong" if alias_type == "1" else "Weak"
                     aliases_raw.append({"name": full_name_resolved, "type": type_str})
                     
             # Gender and Vital status (Section 5 of OFAC Annex)
             elif tag == "Feature":
-                ftype = elem.get("FeatureTypeID")
+                ftype = get_attrib_insensitive(elem, "FeatureTypeID")
                 # Gender (25)
                 if ftype == "25":
                     ref_id = elem.find(".//{*}DetailReference")
@@ -227,7 +240,7 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
                         date_of_death = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
                         
                 # Date of birth (Cycle feature, often 8)
-                elif ftype == "8" or "birth" in elem.find(".//{*}FeatureType").text.lower() if elem.find(".//{*}FeatureType") is not None else False:
+                elif ftype == "8" or (elem.find(".//{*}FeatureType") is not None and elem.find(".//{*}FeatureType").text is not None and "birth" in elem.find(".//{*}FeatureType").text.lower()):
                     year_el = elem.find(".//{*}Year")
                     month_el = elem.find(".//{*}Month")
                     day_el = elem.find(".//{*}Day")
@@ -241,7 +254,7 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             elif tag == "LocationType":
                 current_location_type = elem.text.strip() if elem.text else ""
             elif tag == "LocationCountry":
-                current_location_country = elem.get("CountryISO2") or ""
+                current_location_country = get_attrib_insensitive(elem, "CountryISO2") or ""
             elif tag == "Location":
                 if current_location_country:
                     lt_str = current_location_type.lower()
@@ -259,16 +272,16 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
                     
             # Identifiers routing (Section 4 of OFAC Annex)
             elif tag == "IDRegistrationDocument":
-                doc_type_id = elem.get("IDRegistrationDocTypeID")
+                doc_type_id = get_attrib_insensitive(elem, "IDRegistrationDocTypeID")
                 
                 doc_num_el = elem.find(".//{*}IDRegistrationDocElement")
                 doc_num = doc_num_el.text.strip() if doc_num_el is not None and doc_num_el.text else ""
                 
-                issuing_el = elem.find(".//{*}IssuedBy/CountryISO2")
+                issuing_el = elem.find(".//{*}IssuedBy/{*}CountryISO2")
                 issued_country = issuing_el.text.strip() if issuing_el is not None else ""
                 
                 if doc_num:
-                    if doc_type_id == "392" or "passport" in elem.find(".//{*}IDRegistrationDocType").text.lower() if elem.find(".//{*}IDRegistrationDocType") is not None else False:
+                    if doc_type_id == "392" or (elem.find(".//{*}IDRegistrationDocType") is not None and elem.find(".//{*}IDRegistrationDocType").text is not None and "passport" in elem.find(".//{*}IDRegistrationDocType").text.lower()):
                         # Passport document
                         passports.append({
                             "number": doc_num,

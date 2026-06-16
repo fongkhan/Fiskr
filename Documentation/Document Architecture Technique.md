@@ -236,29 +236,46 @@ Le seuil absolu de génération d'alerte est fixé à 75%.
 * Score Final >= 75% -> Statut : ALERT (Gel de la transaction / Soumission à l'analyse humaine).
 * Score Final < 75% -> Statut : NO_MATCH (Fermeture automatique de la piste).
 
-## 5.5 Règle de Priorité Absolue : Le Match sur Identifiant Éclaté (Hard Match)
+### 5.5 Règle de Priorité Absolue : Le Match sur Identifiant et Match Parfait (Short-Circuit Logic)
 
-Avant d'initier la formule de scoring textuel flou (Fuzzy Matching), le moteur (Spark ou API) exécute une séquence de vérification sur les identifiants durs. Si l'une des correspondances exactes suivantes est validée, le processus de calcul s'arrête immédiatement : le SCORE FINAL est verrouillé à 100% et l'entité passe au statut ALERT.
+Avant d'initier la formule de scoring textuel flou (Fuzzy Matching) basée sur les coefficients pondérés (Section 5.1), le moteur (Spark en mode Batch ou API en Temps Réel) exécute une séquence de vérification stricte. Si l'une des correspondances exactes suivantes est validée, **le calcul s'arrête immédiatement pour cette paire** : le SCORE FINAL est verrouillé à 100% et l'entité passe au statut ALERT.
 
-L'ordre séquentiel d'exécution des contrôles est le suivant :
+L'ordre séquentiel d'exécution des contrôles de court-circuit est le suivant :
 
-1. Priorité 1 : Le Numéro LEI (Personnes Morales - International)
-    * Condition : Si (client_lei_number == watchlist.lei_number) et que le champ n'est pas NULL.
+1. **Priorité 1 : Le Numéro LEI (Personnes Morales - International)**
+    * *Condition :* Si (`client_lei_number == watchlist.lei_number`) et que le champ n'est pas NULL.
 
-2. Priorité 2 : Le Passeport (Personnes Physiques - International)
-    * Condition : Si (client_passport_documents.number == watchlist.passport_documents.number) ET (issuing_country identique).
+2. **Priorité 2 : Le Passeport (Personnes Physiques - International)**
+    * *Condition :* Si (`client_passport_documents.number == watchlist.passport_documents.number`) ET (`issuing_country` identique).
 
-3. Priorité 3 : Les Registres Nationaux d'Entreprises (National Registry IDs)
-    * Condition : Si un numéro du tableau client_national_registry_ids correspond exactement à un numéro du tableau watchlist.national_registry_ids ET que le pays (country) est identique.
+3. **Priorité 3 : Les Registres Nationaux d'Entreprises (National Registry IDs)**
+    * *Condition :* Si un numéro du tableau `client_national_registry_ids` correspond exactement à un numéro du tableau `watchlist.national_registry_ids` ET que le pays (`country`) est identique.
 
-4. Priorité 4 : Les Cartes Nationales d'Identité (National ID)
-    * Condition : Si (client_national_id_documents.number == watchlist.national_id_documents.number) ET (issuing_country identique).
+4. **Priorité 4 : Les Cartes Nationales d'Identité (National ID)**
+    * *Condition :* Si (`client_national_id_documents.number == watchlist.national_id_documents.number`) ET (`issuing_country` identique).
 
-5. Priorité 5 : Les Moyens de Transport (Navires / Avions)
-    * Condition : Match exact sur transaction_vessel_imo ou transaction_aircraft_registration avec leurs homologues de la watchlist.
+5. **Priorité 5 : Le Match Parfait Prénom / Nom (Exact Name Match - NOUVEAU)**
+    * *Condition (Personnes Physiques) :* Si (`client_last_name == watchlist.individual_name_parsed.last_name`) ET (`client_first_name == watchlist.individual_name_parsed.first_name`).
+    * *Condition sur Alias (High Priority) :* La règle s'applique également si le couple Prénom/Nom du client matche parfaitement avec les composants d'un alias classé en `high_priority` (Section 5.6).
+    * *Note technique :* Cette vérification s'accentue sur les chaînes de caractères **normalisées** (majuscules, sans accents, sans espaces multiples) issues du module de nettoyage (Section 3.2).
 
-6. Priorité 6 : Les Autres Documents et Identifiants (Other IDs / Other Registrations)
-    * Condition : Match exact sur le numéro, exigeant la correspondance stricte du type (doc_type ou id_type) pour éviter les collisions sur des numéros courts.
+6. **Priorité 6 : Les Moyens de Transport (Navires / Avions)**
+    * *Condition :* Match exact sur `transaction_vessel_imo` ou `transaction_aircraft_registration`.
+
+7. **Priorité 7 : Les Autres Documents et Identifiants (Other IDs / Other Registrations)**
+    * *Condition :* Match exact sur le numéro et le type de document (`doc_type` ou `id_type`).
+
+```python
+def evaluate_exact_name_match(client_first, client_last, watchlist_first, watchlist_last):
+    # Comparaison stricte des chaînes nettoyées et standardisées
+    if client_last == watchlist_last and client_first == watchlist_first:
+        return {
+            "final_score": 100.0,
+            "decision": "ALERT",
+            "reason": "Exact Name Match: First name and Last name match perfectly (Priority 5)."
+        }
+    return None
+```
 
 ### 5.6 Filtrage Segmenté des Alias par Niveau de Criticité (Alias Risk Categorization)
 

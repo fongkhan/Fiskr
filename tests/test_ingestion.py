@@ -116,3 +116,59 @@ def test_pdf_connector_simulation(tmp_path):
         assert ent["entity_id"] is not None
         assert ent["primary_name"] is not None
         assert "extraction_confidence" in ent
+
+
+MOCK_XML_WITH_NAMESPACES_AND_CASING = """<?xml version="1.0" encoding="utf-8"?>
+<Sanctions xmlns="http://tempuri.org" xmlns:ns="http://tempuri.org/namespace">
+    <DistinctParty ns:ID="9992">
+        <Profile>
+            <PartySubType partytypeid="151"/>
+            <Identity docnamestatusid="1">
+                <DocumentedName docnamestatusid="1">
+                    <DocumentedNamePart nameparttypeid="1360">
+                        <Value>Vladimir</Value>
+                    </DocumentedNamePart>
+                    <DocumentedNamePart nameparttypeid="1361">
+                        <Value>Putin</Value>
+                    </DocumentedNamePart>
+                </DocumentedName>
+            </Identity>
+            <Feature featuretypeid="25">
+                <FeatureVersion>
+                    <VersionDetail>
+                        <DetailReference>Male</DetailReference>
+                    </VersionDetail>
+                </FeatureVersion>
+            </Feature>
+            <Location>
+                <LocationType>citizenship</LocationType>
+                <LocationCountry countryiso2="RU"/>
+            </Location>
+            <IDRegistrationDocument idregistrationdoctypeid="392">
+                <IDRegistrationDocElement>ABCDE123456</IDRegistrationDocElement>
+                <ns:IssuedBy>
+                    <ns:CountryISO2>RU</ns:CountryISO2>
+                </ns:IssuedBy>
+            </IDRegistrationDocument>
+        </Profile>
+    </DistinctParty>
+</Sanctions>
+"""
+
+def test_xml_ofac_connector_namespaces_and_casing(tmp_path):
+    xml_file = tmp_path / "mock_ofac_ns.xml"
+    xml_file.write_text(MOCK_XML_WITH_NAMESPACES_AND_CASING, encoding="utf-8")
+    
+    entities = list(parse_ofac_advanced_xml(str(xml_file)))
+    assert len(entities) == 1
+    ent = entities[0]
+    
+    assert ent["entity_id"] == "9992"
+    assert ent["entity_type"] == "I"
+    assert ent["primary_name"] == "Vladimir Putin"
+    assert ent["gender"] == "M"
+    assert "RU" in ent["countries"]["citizenship"]
+    assert len(ent["passport_documents"]) == 1
+    assert ent["passport_documents"][0]["number"] == "ABCDE123456"
+    assert ent["passport_documents"][0]["issuing_country"] == "RU"
+
