@@ -626,6 +626,48 @@ async def get_audit_history(db: Session = Depends(get_db)):
 async def get_active_config():
     return config
 
+@app.post("/api/snapshots/purge")
+async def purge_failed_snapshots(db: Session = Depends(get_db)):
+    """
+    Purges (deletes) all snapshots and their associated entities (watchlist and clients)
+    that are in status 'ERROR' or 'PROCESSING' (aborted/failed).
+    """
+    try:
+        # Find failed / processing snapshots
+        failed_snapshots = db.query(Snapshot).filter(Snapshot.status.in_(["ERROR", "PROCESSING"])).all()
+        if not failed_snapshots:
+            return {"message": "Aucun snapshot erroné ou en cours à purger.", "purged_snapshots_count": 0}
+            
+        purged_ids = [s.snapshot_id for s in failed_snapshots]
+        
+        # 1. Delete associated WatchlistEntity records
+        deleted_watchlist = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id.in_(purged_ids)).delete(synchronize_session=False)
+        
+        # 2. Delete associated ClientEntity records
+        deleted_client = db.query(ClientEntity).filter(ClientEntity.snapshot_id.in_(purged_ids)).delete(synchronize_session=False)
+        
+        # 3. Delete the Snapshots themselves
+        deleted_snapshots = db.query(Snapshot).filter(Snapshot.snapshot_id.in_(purged_ids)).delete(synchronize_session=False)
+        
+        db.commit()
+        
+        # Reload cache to ensure in-memory items are in sync
+        load_watchlist_cache(db)
+        
+        return {
+            "message": f"Purge réussie : {deleted_snapshots} snapshot(s), {deleted_watchlist} fiches watchlist, et {deleted_client} fiches client supprimées.",
+            "purged_snapshots_count": deleted_snapshots,
+            "purged_watchlist_entities": deleted_watchlist,
+            "purged_client_entities": deleted_client
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to purge snapshots: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Purge failed: {str(e)}"
+        )
+
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

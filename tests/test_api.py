@@ -114,3 +114,63 @@ def test_ingest_reupload_error_snapshot(client):
     assert new_snap_check is not None
     assert new_snap_check.status == "READY"
 
+def test_purge_failed_snapshots(client):
+    import uuid
+    from fiskr.database import get_db, Snapshot, WatchlistEntity, ClientEntity
+    db = next(get_db())
+    
+    # 1. Create a snapshot in ERROR status and a snapshot in PROCESSING status
+    err_snap_id = f"snap-error-{uuid.uuid4()}"
+    proc_snap_id = f"snap-proc-{uuid.uuid4()}"
+    ready_snap_id = f"snap-ready-{uuid.uuid4()}"
+    
+    err_snap = Snapshot(snapshot_id=err_snap_id, file_type="WATCHLIST_OFAC", file_name="err.xml", file_hash=f"hash-{uuid.uuid4()}", status="ERROR")
+    proc_snap = Snapshot(snapshot_id=proc_snap_id, file_type="CLIENT_BASE", file_name="proc.csv", file_hash=f"hash-{uuid.uuid4()}", status="PROCESSING")
+    ready_snap = Snapshot(snapshot_id=ready_snap_id, file_type="WATCHLIST_OFAC", file_name="ready.xml", file_hash=f"hash-{uuid.uuid4()}", status="READY")
+    
+    db.add_all([err_snap, proc_snap, ready_snap])
+    db.commit()
+    
+    # 2. Add some dummy entities linked to these snapshots
+    wl_err_ent = WatchlistEntity(
+        snapshot_id=err_snap_id, entity_id="WL-ERR-1", entity_type="I", 
+        primary_name="Failed Entity", entity_checksum="checksum-err"
+    )
+    wl_ready_ent = WatchlistEntity(
+        snapshot_id=ready_snap_id, entity_id="WL-READY-1", entity_type="I", 
+        primary_name="Success Entity", entity_checksum="checksum-ready"
+    )
+    client_proc_ent = ClientEntity(
+        snapshot_id=proc_snap_id, client_id="CLI-PROC-1", client_type="PP",
+        client_first_name="Pending", client_last_name="Client", entity_checksum="checksum-proc"
+    )
+    
+    db.add_all([wl_err_ent, wl_ready_ent, client_proc_ent])
+    db.commit()
+    
+    # 3. Call the purge endpoint
+    response = client.post("/api/snapshots/purge")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["purged_snapshots_count"] >= 2 # err_snap and proc_snap (and potentially others)
+    assert data["purged_watchlist_entities"] >= 1 # wl_err_ent
+    assert data["purged_client_entities"] >= 1 # client_proc_ent
+    
+    # 4. Verify DB state
+    # err_snap and proc_snap are deleted
+    assert db.query(Snapshot).filter(Snapshot.snapshot_id == err_snap_id).first() is None
+    assert db.query(Snapshot).filter(Snapshot.snapshot_id == proc_snap_id).first() is None
+    # ready_snap remains
+    assert db.query(Snapshot).filter(Snapshot.snapshot_id == ready_snap_id).first() is not None
+    
+    # wl_err_ent and client_proc_ent are deleted
+    assert db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == err_snap_id).first() is None
+    assert db.query(ClientEntity).filter(ClientEntity.snapshot_id == proc_snap_id).first() is None
+    # wl_ready_ent remains
+    assert db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == ready_snap_id).first() is not None
+    
+    # Clean up the ready snapshot and its entity so we don't pollute other tests
+    db.delete(wl_ready_ent)
+    db.delete(db.query(Snapshot).filter(Snapshot.snapshot_id == ready_snap_id).first())
+    db.commit()
+

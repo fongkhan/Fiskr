@@ -840,3 +840,41 @@ window.onclick = function(event) {
         modal.style.display = "none";
     }
 }
+
+// Purge Failed/Processing Snapshots
+async function purgeFailedSnapshots() {
+    if (!confirm("Voulez-vous vraiment purger tous les snapshots et entités en erreur ou en cours de traitement ? Cette action est irréversible.")) {
+        return;
+    }
+    
+    const btn = document.getElementById("btn-purge-snapshots");
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = "⌛ Purge en cours...";
+    }
+    
+    try {
+        const response = await fetch("/api/snapshots/purge", {
+            method: "POST"
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            alert(`Erreur lors de la purge : ${data.detail || JSON.stringify(data)}`);
+            return;
+        }
+        
+        const data = await response.json();
+        alert(`Purge terminée : ${data.message}`);
+        fetchSnapshots();
+        fetchWatchlist();
+    } catch (e) {
+        console.error("Purge failed:", e);
+        alert("Erreur réseau lors de l'appel à la purge.");
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = "🗑️ Purger les imports erronés";
+        }
+    }
+}

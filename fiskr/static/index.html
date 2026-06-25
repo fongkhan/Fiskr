@@ -385,8 +385,13 @@
 
                     <!-- Snapshot History List -->
                     <div class="card result-card">
-                        <h2>Historique des Snapshots Archives</h2>
-                        <p class="section-desc">Liste de tous les instantanés et versions importés dans la base de données relationnelle.</p>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 1rem;">
+                            <h2 style="margin-bottom: 0;">Historique des Snapshots Archives</h2>
+                            <button id="btn-purge-snapshots" class="btn btn-danger" onclick="purgeFailedSnapshots()">
+                                🗑️ Purger les imports erronés
+                            </button>
+                        </div>
+                        <p class="section-desc" style="margin-bottom: 1rem;">Liste de tous les instantanés et versions importés dans la base de données relationnelle.</p>
                         <div class="table-container max-height-table">
                             <table id="snapshots-table">
                                 <thead>

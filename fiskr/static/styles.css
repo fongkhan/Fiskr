@@ -372,6 +372,18 @@ textarea {
     background: rgba(255, 255, 255, 0.12);
 }
 
+.btn-danger {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--color-alert);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.btn-danger:hover {
+    background: rgba(239, 68, 68, 0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.2);
+}
+
 /* Results Section Placeholder */
 .placeholder-content {
     display: flex;
