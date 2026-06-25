@@ -29,7 +29,7 @@ class WatchlistEntity(Base):
     snapshot_id = Column(String(50), ForeignKey("snapshots.snapshot_id"), nullable=False)
     entity_id = Column(String(100), nullable=False)
     entity_type = Column(String(10), nullable=False) # I, E, V, O
-    primary_name = Column(String(255), nullable=False)
+    primary_name = Column(String(1000), nullable=False)
     
     # Parsed structure
     individual_name_parsed = Column(JSON, nullable=True) # first_name, last_name, maiden_name
@@ -66,7 +66,7 @@ class ClientEntity(Base):
     client_first_name = Column(String(100), nullable=True)
     client_last_name = Column(String(100), nullable=True)
     client_maiden_name = Column(String(100), nullable=True)
-    client_company_name = Column(String(255), nullable=True)
+    client_company_name = Column(String(1000), nullable=True)
     client_dob = Column(String(50), nullable=True)
     client_gender = Column(String(5), default="U")
     client_is_deceased = Column(Boolean, default=False)
@@ -93,10 +93,10 @@ class AuditTrail(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     client_id = Column(String(100), nullable=True)
-    client_name = Column(String(255), nullable=False)
+    client_name = Column(String(1000), nullable=False)
     client_type = Column(String(10), nullable=False)
     watchlist_id = Column(String(100), nullable=False)
-    watchlist_name = Column(String(255), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
     base_score = Column(Float, nullable=False)
     final_score = Column(Float, nullable=False)
     status = Column(String(20), nullable=False)
@@ -149,6 +149,21 @@ def init_db():
 
     # Create tables
     Base.metadata.create_all(bind=engine)
+    
+    # Check if we need to alter column lengths (e.g. if we are on postgresql)
+    if engine.dialect.name == "postgresql":
+        try:
+            from sqlalchemy import text
+            with engine.begin() as conn:
+                conn.execute(text("SET lock_timeout = '2s'"))
+                conn.execute(text("ALTER TABLE watchlist_entities ALTER COLUMN primary_name TYPE VARCHAR(1000)"))
+                conn.execute(text("ALTER TABLE client_entities ALTER COLUMN client_company_name TYPE VARCHAR(1000)"))
+                conn.execute(text("ALTER TABLE compliance_audit_trail ALTER COLUMN client_name TYPE VARCHAR(1000)"))
+                conn.execute(text("ALTER TABLE compliance_audit_trail ALTER COLUMN watchlist_name TYPE VARCHAR(1000)"))
+            logger.info("Successfully checked and upgraded column lengths in PostgreSQL.")
+        except Exception as alter_err:
+            logger.warning(f"Could not automatically alter column types in PostgreSQL: {alter_err}")
+            
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():

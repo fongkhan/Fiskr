@@ -171,6 +171,9 @@ def test_purge_failed_snapshots(client):
     
     # Clean up the ready snapshot and its entity so we don't pollute other tests
     db.delete(wl_ready_ent)
-    db.delete(db.query(Snapshot).filter(Snapshot.snapshot_id == ready_snap_id).first())
     db.commit()
+    ready_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == ready_snap_id).first()
+    if ready_snap:
+        db.delete(ready_snap)
+        db.commit()
 

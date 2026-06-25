@@ -341,9 +341,12 @@ async def ingest_file(
             
         # Clean up any existing failed snapshots with the same hash
         failed_snapshots = db.query(Snapshot).filter(Snapshot.file_hash == fhash, Snapshot.status == "ERROR").all()
-        for fs in failed_snapshots:
-            db.delete(fs)
         if failed_snapshots:
+            failed_ids = [fs.snapshot_id for fs in failed_snapshots]
+            db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id.in_(failed_ids)).delete(synchronize_session=False)
+            db.query(ClientEntity).filter(ClientEntity.snapshot_id.in_(failed_ids)).delete(synchronize_session=False)
+            for fs in failed_snapshots:
+                db.delete(fs)
             db.commit()
             
         # Validate that snapshot hash doesn't already exist to prevent redundant work
