@@ -128,11 +128,19 @@ def init_db():
             raise ValueError("Not a PostgreSQL URL")
     except Exception as e:
         if fallback:
-            logger.warning(f"Failed to connect to PostgreSQL: {e}. Falling back to SQLite.")
+            try:
+                err_msg = str(e)
+            except Exception:
+                err_msg = repr(e)
+            logger.warning(f"Failed to connect to PostgreSQL: {err_msg}. Falling back to SQLite.")
             sqlite_url = f"sqlite:///{sqlite_path}"
             engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
         else:
-            logger.error(f"Failed to connect to database and fallback is disabled: {e}")
+            try:
+                err_msg = str(e)
+            except Exception:
+                err_msg = repr(e)
+            logger.error(f"Failed to connect to database and fallback is disabled: {err_msg}")
             raise e
 
     # Create tables
