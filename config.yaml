@@ -23,6 +23,6 @@ scoring:
     geography_no_match_malus: -10
 
 database:
-  url: "postgresql://postgres:postgres@localhost:5432/fiskr"
+  url: "postgresql://postgres:postgrespassword@localhost:5438/fiskr"
   fallback_to_sqlite: true
   sqlite_path: "fiskr.sqlite3"
