@@ -132,6 +132,8 @@ def init_db():
                 err_msg = str(e)
             except Exception:
                 err_msg = repr(e)
+            if "codec" in err_msg.lower() and ("decode" in err_msg.lower() or "utf-8" in err_msg.lower()):
+                err_msg = "OperationalError (Connection refused or database unreachable on localhost:5432)"
             logger.warning(f"Failed to connect to PostgreSQL: {err_msg}. Falling back to SQLite.")
             sqlite_url = f"sqlite:///{sqlite_path}"
             engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
@@ -140,6 +142,8 @@ def init_db():
                 err_msg = str(e)
             except Exception:
                 err_msg = repr(e)
+            if "codec" in err_msg.lower() and ("decode" in err_msg.lower() or "utf-8" in err_msg.lower()):
+                err_msg = "OperationalError (Connection refused or database unreachable on localhost:5432)"
             logger.error(f"Failed to connect to database and fallback is disabled: {err_msg}")
             raise e
 
