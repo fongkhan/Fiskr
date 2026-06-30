@@ -143,19 +143,38 @@ function toggleFormFields() {
 
 // Toggle manual form fields based on entity type
 function toggleManualFormFields() {
-    const entityType = document.getElementById("manual-entity-type").value;
-    const individualFields = document.getElementById("manual-individual-fields");
-    const vesselFields = document.getElementById("manual-vessel-fields");
+    const type = document.getElementById("manual-entity-type").value;
     
-    if (entityType === "I") {
-        individualFields.classList.remove("hidden");
-        vesselFields.classList.add("hidden");
-    } else if (entityType === "V") {
-        individualFields.classList.add("hidden");
-        vesselFields.classList.remove("hidden");
-    } else {
-        individualFields.classList.add("hidden");
-        vesselFields.classList.add("hidden");
+    const individualFields = document.getElementById("manual-individual-fields");
+    
+    const leiGroup = document.getElementById("manual-lei-group");
+    const vesselGroup = document.getElementById("manual-vessel-group");
+    const aircraftGroup = document.getElementById("manual-aircraft-group");
+    const passportGroup = document.getElementById("manual-passport-group");
+    const passportCountryGroup = document.getElementById("manual-passport-country-group");
+    const nationalIdGroup = document.getElementById("manual-national-id-group");
+    
+    // Default: Hide all specific groups
+    if (individualFields) individualFields.classList.add("hidden");
+    
+    if (leiGroup) leiGroup.classList.add("hidden");
+    if (vesselGroup) vesselGroup.classList.add("hidden");
+    if (aircraftGroup) aircraftGroup.classList.add("hidden");
+    if (passportGroup) passportGroup.classList.add("hidden");
+    if (passportCountryGroup) passportCountryGroup.classList.add("hidden");
+    if (nationalIdGroup) nationalIdGroup.classList.add("hidden");
+    
+    if (type === "I") {
+        if (individualFields) individualFields.classList.remove("hidden");
+        if (passportGroup) passportGroup.classList.remove("hidden");
+        if (passportCountryGroup) passportCountryGroup.classList.remove("hidden");
+        if (nationalIdGroup) nationalIdGroup.classList.remove("hidden");
+    } else if (type === "E") {
+        if (leiGroup) leiGroup.classList.remove("hidden");
+    } else if (type === "V") {
+        if (vesselGroup) vesselGroup.classList.remove("hidden");
+    } else if (type === "O") {
+        if (aircraftGroup) aircraftGroup.classList.remove("hidden");
     }
 }
 
@@ -169,11 +188,30 @@ async function handleManualEntity(event) {
     const lastName = document.getElementById("manual-last-name").value.trim();
     const maidenName = document.getElementById("manual-maiden-name").value.trim();
     const dob = document.getElementById("manual-dob").value.trim();
-    const nationality = document.getElementById("manual-nationality").value.trim();
-    const residence = document.getElementById("manual-residence").value.trim();
-    const aliases = document.getElementById("manual-aliases").value.trim();
+    
+    // Hard match
     const lei = document.getElementById("manual-lei").value.trim();
     const imo = document.getElementById("manual-imo").value.trim();
+    const aircraft = document.getElementById("manual-aircraft").value.trim();
+    const passportNum = document.getElementById("manual-passport-num").value.trim();
+    const passportCountry = document.getElementById("manual-passport-country").value.trim();
+    const nationalId = document.getElementById("manual-national-id").value.trim();
+    
+    // Extra
+    const gender = document.getElementById("manual-gender").value;
+    const dateOfDeath = document.getElementById("manual-date-of-death").value.trim();
+    const nationality = document.getElementById("manual-nationality").value.trim();
+    const residence = document.getElementById("manual-residence").value.trim();
+    const placeOfBirth = document.getElementById("manual-place-of-birth").value.trim();
+    const aliases = document.getElementById("manual-aliases").value.trim();
+    const address = document.getElementById("manual-address").value.trim();
+    const city = document.getElementById("manual-city").value.trim();
+    const state = document.getElementById("manual-state").value.trim();
+    const country = document.getElementById("manual-country").value.trim();
+    const origin = document.getElementById("manual-origin").value.trim();
+    const designation = document.getElementById("manual-designation").value.trim();
+    const altAddresses = document.getElementById("manual-alternative-addresses").value.trim();
+    const additionalInfo = document.getElementById("manual-additional-informations").value.trim();
     
     const payload = {
         entity_type: type,
@@ -186,7 +224,21 @@ async function handleManualEntity(event) {
         nationality: nationality || null,
         residence: residence || null,
         lei_number: lei || null,
-        imo_number: type === "V" ? imo : null
+        imo_number: imo || null,
+        gender: gender || "U",
+        aircraft_tail_number: aircraft || null,
+        passport_documents: passportNum ? `${passportNum}` : null,
+        national_id_documents: nationalId ? `${nationalId}` : null,
+        place_of_birth: placeOfBirth || null,
+        address: address || null,
+        city: city || null,
+        state: state || null,
+        country: country || null,
+        origin: origin || null,
+        designation: designation || null,
+        alternative_addresses: altAddresses || null,
+        additional_informations: additionalInfo || null,
+        date_of_death: dateOfDeath || null
     };
     
     const btn = document.getElementById("submit-manual-btn");

@@ -699,6 +699,10 @@ class WatchlistEntityCreate(BaseModel):
     residence: Optional[str] = None
     lei_number: Optional[str] = None
     imo_number: Optional[str] = None
+    gender: Optional[str] = "U"
+    aircraft_tail_number: Optional[str] = None
+    passport_documents: Optional[str] = None
+    national_id_documents: Optional[str] = None
     
     # New fields requested
     place_of_birth: Optional[str] = None
@@ -738,6 +742,9 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
     residence_list = [c.strip().upper() for c in payload.residence.split(",") if c.strip()] if payload.residence else []
     alt_addrs = [a.strip() for a in payload.alternative_addresses.split(";") if a.strip()] if payload.alternative_addresses else []
     
+    passport_list = [{"number": num.strip(), "issuing_country": "XX"} for num in payload.passport_documents.split(",") if num.strip()] if payload.passport_documents else []
+    national_id_list = [{"number": num.strip(), "issuing_country": "XX"} for num in payload.national_id_documents.split(",") if num.strip()] if payload.national_id_documents else []
+    
     from fiskr.ingest import categorize_aliases
     raw_aliases = [{"name": name, "type": "Strong"} for name in aliases_list]
     parsed_aliases = categorize_aliases(raw_aliases)
@@ -755,13 +762,16 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
         "dates_of_birth": dob_list,
         "date_of_death": payload.date_of_death or None,
         "is_deceased": bool(payload.date_of_death),
-        "gender": "U",
+        "gender": payload.gender or "U",
         "countries": {
             "citizenship": nationality_list,
             "residence": residence_list
         },
         "lei_number": payload.lei_number or None,
         "imo_number": payload.imo_number or None,
+        "aircraft_tail_number": payload.aircraft_tail_number or None,
+        "passport_documents": passport_list,
+        "national_id_documents": national_id_list,
         # New fields
         "place_of_birth": payload.place_of_birth or None,
         "address": payload.address or None,
@@ -798,6 +808,9 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
         countries=ent_dict["countries"],
         lei_number=payload.lei_number or None,
         imo_number=payload.imo_number or None,
+        aircraft_tail_number=ent_dict["aircraft_tail_number"],
+        passport_documents=ent_dict["passport_documents"],
+        national_id_documents=ent_dict["national_id_documents"],
         # New fields
         place_of_birth=ent_dict["place_of_birth"],
         address=ent_dict["address"],

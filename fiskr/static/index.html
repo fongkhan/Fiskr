@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=2.5">
+    <link rel="stylesheet" href="/static/styles.css?v=2.6">
 </head>
 <body>
     <div class="app-container">
@@ -298,34 +298,129 @@
                                             <input type="text" id="manual-dob" placeholder="Ex: 1980-05-15, 1980-05-16">
                                         </div>
                                     </div>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="manual-gender">Genre</label>
+                                            <select id="manual-gender">
+                                                <option value="U">Non spécifié (U)</option>
+                                                <option value="M">Masculin (M)</option>
+                                                <option value="F">Féminin (F)</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="manual-date-of-death">Date de Décès (Format YYYY-MM-DD)</label>
+                                            <input type="text" id="manual-date-of-death" placeholder="Ex: 2024-01-10">
+                                        </div>
+                                    </div>
                                 </div>
 
-                                <div class="form-row">
-                                    <div class="form-group">
-                                        <label for="manual-nationality">Nationalités (ISO2, séparés par virgules)</label>
-                                        <input type="text" id="manual-nationality" placeholder="Ex: FR, US">
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="manual-residence">Résidences (ISO2, séparés par virgules)</label>
-                                        <input type="text" id="manual-residence" placeholder="Ex: FR, GB">
+                                <!-- Accordion: Identifiants Uniques / Hard Match -->
+                                <div class="accordion-section" style="margin-top: 1rem;">
+                                    <button type="button" class="accordion-header" onclick="toggleAccordion('manual-hard-match-fields')">
+                                        🔑 Identifiants Uniques & Transports (Hard Match) <span class="accordion-arrow">▼</span>
+                                    </button>
+                                    <div id="manual-hard-match-fields" class="accordion-content hidden">
+                                        <div class="form-row">
+                                            <div class="form-group" id="manual-lei-group">
+                                                <label for="manual-lei">Legal Entity Identifier (LEI)</label>
+                                                <input type="text" id="manual-lei" placeholder="Ex: 96950058N5D982K5G550">
+                                            </div>
+                                            <div class="form-group" id="manual-vessel-group">
+                                                <label for="manual-imo">Numéro IMO Navire (7 chiffres)</label>
+                                                <input type="text" id="manual-imo" placeholder="Ex: 9941235">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group" id="manual-aircraft-group">
+                                                <label for="manual-aircraft">Immatriculation Aéronef (Tail Number)</label>
+                                                <input type="text" id="manual-aircraft" placeholder="Ex: N732MA">
+                                            </div>
+                                            <div class="form-group" id="manual-passport-group">
+                                                <label for="manual-passport-num">Passeport : Numéro</label>
+                                                <input type="text" id="manual-passport-num" placeholder="Ex: 12BB98421">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group" id="manual-passport-country-group">
+                                                <label for="manual-passport-country">Passeport : Pays d'émission (ISO2)</label>
+                                                <input type="text" id="manual-passport-country" placeholder="Ex: RU">
+                                            </div>
+                                            <div class="form-group" id="manual-national-id-group">
+                                                <label for="manual-national-id">CNI : Numéro</label>
+                                                <input type="text" id="manual-national-id" placeholder="Ex: 9901421298">
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
 
-                                <div class="form-row">
-                                    <div class="form-group">
-                                        <label for="manual-aliases">Alias / Noms secondaires (séparés par virgules)</label>
-                                        <input type="text" id="manual-aliases" placeholder="Ex: Johnny, J. Doe">
-                                    </div>
-                                    <div class="form-group">
-                                        <label for="manual-lei">Legal Entity Identifier (LEI)</label>
-                                        <input type="text" id="manual-lei" placeholder="Ex: 96950058N5D982K5G550">
-                                    </div>
-                                </div>
-                                
-                                <div class="form-row hidden" id="manual-vessel-fields">
-                                    <div class="form-group">
-                                        <label for="manual-imo">Numéro IMO (7 chiffres)</label>
-                                        <input type="text" id="manual-imo" placeholder="Ex: 9941235">
+                                <!-- Accordion: Localisation & Détails Supplémentaires -->
+                                <div class="accordion-section" style="margin-top: 1rem;">
+                                    <button type="button" class="accordion-header" onclick="toggleAccordion('manual-extra-details-fields')">
+                                        📋 Localisation, Origine & Détails Supplémentaires <span class="accordion-arrow">▼</span>
+                                    </button>
+                                    <div id="manual-extra-details-fields" class="accordion-content hidden">
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="manual-nationality">Nationalités (ISO2, séparés par virgules)</label>
+                                                <input type="text" id="manual-nationality" placeholder="Ex: FR, US">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="manual-residence">Résidences (ISO2, séparés par virgules)</label>
+                                                <input type="text" id="manual-residence" placeholder="Ex: FR, GB">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="manual-place-of-birth">Lieu de Naissance</label>
+                                                <input type="text" id="manual-place-of-birth" placeholder="Ex: Paris, France">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="manual-aliases">Alias / Noms secondaires (séparés par virgules)</label>
+                                                <input type="text" id="manual-aliases" placeholder="Ex: Johnny, J. Doe">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="manual-address">Adresse</label>
+                                                <input type="text" id="manual-address" placeholder="Ex: 12 Rue de la Paix">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="manual-city">Ville</label>
+                                                <input type="text" id="manual-city" placeholder="Ex: Paris">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="manual-state">État / Région</label>
+                                                <input type="text" id="manual-state" placeholder="Ex: Île-de-France">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="manual-country">Pays</label>
+                                                <input type="text" id="manual-country" placeholder="Ex: France">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="manual-origin">Origine / Source</label>
+                                                <input type="text" id="manual-origin" placeholder="Ex: EU_LIST">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="manual-designation">Fonction / Désignation</label>
+                                                <input type="text" id="manual-designation" placeholder="Ex: Diplomate">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group" style="grid-column: span 2;">
+                                                <label for="manual-alternative-addresses">Adresses Alternatives (séparées par des points-virgules)</label>
+                                                <input type="text" id="manual-alternative-addresses" placeholder="Ex: 45 Ave Champs-Élysées; 10 Downing St">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group" style="grid-column: span 2;">
+                                                <label for="manual-additional-informations">Informations Additionnelles</label>
+                                                <textarea id="manual-additional-informations" placeholder="Ex: Métadonnées de conformité..."></textarea>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -722,6 +817,6 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=2.5"></script>
+    <script src="/static/app.js?v=2.6"></script>
 </body>
 </html>
