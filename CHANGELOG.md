@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Leveraged pre-existing `.hidden` styling in HTML and JS to ensure proper tab state visibility.
 - **Automated Test Coverage**:
   - Added new integration tests (`test_create_watchlist_entity_success` and `test_create_watchlist_entity_quality_gate_failure`) bringing the automated test suite to 47 passing tests.
+- **Full 25-Field Compliance Ingestion & Screening**:
+  - Expanded both `WatchlistEntity` and `ClientEntity` database schemas to support Birth Place, Address, City, State, Country, Origin, Job Designation, Remarks, and Alternate Addresses.
+  - Built automatic database table migrator using SQLAlchemy schema inspection to drop and recreate tables if schemas are outdated.
+  - Updated Pydantic API schemas (`ScreenClientRequest`, `WatchlistEntityCreate`) and CSV/XML/JSON ingest connectors to parse and map all 25 fields.
+  - Extended the geographical matching algorithm in `scoring.py` to evaluate the direct `client_country` and `country` fields.
 
 ---
 

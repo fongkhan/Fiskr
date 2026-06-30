@@ -65,6 +65,38 @@ L'outil intègre trois types de connecteurs pour charger les listes sources :
 
 ---
 
+## 📋 Référentiel des 25 Champs Réglementaires de Criblage
+
+Le moteur intègre 25 champs obligatoires de conformité AML/CFT, tous exploitables lors de l'ingestion de fichiers ou du screening temps réel :
+
+1. **ID** (`entity_id` / `client_id`) : Identifiant unique de l'enregistrement.
+2. **Type** (`entity_type` / `client_type`) : Catégorie d'entité (PP: Individu, PM: Personne Morale, V: Navire, O: Autre).
+3. **Gender** (`gender` / `client_gender`) : Genre (M, F, U).
+4. **Last Name** (`client_last_name` / `last_name`) : Nom de famille de l'individu.
+5. **First Name** (`client_first_name` / `first_name`) : Prénom de l'individu.
+6. **Maiden Name** (`client_maiden_name` / `maiden_name`) : Nom de jeune fille.
+7. **Nationality** (`nationality`) : Code pays de nationalité.
+8. **Place of Birth** (`place_of_birth` / `client_place_of_birth`) : Lieu de naissance (Ville/Pays).
+9. **Date of Birth** (`dates_of_birth` / `client_dob`) : Dates de naissance multiples (sanctions) ou unitaire (client).
+10. **Adress** (`address` / `client_address`) : Adresse postale principale.
+11. **City** (`city` / `client_city`) : Ville de résidence.
+12. **State** (`state` / `client_state`) : Région / État.
+13. **Country** (`country` / `client_country`) : Pays associé.
+14. **Date of Death** (`date_of_death` / `client_date_of_death`) : Date de décès de l'individu.
+15. **Origin** (`origin` / `client_origin`) : Origine / Source de la fiche.
+16. **Designation** (`designation` / `client_designation`) : Fonction de la personne (ex: Chef d'État, Diplomate).
+17. **Additional Informations** (`additional_informations` / `client_additional_informations`) : Notes réglementaires et métadonnées.
+18. **Alternatives Adresses** (`alternative_addresses` / `client_alternative_addresses`) : Adresses secondaires.
+19. **Aliases** (`aliases`) : Liste d'alias qualifiés.
+20. **Jurisdiction Country** (`jurisdiction_country`) : Pays de juridiction ou d'immatriculation.
+21. **IMO Code** (`imo_number` / `transaction_vessel_imo`) : Code d'identification des navires.
+22. **Passport ID** (`passport_documents` / `client_passport_documents`) : Numéro et pays de passeport.
+23. **National ID** (`national_id_documents` / `client_national_id_documents`) : Numéro et pays de carte nationale d'identité.
+24. **Tail Number** (`aircraft_tail_number` / `transaction_aircraft_registration`) : Immatriculation d'aéronef.
+25. **Legal Entity Identifier** (`lei_number` / `client_lei_number`) : Identifiant d'entité juridique à 20 caractères.
+
+---
+
 ## 🚀 Installation & Lancement
 
 ### Prérequis
