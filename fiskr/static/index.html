@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=2.4">
+    <link rel="stylesheet" href="/static/styles.css?v=2.5">
 </head>
 <body>
     <div class="app-container">
@@ -361,8 +361,10 @@
                                     <div class="form-group">
                                         <label for="client-type">Type d'Entité *</label>
                                         <select id="client-type" required onchange="toggleFormFields()">
-                                            <option value="PP">Personne Physique (PP)</option>
-                                            <option value="PM">Personne Morale (PM)</option>
+                                            <option value="I">Individu (PP)</option>
+                                            <option value="E">Entité / Personne Morale (PM)</option>
+                                            <option value="V">Navire (Vessel)</option>
+                                            <option value="O">Autre</option>
                                         </select>
                                     </div>
                                     <div class="form-group">
@@ -426,33 +428,94 @@
                                     </button>
                                     <div id="hard-match-fields" class="accordion-content hidden">
                                         <div class="form-row">
-                                            <div class="form-group">
+                                            <div class="form-group" id="screen-lei-group">
                                                 <label for="client-lei">Legal Entity Identifier (LEI - 20 chars)</label>
                                                 <input type="text" id="client-lei" placeholder="Ex: 96950058N5D982K5G550">
                                             </div>
-                                            <div class="form-group">
+                                            <div class="form-group" id="screen-vessel-group">
                                                 <label for="client-imo">Numéro IMO Navire (7 chiffres)</label>
                                                 <input type="text" id="client-imo" placeholder="Ex: 9941235">
                                             </div>
                                         </div>
                                         <div class="form-row">
-                                            <div class="form-group">
+                                            <div class="form-group" id="screen-aircraft-group">
                                                 <label for="client-aircraft">Immatriculation Aéronef (Tail Number)</label>
                                                 <input type="text" id="client-aircraft" placeholder="Ex: N732MA">
                                             </div>
-                                            <div class="form-group">
+                                            <div class="form-group" id="screen-passport-group">
                                                 <label for="client-passport-num">Passeport : Numéro</label>
                                                 <input type="text" id="client-passport-num" placeholder="Ex: 12BB98421">
                                             </div>
                                         </div>
                                         <div class="form-row">
-                                            <div class="form-group">
+                                            <div class="form-group" id="screen-passport-country-group">
                                                 <label for="client-passport-country">Passeport : Pays (ISO2)</label>
                                                 <input type="text" id="client-passport-country" placeholder="Ex: RU">
                                             </div>
-                                            <div class="form-group">
+                                            <div class="form-group" id="screen-national-id-group">
                                                 <label for="client-national-id">CNI : Numéro</label>
                                                 <input type="text" id="client-national-id" placeholder="Ex: 9901421298">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Accordion: Localisation & Détails Supplémentaires -->
+                                <div class="accordion-section" style="margin-top: 1rem;">
+                                    <button type="button" class="accordion-header" onclick="toggleAccordion('extra-details-fields')">
+                                        📋 Localisation, Origine & Détails Supplémentaires <span class="accordion-arrow">▼</span>
+                                    </button>
+                                    <div id="extra-details-fields" class="accordion-content hidden">
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="client-place-of-birth">Lieu de Naissance</label>
+                                                <input type="text" id="client-place-of-birth" placeholder="Ex: Paris, France">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="client-date-of-death">Date de Décès (Format YYYY-MM-DD)</label>
+                                                <input type="text" id="client-date-of-death" placeholder="Ex: 2024-01-10">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="client-address">Adresse</label>
+                                                <input type="text" id="client-address" placeholder="Ex: 12 Rue de la Paix">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="client-city">Ville</label>
+                                                <input type="text" id="client-city" placeholder="Ex: Paris">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="client-state">État / Région</label>
+                                                <input type="text" id="client-state" placeholder="Ex: Île-de-France">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="client-country">Pays (Résidence/Pays)</label>
+                                                <input type="text" id="client-country" placeholder="Ex: France">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group">
+                                                <label for="client-origin">Origine / Source</label>
+                                                <input type="text" id="client-origin" placeholder="Ex: Interne">
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="client-designation">Fonction / Désignation</label>
+                                                <input type="text" id="client-designation" placeholder="Ex: CEO / PPE">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group" style="grid-column: span 2;">
+                                                <label for="client-alternative-addresses">Adresses Alternatives (séparées par des points-virgules)</label>
+                                                <input type="text" id="client-alternative-addresses" placeholder="Ex: 45 Ave Champs-Élysées; 10 Downing St">
+                                            </div>
+                                        </div>
+                                        <div class="form-row">
+                                            <div class="form-group" style="grid-column: span 2;">
+                                                <label for="client-additional-informations">Informations Additionnelles</label>
+                                                <textarea id="client-additional-informations" placeholder="Ex: Métadonnées de conformité..."></textarea>
                                             </div>
                                         </div>
                                     </div>
@@ -647,7 +710,18 @@
         </div>
     </div>
 
+    <!-- Watchlist/Entity Details Modal -->
+    <div id="details-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 750px;">
+            <span class="close-modal" onclick="closeDetailsModal()">&times;</span>
+            <h2 id="modal-title">Détails de l'Entité</h2>
+            <div id="modal-body" class="modal-body-content">
+                <!-- Populated dynamically -->
+            </div>
+        </div>
+    </div>
+
     <!-- Script -->
-    <script src="/static/app.js?v=2.4"></script>
+    <script src="/static/app.js?v=2.5"></script>
 </body>
 </html>

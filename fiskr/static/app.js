@@ -83,18 +83,61 @@ function switchSubTab(sectionId, subTabId) {
     }
 }
 
-// Toggle fields based on entity type PP/PM
+// Toggle fields based on entity type in Screening Form
 function toggleFormFields() {
-    const entityType = document.getElementById("client-type").value;
+    const type = document.getElementById("client-type").value;
+    
     const ppFields = document.getElementById("pp-fields");
     const pmFields = document.getElementById("pm-fields");
     
-    if (entityType === "PM") {
-        ppFields.classList.add("hidden");
-        pmFields.classList.remove("hidden");
-    } else {
-        ppFields.classList.remove("hidden");
-        pmFields.classList.add("hidden");
+    const leiGroup = document.getElementById("screen-lei-group");
+    const vesselGroup = document.getElementById("screen-vessel-group");
+    const aircraftGroup = document.getElementById("screen-aircraft-group");
+    const passportGroup = document.getElementById("screen-passport-group");
+    const passportCountryGroup = document.getElementById("screen-passport-country-group");
+    const nationalIdGroup = document.getElementById("screen-national-id-group");
+    
+    // Default: Hide all specific groups
+    if (ppFields) ppFields.classList.add("hidden");
+    if (pmFields) pmFields.classList.add("hidden");
+    
+    if (leiGroup) leiGroup.classList.add("hidden");
+    if (vesselGroup) vesselGroup.classList.add("hidden");
+    if (aircraftGroup) aircraftGroup.classList.add("hidden");
+    if (passportGroup) passportGroup.classList.add("hidden");
+    if (passportCountryGroup) passportCountryGroup.classList.add("hidden");
+    if (nationalIdGroup) nationalIdGroup.classList.add("hidden");
+    
+    if (type === "I") {
+        // Individual
+        if (ppFields) ppFields.classList.remove("hidden");
+        if (passportGroup) passportGroup.classList.remove("hidden");
+        if (passportCountryGroup) passportCountryGroup.classList.remove("hidden");
+        if (nationalIdGroup) nationalIdGroup.classList.remove("hidden");
+    } else if (type === "E") {
+        // Corporate Entity
+        if (pmFields) {
+            pmFields.classList.remove("hidden");
+            const label = pmFields.querySelector("label");
+            if (label) label.textContent = "Raison Sociale / Nom PM *";
+        }
+        if (leiGroup) leiGroup.classList.remove("hidden");
+    } else if (type === "V") {
+        // Vessel
+        if (pmFields) {
+            pmFields.classList.remove("hidden");
+            const label = pmFields.querySelector("label");
+            if (label) label.textContent = "Nom du Navire *";
+        }
+        if (vesselGroup) vesselGroup.classList.remove("hidden");
+    } else if (type === "O") {
+        // Other / Aircraft
+        if (pmFields) {
+            pmFields.classList.remove("hidden");
+            const label = pmFields.querySelector("label");
+            if (label) label.textContent = "Nom Principal *";
+        }
+        if (aircraftGroup) aircraftGroup.classList.remove("hidden");
     }
 }
 
@@ -462,6 +505,9 @@ function renderWatchlistTable(items, page = 1) {
     
     paginatedItems.forEach(item => {
         const tr = document.createElement("tr");
+        tr.style.cursor = "pointer";
+        tr.title = "Cliquez pour voir les détails de cette fiche";
+        tr.onclick = () => showWatchlistDetails(item);
         
         // Format countries
         const countriesDict = item.countries || {};
@@ -559,13 +605,16 @@ function changeWatchlistPage(newPage) {
 }
 
 // Handle Real-Time Sandbox Screening
+// Handle Real-Time Sandbox Screening
 async function handleScreening(event) {
     event.preventDefault();
     
-    const clientType = document.getElementById("client-type").value;
+    const clientTypeSelect = document.getElementById("client-type").value;
+    // Map select type to PP/PM for API compatibility
+    const clientType = clientTypeSelect === "I" ? "PP" : "PM";
     const clientGender = document.getElementById("client-gender").value;
     
-    // Get correct names based on type
+    // Get names
     const firstName = document.getElementById("client-firstname").value.trim();
     const lastName = document.getElementById("client-lastname").value.trim();
     const maidenName = document.getElementById("client-maidenname").value.trim();
@@ -586,7 +635,22 @@ async function handleScreening(event) {
     const passportCountry = document.getElementById("client-passport-country").value.trim();
     const nationalId = document.getElementById("client-national-id").value.trim();
     
+    // New fields
+    const placeOfBirth = document.getElementById("client-place-of-birth").value.trim();
+    const dateOfDeath = document.getElementById("client-date-of-death").value.trim();
+    const address = document.getElementById("client-address").value.trim();
+    const city = document.getElementById("client-city").value.trim();
+    const state = document.getElementById("client-state").value.trim();
+    const country = document.getElementById("client-country").value.trim();
+    const origin = document.getElementById("client-origin").value.trim();
+    const designation = document.getElementById("client-designation").value.trim();
+    const altAddressesStr = document.getElementById("client-alternative-addresses").value.trim();
+    const additionalInfo = document.getElementById("client-additional-informations").value.trim();
+    
+    const altAddressesList = altAddressesStr ? altAddressesStr.split(";").map(a => a.trim()) : [];
+    
     const payload = {
+        client_id: `SCREEN-${Math.floor(Math.random() * 10000)}`,
         client_type: clientType,
         client_first_name: clientType === "PP" ? firstName : "",
         client_last_name: clientType === "PP" ? lastName : "",
@@ -594,7 +658,7 @@ async function handleScreening(event) {
         client_company_name: clientType === "PM" ? companyName : "",
         client_dob: dob || null,
         client_gender: clientGender,
-        client_is_deceased: false,
+        client_is_deceased: !!dateOfDeath,
         client_countries: {
             nationality: countriesList,
             residence: countriesList,
@@ -606,7 +670,19 @@ async function handleScreening(event) {
         transaction_aircraft_registration: aircraft || null,
         client_passport_documents: passportNum ? [{ "number": passportNum, "issuing_country": passportCountry || "XX" }] : [],
         client_national_id_documents: nationalId ? [{ "number": nationalId, "issuing_country": "XX" }] : [],
-        client_other_id_documents: []
+        client_other_id_documents: [],
+        
+        // Add new fields to payload
+        client_place_of_birth: placeOfBirth || null,
+        client_address: address || null,
+        client_city: city || null,
+        client_state: state || null,
+        client_country: country || null,
+        client_origin: origin || null,
+        client_designation: designation || null,
+        client_additional_informations: additionalInfo || null,
+        client_alternative_addresses: altAddressesList,
+        client_date_of_death: dateOfDeath || null
     };
     
     const placeholder = document.getElementById("screening-results-placeholder");
@@ -1061,4 +1137,63 @@ async function purgeFailedSnapshots() {
             btn.innerHTML = "🗑️ Purger les imports erronés";
         }
     }
+}
+
+// Watchlist details Modal trigger
+function showWatchlistDetails(item) {
+    const modal = document.getElementById("details-modal");
+    const title = document.getElementById("modal-title");
+    const body = document.getElementById("modal-body");
+    
+    title.textContent = `Détails de l'Entité : ${item.entity_id}`;
+    
+    const altAddrs = Array.isArray(item.alternative_addresses) ? item.alternative_addresses.join("; ") : (item.alternative_addresses || "-");
+    const citizenship = item.countries?.citizenship?.join(", ") || "-";
+    const residence = item.countries?.residence?.join(", ") || "-";
+    
+    let highAliases = [];
+    let lowAliases = [];
+    if (item.aliases) {
+        if (typeof item.aliases === "object" && !Array.isArray(item.aliases)) {
+            highAliases = item.aliases.high_priority || [];
+            lowAliases = item.aliases.low_priority || [];
+        } else if (Array.isArray(item.aliases)) {
+            highAliases = item.aliases;
+        }
+    }
+    const aliasesStr = [...highAliases, ...lowAliases].join(", ") || "-";
+    
+    body.innerHTML = `
+        <div class="details-grid">
+            <div class="details-item"><strong>Nom Principal / Label</strong><span>${escapeHtml(item.primary_name || "-")}</span></div>
+            <div class="details-item"><strong>Type d'Entité</strong><span>${escapeHtml(item.entity_type || "-")}</span></div>
+            <div class="details-item"><strong>Genre</strong><span>${escapeHtml(item.gender || "-")}</span></div>
+            <div class="details-item"><strong>Prénom</strong><span>${escapeHtml(item.individual_name_parsed?.first_name || "-")}</span></div>
+            <div class="details-item"><strong>Nom</strong><span>${escapeHtml(item.individual_name_parsed?.last_name || "-")}</span></div>
+            <div class="details-item"><strong>Nom de Jeune Fille</strong><span>${escapeHtml(item.individual_name_parsed?.maiden_name || "-")}</span></div>
+            <div class="details-item"><strong>Nationalité (Pays)</strong><span>${escapeHtml(citizenship)}</span></div>
+            <div class="details-item"><strong>Résidence</strong><span>${escapeHtml(residence)}</span></div>
+            <div class="details-item"><strong>Lieu de Naissance</strong><span>${escapeHtml(item.place_of_birth || "-")}</span></div>
+            <div class="details-item"><strong>Date de Naissance</strong><span>${escapeHtml((item.dates_of_birth || []).join(", ") || "-")}</span></div>
+            <div class="details-item"><strong>Adresse</strong><span>${escapeHtml(item.address || "-")}</span></div>
+            <div class="details-item"><strong>Ville</strong><span>${escapeHtml(item.city || "-")}</span></div>
+            <div class="details-item"><strong>État / Région</strong><span>${escapeHtml(item.state || "-")}</span></div>
+            <div class="details-item"><strong>Pays</strong><span>${escapeHtml(item.country || "-")}</span></div>
+            <div class="details-item"><strong>Date de Décès</strong><span>${escapeHtml(item.date_of_death || "-")}</span></div>
+            <div class="details-item"><strong>Origine / Source</strong><span>${escapeHtml(item.origin || "-")}</span></div>
+            <div class="details-item"><strong>Fonction / Désignation</strong><span>${escapeHtml(item.designation || "-")}</span></div>
+            <div class="details-item"><strong>Informations Additionnelles</strong><span>${escapeHtml(item.additional_informations || "-")}</span></div>
+            <div class="details-item" style="grid-column: span 2;"><strong>Adresses Alternatives</strong><span>${escapeHtml(altAddrs)}</span></div>
+            <div class="details-item" style="grid-column: span 2;"><strong>Alias</strong><span>${escapeHtml(aliasesStr)}</span></div>
+            <div class="details-item"><strong>LEI (Legal Entity Identifier)</strong><span>${escapeHtml(item.lei_number || "-")}</span></div>
+            <div class="details-item"><strong>IMO Code (Navire)</strong><span>${escapeHtml(item.imo_number || "-")}</span></div>
+            <div class="details-item"><strong>Tail Number (Immatriculation Aéronef)</strong><span>${escapeHtml(item.aircraft_tail_number || "-")}</span></div>
+        </div>
+    `;
+    
+    modal.classList.remove("hidden");
+}
+
+function closeDetailsModal() {
+    document.getElementById("details-modal").classList.add("hidden");
 }

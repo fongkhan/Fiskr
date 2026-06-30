@@ -248,6 +248,12 @@ async def screen_client(request: ScreenClientRequest, db: Session = Depends(get_
     """
     client_dict = request.model_dump()
     
+    # Normalize client_type to PP/PM for internal validation and scoring engine
+    if client_dict.get("client_type") in ["I", "PP"]:
+        client_dict["client_type"] = "PP"
+    else:
+        client_dict["client_type"] = "PM"
+        
     # Evaluate Data Quality
     report = evaluate_and_clean(client_dict)
     if not report["is_valid"]:
