@@ -20,16 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Performance & UI Rendering Optimization**:
   - Implemented pagination (100 items per page) on the Active Watchlist explorer.
   - Refactored DOM rendering to insert rows using `DocumentFragment`, preventing browser layout lockups and reflow lags when exploring large datasets (such as a full OFAC list).
+  - Added click triggers on Active Watchlist table rows to open a details modal (`#details-modal`) displaying all 25 compliance attributes in a structured CSS Grid layout.
 - **Browser Compatibility & Cache-Busting**:
-  - Addressed caching bugs in Firefox by adding query-string cache-busting version numbers (`?v=2.4`) to static CSS and JS script imports.
+  - Addressed caching bugs in Firefox by adding query-string cache-busting version numbers (`?v=2.6`) to static CSS and JS script imports.
   - Leveraged pre-existing `.hidden` styling in HTML and JS to ensure proper tab state visibility.
 - **Automated Test Coverage**:
   - Added new integration tests (`test_create_watchlist_entity_success` and `test_create_watchlist_entity_quality_gate_failure`) bringing the automated test suite to 47 passing tests.
-- **Full 25-Field Compliance Ingestion & Screening**:
+- **Full 25-Field Compliance Ingestion, Screening & Manual Addition**:
   - Expanded both `WatchlistEntity` and `ClientEntity` database schemas to support Birth Place, Address, City, State, Country, Origin, Job Designation, Remarks, and Alternate Addresses.
   - Built automatic database table migrator using SQLAlchemy schema inspection to drop and recreate tables if schemas are outdated.
   - Updated Pydantic API schemas (`ScreenClientRequest`, `WatchlistEntityCreate`) and CSV/XML/JSON ingest connectors to parse and map all 25 fields.
   - Extended the geographical matching algorithm in `scoring.py` to evaluate the direct `client_country` and `country` fields.
+  - Created type-adaptive form layouts for both **Criblage Temps Réel** and **Ajout Manuel** forms, dynamically tailoring the inputs for Individu (PP), Entité (PM), Navire (Vessel) and Autre.
+  - Implemented backend normalization in `/api/screen` to automatically convert client type selectors (e.g., `I` to `PP`) side-stepping potential front-end cache mismatches.
 
 ---
 

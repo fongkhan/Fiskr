@@ -121,8 +121,8 @@ python -m uvicorn fiskr.api:app --host 127.0.0.1 --port 8000 --reload
 Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
 Le dashboard interactif se compose de 3 onglets principaux :
-* **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'ajouter des entités manuellement à la volée.
-* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox) et le crible de masse (simulateur batch).
+* **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 25 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
+* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**) et le crible de masse (simulateur batch).
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
 
 ### 2. Lancer la Suite de Tests
