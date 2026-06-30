@@ -3,6 +3,9 @@
 let activeWatchlist = [];
 let auditHistory = [];
 let activeSnapshots = [];
+let wlCurrentPage = 1;
+const wlItemsPerPage = 100;
+let wlFilteredItems = [];
 
 document.addEventListener("DOMContentLoaded", () => {
     // Initial data loading
@@ -23,14 +26,59 @@ function switchTab(tabId) {
     document.querySelectorAll(".tab-content").forEach(sec => {
         sec.classList.remove("active");
     });
-    document.getElementById(`sec-${tabId}`).classList.add("active");
+    const activeSec = document.getElementById(`sec-${tabId}`);
+    if (activeSec) activeSec.classList.add("active");
     
     // Refresh tab-specific data
-    if (tabId === "watchlist") {
-        fetchWatchlist();
-    } else if (tabId === "history") {
+    if (tabId === "watchlist-mgmt") {
+        const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
+        if (activeSubBtn) {
+            const subTabId = activeSubBtn.id.replace("sub-btn-", "");
+            if (subTabId === "watchlist-active") {
+                fetchWatchlist();
+            } else if (subTabId === "watchlist-snapshots") {
+                fetchSnapshots();
+            }
+        } else {
+            fetchWatchlist();
+            fetchSnapshots();
+        }
+    } else if (tabId === "audit") {
         fetchAuditHistory();
-    } else if (tabId === "snapshots") {
+    }
+}
+
+// Sub-tab navigation
+function switchSubTab(sectionId, subTabId) {
+    const section = document.getElementById(`sec-${sectionId}`);
+    if (!section) return;
+    
+    // Deactivate all sub-tab buttons inside this section
+    section.querySelectorAll(".sub-tab-btn").forEach(btn => {
+        btn.classList.remove("active");
+    });
+    
+    // Activate clicked sub-tab button
+    const activeBtn = document.getElementById(`sub-btn-${subTabId}`);
+    if (activeBtn) activeBtn.classList.add("active");
+    
+    // Hide all sub-tab content panels inside this section
+    section.querySelectorAll(".sub-tab-content").forEach(content => {
+        content.classList.remove("active");
+        content.classList.add("hidden");
+    });
+    
+    // Show active sub-tab content panel
+    const activeContent = document.getElementById(`sub-sec-${subTabId}`);
+    if (activeContent) {
+        activeContent.classList.add("active");
+        activeContent.classList.remove("hidden");
+    }
+
+    // Refresh sub-tab specific data if needed
+    if (subTabId === "watchlist-active") {
+        fetchWatchlist();
+    } else if (subTabId === "watchlist-snapshots") {
         fetchSnapshots();
     }
 }
@@ -294,6 +342,8 @@ async function fetchWatchlist() {
         const data = await response.json();
         
         activeWatchlist = data.items || [];
+        wlFilteredItems = activeWatchlist;
+        wlCurrentPage = 1;
         
         const hashEl = document.getElementById("sidebar-wl-hash");
         if (hashEl) {
@@ -301,23 +351,30 @@ async function fetchWatchlist() {
             hashEl.title = data.hash;
         }
         
-        renderWatchlistTable(activeWatchlist);
+        renderWatchlistTable(wlFilteredItems, wlCurrentPage);
     } catch (e) {
         console.error("Error loading watchlist:", e);
     }
 }
 
 // Render Watchlist Table
-function renderWatchlistTable(items) {
+function renderWatchlistTable(items, page = 1) {
     const tbody = document.querySelector("#watchlist-table tbody");
     tbody.innerHTML = "";
     
     if (items.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted)">Aucune entité de sanctions active chargée</td></tr>';
+        updatePaginationControls(0, 0);
         return;
     }
     
-    items.forEach(item => {
+    const startIndex = (page - 1) * wlItemsPerPage;
+    const endIndex = Math.min(startIndex + wlItemsPerPage, items.length);
+    const paginatedItems = items.slice(startIndex, endIndex);
+    
+    const fragment = document.createDocumentFragment();
+    
+    paginatedItems.forEach(item => {
         const tr = document.createElement("tr");
         
         // Format countries
@@ -351,19 +408,24 @@ function renderWatchlistTable(items) {
                 <small>${decStr} | ${item.gender}</small>
             </td>
         `;
-        tbody.appendChild(tr);
+        fragment.appendChild(tr);
     });
+    
+    tbody.appendChild(fragment);
+    updatePaginationControls(items.length, page);
 }
 
 // Filter Watchlist active items
 function filterWatchlist() {
     const query = document.getElementById("wl-search-input").value.toLowerCase().trim();
     if (!query) {
-        renderWatchlistTable(activeWatchlist);
+        wlFilteredItems = activeWatchlist;
+        wlCurrentPage = 1;
+        renderWatchlistTable(wlFilteredItems, wlCurrentPage);
         return;
     }
     
-    const filtered = activeWatchlist.filter(item => {
+    wlFilteredItems = activeWatchlist.filter(item => {
         const id = (item.entity_id || "").toLowerCase();
         const name = (item.primary_name || "").toLowerCase();
         const lei = (item.lei_number || "").toLowerCase();
@@ -371,7 +433,43 @@ function filterWatchlist() {
         return id.includes(query) || name.includes(query) || lei.includes(query) || imo.includes(query);
     });
     
-    renderWatchlistTable(filtered);
+    wlCurrentPage = 1;
+    renderWatchlistTable(wlFilteredItems, wlCurrentPage);
+}
+
+// Update Watchlist Pagination UI Controls
+function updatePaginationControls(totalItems, page) {
+    const container = document.getElementById("watchlist-pagination");
+    if (!container) return;
+    
+    if (totalItems === 0) {
+        container.innerHTML = "";
+        container.classList.add("hidden");
+        return;
+    }
+    
+    container.classList.remove("hidden");
+    
+    const totalPages = Math.ceil(totalItems / wlItemsPerPage);
+    const startIndex = (page - 1) * wlItemsPerPage + 1;
+    const endIndex = Math.min(page * wlItemsPerPage, totalItems);
+    
+    container.innerHTML = `
+        <span class="pagination-info">
+            Affichage de <strong>${startIndex}</strong> à <strong>${endIndex}</strong> sur <strong>${totalItems}</strong> entités
+        </span>
+        <div class="pagination-buttons">
+            <button class="pagination-btn" id="wl-prev-btn" ${page === 1 ? "disabled" : ""} onclick="changeWatchlistPage(${page - 1})">Précédent</button>
+            <span class="pagination-info" style="align-self: center; margin: 0 0.5rem;">Page ${page} / ${totalPages}</span>
+            <button class="pagination-btn" id="wl-next-btn" ${page === totalPages ? "disabled" : ""} onclick="changeWatchlistPage(${page + 1})">Suivant</button>
+        </div>
+    `;
+}
+
+// Switch Watchlist Page
+function changeWatchlistPage(newPage) {
+    wlCurrentPage = newPage;
+    renderWatchlistTable(wlFilteredItems, wlCurrentPage);
 }
 
 // Handle Real-Time Sandbox Screening
