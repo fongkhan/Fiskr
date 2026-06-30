@@ -127,6 +127,9 @@ def seed_watchlist_json(db: Session):
             
             raw_etype = item.get("entity_type", "I")
             etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
+            
+            alt_addrs = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
+            
             db_ent = WatchlistEntity(
                 snapshot_id=snap_id,
                 entity_id=entity_id,
@@ -139,6 +142,16 @@ def seed_watchlist_json(db: Session):
                 is_deceased=str(item.get("is_deceased", "False")).lower() == "true",
                 gender=item.get("gender") or (item.get("genders", ["U"])[0] if item.get("genders") else "U"),
                 countries=countries,
+                # New fields
+                place_of_birth=item.get("place_of_birth"),
+                address=item.get("address") or item.get("adress"),
+                city=item.get("city"),
+                state=item.get("state"),
+                country=item.get("country"),
+                origin=item.get("origin"),
+                designation=item.get("designation"),
+                additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                alternative_addresses=alt_addrs,
                 imo_number=item.get("imo_number"),
                 aircraft_tail_number=item.get("aircraft_tail_number"),
                 lei_number=item.get("lei_number"),
@@ -195,6 +208,18 @@ class ScreenClientRequest(BaseModel):
     client_gender: Optional[str] = Field("U", example="M")
     client_is_deceased: Optional[bool] = Field(False)
     client_countries: ScreenCountries = ScreenCountries()
+    
+    # New fields requested
+    client_place_of_birth: Optional[str] = None
+    client_address: Optional[str] = None
+    client_city: Optional[str] = None
+    client_state: Optional[str] = None
+    client_country: Optional[str] = None
+    client_origin: Optional[str] = None
+    client_designation: Optional[str] = None
+    client_additional_informations: Optional[str] = None
+    client_alternative_addresses: List[str] = []
+    client_date_of_death: Optional[str] = None
     
     # Identifiers
     transaction_vessel_imo: Optional[str] = None
@@ -388,6 +413,7 @@ async def ingest_file(
                 
                 parsed_name = item.get("individual_name_parsed") or {}
                 
+                alt_addrs_ofac = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
                 db_ent = WatchlistEntity(
                     snapshot_id=snap_id,
                     entity_id=item.get("entity_id"),
@@ -404,6 +430,16 @@ async def ingest_file(
                     is_deceased=item.get("is_deceased", False),
                     gender=report["resolved_gender"],
                     countries=item.get("countries", {}),
+                    # New fields
+                    place_of_birth=item.get("place_of_birth"),
+                    address=item.get("address") or item.get("adress"),
+                    city=item.get("city"),
+                    state=item.get("state"),
+                    country=item.get("country"),
+                    origin=item.get("origin"),
+                    designation=item.get("designation"),
+                    additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                    alternative_addresses=alt_addrs_ofac,
                     imo_number=item.get("imo_number"),
                     aircraft_tail_number=item.get("aircraft_tail_number"),
                     lei_number=item.get("lei_number"),
@@ -427,6 +463,7 @@ async def ingest_file(
                         continue
                     ent_checksum = compute_checksum(item)
                     
+                    alt_addrs_pdf = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
                         entity_id=item.get("entity_id"),
@@ -438,6 +475,16 @@ async def ingest_file(
                         is_deceased=False,
                         gender="U",
                         countries=item.get("countries", {}),
+                        # New fields
+                        place_of_birth=item.get("place_of_birth"),
+                        address=item.get("address") or item.get("adress"),
+                        city=item.get("city"),
+                        state=item.get("state"),
+                        country=item.get("country"),
+                        origin=item.get("origin"),
+                        designation=item.get("designation"),
+                        additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                        alternative_addresses=alt_addrs_pdf,
                         imo_number=item.get("imo_number"),
                         entity_checksum=ent_checksum
                     )
@@ -470,6 +517,8 @@ async def ingest_file(
                     
                     raw_etype = item.get("entity_type", "E")
                     etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
+                    
+                    alt_addrs_csv = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
                         entity_id=item.get("entity_id") or item.get("id") or str(uuid.uuid4())[:8],
@@ -481,6 +530,16 @@ async def ingest_file(
                         is_deceased=False,
                         gender=report["resolved_gender"],
                         countries=countries,
+                        # New fields
+                        place_of_birth=item.get("place_of_birth"),
+                        address=item.get("address") or item.get("adress"),
+                        city=item.get("city"),
+                        state=item.get("state"),
+                        country=item.get("country"),
+                        origin=item.get("origin"),
+                        designation=item.get("designation"),
+                        additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                        alternative_addresses=alt_addrs_csv,
                         lei_number=item.get("lei_number"),
                         entity_checksum=ent_checksum
                     )
@@ -504,6 +563,7 @@ async def ingest_file(
                     "registration_country": [c.strip() for c in (item.get("registration_country") or "").split(",") if c]
                 }
                 
+                alt_addrs_client = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
                 db_ent = ClientEntity(
                     snapshot_id=snap_id,
                     client_id=item.get("client_id"),
@@ -516,6 +576,17 @@ async def ingest_file(
                     client_gender=report["resolved_gender"],
                     client_is_deceased=str(item.get("client_is_deceased", "False")).lower() == "true",
                     client_countries=countries_obj,
+                    # New fields
+                    client_place_of_birth=item.get("client_place_of_birth") or item.get("place_of_birth"),
+                    client_address=item.get("client_address") or item.get("address") or item.get("adress"),
+                    client_city=item.get("client_city") or item.get("city"),
+                    client_state=item.get("client_state") or item.get("state"),
+                    client_country=item.get("client_country") or item.get("country"),
+                    client_origin=item.get("client_origin") or item.get("origin"),
+                    client_designation=item.get("client_designation") or item.get("designation"),
+                    client_additional_informations=item.get("client_additional_informations") or item.get("additional_informations") or item.get("additional_info"),
+                    client_alternative_addresses=alt_addrs_client,
+                    client_date_of_death=item.get("client_date_of_death") or item.get("date_of_death"),
                     client_lei_number=item.get("client_lei_number"),
                     client_national_registry_ids=json.loads(item.get("client_national_registry_ids", "[]")) if item.get("client_national_registry_ids") else [],
                     client_other_registration_ids=json.loads(item.get("client_other_registration_ids", "[]")) if item.get("client_other_registration_ids") else [],
@@ -609,7 +680,7 @@ async def compare_snapshots(request: DeltaRequest, db: Session = Depends(get_db)
         "new_snapshot_id": snap_new.snapshot_id,
         "execution_timestamp": datetime.utcnow().isoformat() + "Z"
     }
-    
+
 class WatchlistEntityCreate(BaseModel):
     entity_type: str
     primary_name: str
@@ -622,6 +693,18 @@ class WatchlistEntityCreate(BaseModel):
     residence: Optional[str] = None
     lei_number: Optional[str] = None
     imo_number: Optional[str] = None
+    
+    # New fields requested
+    place_of_birth: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    origin: Optional[str] = None
+    designation: Optional[str] = None
+    additional_informations: Optional[str] = None
+    alternative_addresses: Optional[str] = None
+    date_of_death: Optional[str] = None
 
 @app.post("/api/watchlist/entity")
 async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = Depends(get_db)):
@@ -647,6 +730,7 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
     dob_list = [d.strip() for d in payload.dates_of_birth.split(",") if d.strip()] if payload.dates_of_birth else []
     nationality_list = [c.strip().upper() for c in payload.nationality.split(",") if c.strip()] if payload.nationality else []
     residence_list = [c.strip().upper() for c in payload.residence.split(",") if c.strip()] if payload.residence else []
+    alt_addrs = [a.strip() for a in payload.alternative_addresses.split(";") if a.strip()] if payload.alternative_addresses else []
     
     from fiskr.ingest import categorize_aliases
     raw_aliases = [{"name": name, "type": "Strong"} for name in aliases_list]
@@ -663,14 +747,25 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
         },
         "aliases": parsed_aliases,
         "dates_of_birth": dob_list,
-        "is_deceased": False,
+        "date_of_death": payload.date_of_death or None,
+        "is_deceased": bool(payload.date_of_death),
         "gender": "U",
         "countries": {
             "citizenship": nationality_list,
             "residence": residence_list
         },
         "lei_number": payload.lei_number or None,
-        "imo_number": payload.imo_number or None
+        "imo_number": payload.imo_number or None,
+        # New fields
+        "place_of_birth": payload.place_of_birth or None,
+        "address": payload.address or None,
+        "city": payload.city or None,
+        "state": payload.state or None,
+        "country": payload.country or None,
+        "origin": payload.origin or None,
+        "designation": payload.designation or None,
+        "additional_informations": payload.additional_informations or None,
+        "alternative_addresses": alt_addrs
     }
     
     # 3. Quality Gate check
@@ -691,11 +786,22 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
         individual_name_parsed=ent_dict["individual_name_parsed"],
         aliases=report["cleansed_aliases"],
         dates_of_birth=ent_dict["dates_of_birth"],
-        is_deceased=False,
+        date_of_death=ent_dict["date_of_death"],
+        is_deceased=ent_dict["is_deceased"],
         gender=report["resolved_gender"],
         countries=ent_dict["countries"],
         lei_number=payload.lei_number or None,
         imo_number=payload.imo_number or None,
+        # New fields
+        place_of_birth=ent_dict["place_of_birth"],
+        address=ent_dict["address"],
+        city=ent_dict["city"],
+        state=ent_dict["state"],
+        country=ent_dict["country"],
+        origin=ent_dict["origin"],
+        designation=ent_dict["designation"],
+        additional_informations=ent_dict["additional_informations"],
+        alternative_addresses=ent_dict["alternative_addresses"],
         entity_checksum=ent_checksum
     )
     db.add(db_ent)

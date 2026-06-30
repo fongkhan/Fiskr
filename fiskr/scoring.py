@@ -470,6 +470,8 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     ))
     if client.get("countries"):
         c_countries.extend(client.get("countries").get("citizenship", []) + client.get("countries").get("residence", []))
+    if client.get("client_country"):
+        c_countries.append(client.get("client_country"))
         
     wc_dict = watchlist_entry.get("countries") or {}
     w_countries = list(set(
@@ -478,6 +480,10 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
         (wc_dict.get("birth_country") or []) +
         (wc_dict.get("jurisdiction_country") or [])
     ))
+    if watchlist_entry.get("country"):
+        w_countries.append(watchlist_entry.get("country"))
+    if watchlist_entry.get("jurisdiction_country"):
+        w_countries.append(watchlist_entry.get("jurisdiction_country"))
     
     geo_adj, geo_desc = calculate_geography_adjustment(c_countries, w_countries, config)
     

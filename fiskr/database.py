@@ -40,6 +40,17 @@ class WatchlistEntity(Base):
     gender = Column(String(5), default="U")
     countries = Column(JSON, nullable=True) # citizenship, residence, birth_country, jurisdiction_country
     
+    # New fields requested
+    place_of_birth = Column(String(255), nullable=True)
+    address = Column(Text, nullable=True)
+    city = Column(String(255), nullable=True)
+    state = Column(String(255), nullable=True)
+    country = Column(String(100), nullable=True)
+    origin = Column(String(255), nullable=True)
+    designation = Column(String(500), nullable=True)
+    additional_informations = Column(Text, nullable=True)
+    alternative_addresses = Column(JSON, nullable=True)
+    
     # Identifiers
     imo_number = Column(String(20), nullable=True)
     aircraft_tail_number = Column(String(50), nullable=True)
@@ -71,6 +82,18 @@ class ClientEntity(Base):
     client_gender = Column(String(5), default="U")
     client_is_deceased = Column(Boolean, default=False)
     client_countries = Column(JSON, nullable=True) # nationality, residence, birth_country, registration_country
+    
+    # New fields requested
+    client_place_of_birth = Column(String(255), nullable=True)
+    client_address = Column(Text, nullable=True)
+    client_city = Column(String(255), nullable=True)
+    client_state = Column(String(255), nullable=True)
+    client_country = Column(String(100), nullable=True)
+    client_origin = Column(String(255), nullable=True)
+    client_designation = Column(String(500), nullable=True)
+    client_additional_informations = Column(Text, nullable=True)
+    client_alternative_addresses = Column(JSON, nullable=True)
+    client_date_of_death = Column(String(50), nullable=True)
     
     # Identifiers
     transaction_vessel_imo = Column(String(20), nullable=True)
@@ -147,7 +170,16 @@ def init_db():
             logger.error(f"Failed to connect to database and fallback is disabled: {err_msg}")
             raise e
 
-    # Create tables
+    from sqlalchemy import inspect
+    try:
+        inspector = inspect(engine)
+        if "watchlist_entities" in inspector.get_table_names():
+            columns = [c["name"] for c in inspector.get_columns("watchlist_entities")]
+            if "place_of_birth" not in columns:
+                logger.info("Database schema outdated. Dropping and recreating tables...")
+                Base.metadata.drop_all(bind=engine)
+    except Exception as e:
+        logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)
     
     # Check if we need to alter column lengths (e.g. if we are on postgresql)
