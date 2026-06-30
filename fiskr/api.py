@@ -610,7 +610,108 @@ async def compare_snapshots(request: DeltaRequest, db: Session = Depends(get_db)
         "execution_timestamp": datetime.utcnow().isoformat() + "Z"
     }
     
-    return report
+class WatchlistEntityCreate(BaseModel):
+    entity_type: str
+    primary_name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    maiden_name: Optional[str] = None
+    aliases: Optional[str] = None
+    dates_of_birth: Optional[str] = None
+    nationality: Optional[str] = None
+    residence: Optional[str] = None
+    lei_number: Optional[str] = None
+    imo_number: Optional[str] = None
+
+@app.post("/api/watchlist/entity")
+async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = Depends(get_db)):
+    """Manually adds a new entity to the active watchlist and updates the engine cache."""
+    # 1. Ensure the manual snapshot exists
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == "manual-watchlist").first()
+    if not snap:
+        snap = Snapshot(
+            snapshot_id="manual-watchlist",
+            file_type="WATCHLIST_EU",
+            file_name="Manuel / Entités à la volée",
+            file_hash="manual-watchlist-hash",
+            record_count=0,
+            uploaded_at=datetime.utcnow(),
+            status="READY"
+        )
+        db.add(snap)
+        db.commit()
+        db.refresh(snap)
+        
+    # 2. Parse fields
+    aliases_list = [a.strip() for a in payload.aliases.split(",") if a.strip()] if payload.aliases else []
+    dob_list = [d.strip() for d in payload.dates_of_birth.split(",") if d.strip()] if payload.dates_of_birth else []
+    nationality_list = [c.strip().upper() for c in payload.nationality.split(",") if c.strip()] if payload.nationality else []
+    residence_list = [c.strip().upper() for c in payload.residence.split(",") if c.strip()] if payload.residence else []
+    
+    from fiskr.ingest import categorize_aliases
+    raw_aliases = [{"name": name, "type": "Strong"} for name in aliases_list]
+    parsed_aliases = categorize_aliases(raw_aliases)
+    
+    ent_dict = {
+        "entity_id": f"MANUAL-{str(uuid.uuid4())[:8].upper()}",
+        "entity_type": payload.entity_type,
+        "primary_name": payload.primary_name,
+        "individual_name_parsed": {
+            "first_name": payload.first_name or "",
+            "last_name": payload.last_name or "",
+            "maiden_name": payload.maiden_name or ""
+        },
+        "aliases": parsed_aliases,
+        "dates_of_birth": dob_list,
+        "is_deceased": False,
+        "gender": "U",
+        "countries": {
+            "citizenship": nationality_list,
+            "residence": residence_list
+        },
+        "lei_number": payload.lei_number or None,
+        "imo_number": payload.imo_number or None
+    }
+    
+    # 3. Quality Gate check
+    report = evaluate_and_clean(ent_dict)
+    if not report["is_valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Quality Gate rejected the entity.", "errors": report["errors"]}
+        )
+        
+    # 4. Save to Database
+    ent_checksum = compute_checksum(ent_dict)
+    db_ent = WatchlistEntity(
+        snapshot_id=snap.snapshot_id,
+        entity_id=ent_dict["entity_id"],
+        entity_type=payload.entity_type,
+        primary_name=report["cleansed_name"],
+        individual_name_parsed=ent_dict["individual_name_parsed"],
+        aliases=report["cleansed_aliases"],
+        dates_of_birth=ent_dict["dates_of_birth"],
+        is_deceased=False,
+        gender=report["resolved_gender"],
+        countries=ent_dict["countries"],
+        lei_number=payload.lei_number or None,
+        imo_number=payload.imo_number or None,
+        entity_checksum=ent_checksum
+    )
+    db.add(db_ent)
+    
+    # Update Snapshot record count
+    snap.record_count += 1
+    db.commit()
+    
+    # 5. Reload Cache
+    load_watchlist_cache(db)
+    
+    return {
+        "message": "Entité ajoutée avec succès.",
+        "entity_id": ent_dict["entity_id"],
+        "primary_name": report["cleansed_name"]
+    }
 
 @app.get("/api/watchlist")
 async def get_watchlist():

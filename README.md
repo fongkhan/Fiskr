@@ -88,15 +88,13 @@ python -m uvicorn fiskr.api:app --host 127.0.0.1 --port 8000 --reload
 ```
 Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
-Le dashboard interactif se compose de 5 onglets :
-* **Sandbox Temps Réel** : Testez unitairement des profils clients avec les nouveaux champs (LEI, CNI, Passeport, IMO).
-* **Mode Batch** : Simulez des scans de masse.
-* **Versions & Delta** : Importez des snapshots de listes (XML, CSV, PDF) et visualisez le rapport comparatif du **Delta Engine**.
-* **Watchlist active** : Consultez et recherchez les fiches de sanctions indexées en cache.
-* **Piste d'Audit** : Historique réglementaire complet conforme ACPR/AMF.
+Le dashboard interactif se compose de 3 onglets principaux :
+* **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'ajouter des entités manuellement à la volée.
+* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox) et le crible de masse (simulateur batch).
+* **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 42 tests avec pytest :
+Exécutez la suite complète de 47 tests avec pytest :
 ```bash
 python -m pytest
 ```

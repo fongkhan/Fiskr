@@ -177,3 +177,41 @@ def test_purge_failed_snapshots(client):
         db.delete(ready_snap)
         db.commit()
 
+
+def test_create_watchlist_entity_success(client):
+    payload = {
+        "entity_type": "I",
+        "primary_name": "Test Person Manual",
+        "first_name": "Test",
+        "last_name": "Person",
+        "nationality": "FR",
+        "residence": "FR",
+        "aliases": "AliasTest"
+    }
+    response = client.post("/api/watchlist/entity", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert "entity_id" in data
+    assert data["primary_name"] == "TEST PERSON MANUAL"
+
+    # Clean up the manual entity from database so it doesn't affect other tests
+    from fiskr.database import get_db, WatchlistEntity
+    db = next(get_db())
+    db.query(WatchlistEntity).filter(WatchlistEntity.entity_id == data["entity_id"]).delete()
+    db.commit()
+
+
+def test_create_watchlist_entity_quality_gate_failure(client):
+    payload = {
+        "entity_type": "I",
+        "primary_name": " ",
+        "first_name": " ",
+        "last_name": " "
+    }
+    response = client.post("/api/watchlist/entity", json=payload)
+    assert response.status_code == 400
+    data = response.json()
+    assert "detail" in data
+    assert "errors" in data["detail"]
+
+

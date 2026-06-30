@@ -98,6 +98,92 @@ function toggleFormFields() {
     }
 }
 
+// Toggle manual form fields based on entity type
+function toggleManualFormFields() {
+    const entityType = document.getElementById("manual-entity-type").value;
+    const individualFields = document.getElementById("manual-individual-fields");
+    const vesselFields = document.getElementById("manual-vessel-fields");
+    
+    if (entityType === "I") {
+        individualFields.classList.remove("hidden");
+        vesselFields.classList.add("hidden");
+    } else if (entityType === "V") {
+        individualFields.classList.add("hidden");
+        vesselFields.classList.remove("hidden");
+    } else {
+        individualFields.classList.add("hidden");
+        vesselFields.classList.add("hidden");
+    }
+}
+
+// Handle manual watchlist entity submission
+async function handleManualEntity(event) {
+    event.preventDefault();
+    
+    const type = document.getElementById("manual-entity-type").value;
+    const primaryName = document.getElementById("manual-primary-name").value.trim();
+    const firstName = document.getElementById("manual-first-name").value.trim();
+    const lastName = document.getElementById("manual-last-name").value.trim();
+    const maidenName = document.getElementById("manual-maiden-name").value.trim();
+    const dob = document.getElementById("manual-dob").value.trim();
+    const nationality = document.getElementById("manual-nationality").value.trim();
+    const residence = document.getElementById("manual-residence").value.trim();
+    const aliases = document.getElementById("manual-aliases").value.trim();
+    const lei = document.getElementById("manual-lei").value.trim();
+    const imo = document.getElementById("manual-imo").value.trim();
+    
+    const payload = {
+        entity_type: type,
+        primary_name: primaryName,
+        first_name: type === "I" ? firstName : null,
+        last_name: type === "I" ? lastName : null,
+        maiden_name: type === "I" ? maidenName : null,
+        aliases: aliases || null,
+        dates_of_birth: dob || null,
+        nationality: nationality || null,
+        residence: residence || null,
+        lei_number: lei || null,
+        imo_number: type === "V" ? imo : null
+    };
+    
+    const btn = document.getElementById("submit-manual-btn");
+    btn.disabled = true;
+    btn.textContent = "Ajout en cours...";
+    
+    try {
+        const response = await fetch("/api/watchlist/entity", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+            const errData = await response.json();
+            const errors = errData.detail && errData.detail.errors ? errData.detail.errors.join(", ") : JSON.stringify(errData);
+            alert(`Erreur de validation Quality Gate : ${errors}`);
+            return;
+        }
+        
+        const data = await response.json();
+        alert(`Entité ajoutée avec succès ! ID : ${data.entity_id}`);
+        
+        // Reset form
+        document.getElementById("manual-entity-form").reset();
+        toggleManualFormFields();
+        
+        // Switch back to Active Watchlist and refresh
+        fetchWatchlist();
+        switchSubTab('watchlist-mgmt', 'watchlist-active');
+        
+    } catch (e) {
+        console.error("Error manual insert:", e);
+        alert("Erreur réseau de communication.");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Ajouter à la Watchlist Active";
+    }
+}
+
 // Collapsible Accordion Utility
 function toggleAccordion(id) {
     const content = document.getElementById(id);

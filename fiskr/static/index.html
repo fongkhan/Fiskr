@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=2.2">
+    <link rel="stylesheet" href="/static/styles.css?v=2.4">
 </head>
 <body>
     <div class="app-container">
@@ -65,6 +65,9 @@
                     </button>
                     <button id="sub-btn-watchlist-snapshots" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-snapshots')">
                         Snapshots & Comparateur
+                    </button>
+                    <button id="sub-btn-watchlist-manual" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-manual')">
+                        Ajout Manuel
                     </button>
                 </div>
 
@@ -246,6 +249,90 @@
                                     </table>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="sub-sec-watchlist-manual" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
+                        <div class="card form-card">
+                            <h2>Ajouter une Entité à la Watchlist (à la volée)</h2>
+                            <p class="section-desc">Saisissez les informations de l'entité. Elle sera soumise au Data Quality Gate et indexée immédiatement dans le moteur de screening.</p>
+                            
+                            <form id="manual-entity-form" onsubmit="handleManualEntity(event)">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="manual-entity-type">Type d'Entité *</label>
+                                        <select id="manual-entity-type" required onchange="toggleManualFormFields()">
+                                            <option value="I">Individu (PP)</option>
+                                            <option value="E">Entité / Personne Morale (PM)</option>
+                                            <option value="V">Navire (Vessel)</option>
+                                            <option value="O">Autre</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="manual-primary-name">Nom Principal / Raison Sociale *</label>
+                                        <input type="text" id="manual-primary-name" required placeholder="Ex: John Doe">
+                                    </div>
+                                </div>
+                                
+                                <!-- individual details (only shown if Individu is selected) -->
+                                <div id="manual-individual-fields">
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="manual-first-name">Prénom</label>
+                                            <input type="text" id="manual-first-name" placeholder="Ex: John">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="manual-last-name">Nom de Famille</label>
+                                            <input type="text" id="manual-last-name" placeholder="Ex: Doe">
+                                        </div>
+                                    </div>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="manual-maiden-name">Nom de Jeune Fille</label>
+                                            <input type="text" id="manual-maiden-name" placeholder="Ex: Smith">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="manual-dob">Dates de naissance (Format YYYY-MM-DD, séparées par virgules)</label>
+                                            <input type="text" id="manual-dob" placeholder="Ex: 1980-05-15, 1980-05-16">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="manual-nationality">Nationalités (ISO2, séparés par virgules)</label>
+                                        <input type="text" id="manual-nationality" placeholder="Ex: FR, US">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="manual-residence">Résidences (ISO2, séparés par virgules)</label>
+                                        <input type="text" id="manual-residence" placeholder="Ex: FR, GB">
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="manual-aliases">Alias / Noms secondaires (séparés par virgules)</label>
+                                        <input type="text" id="manual-aliases" placeholder="Ex: Johnny, J. Doe">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="manual-lei">Legal Entity Identifier (LEI)</label>
+                                        <input type="text" id="manual-lei" placeholder="Ex: 96950058N5D982K5G550">
+                                    </div>
+                                </div>
+                                
+                                <div class="form-row hidden" id="manual-vessel-fields">
+                                    <div class="form-group">
+                                        <label for="manual-imo">Numéro IMO (7 chiffres)</label>
+                                        <input type="text" id="manual-imo" placeholder="Ex: 9941235">
+                                    </div>
+                                </div>
+
+                                <button type="submit" id="submit-manual-btn" class="btn btn-primary" style="margin-top: 1rem;">
+                                    Ajouter à la Watchlist Active
+                                </button>
+                            </form>
                         </div>
                     </div>
                 </div>
@@ -561,6 +648,6 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=2.2"></script>
+    <script src="/static/app.js?v=2.4"></script>
 </body>
 </html>

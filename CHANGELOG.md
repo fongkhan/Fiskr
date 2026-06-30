@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.0] - 2026-07-01
+
+### Added
+- **UI Consolidation into 3 Primary Tabs**:
+  - **Gestion des Watchlists**: Consolidates the Active Watchlist explorer, Snapshot ingestion, and the Delta Engine report.
+  - **Criblage**: Groups the real-time screening sandbox and the mass batch screening simulator.
+  - **Audit**: Houses the compliance audit trail and detail modal inspector.
+- **Manual Entity Insertion On-the-Fly**:
+  - API endpoint `POST /api/watchlist/entity` validating new profiles against the Quality Gate, calculating checksums, and rebuilding the screening cache in-memory instantly.
+  - Full-featured **Ajout Manuel** sub-tab form in the Watchlist Management section to add individuals, corporate entities, or vessels manually.
+- **Performance & UI Rendering Optimization**:
+  - Implemented pagination (100 items per page) on the Active Watchlist explorer.
+  - Refactored DOM rendering to insert rows using `DocumentFragment`, preventing browser layout lockups and reflow lags when exploring large datasets (such as a full OFAC list).
+- **Browser Compatibility & Cache-Busting**:
+  - Addressed caching bugs in Firefox by adding query-string cache-busting version numbers (`?v=2.4`) to static CSS and JS script imports.
+  - Leveraged pre-existing `.hidden` styling in HTML and JS to ensure proper tab state visibility.
+- **Automated Test Coverage**:
+  - Added new integration tests (`test_create_watchlist_entity_success` and `test_create_watchlist_entity_quality_gate_failure`) bringing the automated test suite to 47 passing tests.
+
+---
+
 ## [2.0.0] - 2026-06-16
 
 ### Added
