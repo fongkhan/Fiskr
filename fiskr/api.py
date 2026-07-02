@@ -9,8 +9,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -23,8 +23,10 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot, 
-    WatchlistEntity, ClientEntity, compute_checksum
+    WatchlistEntity, ClientEntity, compute_checksum, User, verify_password
 )
+from fiskr.auth import get_current_user, create_access_token, decode_access_token
+
 
 logger = logging.getLogger("fiskr.api")
 
@@ -236,10 +238,71 @@ class DeltaRequest(BaseModel):
     snapshot_old_id: str
     snapshot_new_id: str
 
-# ------------------ ENDPOINTS ------------------
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# ------------------ AUTHENTICATION ENDPOINTS ------------------
+
+@app.post("/api/auth/login")
+async def login(
+    response: Response,
+    request_data: LoginRequest,
+    db: Session = Depends(get_db)
+):
+    """Authenticates user credentials and sets an HttpOnly access cookie."""
+    if not request_data.username or not request_data.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nom d'utilisateur et mot de passe requis."
+        )
+        
+    user = db.query(User).filter(User.username == request_data.username).first()
+    if not user or not verify_password(request_data.password, user.hashed_password, user.salt):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Identifiants incorrects. Veuillez réessayer."
+        )
+        
+    token = create_access_token({"sub": user.username, "role": user.role})
+    response.set_cookie(
+        key="fiskr_access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400
+    )
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "username": user.username,
+            "full_name": user.full_name,
+            "role": user.role
+        }
+    }
+
+@app.post("/api/auth/logout")
+async def logout(response: Response):
+    """Logs out the user by clearing the authentication token cookie."""
+    response.delete_cookie("fiskr_access_token")
+    return {"message": "Déconnexion réussie."}
+
+@app.get("/api/auth/me")
+async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Returns profile info of the currently logged-in user."""
+    return {"user": current_user}
+
+# ------------------ DATA ENDPOINTS ------------------
 
 @app.post("/api/screen")
-async def screen_client(request: ScreenClientRequest, db: Session = Depends(get_db)):
+async def screen_client(
+    request: ScreenClientRequest, 
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Screens a client profile against active watchlists in-memory cache.
     1. Runs Data Quality Gate evaluation.
@@ -345,12 +408,14 @@ async def screen_client(request: ScreenClientRequest, db: Session = Depends(get_
         "audit_trail_id": audit_id
     }
 
+@app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
-async def ingest_file(
-    file_type: str = Form(...), # WATCHLIST_OFAC, WATCHLIST_EU, CLIENT_BASE
+async def ingest_snapshot(
+    file_type: str = Form(...),
     file: UploadFile = File(...),
     delimiter: str = Form(","),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Ingest XML, CSV or PDF files into the database.
@@ -637,12 +702,19 @@ async def ingest_file(
             os.remove(temp_file_path)
 
 @app.get("/api/snapshots")
-async def get_snapshots(db: Session = Depends(get_db)):
+async def get_snapshots(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Lists loaded snapshots."""
     return db.query(Snapshot).order_by(Snapshot.uploaded_at.desc()).all()
 
 @app.post("/api/snapshots/compare")
-async def compare_snapshots(request: DeltaRequest, db: Session = Depends(get_db)):
+async def compare_snapshots(
+    request: DeltaRequest, 
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Compares two database snapshots of the same file_type.
     Returns ADDED, REMOVED, and MODIFIED records delta report.
@@ -717,7 +789,11 @@ class WatchlistEntityCreate(BaseModel):
     date_of_death: Optional[str] = None
 
 @app.post("/api/watchlist/entity")
-async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = Depends(get_db)):
+async def create_watchlist_entity(
+    payload: WatchlistEntityCreate, 
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Manually adds a new entity to the active watchlist and updates the engine cache."""
     # 1. Ensure the manual snapshot exists
     snap = db.query(Snapshot).filter(Snapshot.snapshot_id == "manual-watchlist").first()
@@ -839,7 +915,7 @@ async def create_watchlist_entity(payload: WatchlistEntityCreate, db: Session = 
     }
 
 @app.get("/api/watchlist")
-async def get_watchlist():
+async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Returns the active loaded in-memory watchlist."""
     return {
         "version": watchlist_version,
@@ -848,15 +924,33 @@ async def get_watchlist():
     }
 
 @app.get("/api/history")
-async def get_audit_history(db: Session = Depends(get_db)):
+async def get_audit_history(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     return db.query(AuditTrail).order_by(AuditTrail.timestamp.desc()).all()
 
 @app.get("/api/config")
-async def get_active_config():
-    return config
+async def get_active_config(current_user: Dict[str, Any] = Depends(get_current_user)):
+    # Create a deep copy to sanitize sensitive database credentials before returning to client
+    sanitized_config = json.loads(json.dumps(config))
+    if "database" in sanitized_config and "url" in sanitized_config["database"]:
+        url = sanitized_config["database"]["url"]
+        if "@" in url and "://" in url:
+            prefix, rest = url.split("://", 1)
+            creds, target = rest.split("@", 1)
+            if ":" in creds:
+                db_user, _ = creds.split(":", 1)
+                sanitized_config["database"]["url"] = f"{prefix}://{db_user}:*****@{target}"
+            else:
+                sanitized_config["database"]["url"] = f"{prefix}://*****@{target}"
+    return sanitized_config
 
 @app.post("/api/snapshots/purge")
-async def purge_failed_snapshots(db: Session = Depends(get_db)):
+async def purge_failed_snapshots(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Purges (deletes) all snapshots and their associated entities (watchlist and clients)
     that are in status 'ERROR' or 'PROCESSING' (aborted/failed).
@@ -901,8 +995,21 @@ async def purge_failed_snapshots(db: Session = Depends(get_db)):
 static_dir = PROJECT_ROOT / "fiskr" / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-@app.get("/", response_class=HTMLResponse)
-async def serve_dashboard():
-    index_path = static_dir / "index.html"
-    with open(index_path, "r", encoding="utf-8") as f:
+@app.get("/login", response_class=HTMLResponse)
+@app.get("/login.html", response_class=HTMLResponse)
+async def serve_login():
+    login_path = static_dir / "login.html"
+    if not login_path.exists():
+        raise HTTPException(status_code=404, detail="Login page not found")
+    with open(login_path, "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read(), status_code=200)
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard(request: Request):
+    token = request.cookies.get("fiskr_access_token")
+    if token and decode_access_token(token):
+        index_path = static_dir / "index.html"
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read(), status_code=200)
+    return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+

@@ -12,8 +12,9 @@ Le système est structuré autour des modules définis dans le Document d'Archit
 
 1. **Module 1 : Data Quality Gate & Nettoyage (`fiskr/quality.py`)**
    * **Niveau 1 (Bloquant/Rejet)** : Vérification des champs vides (`Rule_B01`), types d'entités invalides (`Rule_B02`), structure individu invalide (`Rule_B04` - prénom/nom absents après parsing), et longueur de nom insuffisante (`Rule_B05` - moins de 2 caractères).
-   - **Niveau 2 (Alerte/Dégradé)** : Absence de pays rattaché (`Rule_M01`), absence de DOB pour les individus vivants (`Rule_M02`), caractères non translittérés (`Rule_M03`), contradiction de statut vital (`Rule_M04` - décès avec date mais booléen à faux), formats de date invalides (`Rule_M05`), numéro de passeport suspect (`Rule_M06`), structure LEI invalide (`Rule_M07`), et score d'extraction PDF faible (`Rule_M08`).
-   - **Nettoyage Automatique & Niveau 3** : Normalisation de la casse, aplatissement ASCII (diacritiques/accents Müller -> MULLER), gestion d'incohérence de genre multi-valuée (`Rule_I03` - repli sur `U`), et suppression des suffixes légaux corporatifs (SA, SARL, LLC, GMBH, LTD, SOCIETE) pour les personnes morales via expressions régulières.
+   * **Niveau 2 (Alerte/Dégradé)** : Absence de pays rattaché (`Rule_M01`), absence de DOB pour les individus vivants (`Rule_M02`), caractères non translittérés (`Rule_M03`), contradiction de statut vital (`Rule_M04` - décès avec date mais booléen à faux), formats de date invalides (`Rule_M05`), numéro de passeport suspect (`Rule_M06`), structure LEI invalide (`Rule_M07`), et score d'extraction PDF faible (`Rule_M08`).
+   * **Nettoyage Automatique & Niveau 3** : Normalisation de la casse, aplatissement ASCII (diacritiques/accents Müller -> MULLER), gestion d'incohérence de genre multi-valuée (`Rule_I03` - repli sur `U`), et suppression des suffixes légaux corporatifs (SA, SARL, LLC, GMBH, LTD, SOCIETE) pour les personnes morales via expressions régulières.
+
 
 2. **Module 2 : Custom Blocking Engine (`fiskr/blocking.py`)**
    * Partitionnement par clé configurable (`config.yaml`) pour éviter le produit cartésien.
@@ -95,30 +96,52 @@ Le moteur intègre 25 champs obligatoires de conformité AML/CFT, tous exploitab
 24. **Tail Number** (`aircraft_tail_number` / `transaction_aircraft_registration`) : Immatriculation d'aéronef.
 25. **Legal Entity Identifier** (`lei_number` / `client_lei_number`) : Identifiant d'entité juridique à 20 caractères.
 
+### Configuration de Sécurité & Fichier `.env`
+
+Les secrets de l'application et la chaîne de connexion à la base de données ne sont plus stockés en clair dans `config.yaml`. Ils sont configurables via les variables d'environnement ou le fichier `.env` à la racine du projet (un modèle est fourni dans [`.env.example`](file:///e:/Program%20Files/git/Fiskr/.env.example)) :
+
+```env
+# Connexion PostgreSQL / Base de données
+DB_USER=postgres
+DB_PASSWORD=votre_mot_de_passe_securise
+DB_HOST=localhost
+DB_PORT=5438
+DB_NAME=fiskr
+
+# Clé Secrète JWT & Compte Administrateur Initial
+SECRET_KEY=votre_cle_secrete_jwt_32_caracteres
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=adminpassword
+```
+
 ---
 
 ## 🚀 Installation & Lancement
 
 ### Prérequis
 * Python 3.10 ou supérieur (développé et validé sous Python 3.13.1)
-* Dépendances principales : `fastapi`, `uvicorn`, `sqlalchemy`, `pydantic`, `pyyaml`, `python-multipart`, `pypdf`, `faker`, `pytest`.
+* Dépendances principales : `fastapi`, `uvicorn`, `sqlalchemy`, `pydantic`, `pyyaml`, `python-dotenv`, `pyjwt`, `python-multipart`, `pypdf`, `faker`, `pytest`.
 
 ### Déploiement local
 1. Installez les dépendances :
    ```bash
    pip install -r requirements.txt
    ```
-2. Installez également `python-multipart` et `faker` si besoin :
+2. Créez votre fichier `.env` à partir du modèle :
    ```bash
-   pip install python-multipart faker
+   cp .env.example .env
    ```
 
-### 1. Démarrer le Serveur et le Dashboard
+### 1. Démarrer le Serveur et Accéder à l'Interface Sécurisée
 Lancez le serveur web avec Uvicorn :
 ```bash
 python -m uvicorn fiskr.api:app --host 127.0.0.1 --port 8000 --reload
 ```
 Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
+
+1. Vous serez automatiquement redirigé vers la page de connexion **`/login`**.
+2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).
+3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
 Le dashboard interactif se compose de 3 onglets principaux :
 * **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 25 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
@@ -126,7 +149,8 @@ Le dashboard interactif se compose de 3 onglets principaux :
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 47 tests avec pytest :
+Exécutez la suite complète de 50 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```
+

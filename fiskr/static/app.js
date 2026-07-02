@@ -8,12 +8,48 @@ const wlItemsPerPage = 100;
 let wlFilteredItems = [];
 
 document.addEventListener("DOMContentLoaded", () => {
+    // Check authentication and load user info
+    checkAuthUser();
     // Initial data loading
     fetchWatchlist();
     fetchAuditHistory();
     fetchSnapshots();
     fetchConfig();
 });
+
+// Check current logged-in user profile
+async function checkAuthUser() {
+    try {
+        const response = await fetch("/api/auth/me");
+        if (response.status === 401) {
+            window.location.href = "/login";
+            return;
+        }
+        const data = await response.json();
+        if (data.user) {
+            const userEl = document.getElementById("sidebar-username");
+            if (userEl) {
+                userEl.textContent = data.user.full_name || data.user.username;
+                userEl.title = `Connecté en tant que @${data.user.username} (${data.user.role})`;
+            }
+        }
+    } catch (e) {
+        console.error("Auth check failed:", e);
+    }
+}
+
+// Handle User Logout
+async function handleLogout() {
+    if (!confirm("Voulez-vous vraiment vous déconnecter de Fiskr ?")) return;
+    try {
+        await fetch("/api/auth/logout", { method: "POST" });
+    } catch (e) {
+        console.error("Logout request error:", e);
+    } finally {
+        window.location.href = "/login";
+    }
+}
+
 
 // Tab navigation
 function switchTab(tabId) {

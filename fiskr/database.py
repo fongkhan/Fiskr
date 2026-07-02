@@ -128,6 +128,36 @@ class AuditTrail(Base):
     watchlist_version = Column(String(50), nullable=False)
     watchlist_hash = Column(String(64), nullable=False)
 
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    salt = Column(String(64), nullable=False)
+    full_name = Column(String(255), nullable=True)
+    role = Column(String(50), default="admin")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+import secrets
+import os
+
+def hash_password(password: str, salt_hex: str = None) -> tuple[str, str]:
+    """Hashes a password securely using PBKDF2 HMAC SHA-256 and 100,000 iterations."""
+    salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100_000)
+    return hashed.hex(), salt.hex()
+
+def verify_password(password: str, stored_hash: str, stored_salt: str) -> bool:
+    """Verifies a plain-text password against a stored hash and salt."""
+    try:
+        salt = bytes.fromhex(stored_salt)
+        hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100_000)
+        return secrets.compare_digest(hashed.hex(), stored_hash)
+    except Exception:
+        return False
+
+
 # Setup Database Engine
 db_config = config.get("database", {})
 pg_url = db_config.get("url", "postgresql://postgres:postgres@localhost:5432/fiskr")
@@ -197,6 +227,30 @@ def init_db():
             logger.warning(f"Could not automatically alter column types in PostgreSQL: {alter_err}")
             
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    # Seed default admin user if missing
+    from fiskr.config import ADMIN_USERNAME, ADMIN_PASSWORD
+    db = SessionLocal()
+    try:
+        admin_user = db.query(User).filter(User.username == ADMIN_USERNAME).first()
+        if not admin_user:
+            h_pass, salt_str = hash_password(ADMIN_PASSWORD)
+            new_admin = User(
+                username=ADMIN_USERNAME,
+                hashed_password=h_pass,
+                salt=salt_str,
+                full_name="Administrator",
+                role="admin"
+            )
+            db.add(new_admin)
+            db.commit()
+            logger.info(f"Seeded default admin user: '{ADMIN_USERNAME}'")
+    except Exception as user_err:
+        db.rollback()
+        logger.warning(f"Failed to seed admin user: {user_err}")
+    finally:
+        db.close()
+
 
 def get_db():
     if SessionLocal is None:

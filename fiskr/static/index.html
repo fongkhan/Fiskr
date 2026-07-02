@@ -40,11 +40,22 @@
                 </ul>
             </nav>
             <div class="sidebar-footer">
-                <div class="watchlist-info">
+                <div class="user-badge-container">
+                    <span class="user-avatar">👤</span>
+                    <div class="user-details">
+                        <span id="sidebar-username" class="user-name">Administrateur</span>
+                        <span class="user-role">Conformité AML/CFT</span>
+                    </div>
+                </div>
+                <button class="logout-btn" onclick="handleLogout()" title="Se déconnecter de la session">
+                    <span>🚪 Déconnexion</span>
+                </button>
+                <div class="watchlist-info" style="margin-top: 1rem;">
                     <p>Hash Actif :</p>
                     <span id="sidebar-wl-hash" class="hash-badge">Loading...</span>
                 </div>
             </div>
+
         </aside>
 
         <!-- Main Content Area -->
@@ -817,6 +828,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=2.6"></script>
+    <script src="/static/app.js?v=3.0"></script>
+
 </body>
 </html>

@@ -1,11 +1,17 @@
 import pytest
 from fastapi.testclient import TestClient
 from fiskr.api import app
+from fiskr.auth import get_current_user
+
+
 
 @pytest.fixture
 def client():
+    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "admin", "role": "admin"}
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.clear()
+
 
 def test_get_config(client):
     response = client.get("/api/config")
@@ -213,5 +219,27 @@ def test_create_watchlist_entity_quality_gate_failure(client):
     data = response.json()
     assert "detail" in data
     assert "errors" in data["detail"]
+
+
+def test_login_success():
+    with TestClient(app) as unauth_client:
+        response = unauth_client.post("/api/auth/login", json={"username": "admin", "password": "adminpassword"})
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        assert data["user"]["username"] == "admin"
+
+
+def test_login_invalid_credentials():
+    with TestClient(app) as unauth_client:
+        response = unauth_client.post("/api/auth/login", json={"username": "admin", "password": "wrongpassword"})
+        assert response.status_code == 401
+
+
+def test_unauthenticated_request_rejected():
+    with TestClient(app) as unauth_client:
+        response = unauth_client.get("/api/watchlist")
+        assert response.status_code == 401
+
 
 
