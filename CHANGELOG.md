@@ -9,19 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-07-02
 
-### Security & Authentication Enhancements
-- **User Authentication System & JWT Protection**:
-  - Integrated a complete user authentication subsystem with secure PBKDF2-HMAC-SHA256 password hashing (100,000 iterations) and random 16-byte salts.
-  - Built JWT signed token generator and HttpOnly cookie session management (`fiskr_access_token`).
-  - Implemented `/api/auth/login`, `/api/auth/logout`, and `/api/auth/me` endpoints.
-  - Protected all backend API endpoints (`/api/screen`, `/api/watchlist`, `/api/snapshots`, `/api/audit`, `/api/config`) with the `get_current_user` dependency.
-  - Built a glassmorphic Login UI (`/login`) matching Fiskr's compliance dark theme, featuring automatic session redirect and logout controls.
-  - Automatically seeds an initial default admin user (`admin` / `adminpassword`) upon first database initialization.
-- **Secure Environment Variables & Database Credentials Protection**:
-  - Removed hardcoded plaintext database passwords from `config.yaml` and implemented dynamic environment variable expansion (`${DB_USER}`, `${DB_PASSWORD}`, `${DB_HOST}`, `${DB_PORT}`, `${DB_NAME}`).
-  - Added `.env` file loader via `python-dotenv` and provided `.env.example` template file.
-  - Added `.env` to `.gitignore` to prevent secret leakage in source repositories.
-  - Sanitized `/api/config` API response to automatically mask database passwords (`postgresql://user:*****@host:port/db`) when returning configurations to client browsers.
+- **User Management & Role-Based Access Control (RBAC)**:
+  - Added full User Management module supporting two privilege levels: `admin` (Administrateur) and `user` (Analyste Conformité).
+  - Built self-service endpoints (`PUT /api/users/me/profile`, `PUT /api/users/me/password`) allowing any logged-in user to update their display name, username, or change their password securely.
+  - Built administrative CRUD endpoints (`GET /api/users`, `POST /api/users`, `PUT /api/users/{id}`, `DELETE /api/users/{id}`) protected by the `require_admin` dependency (HTTP 403 Forbidden for standard users).
+  - Added dedicated **Utilisateurs** tab in the sidebar navigation dynamically visible only for Admin accounts.
+  - Added interactive user management table with status pills, edit/delete actions, and modal windows (`#user-modal`, `#profile-modal`).
+
 
 ---
 

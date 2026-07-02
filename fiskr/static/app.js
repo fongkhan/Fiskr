@@ -1,5 +1,6 @@
-// Fiskr - Dashboard Controller v2.0
+// Fiskr - Dashboard Controller v3.1
 
+let currentUser = null;
 let activeWatchlist = [];
 let auditHistory = [];
 let activeSnapshots = [];
@@ -27,10 +28,24 @@ async function checkAuthUser() {
         }
         const data = await response.json();
         if (data.user) {
+            currentUser = data.user;
             const userEl = document.getElementById("sidebar-username");
+            const roleEl = document.getElementById("sidebar-role");
+            const navUsersItem = document.getElementById("nav-item-users");
+
             if (userEl) {
                 userEl.textContent = data.user.full_name || data.user.username;
-                userEl.title = `Connecté en tant que @${data.user.username} (${data.user.role})`;
+                userEl.title = `Connecté en tant que @${data.user.username}`;
+            }
+            if (roleEl) {
+                roleEl.textContent = data.user.role === "admin" ? "Administrateur (ACPR/AMF)" : "Analyste Conformité";
+            }
+            if (navUsersItem) {
+                if (data.user.role === "admin") {
+                    navUsersItem.classList.remove("hidden");
+                } else {
+                    navUsersItem.classList.add("hidden");
+                }
             }
         }
     } catch (e) {
@@ -47,6 +62,102 @@ async function handleLogout() {
         console.error("Logout request error:", e);
     } finally {
         window.location.href = "/login";
+    }
+}
+
+// Fetch Active System Configuration
+async function fetchConfig() {
+    try {
+        const response = await fetch("/api/config");
+        if (response.status === 401) return;
+        const configData = await response.json();
+        console.log("System config active:", configData);
+    } catch (e) {
+        console.error("Failed to fetch config:", e);
+    }
+}
+
+// Fetch Audit Trail History
+async function fetchAuditHistory() {
+    try {
+        const response = await fetch("/api/history");
+        if (response.status === 401) return;
+        auditHistory = await response.json();
+        renderAuditTable(auditHistory);
+    } catch (e) {
+        console.error("Failed to fetch audit history:", e);
+    }
+}
+
+function renderAuditTable(history) {
+    const tbody = document.querySelector("#audit-table tbody");
+    if (!tbody) return;
+    
+    if (!history || history.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucune décision enregistrée dans la piste d\'audit.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = history.map(item => {
+        const statusClass = item.status === "ALERT" ? "alert" : "no_match";
+        const scoreFormatted = item.final_score !== null ? `${item.final_score.toFixed(1)}%` : "N/A";
+        const timestampFormatted = item.timestamp ? new Date(item.timestamp).toLocaleString("fr-FR") : "-";
+
+        return `
+            <tr>
+                <td>${timestampFormatted}</td>
+                <td><strong>${escapeHtml(item.client_name || item.client_id || "N/A")}</strong></td>
+                <td>${escapeHtml(item.matched_entity_name || item.matched_entity_id || "Aucun")}</td>
+                <td><strong style="color: ${item.status === 'ALERT' ? '#f87171' : '#4ade80'};">${scoreFormatted}</strong></td>
+                <td><span class="status-badge ${statusClass}">${item.status}</span></td>
+                <td>
+                    <button class="btn btn-sm" onclick="showAuditModal('${item.id}')" style="background: rgba(255, 255, 255, 0.08);">👁️ Détails</button>
+                </td>
+            </tr>
+        `;
+    }).join("");
+}
+
+function showAuditModal(auditId) {
+    const item = auditHistory.find(a => a.id === auditId || String(a.id) === String(auditId));
+    if (!item) return;
+
+    const modal = document.getElementById("audit-modal");
+    const container = document.getElementById("modal-audit-details");
+    if (!modal || !container) return;
+
+    container.innerHTML = `
+        <div class="details-grid">
+            <div class="details-item"><strong>ID Piste d'Audit</strong><span>${item.id}</span></div>
+            <div class="details-item"><strong>Horodatage</strong><span>${new Date(item.timestamp).toLocaleString("fr-FR")}</span></div>
+            <div class="details-item"><strong>ID Client</strong><span>${escapeHtml(item.client_id || "-")}</span></div>
+            <div class="details-item"><strong>Client / Raison Sociale</strong><span>${escapeHtml(item.client_name || "-")}</span></div>
+            <div class="details-item"><strong>ID Watchlist Matchée</strong><span>${escapeHtml(item.matched_entity_id || "-")}</span></div>
+            <div class="details-item"><strong>Fiche Matchée</strong><span>${escapeHtml(item.matched_entity_name || "-")}</span></div>
+            <div class="details-item"><strong>Score Final</strong><span>${item.final_score}%</span></div>
+            <div class="details-item"><strong>Décision / Statut</strong><span>${item.status}</span></div>
+            <div class="details-item"><strong>Version Watchlist</strong><span>${escapeHtml(item.watchlist_version || "-")}</span></div>
+            <div class="details-item"><strong>Hash Watchlist</strong><span><code class="hash-badge">${escapeHtml(item.watchlist_hash || "-")}</code></span></div>
+        </div>
+        <div class="modal-section" style="margin-top: 1.5rem;">
+            <h4>Arbre de Décision / Explication du Score (JSON)</h4>
+            <pre class="pre-block">${JSON.stringify(item.decision_tree, null, 2)}</pre>
+        </div>
+        <div class="modal-section">
+            <h4>État de Configuration au Moment du Screening</h4>
+            <pre class="pre-block">${JSON.stringify(item.config_state, null, 2)}</pre>
+        </div>
+    `;
+
+    modal.classList.remove("hidden");
+    modal.style.display = "flex";
+}
+
+function closeAuditModal() {
+    const modal = document.getElementById("audit-modal");
+    if (modal) {
+        modal.classList.add("hidden");
+        modal.style.display = "none";
     }
 }
 
@@ -81,8 +192,11 @@ function switchTab(tabId) {
         }
     } else if (tabId === "audit") {
         fetchAuditHistory();
+    } else if (tabId === "users") {
+        fetchUsersList();
     }
 }
+
 
 // Sub-tab navigation
 function switchSubTab(sectionId, subTabId) {
@@ -1285,3 +1399,254 @@ function showWatchlistDetails(item) {
 function closeDetailsModal() {
     document.getElementById("details-modal").classList.add("hidden");
 }
+
+// =========================================================================
+// GESTION DES UTILISATEURS & PROFIL (ADMIN / ME)
+// =========================================================================
+
+let registeredUsers = [];
+
+async function fetchUsersList() {
+    try {
+        const response = await fetch("/api/users");
+        if (response.status === 401 || response.status === 403) {
+            alert("Accès refusé. Droits d'administrateur requis.");
+            return;
+        }
+        registeredUsers = await response.json();
+        renderUsersTable(registeredUsers);
+    } catch (err) {
+        console.error("Failed to fetch users list:", err);
+    }
+}
+
+function renderUsersTable(users) {
+    const tbody = document.getElementById("users-table-body");
+    if (!tbody) return;
+    
+    if (!users || users.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Aucun utilisateur trouvé.</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = users.map(u => {
+        const isAdmin = u.role === "admin";
+        const roleBadge = isAdmin 
+            ? `<span style="background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.4); color: #a5b4fc; padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">ADMINISTRATEUR</span>`
+            : `<span style="background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600;">ANALYSTE USER</span>`;
+
+        const dateFormatted = u.created_at ? new Date(u.created_at).toLocaleDateString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "N/A";
+        const isSelf = currentUser && currentUser.id === u.id;
+
+        return `
+            <tr>
+                <td style="font-weight: bold; color: var(--text-secondary);">#${u.id}</td>
+                <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}</td>
+                <td>${escapeHtml(u.full_name || "—")}</td>
+                <td>${roleBadge}</td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);">${dateFormatted}</td>
+                <td style="text-align: right;">
+                    <button class="btn btn-sm" onclick="openEditUserModal(${u.id})" style="background: rgba(255, 255, 255, 0.08); margin-right: 6px;">✏️ Éditer</button>
+                    ${!isSelf ? `<button class="btn btn-sm" onclick="deleteUserAccount(${u.id}, '${escapeHtml(u.username)}')" style="background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3);">🗑️ Supprimer</button>` : ''}
+                </td>
+            </tr>
+        `;
+    }).join("");
+}
+
+function openCreateUserModal() {
+    document.getElementById("user-modal-title").textContent = "Créer un Utilisateur";
+    document.getElementById("user-edit-id").value = "";
+    document.getElementById("user-input-username").value = "";
+    document.getElementById("user-input-username").disabled = false;
+    document.getElementById("user-input-fullname").value = "";
+    document.getElementById("user-input-role").value = "user";
+    document.getElementById("user-input-password").value = "";
+    document.getElementById("user-input-password").required = true;
+    document.getElementById("user-password-hint").style.display = "none";
+    
+    document.getElementById("user-modal").classList.remove("hidden");
+}
+
+function openEditUserModal(userId) {
+    const user = registeredUsers.find(u => u.id === userId);
+    if (!user) return;
+
+    document.getElementById("user-modal-title").textContent = `Éditer le Compte @${user.username}`;
+    document.getElementById("user-edit-id").value = user.id;
+    document.getElementById("user-input-username").value = user.username;
+    document.getElementById("user-input-username").disabled = false;
+    document.getElementById("user-input-fullname").value = user.full_name || "";
+    document.getElementById("user-input-role").value = user.role;
+    document.getElementById("user-input-password").value = "";
+    document.getElementById("user-input-password").required = false;
+    document.getElementById("user-password-hint").style.display = "block";
+    
+    document.getElementById("user-modal").classList.remove("hidden");
+}
+
+function closeUserModal() {
+    document.getElementById("user-modal").classList.add("hidden");
+}
+
+async function handleSaveUser(event) {
+    event.preventDefault();
+    const editId = document.getElementById("user-edit-id").value;
+    const username = document.getElementById("user-input-username").value.trim();
+    const fullName = document.getElementById("user-input-fullname").value.trim();
+    const role = document.getElementById("user-input-role").value;
+    const password = document.getElementById("user-input-password").value;
+
+    try {
+        let response;
+        if (editId) {
+            // Update existing user
+            response = await fetch(`/api/users/${editId}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username,
+                    full_name: fullName,
+                    role,
+                    password: password || undefined
+                })
+            });
+        } else {
+            // Create new user
+            response = await fetch("/api/users", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username,
+                    full_name: fullName,
+                    role,
+                    password
+                })
+            });
+        }
+
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur: " + (data.detail || "Échec de l'enregistrement de l'utilisateur."));
+            return;
+        }
+
+        closeUserModal();
+        fetchUsersList();
+        if (currentUser && currentUser.id === parseInt(editId, 10)) {
+            checkAuthUser();
+        }
+    } catch (err) {
+        console.error("Save user error:", err);
+        alert("Erreur de communication avec le serveur.");
+    }
+}
+
+async function deleteUserAccount(userId, username) {
+    if (!confirm(`Voulez-vous vraiment supprimer définitivement le compte de @${username} ?`)) return;
+
+    try {
+        const response = await fetch(`/api/users/${userId}`, {
+            method: "DELETE"
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur: " + (data.detail || "Échec de la suppression du compte."));
+            return;
+        }
+
+        fetchUsersList();
+    } catch (err) {
+        console.error("Delete user error:", err);
+        alert("Erreur de connexion lors de la suppression.");
+    }
+}
+
+// -------------------------------------------------------------------------
+// MON PROFIL & SÉCURITÉ (SELF SERVICE)
+// -------------------------------------------------------------------------
+
+function openProfileModal() {
+    if (!currentUser) return;
+
+    document.getElementById("profile-input-username").value = currentUser.username;
+    document.getElementById("profile-input-fullname").value = currentUser.full_name || "";
+    document.getElementById("profile-old-password").value = "";
+    document.getElementById("profile-new-password").value = "";
+
+    document.getElementById("profile-modal").classList.remove("hidden");
+}
+
+function closeProfileModal() {
+    document.getElementById("profile-modal").classList.add("hidden");
+}
+
+async function handleUpdateProfile(event) {
+    event.preventDefault();
+    const username = document.getElementById("profile-input-username").value.trim();
+    const fullName = document.getElementById("profile-input-fullname").value.trim();
+    const oldPassword = document.getElementById("profile-old-password").value;
+    const newPassword = document.getElementById("profile-new-password").value;
+
+    try {
+        // 1. Update Profile Info
+        const profileResp = await fetch("/api/users/me/profile", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, full_name: fullName })
+        });
+        const profileData = await profileResp.json();
+        if (!profileResp.ok) {
+            alert("Erreur Profil: " + (profileData.detail || "Échec de la mise à jour du profil."));
+            return;
+        }
+
+        // 2. Update Password if requested
+        if (oldPassword || newPassword) {
+            if (!oldPassword || !newPassword) {
+                alert("Pour modifier votre mot de passe, veuillez saisir l'ancien ET le nouveau mot de passe.");
+                return;
+            }
+            const passResp = await fetch("/api/users/me/password", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
+            });
+            const passData = await passResp.json();
+            if (!passResp.ok) {
+                alert("Erreur Mot de Passe: " + (passData.detail || "Échec du changement de mot de passe."));
+                return;
+            }
+        }
+
+        alert("Votre profil et vos paramètres de sécurité ont été mis à jour.");
+        closeProfileModal();
+        checkAuthUser();
+    } catch (err) {
+        console.error("Update profile error:", err);
+        alert("Erreur de communication avec le serveur.");
+    }
+}
+
+// Global Modal Backdrop Click Listener
+window.onclick = function(event) {
+    const auditModal = document.getElementById("audit-modal");
+    const detailsModal = document.getElementById("details-modal");
+    const userModal = document.getElementById("user-modal");
+    const profileModal = document.getElementById("profile-modal");
+
+    if (event.target === auditModal) {
+        auditModal.style.display = "none";
+    }
+    if (event.target === detailsModal) {
+        detailsModal.classList.add("hidden");
+    }
+    if (event.target === userModal) {
+        userModal.classList.add("hidden");
+    }
+    if (event.target === profileModal) {
+        profileModal.classList.add("hidden");
+    }
+};
+
+

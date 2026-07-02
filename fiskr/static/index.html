@@ -37,19 +37,26 @@
                             <span class="nav-icon">📜</span> Audit
                         </button>
                     </li>
+                    <li id="nav-item-users" class="hidden">
+                        <button id="nav-btn-users" class="nav-item" onclick="switchTab('users')">
+                            <span class="nav-icon">👥</span> Utilisateurs
+                        </button>
+                    </li>
                 </ul>
             </nav>
             <div class="sidebar-footer">
-                <div class="user-badge-container">
+                <div class="user-badge-container" onclick="openProfileModal()" style="cursor: pointer;" title="Gérer mon profil et mot de passe">
                     <span class="user-avatar">👤</span>
                     <div class="user-details">
                         <span id="sidebar-username" class="user-name">Administrateur</span>
-                        <span class="user-role">Conformité AML/CFT</span>
+                        <span id="sidebar-role" class="user-role">Conformité AML/CFT</span>
                     </div>
+                    <span style="margin-left: auto; font-size: 0.8rem; opacity: 0.6;">⚙️</span>
                 </div>
                 <button class="logout-btn" onclick="handleLogout()" title="Se déconnecter de la session">
                     <span>🚪 Déconnexion</span>
                 </button>
+
                 <div class="watchlist-info" style="margin-top: 1rem;">
                     <p>Hash Actif :</p>
                     <span id="sidebar-wl-hash" class="hash-badge">Loading...</span>
@@ -802,11 +809,46 @@
                     </div>
                 </div>
             </section>
+
+            <!-- SECTION 4: GESTION DES UTILISATEURS (ADMIN) -->
+            <section id="sec-users" class="tab-content">
+
+                <div class="card result-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+                        <div>
+                            <h2>Gestion des Comptes & Droits d'Accès</h2>
+                            <p class="section-desc">Administration des utilisateurs du système, création de comptes et gestion des rôles.</p>
+                        </div>
+                        <button class="btn btn-primary" onclick="openCreateUserModal()">
+                            ➕ Nouveau Compte Utilisateur
+                        </button>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="data-table" id="users-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Nom d'utilisateur</th>
+                                    <th>Nom Complet</th>
+                                    <th>Rôle</th>
+                                    <th>Date de Création</th>
+                                    <th style="text-align: right;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="users-table-body">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
     <!-- Audit Log Modal -->
-    <div id="audit-modal" class="modal">
+    <div id="audit-modal" class="modal hidden">
+
         <div class="modal-content">
             <span class="close-modal" onclick="closeAuditModal()">&times;</span>
             <h2>Détail Linear Audit Trail & Décision</h2>
@@ -827,8 +869,78 @@
         </div>
     </div>
 
+    <!-- Admin User Modal (Create/Edit) -->
+    <div id="user-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 500px;">
+            <span class="close-modal" onclick="closeUserModal()">&times;</span>
+            <h2 id="user-modal-title">Créer un Utilisateur</h2>
+            <form id="user-form" onsubmit="handleSaveUser(event)" style="margin-top: 1rem;">
+                <input type="hidden" id="user-edit-id">
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="user-input-username">Nom d'utilisateur</label>
+                    <input type="text" id="user-input-username" required style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="user-input-fullname">Nom Complet</label>
+                    <input type="text" id="user-input-fullname" placeholder="Ex: Jean Dupont" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="user-input-role">Rôle / Privilèges</label>
+                    <select id="user-input-role" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(13,14,21,0.95); border: 1px solid var(--border-color); color: white;">
+                        <option value="user">Utilisateur (Criblage & Consultation)</option>
+                        <option value="admin">Administrateur (Accès Complet)</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom: 1.5rem;">
+                    <label for="user-input-password">Mot de passe</label>
+                    <input type="password" id="user-input-password" placeholder="••••••••" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <small id="user-password-hint" style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.35rem; display: block;">Laissez vide si vous ne souhaitez pas modifier le mot de passe actuel.</small>
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+                    <button type="button" class="btn" onclick="closeUserModal()" style="background: rgba(255,255,255,0.1);">Annuler</button>
+                    <button type="submit" class="btn btn-primary">Enregistrer</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Self Profile & Password Change Modal -->
+    <div id="profile-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 480px;">
+            <span class="close-modal" onclick="closeProfileModal()">&times;</span>
+            <h2>Mon Profil & Sécurité</h2>
+            <form id="profile-form" onsubmit="handleUpdateProfile(event)" style="margin-top: 1rem;">
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="profile-input-username">Nom d'utilisateur</label>
+                    <input type="text" id="profile-input-username" required style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="profile-input-fullname">Nom Complet</label>
+                    <input type="text" id="profile-input-fullname" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 1.25rem 0;">
+                <h3 style="font-size: 0.95rem; margin-bottom: 0.75rem; color: var(--color-primary);">Changer le Mot de Passe</h3>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="profile-old-password">Mot de passe actuel</label>
+                    <input type="password" id="profile-old-password" placeholder="••••••••" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1.5rem;">
+                    <label for="profile-new-password">Nouveau mot de passe</label>
+                    <input type="password" id="profile-new-password" placeholder="•••••••• (min 6 car.)" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+                    <button type="button" class="btn" onclick="closeProfileModal()" style="background: rgba(255,255,255,0.1);">Fermer</button>
+                    <button type="submit" class="btn btn-primary">Sauvegarder</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Script -->
-    <script src="/static/app.js?v=3.0"></script>
+    <script src="/static/app.js?v=3.3"></script>
+
+
+
 
 </body>
 </html>

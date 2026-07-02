@@ -80,3 +80,18 @@ async def get_current_user(
         "full_name": user.full_name,
         "role": user.role
     }
+
+async def require_admin(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    FastAPI dependency enforcing administrator privileges ('admin' role).
+    Raises HTTP 403 Forbidden if current user is not an admin.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès refusé. Privilèges d'administrateur requis."
+        )
+    return current_user
+

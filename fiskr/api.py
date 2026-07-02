@@ -23,9 +23,10 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot, 
-    WatchlistEntity, ClientEntity, compute_checksum, User, verify_password
+    WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password
 )
-from fiskr.auth import get_current_user, create_access_token, decode_access_token
+from fiskr.auth import get_current_user, require_admin, create_access_token, decode_access_token
+
 
 
 logger = logging.getLogger("fiskr.api")
@@ -290,10 +291,211 @@ async def logout(response: Response):
     response.delete_cookie("fiskr_access_token")
     return {"message": "Déconnexion réussie."}
 
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+class UpdateSelfProfileRequest(BaseModel):
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    full_name: Optional[str] = None
+    role: str = "user"
+
+class UpdateUserAdminRequest(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = None
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+
 @app.get("/api/auth/me")
 async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Returns profile info of the currently logged-in user."""
     return {"user": current_user}
+
+# ------------------ USER MANAGEMENT ENDPOINTS ------------------
+
+@app.put("/api/users/me/password")
+async def change_own_password(
+    payload: ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Allows any logged-in user to change their own password."""
+    if not payload.old_password or not payload.new_password:
+        raise HTTPException(status_code=400, detail="L'ancien et le nouveau mot de passe sont requis.")
+    if len(payload.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit contenir au moins 6 caractères.")
+        
+    user = db.query(User).filter(User.id == current_user["id"]).first()
+    if not user or not verify_password(payload.old_password, user.hashed_password, user.salt):
+        raise HTTPException(status_code=400, detail="L'ancien mot de passe est incorrect.")
+        
+    h_pass, salt_str = hash_password(payload.new_password)
+    user.hashed_password = h_pass
+    user.salt = salt_str
+    db.commit()
+    return {"message": "Mot de passe modifié avec succès."}
+
+@app.put("/api/users/me/profile")
+async def update_own_profile(
+    payload: UpdateSelfProfileRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Allows any logged-in user to update their profile information."""
+    user = db.query(User).filter(User.id == current_user["id"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+        
+    if payload.username and payload.username.strip() != user.username:
+        new_uname = payload.username.strip()
+        existing = db.query(User).filter(User.username == new_uname, User.id != user.id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Ce nom d'utilisateur est déjà utilisé par un autre compte.")
+        user.username = new_uname
+        
+    if payload.full_name is not None:
+        user.full_name = payload.full_name.strip()
+        
+    db.commit()
+    db.refresh(user)
+    return {
+        "message": "Profil mis à jour avec succès.",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "role": user.role
+        }
+    }
+
+@app.get("/api/users")
+async def list_users(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Lists all user accounts (Admin only)."""
+    users = db.query(User).order_by(User.id.asc()).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "full_name": u.full_name,
+            "role": u.role,
+            "created_at": u.created_at.isoformat() if u.created_at else None
+        }
+        for u in users
+    ]
+
+@app.post("/api/users")
+async def create_user(
+    payload: CreateUserRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Creates a new user account (Admin only)."""
+    username = payload.username.strip()
+    if not username or not payload.password:
+        raise HTTPException(status_code=400, detail="Nom d'utilisateur et mot de passe requis.")
+        
+    if payload.role not in ["admin", "user"]:
+        raise HTTPException(status_code=400, detail="Rôle invalide. Choisissez 'admin' ou 'user'.")
+        
+    existing = db.query(User).filter(User.username == username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"L'utilisateur '{username}' existe déjà.")
+        
+    h_pass, salt_str = hash_password(payload.password)
+    new_user = User(
+        username=username,
+        hashed_password=h_pass,
+        salt=salt_str,
+        full_name=(payload.full_name or "").strip(),
+        role=payload.role
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return {
+        "message": f"Utilisateur '{username}' créé avec succès.",
+        "user": {
+            "id": new_user.id,
+            "username": new_user.username,
+            "full_name": new_user.full_name,
+            "role": new_user.role
+        }
+    }
+
+@app.put("/api/users/{user_id}")
+async def update_user_admin(
+    user_id: int,
+    payload: UpdateUserAdminRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Updates any user account details or resets password (Admin only)."""
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+        
+    if payload.username and payload.username.strip() != target_user.username:
+        new_uname = payload.username.strip()
+        existing = db.query(User).filter(User.username == new_uname, User.id != user_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Ce nom d'utilisateur est déjà attribué à un autre compte.")
+        target_user.username = new_uname
+        
+    if payload.full_name is not None:
+        target_user.full_name = payload.full_name.strip()
+        
+    if payload.role:
+        if payload.role not in ["admin", "user"]:
+            raise HTTPException(status_code=400, detail="Rôle invalide. Choisissez 'admin' ou 'user'.")
+        target_user.role = payload.role
+        
+    if payload.password and payload.password.strip():
+        if len(payload.password.strip()) < 6:
+            raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 6 caractères.")
+        h_pass, salt_str = hash_password(payload.password.strip())
+        target_user.hashed_password = h_pass
+        target_user.salt = salt_str
+        
+    db.commit()
+    db.refresh(target_user)
+    
+    return {
+        "message": "Compte utilisateur mis à jour.",
+        "user": {
+            "id": target_user.id,
+            "username": target_user.username,
+            "full_name": target_user.full_name,
+            "role": target_user.role
+        }
+    }
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Deletes a user account (Admin only). Cannot delete active self user."""
+    if user_id == admin_user["id"]:
+        raise HTTPException(status_code=400, detail="Impossible de supprimer votre propre compte actif.")
+        
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+        
+    db.delete(target_user)
+    db.commit()
+    return {"message": f"Utilisateur '{target_user.username}' supprimé avec succès."}
+
 
 # ------------------ DATA ENDPOINTS ------------------
 

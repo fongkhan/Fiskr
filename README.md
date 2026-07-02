@@ -143,14 +143,18 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
-Le dashboard interactif se compose de 3 onglets principaux :
+Le dashboard interactif se compose de 4 onglets principaux :
 * **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 25 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
 * **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**) et le crible de masse (simulateur batch).
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
+* **Utilisateurs** *(Réservé aux Administrateurs)* : Interface de gestion des utilisateurs, création de comptes, réinitialisation de mots de passe et attribution des rôles (`admin` / `user`).
+
+Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 50 tests automatisés avec pytest :
+Exécutez la suite complète de 52 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```
+
 

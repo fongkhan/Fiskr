@@ -242,4 +242,45 @@ def test_unauthenticated_request_rejected():
         assert response.status_code == 401
 
 
+def test_admin_user_management_flow(client):
+    # 1. List users
+    response = client.get("/api/users")
+    assert response.status_code == 200
+    users = response.json()
+    assert len(users) >= 1
+
+    # 2. Create new user
+    create_payload = {
+        "username": "testanalyst",
+        "password": "analystpassword",
+        "full_name": "Test Analyst",
+        "role": "user"
+    }
+    create_resp = client.post("/api/users", json=create_payload)
+    assert create_resp.status_code == 200
+    new_user = create_resp.json()["user"]
+    assert new_user["username"] == "testanalyst"
+    assert new_user["role"] == "user"
+
+    # 3. Update user
+    update_resp = client.put(f"/api/users/{new_user['id']}", json={"full_name": "Updated Analyst", "role": "admin"})
+    assert update_resp.status_code == 200
+    assert update_resp.json()["user"]["full_name"] == "Updated Analyst"
+    assert update_resp.json()["user"]["role"] == "admin"
+
+    # 4. Delete user
+    del_resp = client.delete(f"/api/users/{new_user['id']}")
+    assert del_resp.status_code == 200
+
+
+def test_non_admin_forbidden_user_management():
+    # Create an app dependency override returning a regular 'user' role
+    app.dependency_overrides[get_current_user] = lambda: {"id": 99, "username": "analyst", "role": "user"}
+    with TestClient(app) as user_client:
+        response = user_client.get("/api/users")
+        assert response.status_code == 403
+    app.dependency_overrides.clear()
+
+
+
 
