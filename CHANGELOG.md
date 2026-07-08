@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.0] - 2026-07-08
+
+### Added
+- **Smart Sanctions Ingestion Engine (SSIE) Integration**:
+  - New `fiskr/ssie.py` module porting the SSIE 3-phase pipeline into the watchlist import: Phase 1 **Discovery** (streaming extraction of the feature-type reference dictionary), Phase 2 **Resolution** (dynamic join of listed entities' features against the dictionary), Phase 3 **Restitution** (dynamic pivot of resolved features into Fiskr's 25-field compliance schema).
+  - **Structural agnosticism**: pivot tag selectors (`reference_item_tag`, `entity_root_tag`, `entity_feature_tag`, `mapping_id_attr`, `mapping_link_attr`) are externally configured in the new `ssie` section of `config.yaml` and can be overridden per import, supporting OFAC Advanced, SWIFT SLD, or any ID-cross-referenced XML feed without hard-coding.
+  - Memory-safe event streaming (`ElementTree.iterparse` with depth-tracked `elem.clear()`) keeping RAM consumption constant on multi-GB Full Dataset files.
+  - New `WATCHLIST_SSIE` file type on `POST /api/ingest` accepting optional `ssie_selectors` (JSON) and `ssie_source_format` form fields (HTTP 400 on malformed selectors), feeding the Quality Gate, entity checksums, and the in-memory screening cache like any other watchlist.
+  - Unmapped dynamically-discovered features are preserved in `additional_informations` (pivoted `Label: value` pairs); heuristic entity typing (Individual/Entity/Vessel/Other) and `LAST, First` name splitting for individuals.
+  - **Import de Liste UI**: new "Smart Sanctions — XML générique (Moteur SSIE)" option in the snapshot ingestion form with an adaptive panel exposing the source format and the pivot selectors JSON; dedicated SSIE XML badge in the snapshot history table.
+  - SSIE snapshots are fully integrated with the **Delta Engine** version comparator and the active watchlist cache loader.
+  - 6 new automated tests (`tests/test_ssie.py`) covering reference discovery, the full pipeline with default and custom selectors, partial selector merging, and end-to-end API ingestion — bringing the suite to 58 passing tests.
+
+---
+
 ## [2.2.0] - 2026-07-02
 
 - **User Management & Role-Based Access Control (RBAC)**:

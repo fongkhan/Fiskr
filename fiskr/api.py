@@ -21,6 +21,7 @@ from fiskr.blocking import generate_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.delta import calculate_delta
 from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist
+from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot, 
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password
@@ -30,6 +31,9 @@ from fiskr.auth import get_current_user, require_admin, create_access_token, dec
 
 
 logger = logging.getLogger("fiskr.api")
+
+# Snapshot file types persisted as WatchlistEntity records
+WATCHLIST_FILE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE"]
 
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
@@ -41,18 +45,18 @@ def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
     global watchlist_store, watchlist_index, watchlist_hash
     
-    # 1. Look for latest READY snapshots in DB of types WATCHLIST_OFAC / WATCHLIST_EU
+    # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
     snapshots = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(["WATCHLIST_OFAC", "WATCHLIST_EU"]),
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
         Snapshot.status == "READY"
     ).order_by(Snapshot.uploaded_at.desc()).all()
-    
+
     if not snapshots:
         # Fallback: Ingest watchlist.json if it exists to seed the database
         seed_watchlist_json(db)
         # Re-fetch
         snapshots = db.query(Snapshot).filter(
-            Snapshot.file_type.in_(["WATCHLIST_OFAC", "WATCHLIST_EU"]),
+            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
             Snapshot.status == "READY"
         ).order_by(Snapshot.uploaded_at.desc()).all()
         
@@ -616,13 +620,29 @@ async def ingest_snapshot(
     file_type: str = Form(...),
     file: UploadFile = File(...),
     delimiter: str = Form(","),
+    ssie_selectors: Optional[str] = Form(None),
+    ssie_source_format: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Ingest XML, CSV or PDF files into the database.
     Performs data quality validation and saves snapshot.
+    WATCHLIST_SSIE runs the Smart Sanctions Ingestion Engine pipeline
+    (Discovery -> Resolution -> Restitution) with configurable tag selectors.
     """
+    # Validate SSIE selectors overrides upfront (before any snapshot record is created)
+    ssie_selector_overrides = None
+    if file_type == "WATCHLIST_SSIE" and ssie_selectors:
+        try:
+            ssie_selector_overrides = json.loads(ssie_selectors)
+            if not isinstance(ssie_selector_overrides, dict):
+                raise ValueError("selectors must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid ssie_selectors JSON: {e}"
+            )
     # 1. Create a temporary path
     temp_dir = PROJECT_ROOT / "temp_ingestion"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -673,9 +693,20 @@ async def ingest_snapshot(
         record_count = 0
         
         # 3. Parse contents based on File Type
-        if file_type == "WATCHLIST_OFAC":
-            # XML parsing (iterparse)
-            for item in parse_ofac_advanced_xml(str(temp_file_path)):
+        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE"):
+            if file_type == "WATCHLIST_SSIE":
+                # Smart Sanctions Ingestion Engine: config-driven agnostic XML pipeline
+                ssie_config = config.get("ssie", {}) or {}
+                selectors = merge_ssie_selectors(ssie_config.get("selectors"))
+                if ssie_selector_overrides:
+                    selectors = merge_ssie_selectors({**selectors, **ssie_selector_overrides})
+                source_format = ssie_source_format or ssie_config.get("source_format") or DEFAULT_SOURCE_FORMAT
+                parser_stream = parse_ssie_xml(str(temp_file_path), selectors=selectors, source_format=source_format)
+            else:
+                # OFAC Advanced XML parsing (iterparse)
+                parser_stream = parse_ofac_advanced_xml(str(temp_file_path))
+
+            for item in parser_stream:
                 # Validate quality gate
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
@@ -877,7 +908,7 @@ async def ingest_snapshot(
         db.commit()
         
         # Reload cache to integrate newly loaded watchlists
-        if file_type in ["WATCHLIST_OFAC", "WATCHLIST_EU"]:
+        if file_type in WATCHLIST_FILE_TYPES:
             load_watchlist_cache(db)
             
         return {
@@ -937,7 +968,7 @@ async def compare_snapshots(
         )
         
     # Query all entities for both snapshots
-    if snap_old.file_type in ["WATCHLIST_OFAC", "WATCHLIST_EU"]:
+    if snap_old.file_type in WATCHLIST_FILE_TYPES:
         old_ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == request.snapshot_old_id).all()
         new_ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == request.snapshot_new_id).all()
         key_column = "entity_id"

@@ -57,12 +57,37 @@ Le système est structuré autour des modules définis dans le Document d'Archit
 
 ---
 
-## 🏃 Ingestion & Connecteurs d'Entrée (`fiskr/ingest.py`)
+## 🏃 Ingestion & Connecteurs d'Entrée (`fiskr/ingest.py`, `fiskr/ssie.py`)
 
-L'outil intègre trois types de connecteurs pour charger les listes sources :
+L'outil intègre quatre types de connecteurs pour charger les listes sources :
 * **OFAC XML Connector** : Lecture et traitement séquentiels d'un flux XML via `ElementTree.iterparse` pour éviter la saturation de la mémoire vive.
 * **CSV Connector** : Parseur de fichiers délimités personnalisables (délimiteur et dictionnaire de colonnes).
 * **PDF Connector** : Extracteur textuel via `pypdf` avec analyseur heuritique NER (Named Entity Recognition) pour isoler les navires, identifiants et caractéristiques.
+* **Smart Sanctions Ingestion Engine (SSIE)** : Connecteur XML générique et structurellement agnostique (`fiskr/ssie.py`) pour les flux à références croisées par ID (OFAC Advanced, SWIFT SLD, etc.).
+
+### Le Moteur SSIE (Smart Sanctions Ingestion Engine)
+
+Intégré à l'import de listes du dashboard (type de fichier **Smart Sanctions — XML générique**), le pipeline SSIE s'exécute en 3 phases séquentielles à consommation mémoire constante (`iterparse` + `elem.clear()`) :
+
+1. **Étape de Découverte (Phase 1)** : Extraction en continu des ID et Libellés des types de caractéristiques pour alimenter le dictionnaire de référence.
+2. **Étape de Résolution (Phase 2)** : Lecture des listés (entités) et jointure dynamique de leurs caractéristiques (Features) avec le dictionnaire de référence — sans codage en dur des types.
+3. **Étape de Restitution (Phase 3)** : Pivot dynamique des caractéristiques résolues vers le schéma de criblage Fiskr (25 champs réglementaires) ; les caractéristiques découvertes mais non pivotables sont conservées dans `additional_informations`.
+
+L'**adaptabilité (Change Management)** est assurée par des sélecteurs de balises pivots externes, définis dans la section `ssie` de `config.yaml` et surchargables à chaque import depuis le formulaire (JSON) :
+
+```yaml
+ssie:
+  source_format: "OFAC_ADVANCED_v1"
+  selectors:
+    reference_root_tag: ".//ReferenceValueList"
+    reference_item_tag: "ReferenceValue"
+    entity_root_tag: ".//DistinctParty"
+    entity_feature_tag: "Feature"
+    mapping_id_attr: "ID"
+    mapping_link_attr: "FeatureTypeID"
+```
+
+Ainsi, un changement de nomenclature de l'émetteur (ex: `<DistinctParty>` devenant `<EntitiesList>`) se gère par simple reconfiguration des sélecteurs, sans modification de code. Les snapshots SSIE bénéficient des mêmes services que les autres listes : Data Quality Gate, checksums d'entités, Delta Engine et criblage temps réel.
 
 ---
 
@@ -152,7 +177,7 @@ Le dashboard interactif se compose de 4 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 52 tests automatisés avec pytest :
+Exécutez la suite complète de 58 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```
