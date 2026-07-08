@@ -474,6 +474,7 @@ function renderSnapshotsTable(snaps) {
         let typeBadge = "";
         if (snap.file_type === "WATCHLIST_OFAC") typeBadge = '<span class="status-badge alert">OFAC XML</span>';
         else if (snap.file_type === "WATCHLIST_EU") typeBadge = '<span class="status-badge warning">EU CSV/PDF</span>';
+        else if (snap.file_type === "WATCHLIST_SSIE") typeBadge = '<span class="status-badge alert">SSIE XML</span>';
         else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
         
         tr.innerHTML = `
@@ -517,24 +518,48 @@ function populateCompareSelects(snaps) {
     newSelect.value = newVal;
 }
 
+// Show/hide the SSIE selectors panel depending on the chosen file type
+function toggleSsieOptions() {
+    const fileType = document.getElementById("ingest-file-type").value;
+    const panel = document.getElementById("ssie-options");
+    panel.classList.toggle("hidden", fileType !== "WATCHLIST_SSIE");
+}
+
 // Handle Snapshot Ingestion (Upload file)
 async function handleIngestion(event) {
     event.preventDefault();
-    
+
     const fileType = document.getElementById("ingest-file-type").value;
     const fileInput = document.getElementById("ingest-file");
     const delimiter = document.getElementById("ingest-delimiter").value.trim();
     const btn = document.getElementById("submit-ingest-btn");
-    
+
     if (fileInput.files.length === 0) {
         alert("Veuillez sélectionner un fichier.");
         return;
     }
-    
+
     const formData = new FormData();
     formData.append("file_type", fileType);
     formData.append("file", fileInput.files[0]);
     formData.append("delimiter", delimiter || ",");
+
+    if (fileType === "WATCHLIST_SSIE") {
+        const selectorsRaw = document.getElementById("ssie-selectors").value.trim();
+        if (selectorsRaw) {
+            try {
+                JSON.parse(selectorsRaw);
+            } catch (e) {
+                alert("Les sélecteurs SSIE ne sont pas un JSON valide.");
+                return;
+            }
+            formData.append("ssie_selectors", selectorsRaw);
+        }
+        const sourceFormat = document.getElementById("ssie-source-format").value.trim();
+        if (sourceFormat) {
+            formData.append("ssie_source_format", sourceFormat);
+        }
+    }
     
     btn.disabled = true;
     btn.textContent = "Importation en cours...";

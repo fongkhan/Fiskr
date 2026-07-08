@@ -131,11 +131,30 @@
                             <form id="ingest-form" onsubmit="handleIngestion(event)">
                                 <div class="form-group">
                                     <label for="ingest-file-type">Type de Fichier *</label>
-                                    <select id="ingest-file-type" required>
+                                    <select id="ingest-file-type" required onchange="toggleSsieOptions()">
                                         <option value="WATCHLIST_OFAC">Watchlist OFAC (XML)</option>
                                         <option value="WATCHLIST_EU">Watchlist Européenne / Gels d'avoirs (CSV ou PDF)</option>
+                                        <option value="WATCHLIST_SSIE">Smart Sanctions — XML générique (Moteur SSIE)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
+                                </div>
+                                <div id="ssie-options" class="hidden">
+                                    <p class="section-desc">Pipeline SSIE en 3 phases (Découverte → Résolution → Restitution) : les balises pivots sont configurables pour supporter tout flux XML référencé par ID (OFAC Advanced, SWIFT SLD, etc.).</p>
+                                    <div class="form-group">
+                                        <label for="ssie-source-format">Format Source</label>
+                                        <input type="text" id="ssie-source-format" value="OFAC_ADVANCED_v1" placeholder="OFAC_ADVANCED_v1">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="ssie-selectors">Sélecteurs de Balises Pivots (JSON)</label>
+                                        <textarea id="ssie-selectors" rows="8" spellcheck="false" style="font-family: monospace; font-size: 0.8rem;">{
+  "reference_root_tag": ".//ReferenceValueList",
+  "reference_item_tag": "ReferenceValue",
+  "entity_root_tag": ".//DistinctParty",
+  "entity_feature_tag": "Feature",
+  "mapping_id_attr": "ID",
+  "mapping_link_attr": "FeatureTypeID"
+}</textarea>
+                                    </div>
                                 </div>
                                 <div class="form-row">
                                     <div class="form-group">
@@ -937,7 +956,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=3.3"></script>
+    <script src="/static/app.js?v=3.4"></script>
 
 
 
