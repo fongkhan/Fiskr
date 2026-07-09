@@ -29,6 +29,7 @@ from fiskr.database import (
     SyncReport
 )
 from fiskr.sync import run_ofac_sync, run_eurlex_sync, get_sync_config
+from fiskr.names import ensure_parsed_name
 from fiskr.auth import get_current_user, require_admin, create_access_token, decode_access_token
 
 
@@ -749,6 +750,8 @@ async def ingest_snapshot(
                 parser_stream = parse_ofac_advanced_xml(str(temp_file_path))
 
             for item in parser_stream:
+                # Complete le decoupage prenoms / nom des individus si absent
+                item = ensure_parsed_name(item)
                 # Validate quality gate
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
@@ -805,18 +808,20 @@ async def ingest_snapshot(
             if file.filename.endswith(".pdf"):
                 extracted = parse_pdf_watchlist(str(temp_file_path))
                 for item in extracted:
+                    item = ensure_parsed_name(item)
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
                         continue
                     ent_checksum = compute_checksum(item)
-                    
+
+                    parsed_pdf = item.get("individual_name_parsed") or {"first_name": "", "last_name": "", "maiden_name": ""}
                     alt_addrs_pdf = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
                         entity_id=item.get("entity_id"),
                         entity_type=item.get("entity_type"),
                         primary_name=report["cleansed_name"],
-                        individual_name_parsed={"first_name": "", "last_name": "", "maiden_name": ""},
+                        individual_name_parsed=parsed_pdf,
                         aliases={"high_priority": [], "low_priority": []},
                         dates_of_birth=[],
                         is_deceased=False,
@@ -840,6 +845,9 @@ async def ingest_snapshot(
                     record_count += 1
             else:
                 for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
+                    # Moteur de detection des noms : colonnes explicites ou
+                    # decoupage du nom principal pour les individus (PP/I)
+                    item = ensure_parsed_name(item)
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
                         continue
@@ -866,13 +874,14 @@ async def ingest_snapshot(
                     raw_etype = item.get("entity_type", "E")
                     etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
                     
+                    parsed_csv = item.get("individual_name_parsed") or {"first_name": "", "last_name": "", "maiden_name": ""}
                     alt_addrs_csv = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
                         entity_id=item.get("entity_id") or item.get("id") or str(uuid.uuid4())[:8],
                         entity_type=etype,
                         primary_name=report["cleansed_name"],
-                        individual_name_parsed={"first_name": "", "last_name": "", "maiden_name": ""},
+                        individual_name_parsed=parsed_csv,
                         aliases=aliases,
                         dates_of_birth=dob_arr,
                         is_deceased=False,
@@ -1139,7 +1148,10 @@ async def create_watchlist_entity(
         "additional_informations": payload.additional_informations or None,
         "alternative_addresses": alt_addrs
     }
-    
+
+    # Moteur de detection des noms : decoupe le nom principal si prenom/nom absents
+    ent_dict = ensure_parsed_name(ent_dict)
+
     # 3. Quality Gate check
     report = evaluate_and_clean(ent_dict)
     if not report["is_valid"]:

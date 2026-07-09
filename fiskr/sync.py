@@ -35,7 +35,7 @@ from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
 from fiskr.ingest import parse_ofac_advanced_xml
-from fiskr.ssie import _parse_individual_name
+from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
 
 logger = logging.getLogger("fiskr.sync")
@@ -172,6 +172,9 @@ def persist_pivot_items(db, snap_id: str, items) -> int:
     """Valide (Quality Gate) et persiste des enregistrements pivots. Retourne le nombre insere."""
     count = 0
     for item in items:
+        # Complete le decoupage prenoms / nom de famille des individus quand la
+        # source ne le fournit pas (moteur de detection fiskr.names)
+        item = ensure_parsed_name(item)
         report = evaluate_and_clean(item)
         if not report["is_valid"]:
             continue
@@ -521,6 +524,14 @@ _NON_NAME_PATTERNS = (
 # En-tete de la colonne des motifs dans les annexes (FR/EN)
 _MOTIFS_HEADER = re.compile(r"motif|reasons|grounds", re.IGNORECASE)
 
+# Instructions d'amendement citant du texte de liste ("la mention suivante est
+# remplacee par...") : leurs lignes ne decrivent pas un liste
+_AMENDMENT_CONTEXT = re.compile(
+    r"(est|sont) (remplace|ajoute|supprime|modifie)|texte suivant|mention suivante|"
+    r"rubrique suivante|entree suivante|(is|are) (replaced|added|deleted|amended)",
+    re.IGNORECASE
+)
+
 # Indices d'attributs personnels : ils priment sur les mots-cles d'entites
 # presents dans les motifs (ex: "dirigeant d'une entite")
 _PERSONAL_INDICATORS = re.compile(
@@ -568,9 +579,16 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
     entities: Dict[str, Dict[str, Any]] = {}
 
     def register(name: str, context: str, reasons: Optional[str] = None):
+        # Les lignes d'instructions d'amendement citent du texte de liste
+        # entre guillemets : ce ne sont pas des listes
+        if _AMENDMENT_CONTEXT.search(_strip_accents_lower(context)):
+            return
+        # Retire les guillemets (typographiques inclus) avant analyse
+        name = re.sub(r"[«»“”\"]", " ", name)
         # Ne conserve que le segment latin du nom (les translitterations
         # cyrilliques/arabes accolees dans la meme cellule sont ecartees)
-        latin = re.match(r"^[A-Za-zÀ-ÿ0-9\s'’.,()\-/«»\"]+", name)
+        name = name.strip()
+        latin = re.match(r"^[A-Za-zÀ-ÿ0-9\s'’.,()\-/]+", name)
         if latin:
             name = latin.group(0)
         # Retire les mentions de langue tronquees par la coupe ci-dessus, avec ou
@@ -604,7 +622,7 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
             "entity_id": entity_id,
             "entity_type": etype,
             "primary_name": name,
-            "individual_name_parsed": _parse_individual_name(name) if etype == "I" else {"first_name": "", "last_name": "", "maiden_name": ""},
+            "individual_name_parsed": parse_individual_name(name) if etype == "I" else {"first_name": "", "last_name": "", "maiden_name": ""},
             "aliases": {"high_priority": [], "low_priority": []},
             "dates_of_birth": [dob] if dob else [],
             "date_of_death": None,

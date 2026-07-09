@@ -65,6 +65,14 @@ L'outil intègre quatre types de connecteurs pour charger les listes sources :
 * **PDF Connector** : Extracteur textuel via `pypdf` avec analyseur heuritique NER (Named Entity Recognition) pour isoler les navires, identifiants et caractéristiques.
 * **Smart Sanctions Ingestion Engine (SSIE)** : Connecteur XML générique et structurellement agnostique (`fiskr/ssie.py`) pour les flux à références croisées par ID (OFAC Advanced, SWIFT SLD, etc.).
 
+### Moteur de Détection des Noms d'Individus (`fiskr/names.py`)
+
+Tous les connecteurs partagent un moteur de découpage des noms complets en **prénom(s) / nom de famille**, appliqué lorsque la source ne fournit pas de structure (EUR-Lex, SSIE, CSV, PDF, ajout manuel) — un découpage fourni par la source (parties de noms OFAC XML, colonnes CSV explicites) n'est jamais écrasé. Règles par priorité :
+
+1. **Format « NOM, Prénoms »** : la virgule sépare famille et prénoms.
+2. **Signal typographique** : les listes officielles écrivent le nom de famille en CAPITALES et les prénoms en casse mixte — les prénoms multiples sont ainsi préservés quel que soit l'ordre des blocs (*Aleksandr Vladimirovich GUTSAN* → prénoms « Aleksandr Vladimirovich », famille « GUTSAN »), avec rattachement des particules adjacentes (*bin LADIN*, *Le PEN*, *van der...*).
+3. **Repli** : sans signal de casse, premier mot = prénom, reste = nom.
+
 ### Le Moteur SSIE (Smart Sanctions Ingestion Engine)
 
 Intégré à l'import de listes du dashboard (type de fichier **Smart Sanctions — XML générique**), le pipeline SSIE s'exécute en 3 phases séquentielles à consommation mémoire constante (`iterparse` + `elem.clear()`) :
@@ -206,7 +214,7 @@ Le dashboard interactif se compose de 4 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 71 tests automatisés avec pytest :
+Exécutez la suite complète de 81 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

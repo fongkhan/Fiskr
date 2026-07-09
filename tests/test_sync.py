@@ -190,6 +190,7 @@ def test_scrape_act_cleans_language_mentions_and_headers():
     <tr><td>Motifs de l&rsquo;inscription sur une liste</td><td>-</td><td>-</td></tr>
     <tr><td>Sont gel&eacute;s tous les fonds</td><td>-</td><td>-</td></tr>
     <tr><td>&#1056;&#1091;&#1089;&#1090;&#1072;&#1082;&#1090;</td><td>Entit&eacute; russe</td><td>-</td></tr>
+    <tr><td>&laquo;&nbsp;Corps des gardiens de la r&eacute;volution (IRGC)&nbsp;&raquo;</td><td>La mention suivante est remplac&eacute;e par le texte suivant</td><td>-</td></tr>
     </table></body></html>
     """
     entities = scrape_act_entities(html, "Acte test", "http://act.example")
@@ -198,6 +199,11 @@ def test_scrape_act_cleans_language_mentions_and_headers():
     assert "Anton USOV" in names
     assert all("en russe" not in n.lower() for n in names)
     assert all(not n.lower().startswith(("lieu", "motifs", "sont")) for n in names)
+    # Les instructions d'amendement citant du texte de liste sont ignorees
+    assert all("gardiens" not in n.lower() for n in names)
+    # Le decoupage prenoms multiples / nom de famille est applique
+    fedorov = next(e for e in entities if e["primary_name"] == "Kirill FEDOROV")
+    assert fedorov["individual_name_parsed"] == {"first_name": "Kirill", "last_name": "FEDOROV", "maiden_name": ""}
 
 
 def test_detect_entity_type_word_boundaries():
