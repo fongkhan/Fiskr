@@ -1,10 +1,11 @@
 import os
 import uuid
 import json
+import asyncio
 import hashlib
 import logging
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -23,9 +24,11 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
-    get_db, init_db, log_compliance_decision, AuditTrail, Snapshot, 
-    WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password
+    get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
+    WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
+    SyncReport
 )
+from fiskr.sync import run_ofac_sync, run_eurlex_sync, get_sync_config
 from fiskr.auth import get_current_user, require_admin, create_access_token, decode_access_token
 
 
@@ -157,6 +160,7 @@ def seed_watchlist_json(db: Session):
                 country=item.get("country"),
                 origin=item.get("origin"),
                 designation=item.get("designation"),
+                designation_reasons=item.get("designation_reasons"),
                 additional_informations=item.get("additional_informations") or item.get("additional_info"),
                 alternative_addresses=alt_addrs,
                 imo_number=item.get("imo_number"),
@@ -177,6 +181,38 @@ def seed_watchlist_json(db: Session):
         db.rollback()
         logger.error(f"Failed to seed watchlist from JSON: {e}")
 
+def _run_scheduled_syncs():
+    """Execute les synchronisations de sources activees (appel planifie quotidien)."""
+    sync_cfg = get_sync_config()
+    db = next(get_db())
+    try:
+        if sync_cfg["ofac"]["enabled"]:
+            run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+        if sync_cfg["eurlex"]["enabled"]:
+            run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+    finally:
+        db.close()
+
+async def _daily_sync_scheduler():
+    """Boucle asynchrone declenchant les synchronisations chaque matin (sync.schedule_time)."""
+    while True:
+        schedule_time = get_sync_config()["schedule_time"]
+        try:
+            hour, minute = (int(p) for p in schedule_time.split(":"))
+        except ValueError:
+            logger.error(f"sync.schedule_time invalide ({schedule_time}), format attendu HH:MM. Planificateur arrete.")
+            return
+        now = datetime.now()
+        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        logger.info(f"Prochaine synchronisation automatique des sources: {next_run}")
+        await asyncio.sleep((next_run - now).total_seconds())
+        try:
+            await asyncio.to_thread(_run_scheduled_syncs)
+        except Exception as e:
+            logger.error(f"Echec de la synchronisation planifiee: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -185,8 +221,14 @@ async def lifespan(app: FastAPI):
     # Populate the cache from database
     db = next(get_db())
     load_watchlist_cache(db)
+    # Start the daily source synchronization scheduler if enabled
+    scheduler_task = None
+    if get_sync_config()["auto_enabled"]:
+        scheduler_task = asyncio.create_task(_daily_sync_scheduler())
     yield
     # Shutdown
+    if scheduler_task:
+        scheduler_task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -742,6 +784,7 @@ async def ingest_snapshot(
                     country=item.get("country"),
                     origin=item.get("origin"),
                     designation=item.get("designation"),
+                    designation_reasons=item.get("designation_reasons"),
                     additional_informations=item.get("additional_informations") or item.get("additional_info"),
                     alternative_addresses=alt_addrs_ofac,
                     imo_number=item.get("imo_number"),
@@ -787,6 +830,7 @@ async def ingest_snapshot(
                         country=item.get("country"),
                         origin=item.get("origin"),
                         designation=item.get("designation"),
+                        designation_reasons=item.get("designation_reasons"),
                         additional_informations=item.get("additional_informations") or item.get("additional_info"),
                         alternative_addresses=alt_addrs_pdf,
                         imo_number=item.get("imo_number"),
@@ -842,6 +886,7 @@ async def ingest_snapshot(
                         country=item.get("country"),
                         origin=item.get("origin"),
                         designation=item.get("designation"),
+                        designation_reasons=item.get("designation_reasons"),
                         additional_informations=item.get("additional_informations") or item.get("additional_info"),
                         alternative_addresses=alt_addrs_csv,
                         lei_number=item.get("lei_number"),
@@ -1017,6 +1062,7 @@ class WatchlistEntityCreate(BaseModel):
     country: Optional[str] = None
     origin: Optional[str] = None
     designation: Optional[str] = None
+    designation_reasons: Optional[str] = None
     additional_informations: Optional[str] = None
     alternative_addresses: Optional[str] = None
     date_of_death: Optional[str] = None
@@ -1089,6 +1135,7 @@ async def create_watchlist_entity(
         "country": payload.country or None,
         "origin": payload.origin or None,
         "designation": payload.designation or None,
+        "designation_reasons": payload.designation_reasons or None,
         "additional_informations": payload.additional_informations or None,
         "alternative_addresses": alt_addrs
     }
@@ -1128,6 +1175,7 @@ async def create_watchlist_entity(
         country=ent_dict["country"],
         origin=ent_dict["origin"],
         designation=ent_dict["designation"],
+        designation_reasons=ent_dict["designation_reasons"],
         additional_informations=ent_dict["additional_informations"],
         alternative_addresses=ent_dict["alternative_addresses"],
         entity_checksum=ent_checksum
@@ -1223,6 +1271,69 @@ async def purge_failed_snapshots(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Purge failed: {str(e)}"
         )
+
+# ------------------ SOURCE SYNCHRONIZATION (OFAC download / EUR-Lex scraping) ------------------
+
+class SyncRunRequest(BaseModel):
+    source: str                      # OFAC | EURLEX
+    date: Optional[str] = None       # YYYY-MM-DD (EURLEX uniquement, defaut: aujourd'hui)
+
+def _serialize_sync_report(report: SyncReport) -> Dict[str, Any]:
+    return {c.name: getattr(report, c.name) for c in report.__table__.columns}
+
+@app.post("/api/sync/run")
+def run_source_sync(
+    request: SyncRunRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Declenche manuellement la synchronisation d'une source officielle :
+    telechargement du fichier OFAC ou scraping du Journal Officiel EUR-Lex,
+    delta par rapport a la liste active, application et rapport de suivi.
+    """
+    source = (request.source or "").strip().upper()
+    reload_cache = lambda: load_watchlist_cache(db)
+
+    if source == "OFAC":
+        report = run_ofac_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "EURLEX":
+        for_date = None
+        if request.date:
+            try:
+                for_date = datetime.strptime(request.date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Format de date invalide (attendu: YYYY-MM-DD)."
+                )
+        report = run_eurlex_sync(db, for_date=for_date, trigger="MANUAL", reload_cache=reload_cache)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Source inconnue (valeurs possibles: OFAC, EURLEX)."
+        )
+
+    return _serialize_sync_report(report)
+
+@app.get("/api/sync/reports")
+async def get_sync_reports(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Historique des rapports de synchronisation des sources (suivi in-app)."""
+    reports = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(limit).all()
+    return [_serialize_sync_report(r) for r in reports]
+
+@app.get("/api/sync/config")
+async def get_sync_configuration(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Configuration active de la synchronisation automatique des sources."""
+    cfg = get_sync_config()
+    cfg["email_configured"] = bool(os.getenv("SMTP_HOST") and os.getenv("SYNC_EMAIL_TO"))
+    return cfg
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

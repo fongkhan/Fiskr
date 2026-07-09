@@ -244,6 +244,7 @@ def pivot_to_watchlist_schema(
     state = None
     country_field = None
     designation = None
+    designation_reasons: List[str] = []
     maiden_name = ""
     entity_type_hint = None
 
@@ -305,6 +306,8 @@ def pivot_to_watchlist_schema(
             state = val
         elif ll == "country":
             country_field = val
+        elif "motif" in ll or "reason" in ll or "grounds" in ll:
+            designation_reasons.append(val)
         elif "title" in ll or "designation" in ll or "function" in ll or "position" in ll:
             designation = val
         elif "vital status" in ll and "deceased" in val.lower():
@@ -352,6 +355,7 @@ def pivot_to_watchlist_schema(
         "country": country_field,
         "origin": source_format,
         "designation": designation,
+        "designation_reasons": "; ".join(designation_reasons) if designation_reasons else None,
         "additional_informations": "; ".join(unmapped) if unmapped else None,
         "imo_number": imo_number,
         "aircraft_tail_number": aircraft_tail,

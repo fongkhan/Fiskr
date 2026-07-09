@@ -87,6 +87,9 @@
                     <button id="sub-btn-watchlist-manual" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-manual')">
                         Ajout Manuel
                     </button>
+                    <button id="sub-btn-watchlist-sync" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-sync')">
+                        Sources Automatiques
+                    </button>
                 </div>
 
                 <div id="sub-sec-watchlist-active" class="sub-tab-content active">
@@ -454,6 +457,10 @@
                                         </div>
                                         <div class="form-row">
                                             <div class="form-group" style="grid-column: span 2;">
+                                                <label for="manual-designation-reasons">Motifs de la Désignation</label>
+                                                <textarea id="manual-designation-reasons" placeholder="Ex: Responsable de cyberattaques contre des infrastructures critiques..."></textarea>
+                                            </div>
+                                            <div class="form-group">
                                                 <label for="manual-additional-informations">Informations Additionnelles</label>
                                                 <textarea id="manual-additional-informations" placeholder="Ex: Métadonnées de conformité..."></textarea>
                                             </div>
@@ -465,6 +472,64 @@
                                     Ajouter à la Watchlist Active
                                 </button>
                             </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="sub-sec-watchlist-sync" class="sub-tab-content hidden">
+                    <div class="grid-layout">
+                        <!-- Source Collectors Card -->
+                        <div class="card form-card">
+                            <h2>Collecteurs de Sources Officielles</h2>
+                            <p class="section-desc">Récupérez les listes directement auprès des émetteurs : le delta (ADDED / MODIFIED / REMOVED) est calculé puis appliqué au référentiel actif, et un rapport de suivi est émis (in-app + email si SMTP configuré).</p>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇺🇸 OFAC — SDN Advanced (XML)</h3>
+                                <p class="section-desc">Téléchargement du fichier officiel <code>SDN_ADVANCED.XML</code>, ingestion, delta et remplacement de la liste OFAC active.</p>
+                                <button id="sync-ofac-btn" class="btn btn-primary" onclick="handleSourceSync('OFAC')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
+                                <h3 style="margin-top: 0;">🇪🇺 EUR-Lex — Journal Officiel du jour</h3>
+                                <p class="section-desc">Recherche des actes mentionnant « mesures restrictives » au Journal Officiel, scraping des listés (Individus, Entités, Navires, Aéronefs) et fusion incrémentale avec la liste EU active.</p>
+                                <div class="form-group" style="max-width: 220px;">
+                                    <label for="sync-eurlex-date">Date du Journal Officiel</label>
+                                    <input type="date" id="sync-eurlex-date">
+                                </div>
+                                <button id="sync-eurlex-btn" class="btn btn-primary" onclick="handleSourceSync('EURLEX')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <p id="sync-schedule-info" class="section-desc" style="margin-top: 1rem;"></p>
+                        </div>
+
+                        <!-- Sync Reports History Card -->
+                        <div class="card result-card">
+                            <h2>Rapports de Synchronisation</h2>
+                            <p class="section-desc">Suivi des exécutions manuelles et planifiées, avec le résumé du delta appliqué.</p>
+                            <div class="table-container max-height-table">
+                                <table id="sync-reports-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Source</th>
+                                            <th>Statut</th>
+                                            <th>Delta (+ / ~ / −)</th>
+                                            <th>Email</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- Populated dynamically -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div id="sync-report-detail" class="hidden" style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                                <h3>Détail du rapport</h3>
+                                <pre id="sync-report-detail-content" style="max-height: 320px; overflow: auto; font-size: 0.75rem; white-space: pre-wrap;"></pre>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -956,7 +1021,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=3.4"></script>
+    <script src="/static/app.js?v=3.6"></script>
 
 
 
