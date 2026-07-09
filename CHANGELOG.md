@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.1] - 2026-07-09
+
+### Fixed
+- **EUR-Lex sync crash on long act titles (`StringDataRightTruncation`)**: EUR-Lex act titles routinely exceed the 255-character `origin` column (e.g. the OJ of 2026-06-08 Iran decision). `build_watchlist_entity` now clamps every string value to its column's `VARCHAR` length before insertion, so scraped data of any length can no longer fail the snapshot INSERT. Entity checksums are computed on the pivot record before clamping, keeping cross-day deltas stable.
+- **Annex scraping noise filters hardened** (observed on the June 2026 Official Journals):
+  - Truncated language mentions are stripped from names, with or without parentheses ("Anton USOV en russe : Антон УСОВ" → "Anton USOV").
+  - Column headers ("Noms (translittération en caractères latins)", "Lieu d'enregistrement", "Motifs de l'inscription sur une liste", plural "Noms"/"Names") and legal boilerplate ("Sont gelés tous les fonds…", "Limited Liability Company") are no longer registered as listed parties.
+  - Records whose name does not survive cleansing (e.g. Cyrillic-only cells) are skipped instead of persisting empty-name entities.
+- 3 new regression tests (`tests/test_sync.py`) — 71 passing total.
+
+---
+
 ## [2.4.0] - 2026-07-09
 
 ### Added
