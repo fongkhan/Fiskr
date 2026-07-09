@@ -20,6 +20,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 from fiskr.ingest import categorize_aliases
+from fiskr.names import parse_individual_name
 
 logger = logging.getLogger("fiskr.ssie")
 
@@ -195,21 +196,6 @@ def _normalize_date(value: str) -> str:
     return value
 
 
-def _parse_individual_name(primary_name: str) -> Dict[str, str]:
-    """
-    Decoupe heuristique du nom principal d'un individu :
-    'NOM, Prenom' -> (Prenom, NOM), sinon premier mot = prenom, reste = nom.
-    """
-    name = primary_name.strip()
-    if "," in name:
-        last, _, first = name.partition(",")
-        return {"first_name": first.strip(), "last_name": last.strip(), "maiden_name": ""}
-    tokens = name.split()
-    if len(tokens) >= 2:
-        return {"first_name": tokens[0], "last_name": " ".join(tokens[1:]), "maiden_name": ""}
-    return {"first_name": "", "last_name": name, "maiden_name": ""}
-
-
 def pivot_to_watchlist_schema(
     record: Dict[str, Any],
     references: Dict[str, str],
@@ -326,7 +312,7 @@ def pivot_to_watchlist_schema(
 
     primary_name = record.get("nom_principal", "")
     if entity_type == "I":
-        parsed_name = _parse_individual_name(primary_name)
+        parsed_name = parse_individual_name(primary_name)
         parsed_name["maiden_name"] = maiden_name
     else:
         parsed_name = {"first_name": "", "last_name": "", "maiden_name": maiden_name}

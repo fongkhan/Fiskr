@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.0] - 2026-07-09
+
+### Added
+- **Individual Name Detection Engine (`fiskr/names.py`)** — shared by every listed-party import:
+  - Official lists (EUR-Lex, UN) write the FAMILY NAME in capitals and given names in mixed case; the engine uses this typographic signal to split names correctly whatever the block order ("Aleksandr Vladimirovich GUTSAN" → given names "Aleksandr Vladimirovich" / family "GUTSAN", previously "Aleksandr" / "Vladimirovich GUTSAN").
+  - Handles "FAMILY, Given Names" comma format, family particles attached to the capitalized block (bin LADIN, Le PEN, van der…), initials, single-token names, and falls back to first-token-as-given-name when no case signal exists.
+  - `ensure_parsed_name` plugs the engine into all import paths — EUR-Lex scraping, SSIE pivot, OFAC/SSIE/CSV/PDF `/api/ingest` branches, source synchronization, and the manual addition form — without ever overwriting a split provided by the source (OFAC XML name parts) or explicit CSV first/last columns.
+  - 10 dedicated tests (`tests/test_names.py`).
+- **Amendment-instruction filter in the EUR-Lex scraper**: annex rows that quote list-entry text inside amendment instructions ("la mention suivante est remplacée par…") are no longer registered as listed parties, and typographic quotes are stripped from names.
+- 81 automated tests passing.
+
+---
+
 ## [2.4.1] - 2026-07-09
 
 ### Fixed
