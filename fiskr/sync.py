@@ -109,13 +109,28 @@ def http_get_text(url: str, timeout: float = 60.0, retries: int = 2) -> str:
 
 # ------------------ PERSISTANCE DES SNAPSHOTS ------------------
 
+def _clamp_to_column_lengths(values: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Tronque les valeurs textuelles aux longueurs maximales des colonnes
+    (VARCHAR(n)) : les donnees scrapees (titres d'actes EUR-Lex, adresses...)
+    peuvent depasser les capacites du schema et faire echouer l'INSERT
+    (StringDataRightTruncation sous PostgreSQL).
+    """
+    for column in WatchlistEntity.__table__.columns:
+        max_length = getattr(column.type, "length", None)
+        value = values.get(column.name)
+        if max_length and isinstance(value, str) and len(value) > max_length:
+            values[column.name] = value[:max_length]
+    return values
+
+
 def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str, Any]) -> WatchlistEntity:
     """Construit une ligne WatchlistEntity depuis un enregistrement au schema pivot."""
     parsed_name = item.get("individual_name_parsed") or {}
     alt_addrs = item.get("alternative_addresses")
     if isinstance(alt_addrs, str):
         alt_addrs = [a.strip() for a in alt_addrs.split(";")]
-    return WatchlistEntity(
+    return WatchlistEntity(**_clamp_to_column_lengths(dict(
         snapshot_id=snap_id,
         entity_id=item.get("entity_id"),
         entity_type=item.get("entity_type"),
@@ -150,7 +165,7 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
         national_id_documents=item.get("national_id_documents"),
         other_id_documents=item.get("other_id_documents"),
         entity_checksum=item.get("entity_checksum") or compute_checksum(item)
-    )
+    )))
 
 
 def persist_pivot_items(db, snap_id: str, items) -> int:
@@ -159,6 +174,10 @@ def persist_pivot_items(db, snap_id: str, items) -> int:
     for item in items:
         report = evaluate_and_clean(item)
         if not report["is_valid"]:
+            continue
+        # Un nom qui ne survit pas au nettoyage (ex: uniquement des caracteres
+        # speciaux ou cyrilliques) ne peut pas etre crible : fiche ecartee
+        if len([c for c in report["cleansed_name"] if c.isalnum()]) < 2:
             continue
         db.add(build_watchlist_entity(snap_id, item, report))
         count += 1
@@ -496,7 +515,7 @@ def _extract_dob(text: str) -> Optional[str]:
 _NON_NAME_PATTERNS = (
     "journal officiel", "union europeenne", "il y a ", "vu le ", "vu la ", "considerant",
     "le conseil ", "la commission ", "conformement ", "annexe ", "serie l",
-    "informations d'identification",
+    "informations d'identification", "translitteration", "caracteres latins",
 )
 
 # En-tete de la colonne des motifs dans les annexes (FR/EN)
@@ -521,9 +540,12 @@ def _looks_like_name(value: str) -> bool:
     if re.fullmatch(r"[\d\s./-]+", v):
         return False
     normalized = _strip_accents_lower(v)
-    if normalized in ("nom", "name", "designation", "informations d'identification",
-                      "motifs", "motifs de la designation", "motifs de l'inscription",
-                      "date de l'inscription", "date d'inscription", "type", "identite", "identity"):
+    if normalized in ("nom", "noms", "name", "names", "nom complet", "designation",
+                      "type", "identite", "identity", "limited liability company"):
+        return False
+    # Libelles de colonnes et formules juridiques des annexes
+    if normalized.startswith(("motifs", "date d", "date de", "lieu d", "informations",
+                              "sont ", "tous les", "les fonds", "en russe", "en anglais")):
         return False
     # Les phrases longues sont du texte editorial, pas des identites
     if len(v.split()) > 8:
@@ -548,10 +570,18 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
     def register(name: str, context: str, reasons: Optional[str] = None):
         # Ne conserve que le segment latin du nom (les translitterations
         # cyrilliques/arabes accolees dans la meme cellule sont ecartees)
-        latin = re.match(r"^[A-Za-zÀ-ÿ0-9\s'’.,()\-/]+", name)
+        latin = re.match(r"^[A-Za-zÀ-ÿ0-9\s'’.,()\-/«»\"]+", name)
         if latin:
             name = latin.group(0)
-        name = re.sub(r"\s+", " ", name).strip().rstrip(".;,(")
+        # Retire les mentions de langue tronquees par la coupe ci-dessus, avec ou
+        # sans parenthese (ex: "Anton USOV en russe : ..." -> "Anton USOV")
+        name = re.sub(
+            r"\s*[\(«\"]?\s*\b(en|in)\s+(russe|anglais|ukrainien|bielorusse|arabe|persan|farsi|"
+            r"russian|english|ukrainian|belarusian|arabic|persian)\b.*$",
+            "", name, flags=re.IGNORECASE
+        )
+        name = re.sub(r"\s*\(\s*(en|in)\s+[^)]*\)?\s*$", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\s+", " ", name).strip().strip("«»\"").rstrip(".;,(")
         if not _looks_like_name(name):
             return
         etype = _detect_entity_type(context)

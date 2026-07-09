@@ -136,6 +136,70 @@ def test_scrape_act_entities_types_and_identifiers():
     assert individual["entity_id"] == _stable_eu_entity_id("Igor PETROV")
 
 
+def test_scrape_act_excludes_transliteration_header():
+    # L'en-tete "Noms (translitteration en caracteres latins)" des annexes ne doit
+    # pas devenir une fiche (bug observe sur le JO du 08/06/2026)
+    html = """
+    <html><body><table>
+    <tr><td>Noms (translitt&eacute;ration en caract&egrave;res latins)</td><td>Noms</td><td>Informations d'identification</td></tr>
+    <tr><td>Mohammad AKBARZADEH</td><td>&#1605;&#1581;&#1605;&#1583;</td><td>N&eacute; le 01.01.1980</td></tr>
+    </table></body></html>
+    """
+    entities = scrape_act_entities(html, "Acte test", "http://act.example")
+    names = {e["primary_name"] for e in entities}
+    assert names == {"Mohammad AKBARZADEH"}
+
+
+def test_eurlex_sync_long_act_title_clamped_to_column(db):
+    # Les titres d'actes EUR-Lex depassent 255 caracteres : la colonne origin
+    # (VARCHAR(255)) doit etre tronquee au lieu de faire echouer l'INSERT
+    long_title = ("Décision (PESC) 2026/1226 du Conseil du 8 juin 2026 modifiant la décision (PESC) 2023/1532 "
+                  "concernant des mesures restrictives en raison du soutien militaire apporté par l'Iran à des "
+                  "groupes armés et entités au Moyen-Orient et dans la région de la mer Rouge, ainsi que des "
+                  "actions imputables à l'Iran qui compromettent la liberté de navigation au Moyen-Orient "
+                  "et dans la région de la mer Rouge")
+    assert len(long_title) > 255
+    daily_html = f'<html><body><a href="./legal-content/FR/TXT/?uri=OJ:L_202601226">{long_title}</a></body></html>'
+    act_html = """
+    <html><body><table>
+    <tr><th>Nom</th><th>Informations d'identification</th><th>Motifs</th></tr>
+    <tr><td>Mohammad AKBARZADEH</td><td>N&eacute; le 01.01.1980</td><td>Soutien logistique</td></tr>
+    </table></body></html>
+    """
+    report = run_eurlex_sync(db, for_date=date(2026, 6, 8), http_get=make_http_get(daily_html, act_html))
+
+    assert report.status == "SUCCESS"
+    assert report.added_count == 1
+    ent = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == report.snapshot_id).first()
+    assert ent.primary_name == "MOHAMMAD AKBARZADEH"
+    assert ent.designation_reasons == "Soutien logistique"
+    assert len(ent.origin) <= 255
+    assert ent.origin.startswith("EUR-Lex - Décision (PESC) 2026/1226")
+
+
+def test_scrape_act_cleans_language_mentions_and_headers():
+    # Bugs observes sur les JO de juin 2026 : suffixes "(en russe : ...)" tronques,
+    # en-tetes "Lieu d'enregistrement" / "Motifs de l'inscription sur une liste",
+    # formules juridiques ("Sont geles tous les fonds...") et noms non latins
+    html = """
+    <html><body><table>
+    <tr><th>Nom</th><th>Informations d'identification</th><th>Motifs</th></tr>
+    <tr><td>Kirill FEDOROV (en russe : &#1050;&#1080;&#1088;&#1080;&#1083;&#1083;)</td><td>N&eacute; le 27.10.1998</td><td>Propagandiste</td></tr>
+    <tr><td>Anton USOV en russe : &#1040;&#1085;&#1090;&#1086;&#1085; &#1059;&#1057;&#1054;&#1042;</td><td>N&eacute; le 03.04.1981</td><td>Cadre</td></tr>
+    <tr><td>Lieu d&rsquo;enregistrement</td><td>Moscou</td><td>-</td></tr>
+    <tr><td>Motifs de l&rsquo;inscription sur une liste</td><td>-</td><td>-</td></tr>
+    <tr><td>Sont gel&eacute;s tous les fonds</td><td>-</td><td>-</td></tr>
+    <tr><td>&#1056;&#1091;&#1089;&#1090;&#1072;&#1082;&#1090;</td><td>Entit&eacute; russe</td><td>-</td></tr>
+    </table></body></html>
+    """
+    entities = scrape_act_entities(html, "Acte test", "http://act.example")
+    names = {e["primary_name"] for e in entities}
+    assert "Kirill FEDOROV" in names
+    assert "Anton USOV" in names
+    assert all("en russe" not in n.lower() for n in names)
+    assert all(not n.lower().startswith(("lieu", "motifs", "sont")) for n in names)
+
+
 def test_detect_entity_type_word_boundaries():
     # "SHIPPING" ne doit pas etre confondu avec le mot "ship"
     assert _detect_entity_type("ZARYA SHIPPING LLC societe de transport") == "E"
