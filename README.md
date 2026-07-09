@@ -104,7 +104,8 @@ Ainsi, un changement de nomenclature de l'émetteur (ex: `<DistinctParty>` deven
 L'onglet **Gestion des Watchlists → Sources Automatiques** permet de récupérer les listes directement auprès des émetteurs officiels, manuellement ou automatiquement chaque matin :
 
 * **🇺🇸 OFAC — SDN Advanced** : Téléchargement du fichier officiel [`SDN_ADVANCED.XML`](https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML), ingestion en snapshot, **delta** (ADDED / MODIFIED / REMOVED) par rapport à la liste OFAC active, puis application : le nouveau snapshot remplace l'ancien (statut `SUPERSEDED`) dans le cache de criblage. Si le hash du fichier est inchangé, le rapport indique `NO_CHANGE` sans retraitement.
-* **🇪🇺 EUR-Lex — Journal Officiel du jour** : Lecture de la page du Journal Officiel (série L) de la date choisie, détection des actes dont le titre mentionne **« mesures restrictives »**, puis scraping heuristique des annexes (tableaux et listes numérotées) pour en extraire les listés — Individus (avec date de naissance), Entités, Navires (IMO) et Aéronefs. Les fiches extraites sont **fusionnées de manière incrémentale** avec la liste EU active (le JO amende la liste, il ne la remplace pas) et le delta est calculé. En l'absence d'acte pertinent, le rapport indique `NO_PUBLICATION`.
+* **🇪🇺 EUR-Lex — Journal Officiel du jour (édition anglaise)** : Lecture de la page du Journal Officiel (série L, **version anglaise, qui fait référence pour la réglementation européenne**) de la date choisie, détection des actes dont le titre mentionne **« restrictive measures »**, puis scraping heuristique des annexes (tableaux et listes numérotées) pour en extraire les listés — Individus (avec date de naissance), Entités, Navires (IMO) et Aéronefs. Le type du listé est déduit de toute la ligne d'annexe, **motifs de la désignation compris** (les indices personnels — pronoms, fonctions, données de naissance — priment sur les mots-clés d'entités cités dans les motifs). Les fiches extraites sont **fusionnées de manière incrémentale** avec la liste EU active (le JO amende la liste, il ne la remplace pas) et le delta est calculé. En l'absence d'acte pertinent, le rapport indique `NO_PUBLICATION`.
+* **Archivage probant** : le **PDF officiel** de chaque acte retenu — la version qui **fait foi lors des audits** — est téléchargé dans `eurlex_archives/` avec son empreinte SHA-256 d'intégrité, référencé dans le rapport de synchronisation et téléchargeable depuis l'application (`GET /api/sync/evidence/{fichier}`).
 
 Dans les deux cas, les **ajouts manuels à la volée sont préservés** (le snapshot `manual-watchlist` n'est jamais remplacé), et chaque exécution génère un **rapport de suivi** consultable dans l'application (table `sync_reports`, avec le détail du delta) et envoyé **par email** si un serveur SMTP est configuré dans `.env` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SYNC_EMAIL_TO`).
 
@@ -119,8 +120,8 @@ sync:
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
   eurlex:
     enabled: true
-    daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=fr"
-    keyword: "mesures restrictives"
+    daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
+    keyword: "restrictive measures"
 ```
 
 Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé aux administrateurs), `GET /api/sync/reports` (historique des rapports) et `GET /api/sync/config` (configuration active).

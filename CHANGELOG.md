@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.6.0] - 2026-07-10
+
+### Changed
+- **EUR-Lex switched to the English Official Journal edition** (the regulatory reference retained): default daily-view URL now uses `locale=en` and the act filter keyword is "restrictive measures". The scraping vocabulary (annex column headers, editorial boilerplate, truncated language mentions, amendment instructions) now covers English alongside French, so both editions remain parseable.
+- **Entity-type detection now leverages the designation reasons**: personal indicators found anywhere in the annex row — including the Reasons/Motifs column (pronouns "he/she is", roles such as minister, oligarch, businessman/woman, propagandist, birth data, nationality) — take precedence over entity/vessel keywords quoted in the reasons; entity and vessel keyword sets were extended (corporation, subsidiary, registered in, state-owned / tanker, shadow fleet, MMSI, flag of…).
+
+### Added
+- **Audit-proof PDF archiving**: for every retained act, the official EUR-Lex PDF (the version that is authentic for audits) is downloaded to `eurlex_archives/` with its SHA-256 integrity hash, recorded in the sync report (`acts[].pdf_file` / `pdf_sha256`). A PDF download failure never interrupts the synchronization.
+- New endpoints `GET /api/sync/evidence` (list) and `GET /api/sync/evidence/{filename}` (download, filename-validated) to retrieve archived evidence PDFs.
+- Sync report detail panel now lists the archived official PDFs with direct download links and their SHA-256 fingerprints.
+- 81 automated tests passing (English-source mocks, PDF archiving assertions).
+
+---
+
 ## [2.5.0] - 2026-07-09
 
 ### Added

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -28,7 +28,7 @@ from fiskr.database import (
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     SyncReport
 )
-from fiskr.sync import run_ofac_sync, run_eurlex_sync, get_sync_config
+from fiskr.sync import run_ofac_sync, run_eurlex_sync, get_sync_config, EURLEX_ARCHIVE_DIR
 from fiskr.names import ensure_parsed_name
 from fiskr.auth import get_current_user, require_admin, create_access_token, decode_access_token
 
@@ -1346,6 +1346,29 @@ async def get_sync_configuration(
     cfg = get_sync_config()
     cfg["email_configured"] = bool(os.getenv("SMTP_HOST") and os.getenv("SYNC_EMAIL_TO"))
     return cfg
+
+@app.get("/api/sync/evidence")
+async def list_sync_evidence(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Liste les PDF officiels EUR-Lex archives (pieces probantes d'audit)."""
+    if not EURLEX_ARCHIVE_DIR.exists():
+        return {"files": []}
+    return {"files": sorted(p.name for p in EURLEX_ARCHIVE_DIR.glob("*.pdf"))}
+
+@app.get("/api/sync/evidence/{filename}")
+async def download_sync_evidence(
+    filename: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Telecharge un PDF officiel EUR-Lex archive (version faisant foi en audit)."""
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9_.\-]+\.pdf", filename):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nom de fichier invalide.")
+    file_path = EURLEX_ARCHIVE_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Piece probante introuvable.")
+    return FileResponse(str(file_path), media_type="application/pdf", filename=filename)
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

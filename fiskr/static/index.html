@@ -492,8 +492,8 @@
                             </div>
 
                             <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
-                                <h3 style="margin-top: 0;">🇪🇺 EUR-Lex — Journal Officiel du jour</h3>
-                                <p class="section-desc">Recherche des actes mentionnant « mesures restrictives » au Journal Officiel, scraping des listés (Individus, Entités, Navires, Aéronefs) et fusion incrémentale avec la liste EU active.</p>
+                                <h3 style="margin-top: 0;">🇪🇺 EUR-Lex — Journal Officiel du jour (version anglaise)</h3>
+                                <p class="section-desc">Recherche des actes mentionnant « restrictive measures » au Journal Officiel (édition anglaise, qui fait référence), scraping des listés (Individus, Entités, Navires, Aéronefs), fusion incrémentale avec la liste EU active et archivage du PDF officiel de chaque acte (valeur probante en audit).</p>
                                 <div class="form-group" style="max-width: 220px;">
                                     <label for="sync-eurlex-date">Date du Journal Officiel</label>
                                     <input type="date" id="sync-eurlex-date">
@@ -529,6 +529,7 @@
                             <div id="sync-report-detail" class="hidden" style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
                                 <h3>Détail du rapport</h3>
                                 <pre id="sync-report-detail-content" style="max-height: 320px; overflow: auto; font-size: 0.75rem; white-space: pre-wrap;"></pre>
+                                <div id="sync-report-evidence" class="hidden" style="margin-top: 1rem;"></div>
                             </div>
                         </div>
                     </div>
@@ -1021,7 +1022,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=3.6"></script>
+    <script src="/static/app.js?v=3.7"></script>
 
 
 
