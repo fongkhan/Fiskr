@@ -18,4 +18,5 @@ metastore_db/
 derby.log
 clients_*.csv
 temp_ingestion/
+eurlex_archives/
 .env

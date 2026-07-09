@@ -698,6 +698,22 @@ function showSyncReportDetail(report) {
         delta: report.delta_report
     };
     content.textContent = JSON.stringify(detail, null, 2);
+
+    // Pieces probantes : liens vers les PDF officiels EUR-Lex archives
+    const evidenceDiv = document.getElementById("sync-report-evidence");
+    const acts = (report.delta_report && report.delta_report.acts) || [];
+    const withPdf = acts.filter(a => a.pdf_file);
+    if (withPdf.length > 0) {
+        evidenceDiv.innerHTML = "<h3>Pièces probantes (PDF officiels)</h3>" + withPdf.map(a =>
+            `<div style="margin-bottom: 0.4rem;">📄 <a href="/api/sync/evidence/${encodeURIComponent(a.pdf_file)}" target="_blank">${escapeHtml(a.pdf_file)}</a>` +
+            `<br><small style="color:var(--text-muted)">${escapeHtml((a.title || "").substring(0, 110))} — SHA-256: ${escapeHtml((a.pdf_sha256 || "").substring(0, 16))}…</small></div>`
+        ).join("");
+        evidenceDiv.classList.remove("hidden");
+    } else {
+        evidenceDiv.innerHTML = "";
+        evidenceDiv.classList.add("hidden");
+    }
+
     panel.classList.remove("hidden");
 }
 

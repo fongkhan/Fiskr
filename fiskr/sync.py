@@ -41,8 +41,12 @@ from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checks
 logger = logging.getLogger("fiskr.sync")
 
 DEFAULT_OFAC_URL = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
-DEFAULT_EURLEX_DAILY_URL = "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=fr"
-DEFAULT_EURLEX_KEYWORD = "mesures restrictives"
+# Version anglaise du Journal Officiel : c'est la reference reglementaire retenue
+DEFAULT_EURLEX_DAILY_URL = "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
+DEFAULT_EURLEX_KEYWORD = "restrictive measures"
+
+# Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
+EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
 
 # Le snapshot des ajouts manuels reste toujours actif : il n'est ni fusionne
 # ni remplace par les synchronisations automatiques.
@@ -474,19 +478,27 @@ def extract_daily_acts(html: str, base_url: str, keyword: str = DEFAULT_EURLEX_K
 
 
 _TYPE_KEYWORDS = [
-    ("V", ["navire", "vessel", "ship", "imo"]),
+    ("V", ["navire", "vessel", "ship", "imo", "tanker", "petrolier", "pétrolier",
+           "flotte fantome", "shadow fleet", "mmsi", "pavillon", "flag of"]),
     ("O", ["aeronef", "aéronef", "aircraft", "immatriculation de l'aeronef", "tail number"]),
-    ("E", ["entite", "entité", "entity", "societe", "société", "organisation", "organisme", "company", "sarl", "llc", "ltd"]),
+    ("E", ["entite", "entité", "entity", "societe", "société", "organisation", "organisme",
+           "company", "corporation", "enterprise", "subsidiary", "filiale", "holding",
+           "incorporated", "registered in", "immatriculee", "enregistree", "state-owned",
+           "joint stock", "sarl", "llc", "ltd", "gmbh", "fze"]),
 ]
 
 
 def _detect_entity_type(context_text: str) -> str:
+    """
+    Determine le type du liste (I/E/V/O) a partir de toute la ligne d'annexe :
+    informations d'identification ET motifs de la designation. Les indices
+    personnels (date/lieu de naissance, pronoms, fonctions) priment sur les
+    mots-cles d'entites ou de navires cites dans les motifs.
+    """
     ctx = _strip_accents_lower(context_text)
+    if _PERSONAL_INDICATORS.search(ctx):
+        return "I"
     for etype, keywords in _TYPE_KEYWORDS:
-        if etype == "E" and _PERSONAL_INDICATORS.search(ctx):
-            # Une date/lieu de naissance designe une personne physique meme si
-            # les motifs mentionnent une entite
-            return "I"
         for kw in keywords:
             # Correspondance sur mot entier ("ship" ne doit pas matcher "SHIPPING")
             if re.search(rf"\b{re.escape(_strip_accents_lower(kw))}\b", ctx):
@@ -516,9 +528,15 @@ def _extract_dob(text: str) -> Optional[str]:
 # Tournures editoriales des actes (considerants, references, mise en page)
 # a ne pas confondre avec des noms
 _NON_NAME_PATTERNS = (
+    # Francais
     "journal officiel", "union europeenne", "il y a ", "vu le ", "vu la ", "considerant",
-    "le conseil ", "la commission ", "conformement ", "annexe ", "serie l",
+    "le conseil ", "la commission ", "conformement ", "annex", "serie l",
     "informations d'identification", "translitteration", "caracteres latins",
+    # Anglais (version de reference du JO)
+    "official journal", "european union", "having regard", "whereas",
+    "the council", "the commission", "in accordance", "identifying information",
+    "transliteration", "latin characters", "latin script", "l series",
+    "should therefore", "as follows",
 )
 
 # En-tete de la colonne des motifs dans les annexes (FR/EN)
@@ -532,11 +550,15 @@ _AMENDMENT_CONTEXT = re.compile(
     re.IGNORECASE
 )
 
-# Indices d'attributs personnels : ils priment sur les mots-cles d'entites
-# presents dans les motifs (ex: "dirigeant d'une entite")
+# Indices d'attributs personnels, y compris dans les motifs de la designation
+# (pronoms, fonctions, professions) : ils priment sur les mots-cles d'entites
+# presents dans la meme ligne (ex: "dirigeant d'une entite")
 _PERSONAL_INDICATORS = re.compile(
     r"date de naissance|lieu de naissance|date of birth|place of birth|"
-    r"\bn[ée]e? le\b|\bborn\b|nationalite|sexe\s*:|gender\s*:",
+    r"\bn[ée]e? le\b|\bborn\b|nationalit[ey]|sexe\s*:|gender\s*:|"
+    r"\b(he|she) (is|was|has)\b|\bil est\b|\belle est\b|"
+    r"minist(re|er)|oligar(que|ch)|homme d'affaires|femme d'affaires|"
+    r"business(man|woman)|propagandist|ressortissant",
     re.IGNORECASE
 )
 
@@ -551,12 +573,17 @@ def _looks_like_name(value: str) -> bool:
     if re.fullmatch(r"[\d\s./-]+", v):
         return False
     normalized = _strip_accents_lower(v)
-    if normalized in ("nom", "noms", "name", "names", "nom complet", "designation",
-                      "type", "identite", "identity", "limited liability company"):
+    if normalized in ("nom", "noms", "name", "names", "nom complet", "full name", "designation",
+                      "type", "identite", "identity", "reasons", "grounds",
+                      "limited liability company"):
         return False
-    # Libelles de colonnes et formules juridiques des annexes
+    # Libelles de colonnes, references d'actes et formules juridiques (FR + EN)
     if normalized.startswith(("motifs", "date d", "date de", "lieu d", "informations",
-                              "sont ", "tous les", "les fonds", "en russe", "en anglais")):
+                              "sont ", "tous les", "les fonds", "en russe", "en anglais",
+                              "reasons", "grounds", "date of", "place of", "identifying",
+                              "statement of", "in russian", "in english", "all funds",
+                              "funds and", "name of", "regulation", "decision", "directive",
+                              "reglement", "implementing")):
         return False
     # Les phrases longues sont du texte editorial, pas des identites
     if len(v.split()) > 8:
@@ -592,7 +619,13 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
         if latin:
             name = latin.group(0)
         # Retire les mentions de langue tronquees par la coupe ci-dessus, avec ou
-        # sans parenthese (ex: "Anton USOV en russe : ..." -> "Anton USOV")
+        # sans parenthese et dans les deux syntaxes : "Anton USOV en russe : ..."
+        # (FR) et "Maria DUDKO (Russian: ...)" (EN)
+        name = re.sub(
+            r"\s*[\(«\"]?\s*\b((en|in)\s+)?(russe|anglais|ukrainien|bielorusse|arabe|persan|farsi|"
+            r"russian|english|ukrainian|belarusian|arabic|persian)\b(\s*[:)].*)?$",
+            "", name, flags=re.IGNORECASE
+        )
         name = re.sub(
             r"\s*[\(«\"]?\s*\b(en|in)\s+(russe|anglais|ukrainien|bielorusse|arabe|persan|farsi|"
             r"russian|english|ukrainian|belarusian|arabic|persian)\b.*$",
@@ -682,6 +715,38 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
     return list(entities.values())
 
 
+def _act_pdf_url(act_url: str) -> str:
+    """URL du PDF officiel d'un acte EUR-Lex (…/legal-content/EN/TXT/PDF/?uri=…)."""
+    if "/TXT/PDF/" in act_url:
+        return act_url
+    return re.sub(r"/TXT(/HTML)?/", "/TXT/PDF/", act_url)
+
+
+def _archive_act_pdf(act: Dict[str, str], pdf_fetcher: Callable[[str, Path], None],
+                     archive_dir: Path) -> None:
+    """
+    Telecharge et archive le PDF officiel de l'acte (version qui fait foi lors
+    des audits), avec empreinte SHA-256 pour garantir son integrite probante.
+    Un echec de telechargement n'interrompt pas la synchronisation.
+    """
+    match = re.search(r"uri=([^&]+)", act["url"])
+    base_name = match.group(1) if match else hashlib.sha1(act["url"].encode()).hexdigest()[:12]
+    filename = re.sub(r"[^A-Za-z0-9_.\-]", "_", base_name) + ".pdf"
+    dest = archive_dir / filename
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            pdf_fetcher(_act_pdf_url(act["url"]), dest)
+        with open(dest, "rb") as f:
+            act["pdf_sha256"] = hashlib.sha256(f.read()).hexdigest()
+        act["pdf_file"] = filename
+    except Exception as e:
+        logger.warning(f"Echec de l'archivage du PDF officiel {act['url']}: {e}")
+        act["pdf_file"] = None
+        if dest.exists():
+            os.remove(dest)
+
+
 def fetch_eurlex_entities(
     for_date: date,
     http_get: Callable[[str], str],
@@ -715,20 +780,30 @@ def run_eurlex_sync(
     trigger: str = "MANUAL",
     http_get: Optional[Callable[[str], str]] = None,
     reload_cache: Optional[Callable[[], None]] = None,
+    pdf_fetcher: Optional[Callable[[str, Path], None]] = None,
+    archive_dir: Optional[Path] = None,
 ) -> SyncReport:
     """
-    Scrape le Journal Officiel de l'UE du jour et fusionne les listes trouves
-    avec la liste EU active (mode incremental : le JO amende la liste, les
-    suppressions explicites ne sont pas encore detectees automatiquement).
+    Scrape le Journal Officiel de l'UE du jour (version anglaise, qui fait
+    reference), archive les PDF officiels des actes retenus (valeur probante
+    en audit) et fusionne les listes trouves avec la liste EU active (mode
+    incremental : le JO amende la liste, les suppressions explicites ne sont
+    pas encore detectees automatiquement).
     """
     cfg = get_sync_config()["eurlex"]
     for_date = for_date or date.today()
     getter = http_get or http_get_text
+    pdf_getter = pdf_fetcher or download_to_file
+    archive_dir = archive_dir or EURLEX_ARCHIVE_DIR
 
     previous = _latest_ready_snapshot(db, "WATCHLIST_EU")
     snap_id = None
     try:
         acts, scraped = fetch_eurlex_entities(for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
+
+        # Archivage probant : le PDF officiel de chaque acte retenu fait foi
+        for act in acts:
+            _archive_act_pdf(act, pdf_getter, archive_dir)
 
         if not acts:
             return _finalize_report(

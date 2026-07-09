@@ -36,9 +36,10 @@ sync:
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
   eurlex:
     enabled: true
+    # Version anglaise du Journal Officiel : reference reglementaire retenue.
     # {date} est remplace par la date du jour au format DDMMYYYY
-    daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=fr"
-    keyword: "mesures restrictives"
+    daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
+    keyword: "restrictive measures"
 
 # Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
 # Les selecteurs de balises pivots sont surchargables lors de chaque import.
