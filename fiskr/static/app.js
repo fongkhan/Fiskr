@@ -230,6 +230,14 @@ function switchSubTab(sectionId, subTabId) {
         fetchWatchlist();
     } else if (subTabId === "watchlist-snapshots") {
         fetchSnapshots();
+    } else if (subTabId === "watchlist-sync") {
+        fetchSyncReports();
+        fetchSyncConfig();
+        const dateInput = document.getElementById("sync-eurlex-date");
+        if (dateInput && !dateInput.value) {
+            const now = new Date();
+            dateInput.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        }
     }
 }
 
@@ -360,6 +368,7 @@ async function handleManualEntity(event) {
     const country = document.getElementById("manual-country").value.trim();
     const origin = document.getElementById("manual-origin").value.trim();
     const designation = document.getElementById("manual-designation").value.trim();
+    const designationReasons = document.getElementById("manual-designation-reasons").value.trim();
     const altAddresses = document.getElementById("manual-alternative-addresses").value.trim();
     const additionalInfo = document.getElementById("manual-additional-informations").value.trim();
     
@@ -386,6 +395,7 @@ async function handleManualEntity(event) {
         country: country || null,
         origin: origin || null,
         designation: designation || null,
+        designation_reasons: designationReasons || null,
         alternative_addresses: altAddresses || null,
         additional_informations: additionalInfo || null,
         date_of_death: dateOfDeath || null
@@ -587,6 +597,126 @@ async function handleIngestion(event) {
     } finally {
         btn.disabled = false;
         btn.textContent = "Charger & Archiver";
+    }
+}
+
+// ------------------ SOURCES AUTOMATIQUES (Sync OFAC / EUR-Lex) ------------------
+
+// Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
+async function handleSourceSync(source) {
+    const btn = document.getElementById(source === "OFAC" ? "sync-ofac-btn" : "sync-eurlex-btn");
+    const payload = { source };
+    if (source === "EURLEX") {
+        const dateVal = document.getElementById("sync-eurlex-date").value;
+        if (dateVal) payload.date = dateVal;
+    }
+
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "Synchronisation en cours...";
+
+    try {
+        const response = await fetch("/api/sync/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert(`Erreur de synchronisation : ${data.detail || JSON.stringify(data)}`);
+            return;
+        }
+        alert(`Synchronisation ${data.source} terminée — Statut : ${data.status}\n${data.message || ""}\nDelta : +${data.added_count} / ~${data.modified_count} / -${data.removed_count}`);
+        fetchSyncReports();
+        fetchSnapshots();
+        fetchWatchlist();
+    } catch (e) {
+        console.error("Error running source sync:", e);
+        alert("Erreur réseau pendant la synchronisation.");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+// Load and render the synchronization reports history
+async function fetchSyncReports() {
+    try {
+        const response = await fetch("/api/sync/reports");
+        if (!response.ok) return;
+        const reports = await response.json();
+        renderSyncReportsTable(reports);
+    } catch (e) {
+        console.error("Error fetching sync reports:", e);
+    }
+}
+
+function renderSyncReportsTable(reports) {
+    const tbody = document.querySelector("#sync-reports-table tbody");
+    tbody.innerHTML = "";
+
+    if (!reports || reports.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Aucune synchronisation exécutée</td></tr>';
+        return;
+    }
+
+    reports.forEach(report => {
+        const dateStr = new Date(report.executed_at).toLocaleString("fr-FR");
+        const tr = document.createElement("tr");
+        tr.style.cursor = "pointer";
+
+        let statusBadge;
+        if (report.status === "SUCCESS") statusBadge = '<span class="status-badge no_match">SUCCESS</span>';
+        else if (report.status === "ERROR") statusBadge = '<span class="status-badge alert">ERROR</span>';
+        else statusBadge = `<span class="status-badge warning">${escapeHtml(report.status)}</span>`;
+
+        const sourceLabel = report.source === "OFAC" ? "OFAC XML" : "EUR-Lex JO";
+
+        tr.innerHTML = `
+            <td>${escapeHtml(dateStr)}<br><small style="color:var(--text-muted)">${escapeHtml(report.trigger || "MANUAL")}</small></td>
+            <td><strong>${escapeHtml(sourceLabel)}</strong></td>
+            <td>${statusBadge}</td>
+            <td>+${report.added_count} / ~${report.modified_count} / −${report.removed_count}</td>
+            <td>${report.email_sent ? "📧 Envoyé" : "—"}</td>
+        `;
+        tr.addEventListener("click", () => showSyncReportDetail(report));
+        tbody.appendChild(tr);
+    });
+}
+
+// Display the detail (message + truncated delta) of a sync report
+function showSyncReportDetail(report) {
+    const panel = document.getElementById("sync-report-detail");
+    const content = document.getElementById("sync-report-detail-content");
+    const detail = {
+        source: report.source,
+        executed_at: report.executed_at,
+        statut: report.status,
+        message: report.message,
+        snapshot: report.snapshot_id,
+        snapshot_precedent: report.previous_snapshot_id,
+        delta: report.delta_report
+    };
+    content.textContent = JSON.stringify(detail, null, 2);
+    panel.classList.remove("hidden");
+}
+
+// Display the active scheduler configuration under the source cards
+async function fetchSyncConfig() {
+    try {
+        const response = await fetch("/api/sync/config");
+        if (!response.ok) return;
+        const cfg = await response.json();
+        const info = document.getElementById("sync-schedule-info");
+        const autoTxt = cfg.auto_enabled
+            ? `⏰ Synchronisation automatique activée chaque jour à ${cfg.schedule_time}.`
+            : "⏸️ Synchronisation automatique désactivée (sync.auto_enabled dans config.yaml).";
+        const mailTxt = cfg.email_configured
+            ? "Rapports envoyés par email (SMTP configuré)."
+            : "Rapports disponibles dans l'application uniquement (SMTP non configuré).";
+        info.textContent = `${autoTxt} ${mailTxt}`;
+    } catch (e) {
+        console.error("Error fetching sync config:", e);
     }
 }
 
@@ -1410,6 +1540,7 @@ function showWatchlistDetails(item) {
             <div class="details-item"><strong>Origine / Source</strong><span>${escapeHtml(item.origin || "-")}</span></div>
             <div class="details-item"><strong>Fonction / Désignation</strong><span>${escapeHtml(item.designation || "-")}</span></div>
             <div class="details-item"><strong>Informations Additionnelles</strong><span>${escapeHtml(item.additional_informations || "-")}</span></div>
+            <div class="details-item" style="grid-column: span 2;"><strong>Motifs de la Désignation</strong><span>${escapeHtml(item.designation_reasons || "-")}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Adresses Alternatives</strong><span>${escapeHtml(altAddrs)}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Alias</strong><span>${escapeHtml(aliasesStr)}</span></div>
             <div class="details-item"><strong>LEI (Legal Entity Identifier)</strong><span>${escapeHtml(item.lei_number || "-")}</span></div>

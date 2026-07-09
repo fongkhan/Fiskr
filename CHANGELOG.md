@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.0] - 2026-07-09
+
+### Added
+- **Automatic Source Synchronization (OFAC download & EUR-Lex scraping)**:
+  - New `fiskr/sync.py` module and **Sources Automatiques** sub-tab under Watchlist Management.
+  - **OFAC collector**: streams the official `SDN_ADVANCED.XML` publication, ingests it as a snapshot, computes the delta (ADDED / MODIFIED / REMOVED) against the active OFAC list, then applies it — the new snapshot supersedes the previous one in the screening cache. Unchanged file hashes short-circuit with a `NO_CHANGE` report.
+  - **EUR-Lex collector**: fetches the Official Journal (L series) daily view for the requested date, keeps acts whose title mentions "mesures restrictives" (accent-insensitive), and heuristically scrapes their annexes (tables and numbered lists) into pivot-schema entities — Individuals (with DOB extraction), Entities, Vessels (IMO) and Aircraft — using stdlib `html.parser` (no new dependency). Scraped entities are **incrementally merged** with the active EU list (stable `EU-<hash>` entity ids for cross-day deltas); `NO_PUBLICATION` is reported when no relevant act exists.
+  - Manual on-the-fly additions (`manual-watchlist` snapshot) are never superseded or merged away by synchronizations.
+  - **Follow-up reports**: every run (manual or scheduled) persists a `SyncReport` row (status, delta counts, truncated delta details, acts found) surfaced in the app, and is emailed when SMTP is configured (`SMTP_*` / `SYNC_EMAIL_TO` in `.env`).
+  - **Daily scheduler**: optional asyncio background task (`sync.auto_enabled` / `sync.schedule_time` in the new `sync` section of `config.yaml`) running both collectors every morning.
+  - New endpoints: `POST /api/sync/run` (admin-only manual trigger, per source, optional date for EUR-Lex), `GET /api/sync/reports`, `GET /api/sync/config`.
+  - UI: source cards with "Synchroniser maintenant" buttons (date picker for EUR-Lex), scheduler status line, and a clickable synchronization reports history with delta detail panel.
+  - 10 new automated tests (`tests/test_sync.py`) on an isolated SQLite database: daily journal filtering, annex scraping (types, DOB, IMO, word-boundary type detection), OFAC replace flow (initial import → `NO_CHANGE` → full delta with supersede), EUR-Lex incremental merge, email skip without SMTP, and API endpoints — bringing the suite to 68 passing tests.
+- **26th Compliance Field — Designation Reasons (« Motifs de la désignation »)**:
+  - New nullable `designation_reasons` column on `watchlist_entities`, added through a non-destructive `ALTER TABLE ADD COLUMN` migration in `init_db` (existing data preserved).
+  - The EUR-Lex scraper locates the « Motifs » column via the annex header row (FR/EN: motifs / reasons / grounds) and stores each listed party's designation grounds alongside its identity.
+  - Plumbed through every ingestion path: OFAC/SSIE/CSV/PDF connectors, JSON seed, source synchronization, and the manual addition form (new « Motifs de la Désignation » textarea).
+  - SSIE pivot maps dynamically discovered feature labels containing motif/reason/grounds to the new field.
+  - Displayed in the entity details modal (full-width row) and covered by scraping assertions in `tests/test_sync.py`.
+
+---
+
 ## [2.3.0] - 2026-07-08
 
 ### Added

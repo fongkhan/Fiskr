@@ -71,7 +71,7 @@ Intégré à l'import de listes du dashboard (type de fichier **Smart Sanctions 
 
 1. **Étape de Découverte (Phase 1)** : Extraction en continu des ID et Libellés des types de caractéristiques pour alimenter le dictionnaire de référence.
 2. **Étape de Résolution (Phase 2)** : Lecture des listés (entités) et jointure dynamique de leurs caractéristiques (Features) avec le dictionnaire de référence — sans codage en dur des types.
-3. **Étape de Restitution (Phase 3)** : Pivot dynamique des caractéristiques résolues vers le schéma de criblage Fiskr (25 champs réglementaires) ; les caractéristiques découvertes mais non pivotables sont conservées dans `additional_informations`.
+3. **Étape de Restitution (Phase 3)** : Pivot dynamique des caractéristiques résolues vers le schéma de criblage Fiskr (26 champs réglementaires) ; les caractéristiques découvertes mais non pivotables sont conservées dans `additional_informations`.
 
 L'**adaptabilité (Change Management)** est assurée par des sélecteurs de balises pivots externes, définis dans la section `ssie` de `config.yaml` et surchargables à chaque import depuis le formulaire (JSON) :
 
@@ -91,9 +91,37 @@ Ainsi, un changement de nomenclature de l'émetteur (ex: `<DistinctParty>` deven
 
 ---
 
-## 📋 Référentiel des 25 Champs Réglementaires de Criblage
+## 🛰️ Synchronisation Automatique des Sources (`fiskr/sync.py`)
 
-Le moteur intègre 25 champs obligatoires de conformité AML/CFT, tous exploitables lors de l'ingestion de fichiers ou du screening temps réel :
+L'onglet **Gestion des Watchlists → Sources Automatiques** permet de récupérer les listes directement auprès des émetteurs officiels, manuellement ou automatiquement chaque matin :
+
+* **🇺🇸 OFAC — SDN Advanced** : Téléchargement du fichier officiel [`SDN_ADVANCED.XML`](https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML), ingestion en snapshot, **delta** (ADDED / MODIFIED / REMOVED) par rapport à la liste OFAC active, puis application : le nouveau snapshot remplace l'ancien (statut `SUPERSEDED`) dans le cache de criblage. Si le hash du fichier est inchangé, le rapport indique `NO_CHANGE` sans retraitement.
+* **🇪🇺 EUR-Lex — Journal Officiel du jour** : Lecture de la page du Journal Officiel (série L) de la date choisie, détection des actes dont le titre mentionne **« mesures restrictives »**, puis scraping heuristique des annexes (tableaux et listes numérotées) pour en extraire les listés — Individus (avec date de naissance), Entités, Navires (IMO) et Aéronefs. Les fiches extraites sont **fusionnées de manière incrémentale** avec la liste EU active (le JO amende la liste, il ne la remplace pas) et le delta est calculé. En l'absence d'acte pertinent, le rapport indique `NO_PUBLICATION`.
+
+Dans les deux cas, les **ajouts manuels à la volée sont préservés** (le snapshot `manual-watchlist` n'est jamais remplacé), et chaque exécution génère un **rapport de suivi** consultable dans l'application (table `sync_reports`, avec le détail du delta) et envoyé **par email** si un serveur SMTP est configuré dans `.env` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SYNC_EMAIL_TO`).
+
+La planification quotidienne se configure dans `config.yaml` :
+
+```yaml
+sync:
+  auto_enabled: true         # exécution automatique chaque matin
+  schedule_time: "06:00"     # heure locale de déclenchement (HH:MM)
+  ofac:
+    enabled: true
+    url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
+  eurlex:
+    enabled: true
+    daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=fr"
+    keyword: "mesures restrictives"
+```
+
+Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé aux administrateurs), `GET /api/sync/reports` (historique des rapports) et `GET /api/sync/config` (configuration active).
+
+---
+
+## 📋 Référentiel des 26 Champs Réglementaires de Criblage
+
+Le moteur intègre 26 champs obligatoires de conformité AML/CFT, tous exploitables lors de l'ingestion de fichiers ou du screening temps réel :
 
 1. **ID** (`entity_id` / `client_id`) : Identifiant unique de l'enregistrement.
 2. **Type** (`entity_type` / `client_type`) : Catégorie d'entité (PP: Individu, PM: Personne Morale, V: Navire, O: Autre).
@@ -120,6 +148,7 @@ Le moteur intègre 25 champs obligatoires de conformité AML/CFT, tous exploitab
 23. **National ID** (`national_id_documents` / `client_national_id_documents`) : Numéro et pays de carte nationale d'identité.
 24. **Tail Number** (`aircraft_tail_number` / `transaction_aircraft_registration`) : Immatriculation d'aéronef.
 25. **Legal Entity Identifier** (`lei_number` / `client_lei_number`) : Identifiant d'entité juridique à 20 caractères.
+26. **Designation Reasons** (`designation_reasons`) : Motifs de la désignation / de l'inscription sur liste (extraits de la colonne « Motifs » des annexes EUR-Lex, des libellés SSIE « motif / reason / grounds », ou saisis manuellement).
 
 ### Configuration de Sécurité & Fichier `.env`
 
@@ -169,7 +198,7 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
 Le dashboard interactif se compose de 4 onglets principaux :
-* **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 25 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
+* **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 26 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF), de comparer les versions historiques via le **Delta Engine** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
 * **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**) et le crible de masse (simulateur batch).
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
 * **Utilisateurs** *(Réservé aux Administrateurs)* : Interface de gestion des utilisateurs, création de comptes, réinitialisation de mots de passe et attribution des rôles (`admin` / `user`).
@@ -177,7 +206,7 @@ Le dashboard interactif se compose de 4 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 58 tests automatisés avec pytest :
+Exécutez la suite complète de 68 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

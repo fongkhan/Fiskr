@@ -48,9 +48,10 @@ class WatchlistEntity(Base):
     country = Column(String(100), nullable=True)
     origin = Column(String(255), nullable=True)
     designation = Column(String(500), nullable=True)
+    designation_reasons = Column(Text, nullable=True)  # Motifs de la designation (annexes EUR-Lex, notes OFAC)
     additional_informations = Column(Text, nullable=True)
     alternative_addresses = Column(JSON, nullable=True)
-    
+
     # Identifiers
     imo_number = Column(String(20), nullable=True)
     aircraft_tail_number = Column(String(50), nullable=True)
@@ -128,6 +129,23 @@ class AuditTrail(Base):
     watchlist_version = Column(String(50), nullable=False)
     watchlist_hash = Column(String(64), nullable=False)
 
+class SyncReport(Base):
+    __tablename__ = "sync_reports"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(20), nullable=False)             # OFAC, EURLEX
+    executed_at = Column(DateTime, default=datetime.utcnow)
+    trigger = Column(String(20), default="MANUAL")          # MANUAL, SCHEDULED
+    status = Column(String(30), nullable=False)             # SUCCESS, NO_CHANGE, NO_PUBLICATION, ERROR
+    message = Column(Text, nullable=True)
+    snapshot_id = Column(String(50), nullable=True)
+    previous_snapshot_id = Column(String(50), nullable=True)
+    added_count = Column(Integer, default=0)
+    modified_count = Column(Integer, default=0)
+    removed_count = Column(Integer, default=0)
+    delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
+    email_sent = Column(Boolean, default=False)
+
 class User(Base):
     __tablename__ = "users"
     
@@ -200,7 +218,7 @@ def init_db():
             logger.error(f"Failed to connect to database and fallback is disabled: {err_msg}")
             raise e
 
-    from sqlalchemy import inspect
+    from sqlalchemy import inspect, text
     try:
         inspector = inspect(engine)
         if "watchlist_entities" in inspector.get_table_names():
@@ -208,6 +226,11 @@ def init_db():
             if "place_of_birth" not in columns:
                 logger.info("Database schema outdated. Dropping and recreating tables...")
                 Base.metadata.drop_all(bind=engine)
+            elif "designation_reasons" not in columns:
+                # Migration additive (colonne nullable) : les donnees existantes sont conservees
+                logger.info("Adding missing column watchlist_entities.designation_reasons...")
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE watchlist_entities ADD COLUMN designation_reasons TEXT"))
     except Exception as e:
         logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)
