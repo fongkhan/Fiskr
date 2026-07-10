@@ -27,3 +27,29 @@ database:
   fallback_to_sqlite: true
   sqlite_path: "fiskr.sqlite3"
 
+# Synchronisation automatique des sources officielles (OFAC / EUR-Lex)
+sync:
+  auto_enabled: false        # true = execution automatique chaque matin
+  schedule_time: "06:00"     # heure locale de declenchement quotidien (HH:MM)
+  ofac:
+    enabled: true
+    url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
+  eurlex:
+    enabled: true
+    # Version anglaise du Journal Officiel : reference reglementaire retenue.
+    # {date} est remplace par la date du jour au format DDMMYYYY
+    daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
+    keyword: "restrictive measures"
+
+# Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
+# Les selecteurs de balises pivots sont surchargables lors de chaque import.
+ssie:
+  source_format: "OFAC_ADVANCED_v1"
+  selectors:
+    reference_root_tag: ".//ReferenceValueList"
+    reference_item_tag: "ReferenceValue"
+    entity_root_tag: ".//DistinctParty"
+    entity_feature_tag: "Feature"
+    mapping_id_attr: "ID"
+    mapping_link_attr: "FeatureTypeID"
+

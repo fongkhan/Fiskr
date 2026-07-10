@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.6.0] - 2026-07-10
+
+### Changed
+- **EUR-Lex switched to the English Official Journal edition** (the regulatory reference retained): default daily-view URL now uses `locale=en` and the act filter keyword is "restrictive measures". The scraping vocabulary (annex column headers, editorial boilerplate, truncated language mentions, amendment instructions) now covers English alongside French, so both editions remain parseable.
+- **Entity-type detection now leverages the designation reasons**: personal indicators found anywhere in the annex row — including the Reasons/Motifs column (pronouns "he/she is", roles such as minister, oligarch, businessman/woman, propagandist, birth data, nationality) — take precedence over entity/vessel keywords quoted in the reasons; entity and vessel keyword sets were extended (corporation, subsidiary, registered in, state-owned / tanker, shadow fleet, MMSI, flag of…).
+
+### Added
+- **Audit-proof PDF archiving**: for every retained act, the official EUR-Lex PDF (the version that is authentic for audits) is downloaded to `eurlex_archives/` with its SHA-256 integrity hash, recorded in the sync report (`acts[].pdf_file` / `pdf_sha256`). A PDF download failure never interrupts the synchronization.
+- New endpoints `GET /api/sync/evidence` (list) and `GET /api/sync/evidence/{filename}` (download, filename-validated) to retrieve archived evidence PDFs.
+- Sync report detail panel now lists the archived official PDFs with direct download links and their SHA-256 fingerprints.
+- 81 automated tests passing (English-source mocks, PDF archiving assertions).
+
+---
+
+## [2.5.0] - 2026-07-09
+
+### Added
+- **Individual Name Detection Engine (`fiskr/names.py`)** — shared by every listed-party import:
+  - Official lists (EUR-Lex, UN) write the FAMILY NAME in capitals and given names in mixed case; the engine uses this typographic signal to split names correctly whatever the block order ("Aleksandr Vladimirovich GUTSAN" → given names "Aleksandr Vladimirovich" / family "GUTSAN", previously "Aleksandr" / "Vladimirovich GUTSAN").
+  - Handles "FAMILY, Given Names" comma format, family particles attached to the capitalized block (bin LADIN, Le PEN, van der…), initials, single-token names, and falls back to first-token-as-given-name when no case signal exists.
+  - `ensure_parsed_name` plugs the engine into all import paths — EUR-Lex scraping, SSIE pivot, OFAC/SSIE/CSV/PDF `/api/ingest` branches, source synchronization, and the manual addition form — without ever overwriting a split provided by the source (OFAC XML name parts) or explicit CSV first/last columns.
+  - 10 dedicated tests (`tests/test_names.py`).
+- **Amendment-instruction filter in the EUR-Lex scraper**: annex rows that quote list-entry text inside amendment instructions ("la mention suivante est remplacée par…") are no longer registered as listed parties, and typographic quotes are stripped from names.
+- 81 automated tests passing.
+
+---
+
+## [2.4.1] - 2026-07-09
+
+### Fixed
+- **EUR-Lex sync crash on long act titles (`StringDataRightTruncation`)**: EUR-Lex act titles routinely exceed the 255-character `origin` column (e.g. the OJ of 2026-06-08 Iran decision). `build_watchlist_entity` now clamps every string value to its column's `VARCHAR` length before insertion, so scraped data of any length can no longer fail the snapshot INSERT. Entity checksums are computed on the pivot record before clamping, keeping cross-day deltas stable.
+- **Annex scraping noise filters hardened** (observed on the June 2026 Official Journals):
+  - Truncated language mentions are stripped from names, with or without parentheses ("Anton USOV en russe : Антон УСОВ" → "Anton USOV").
+  - Column headers ("Noms (translittération en caractères latins)", "Lieu d'enregistrement", "Motifs de l'inscription sur une liste", plural "Noms"/"Names") and legal boilerplate ("Sont gelés tous les fonds…", "Limited Liability Company") are no longer registered as listed parties.
+  - Records whose name does not survive cleansing (e.g. Cyrillic-only cells) are skipped instead of persisting empty-name entities.
+- 3 new regression tests (`tests/test_sync.py`) — 71 passing total.
+
+---
+
+## [2.4.0] - 2026-07-09
+
+### Added
+- **Automatic Source Synchronization (OFAC download & EUR-Lex scraping)**:
+  - New `fiskr/sync.py` module and **Sources Automatiques** sub-tab under Watchlist Management.
+  - **OFAC collector**: streams the official `SDN_ADVANCED.XML` publication, ingests it as a snapshot, computes the delta (ADDED / MODIFIED / REMOVED) against the active OFAC list, then applies it — the new snapshot supersedes the previous one in the screening cache. Unchanged file hashes short-circuit with a `NO_CHANGE` report.
+  - **EUR-Lex collector**: fetches the Official Journal (L series) daily view for the requested date, keeps acts whose title mentions "mesures restrictives" (accent-insensitive), and heuristically scrapes their annexes (tables and numbered lists) into pivot-schema entities — Individuals (with DOB extraction), Entities, Vessels (IMO) and Aircraft — using stdlib `html.parser` (no new dependency). Scraped entities are **incrementally merged** with the active EU list (stable `EU-<hash>` entity ids for cross-day deltas); `NO_PUBLICATION` is reported when no relevant act exists.
+  - Manual on-the-fly additions (`manual-watchlist` snapshot) are never superseded or merged away by synchronizations.
+  - **Follow-up reports**: every run (manual or scheduled) persists a `SyncReport` row (status, delta counts, truncated delta details, acts found) surfaced in the app, and is emailed when SMTP is configured (`SMTP_*` / `SYNC_EMAIL_TO` in `.env`).
+  - **Daily scheduler**: optional asyncio background task (`sync.auto_enabled` / `sync.schedule_time` in the new `sync` section of `config.yaml`) running both collectors every morning.
+  - New endpoints: `POST /api/sync/run` (admin-only manual trigger, per source, optional date for EUR-Lex), `GET /api/sync/reports`, `GET /api/sync/config`.
+  - UI: source cards with "Synchroniser maintenant" buttons (date picker for EUR-Lex), scheduler status line, and a clickable synchronization reports history with delta detail panel.
+  - 10 new automated tests (`tests/test_sync.py`) on an isolated SQLite database: daily journal filtering, annex scraping (types, DOB, IMO, word-boundary type detection), OFAC replace flow (initial import → `NO_CHANGE` → full delta with supersede), EUR-Lex incremental merge, email skip without SMTP, and API endpoints — bringing the suite to 68 passing tests.
+- **26th Compliance Field — Designation Reasons (« Motifs de la désignation »)**:
+  - New nullable `designation_reasons` column on `watchlist_entities`, added through a non-destructive `ALTER TABLE ADD COLUMN` migration in `init_db` (existing data preserved).
+  - The EUR-Lex scraper locates the « Motifs » column via the annex header row (FR/EN: motifs / reasons / grounds) and stores each listed party's designation grounds alongside its identity.
+  - Plumbed through every ingestion path: OFAC/SSIE/CSV/PDF connectors, JSON seed, source synchronization, and the manual addition form (new « Motifs de la Désignation » textarea).
+  - SSIE pivot maps dynamically discovered feature labels containing motif/reason/grounds to the new field.
+  - Displayed in the entity details modal (full-width row) and covered by scraping assertions in `tests/test_sync.py`.
+
+---
+
+## [2.3.0] - 2026-07-08
+
+### Added
+- **Smart Sanctions Ingestion Engine (SSIE) Integration**:
+  - New `fiskr/ssie.py` module porting the SSIE 3-phase pipeline into the watchlist import: Phase 1 **Discovery** (streaming extraction of the feature-type reference dictionary), Phase 2 **Resolution** (dynamic join of listed entities' features against the dictionary), Phase 3 **Restitution** (dynamic pivot of resolved features into Fiskr's 25-field compliance schema).
+  - **Structural agnosticism**: pivot tag selectors (`reference_item_tag`, `entity_root_tag`, `entity_feature_tag`, `mapping_id_attr`, `mapping_link_attr`) are externally configured in the new `ssie` section of `config.yaml` and can be overridden per import, supporting OFAC Advanced, SWIFT SLD, or any ID-cross-referenced XML feed without hard-coding.
+  - Memory-safe event streaming (`ElementTree.iterparse` with depth-tracked `elem.clear()`) keeping RAM consumption constant on multi-GB Full Dataset files.
+  - New `WATCHLIST_SSIE` file type on `POST /api/ingest` accepting optional `ssie_selectors` (JSON) and `ssie_source_format` form fields (HTTP 400 on malformed selectors), feeding the Quality Gate, entity checksums, and the in-memory screening cache like any other watchlist.
+  - Unmapped dynamically-discovered features are preserved in `additional_informations` (pivoted `Label: value` pairs); heuristic entity typing (Individual/Entity/Vessel/Other) and `LAST, First` name splitting for individuals.
+  - **Import de Liste UI**: new "Smart Sanctions — XML générique (Moteur SSIE)" option in the snapshot ingestion form with an adaptive panel exposing the source format and the pivot selectors JSON; dedicated SSIE XML badge in the snapshot history table.
+  - SSIE snapshots are fully integrated with the **Delta Engine** version comparator and the active watchlist cache loader.
+  - 6 new automated tests (`tests/test_ssie.py`) covering reference discovery, the full pipeline with default and custom selectors, partial selector merging, and end-to-end API ingestion — bringing the suite to 58 passing tests.
+
+---
+
 ## [2.2.0] - 2026-07-02
 
 - **User Management & Role-Based Access Control (RBAC)**:
