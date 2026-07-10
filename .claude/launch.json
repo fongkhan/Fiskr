@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fiskr-api",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "fiskr.api:app", "--host", "127.0.0.1", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

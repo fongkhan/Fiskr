@@ -19,3 +19,7 @@ derby.log
 clients_*.csv
 temp_ingestion/
 .env
+
+# Local audit PDFs and downloads
+*.pdf
+eurlex_archives/
