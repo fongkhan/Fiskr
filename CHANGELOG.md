@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.7.0] - 2026-07-13
+
+### Added
+- **Homologation mode (pre-production review environment)** for watchlist ingestion: when enabled, every inbound watchlist snapshot (manual upload, manual sync, scheduled OFAC/EUR-Lex sync) lands in a new `PENDING_REVIEW` status instead of going straight to production. Pending snapshots are invisible to the screening engine; the previous `READY` list stays live until a human approves the new one. Snapshot lifecycle becomes `PROCESSING → PENDING_REVIEW → READY | REJECTED → SUPERSEDED`.
+- **Hot-toggleable settings store (`app_settings` table + `fiskr/settings.py`)**: `ingestion.require_approval`, `review.exclusion_justification_required` and `review.exclusion_file_required` are admin-editable at runtime via `GET/PUT /api/settings/ingestion` (no restart needed); `config.yaml` only provides the defaults. Disabling the mode leaves already-pending snapshots reviewable.
+- **Review workflow API**: `GET /api/review/pending`, `GET /api/review/snapshots/{id}` (live delta vs the current production list, computed on demand), paginated entity browsing, `POST …/approve` (promotes to `READY`, supersedes previous same-type snapshots, reloads the cache) and `POST …/reject` (comment required, snapshot never enters production, kept for audit). Reviewer identity, timestamp and comment are stored on the snapshot.
+- **Per-entity exclusions with modular justification**: a reviewer can exclude individual listed parties from a pending snapshot before approval. Each exclusion action carries a text justification and an evidence file (archived under `exclusion_evidence/` and downloadable via `GET /api/review/exclusion-evidence/{id}`); whether each of the two fields is mandatory is controlled independently by the two settings above. Excluded entities never enter the screening cache but remain in the database for audit, and are not carried forward by the EUR-Lex incremental merge.
+- **`reviewer` role with stackable roles**: `User.role` now accepts comma-separated stacked roles (e.g. `user,reviewer`); existing single-role accounts keep working. New `require_roles`/`require_reviewer` dependencies (admin always passes); approve/reject/exclusion endpoints require reviewer or admin.
+- **Dashboard — new "Homologation" sub-tab**: pending-snapshot queue with count badge, delta tiles vs production, paginated entity table with exclusion checkboxes, justification/evidence modal (required-field marks follow the live settings), approve/reject actions, and the admin settings card with the three toggles. Snapshot list shows explicit `EN ATTENTE D'HOMOLOGATION` / `REJETÉ` badges; user management supports the stacked roles.
+- 96 automated tests passing (15 new: review lifecycle, modular justification, role enforcement, staged syncs).
+
+### Changed
+- Sync hash-deduplication now also matches snapshots awaiting review, so a daily sync no longer re-creates a pending duplicate every morning; EUR-Lex gains content-hash deduplication and uses the newest live-or-pending snapshot as its incremental merge base so successive pending days chain without losing amendments.
+- Approving a snapshot supersedes previous `READY` snapshots of the same type (manual uploads previously stacked). Manual single-entity additions (`manual-watchlist`) remain immediate — already an explicit human action.
+- `POST /api/snapshots/purge` also purges `REJECTED` snapshots, freeing their file hash for re-upload.
+
+---
+
 ## [2.6.0] - 2026-07-10
 
 ### Changed

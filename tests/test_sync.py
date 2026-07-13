@@ -361,3 +361,78 @@ def test_api_sync_run_eurlex_no_publication(client, monkeypatch):
     data = response.json()
     assert data["status"] == "NO_PUBLICATION"
     assert data["source"] == "EURLEX"
+
+
+# ------------------ MODE HOMOLOGATION (STAGING) ------------------
+
+def _enable_staging(db):
+    from fiskr.database import AppSetting
+    from fiskr.settings import SETTING_REQUIRE_APPROVAL
+    db.add(AppSetting(key=SETTING_REQUIRE_APPROVAL, value=True))
+    db.commit()
+
+
+def test_ofac_sync_staging_keeps_previous_live(db):
+    # v1 en production (mode inactif)
+    v1 = make_ofac_xml([("100", "Ivan", "Volkov", "1960")])
+    report1 = run_ofac_sync(db, fetcher=make_fetcher(v1))
+    assert report1.status == "SUCCESS"
+    snap1 = db.query(Snapshot).filter(Snapshot.snapshot_id == report1.snapshot_id).first()
+
+    # Mode homologation actif : v2 attend un pointage, v1 reste en production
+    _enable_staging(db)
+    v2 = make_ofac_xml([("100", "Ivan", "Volkov", "1961"), ("300", "Anna", "Orlova", "1980")])
+    report2 = run_ofac_sync(db, fetcher=make_fetcher(v2))
+    assert report2.status == "PENDING_REVIEW"
+    assert report2.added_count == 1  # delta calcule malgre l'attente
+
+    snap2 = db.query(Snapshot).filter(Snapshot.snapshot_id == report2.snapshot_id).first()
+    assert snap2.status == "PENDING_REVIEW"
+    db.refresh(snap1)
+    assert snap1.status == "READY"  # non supersede tant que v2 n'est pas approuve
+
+
+def test_ofac_sync_staging_hash_dedup_on_pending(db):
+    _enable_staging(db)
+    v1 = make_ofac_xml([("100", "Ivan", "Volkov", "1960")])
+    report1 = run_ofac_sync(db, fetcher=make_fetcher(v1))
+    assert report1.status == "PENDING_REVIEW"
+
+    # Re-sync du meme fichier : pas de doublon pending quotidien
+    report2 = run_ofac_sync(db, fetcher=make_fetcher(v1))
+    assert report2.status == "NO_CHANGE"
+    pending = db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").all()
+    assert len(pending) == 1
+
+
+def test_eurlex_sync_staging_merge_base_includes_pending(db, tmp_path):
+    _enable_staging(db)
+    archive_dir = tmp_path / "archives"
+
+    # Jour 1 : 3 listes -> snapshot pending
+    report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
+                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
+    assert report1.status == "PENDING_REVIEW"
+
+    # Jour 2 : nouvel acte -> le pending du jour 2 reconduit les entites du pending du jour 1
+    act_day2 = """
+    <html><body><table>
+    <tr><th>Name</th><th>Identifying information</th><th>Reasons</th><th>Date of listing</th></tr>
+    <tr><td>DIMA KUZNETSOV</td><td>Born on 5.5.1985</td><td>Financing of the regime</td><td>9.7.2026</td></tr>
+    </table></body></html>
+    """
+    report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
+                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
+    assert report2.status == "PENDING_REVIEW"
+
+    day2_entities = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id == report2.snapshot_id
+    ).all()
+    names = {e.primary_name for e in day2_entities}
+    assert len(day2_entities) == 4  # 1 nouveau + 3 reconduits du pending jour 1
+    assert any("KUZNETSOV" in n for n in names)
+    assert any("PETROV" in n for n in names)
+
+    # Le pending du jour 1 n'est pas supersede (decision humaine explicite)
+    snap1 = db.query(Snapshot).filter(Snapshot.snapshot_id == report1.snapshot_id).first()
+    assert snap1.status == "PENDING_REVIEW"

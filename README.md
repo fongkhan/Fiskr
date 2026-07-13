@@ -128,6 +128,22 @@ Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé
 
 ---
 
+## ✅ Mode Homologation — Environnement de Validation avant Production
+
+Certaines banques exigent un **pointage humain** avant qu'une nouvelle liste ne serve au criblage. Le **mode homologation** répond à ce besoin : lorsqu'il est actif, **tout snapshot watchlist entrant** (upload manuel, synchronisation manuelle ou planifiée OFAC/EUR-Lex) prend le statut `PENDING_REVIEW` au lieu d'entrer directement en production. Il est alors **invisible du moteur de criblage** — la liste `READY` précédente reste active — jusqu'à la décision d'un réviseur.
+
+Cycle de vie des snapshots : `PROCESSING → PENDING_REVIEW → READY | REJECTED → SUPERSEDED` (mode inactif : `PROCESSING → READY`, comportement historique inchangé).
+
+* **Activation / désactivation à chaud** : réglage `Homologation obligatoire` modifiable par un admin depuis l'onglet **Gestion des Watchlists → Homologation** (ou `PUT /api/settings/ingestion`), stocké en base (table `app_settings`) avec repli sur les défauts de `config.yaml` (section `ingestion.require_approval`). Aucun redémarrage nécessaire ; désactiver le mode laisse les snapshots déjà en attente approuvables.
+* **Revue** : le réviseur consulte le **delta calculé en direct par rapport à la production** (ajouts / modifications / suppressions), parcourt les entités du snapshot, puis **approuve** (promotion `READY`, remplacement des listes antérieures du même type, rechargement du cache) ou **rejette** (commentaire obligatoire, le snapshot n'entre jamais en production mais est conservé pour l'audit). L'identité du réviseur, la date et le commentaire sont tracés sur le snapshot.
+* **Exclusions d'entités justifiées** : avant approbation, des listés individuels peuvent être **exclus de la mise en production** (conservés en base pour l'audit, jamais chargés dans le cache ni reconduits par la fusion EUR-Lex). Chaque exclusion s'accompagne d'une **justification texte** et d'une **pièce jointe justificative** (archivée sous `exclusion_evidence/`, retéléchargeable) ; le caractère **obligatoire de chacun des deux champs est modulaire** (`review.exclusion_justification_required`, `review.exclusion_file_required`).
+* **Rôle `reviewer` et rôles empilables** : un nouveau rôle dédié à la validation, cumulable avec les autres (ex. `user,reviewer`). L'approbation, le rejet et les exclusions exigent le rôle `reviewer` ou `admin` ; la gestion des réglages reste réservée aux admins.
+* **Déduplication consciente de l'attente** : une synchronisation quotidienne dont le fichier correspond à un snapshot déjà en attente d'homologation rend `NO_CHANGE` (pas de doublon chaque matin), et les JO EUR-Lex de jours successifs s'enchaînent sur le snapshot en attente le plus récent sans perte d'amendements.
+
+Endpoints associés : `GET/PUT /api/settings/ingestion`, `GET /api/review/pending`, `GET /api/review/snapshots/{id}` (+ `/entities`), `POST /api/review/snapshots/{id}/exclusions` (+ `/remove`), `GET /api/review/exclusion-evidence/{id}`, `POST /api/review/snapshots/{id}/approve|reject`.
+
+---
+
 ## 📋 Référentiel des 26 Champs Réglementaires de Criblage
 
 Le moteur intègre 26 champs obligatoires de conformité AML/CFT, tous exploitables lors de l'ingestion de fichiers ou du screening temps réel :
@@ -215,7 +231,7 @@ Le dashboard interactif se compose de 4 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 81 tests automatisés avec pytest :
+Exécutez la suite complète de 96 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

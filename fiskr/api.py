@@ -28,9 +28,20 @@ from fiskr.database import (
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     SyncReport
 )
-from fiskr.sync import run_ofac_sync, run_eurlex_sync, get_sync_config, EURLEX_ARCHIVE_DIR
+from fiskr.sync import (
+    run_ofac_sync, run_eurlex_sync, get_sync_config, EURLEX_ARCHIVE_DIR,
+    _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
+    _truncate_delta_details
+)
 from fiskr.names import ensure_parsed_name
-from fiskr.auth import get_current_user, require_admin, create_access_token, decode_access_token
+from fiskr.auth import (
+    get_current_user, require_admin, require_reviewer, create_access_token,
+    decode_access_token, parse_roles, normalize_roles
+)
+from fiskr.settings import (
+    require_approval_enabled, exclusion_requirements, get_setting_with_source, set_setting,
+    SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, SETTING_EXCLUSION_FILE_REQUIRED
+)
 
 
 
@@ -72,9 +83,13 @@ def load_watchlist_cache(db: Session):
     active_hash = snapshots[0].file_hash
     watchlist_hash = active_hash
     
-    # Load all entities for these active snapshots
+    # Load all entities for these active snapshots (excluded entities stay out
+    # of production but are kept in DB for audit; NULL = legacy rows, not excluded)
     snapshot_ids = [s.snapshot_id for s in snapshots]
-    entities = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id.in_(snapshot_ids)).all()
+    entities = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id.in_(snapshot_ids),
+        WatchlistEntity.excluded.isnot(True)
+    ).all()
     
     temp_store = []
     temp_index = {}
@@ -328,7 +343,8 @@ async def login(
         "user": {
             "username": user.username,
             "full_name": user.full_name,
-            "role": user.role
+            "role": user.role,
+            "roles": parse_roles(user.role)
         }
     }
 
@@ -433,6 +449,7 @@ async def list_users(
             "username": u.username,
             "full_name": u.full_name,
             "role": u.role,
+            "roles": parse_roles(u.role),
             "created_at": u.created_at.isoformat() if u.created_at else None
         }
         for u in users
@@ -449,9 +466,11 @@ async def create_user(
     if not username or not payload.password:
         raise HTTPException(status_code=400, detail="Nom d'utilisateur et mot de passe requis.")
         
-    if payload.role not in ["admin", "user"]:
-        raise HTTPException(status_code=400, detail="Rôle invalide. Choisissez 'admin' ou 'user'.")
-        
+    try:
+        canonical_role = normalize_roles(payload.role)
+    except ValueError as role_err:
+        raise HTTPException(status_code=400, detail=str(role_err))
+
     existing = db.query(User).filter(User.username == username).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"L'utilisateur '{username}' existe déjà.")
@@ -462,7 +481,7 @@ async def create_user(
         hashed_password=h_pass,
         salt=salt_str,
         full_name=(payload.full_name or "").strip(),
-        role=payload.role
+        role=canonical_role
     )
     db.add(new_user)
     db.commit()
@@ -501,9 +520,10 @@ async def update_user_admin(
         target_user.full_name = payload.full_name.strip()
         
     if payload.role:
-        if payload.role not in ["admin", "user"]:
-            raise HTTPException(status_code=400, detail="Rôle invalide. Choisissez 'admin' ou 'user'.")
-        target_user.role = payload.role
+        try:
+            target_user.role = normalize_roles(payload.role)
+        except ValueError as role_err:
+            raise HTTPException(status_code=400, detail=str(role_err))
         
     if payload.password and payload.password.strip():
         if len(payload.password.strip()) < 6:
@@ -713,11 +733,12 @@ async def ingest_snapshot(
         # Validate that snapshot hash doesn't already exist to prevent redundant work
         exists = db.query(Snapshot).filter(Snapshot.file_hash == fhash).first()
         if exists:
-            # Snapshot already loaded, we can skip or reload. Let's reuse it.
+            # Snapshot already loaded (possibly pending review or rejected), reuse it.
             return {
                 "message": "Snapshot with this hash already uploaded.",
                 "snapshot_id": exists.snapshot_id,
-                "record_count": exists.record_count
+                "record_count": exists.record_count,
+                "status": exists.status
             }
             
         # Create Snapshot record
@@ -956,19 +977,29 @@ async def ingest_snapshot(
                 db.add(db_ent)
                 record_count += 1
                 
-        # Update Snapshot status
-        snap.status = "READY"
+        # Update Snapshot status. En mode homologation, les watchlists attendent
+        # un pointage humain (PENDING_REVIEW) et restent hors du cache de criblage.
+        staging = file_type in WATCHLIST_FILE_TYPES and require_approval_enabled(db)
+        snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
         db.commit()
-        
+
         # Reload cache to integrate newly loaded watchlists
-        if file_type in WATCHLIST_FILE_TYPES:
+        if file_type in WATCHLIST_FILE_TYPES and not staging:
             load_watchlist_cache(db)
-            
+
+        if staging:
+            message = (
+                f"{record_count} fiches importées, snapshot en attente d'homologation "
+                "(pointage humain requis avant mise en production)."
+            )
+        else:
+            message = f"Successfully imported {record_count} items."
         return {
-            "message": f"Successfully imported {record_count} items.",
+            "message": message,
             "snapshot_id": snap_id,
-            "record_count": record_count
+            "record_count": record_count,
+            "status": snap.status
         }
     except Exception as e:
         db.rollback()
@@ -1246,11 +1277,12 @@ async def purge_failed_snapshots(
 ):
     """
     Purges (deletes) all snapshots and their associated entities (watchlist and clients)
-    that are in status 'ERROR' or 'PROCESSING' (aborted/failed).
+    that are in status 'ERROR', 'PROCESSING' (aborted/failed) or 'REJECTED'
+    (refused during homologation review; purging frees the file hash for re-upload).
     """
     try:
-        # Find failed / processing snapshots
-        failed_snapshots = db.query(Snapshot).filter(Snapshot.status.in_(["ERROR", "PROCESSING"])).all()
+        # Find failed / processing / rejected snapshots
+        failed_snapshots = db.query(Snapshot).filter(Snapshot.status.in_(["ERROR", "PROCESSING", "REJECTED"])).all()
         if not failed_snapshots:
             return {"message": "Aucun snapshot erroné ou en cours à purger.", "purged_snapshots_count": 0}
             
@@ -1369,6 +1401,351 @@ async def download_sync_evidence(
     if not file_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Piece probante introuvable.")
     return FileResponse(str(file_path), media_type="application/pdf", filename=filename)
+
+# ------------------ HOMOLOGATION (REVUE AVANT PRODUCTION) ------------------
+
+# Pieces justificatives des exclusions d'entites (valeur probante en audit)
+EXCLUSION_EVIDENCE_DIR = PROJECT_ROOT / "exclusion_evidence"
+
+class IngestionSettingsUpdate(BaseModel):
+    require_approval: Optional[bool] = None
+    exclusion_justification_required: Optional[bool] = None
+    exclusion_file_required: Optional[bool] = None
+
+class ReviewDecisionRequest(BaseModel):
+    comment: Optional[str] = None
+
+class ExclusionRemoveRequest(BaseModel):
+    entity_ids: List[int]
+
+def _settings_payload(db: Session) -> Dict[str, Any]:
+    approval = get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
+    justif = get_setting_with_source(db, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, True)
+    evidence = get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)
+    return {
+        "require_approval": bool(approval["value"]),
+        "exclusion_justification_required": bool(justif["value"]),
+        "exclusion_file_required": bool(evidence["value"]),
+        "sources": {
+            "require_approval": approval["source"],
+            "exclusion_justification_required": justif["source"],
+            "exclusion_file_required": evidence["source"],
+        },
+    }
+
+@app.get("/api/settings/ingestion")
+async def get_ingestion_settings(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Etat effectif du mode homologation et des exigences de justification d'exclusion."""
+    return _settings_payload(db)
+
+@app.put("/api/settings/ingestion")
+async def update_ingestion_settings(
+    payload: IngestionSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Modifie a chaud les reglages d'homologation (Admin). Effet immediat, sans redemarrage."""
+    updates = {
+        SETTING_REQUIRE_APPROVAL: payload.require_approval,
+        SETTING_EXCLUSION_JUSTIFICATION_REQUIRED: payload.exclusion_justification_required,
+        SETTING_EXCLUSION_FILE_REQUIRED: payload.exclusion_file_required,
+    }
+    changed = {k: v for k, v in updates.items() if v is not None}
+    if not changed:
+        raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
+    for key, value in changed.items():
+        set_setting(db, key, bool(value), updated_by=admin_user["username"])
+    return {"message": "Réglages d'homologation mis à jour.", **_settings_payload(db)}
+
+def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot introuvable.")
+    if snap.file_type not in WATCHLIST_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Ce snapshot n'est pas une watchlist.")
+    if snap.status != "PENDING_REVIEW":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ce snapshot n'est pas en attente d'homologation (statut: {snap.status})."
+        )
+    return snap
+
+def _snapshot_summary(db: Session, snap: Snapshot) -> Dict[str, Any]:
+    excluded_count = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id == snap.snapshot_id,
+        WatchlistEntity.excluded.is_(True)
+    ).count()
+    return {
+        "snapshot_id": snap.snapshot_id,
+        "file_type": snap.file_type,
+        "file_name": snap.file_name,
+        "file_hash": snap.file_hash,
+        "record_count": snap.record_count,
+        "uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
+        "status": snap.status,
+        "excluded_count": excluded_count,
+        "reviewed_by": snap.reviewed_by,
+        "reviewed_at": snap.reviewed_at.isoformat() if snap.reviewed_at else None,
+        "review_comment": snap.review_comment,
+    }
+
+@app.get("/api/review/pending")
+async def list_pending_reviews(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Snapshots watchlist en attente d'homologation (plus recents d'abord)."""
+    snaps = db.query(Snapshot).filter(
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+        Snapshot.status == "PENDING_REVIEW"
+    ).order_by(Snapshot.uploaded_at.desc()).all()
+    return {"pending": [_snapshot_summary(db, s) for s in snaps]}
+
+@app.get("/api/review/snapshots/{snapshot_id}")
+async def get_review_detail(
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Detail d'un snapshot en attente : metadonnees + delta calcule a la volee
+    par rapport a la liste actuellement en production (toujours a jour).
+    """
+    snap = _get_pending_snapshot(db, snapshot_id)
+    production = _latest_ready_snapshot(db, snap.file_type)
+    old_entities = _snapshot_entity_dicts(db, production.snapshot_id) if production else []
+    new_entities = _snapshot_entity_dicts(db, snapshot_id)
+    delta = calculate_delta(old_entities, new_entities, "entity_id")
+    return {
+        **_snapshot_summary(db, snap),
+        "production_snapshot_id": production.snapshot_id if production else None,
+        "delta_summary": delta["summary"],
+        "delta_details": _truncate_delta_details(delta),
+    }
+
+@app.get("/api/review/snapshots/{snapshot_id}/entities")
+async def list_review_entities(
+    snapshot_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    search: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Entites paginees d'un snapshot en attente, avec leur etat d'exclusion."""
+    _get_pending_snapshot(db, snapshot_id)
+    query = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == snapshot_id)
+    if search:
+        needle = f"%{search.strip()}%"
+        query = query.filter(
+            (WatchlistEntity.primary_name.ilike(needle)) | (WatchlistEntity.entity_id.ilike(needle))
+        )
+    total = query.count()
+    rows = query.order_by(WatchlistEntity.id.asc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": r.id,
+                "entity_id": r.entity_id,
+                "entity_type": r.entity_type,
+                "primary_name": r.primary_name,
+                "excluded": bool(r.excluded),
+                "exclusion_justification": r.exclusion_justification,
+                "exclusion_file_name": r.exclusion_file_name,
+                "excluded_by": r.excluded_by,
+            }
+            for r in rows
+        ],
+    }
+
+@app.post("/api/review/snapshots/{snapshot_id}/exclusions")
+async def set_review_exclusions(
+    snapshot_id: str,
+    entity_ids: str = Form(...),
+    justification: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Exclut des entites d'un snapshot en attente d'homologation. La justification
+    texte et la piece jointe sont exigees selon les reglages modulaires
+    (review.exclusion_justification_required / review.exclusion_file_required).
+    """
+    snap = _get_pending_snapshot(db, snapshot_id)
+    try:
+        ids = json.loads(entity_ids)
+        assert isinstance(ids, list) and all(isinstance(i, int) for i in ids) and ids
+    except (json.JSONDecodeError, AssertionError):
+        raise HTTPException(status_code=400, detail="entity_ids doit être une liste JSON non vide d'entiers.")
+
+    rows = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id == snapshot_id,
+        WatchlistEntity.id.in_(ids)
+    ).all()
+    if len(rows) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="Certaines entités n'appartiennent pas à ce snapshot.")
+
+    requirements = exclusion_requirements(db)
+    justification = (justification or "").strip()
+    if requirements["justification_required"] and not justification:
+        raise HTTPException(
+            status_code=400,
+            detail="Une justification est obligatoire pour exclure une entité (réglage actif)."
+        )
+    if requirements["file_required"] and (file is None or not file.filename):
+        raise HTTPException(
+            status_code=400,
+            detail="Une pièce jointe justificative est obligatoire pour exclure une entité (réglage actif)."
+        )
+
+    evidence_name = None
+    evidence_path = None
+    if file is not None and file.filename:
+        safe_name = os.path.basename(file.filename).replace("..", "_")
+        target_dir = EXCLUSION_EVIDENCE_DIR / snap.snapshot_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        evidence_name = safe_name
+        evidence_path = str(target_path)
+
+    now = datetime.utcnow()
+    for row in rows:
+        row.excluded = True
+        row.exclusion_justification = justification or None
+        row.exclusion_file_name = evidence_name
+        row.exclusion_file_path = evidence_path
+        row.excluded_by = reviewer["username"]
+        row.excluded_at = now
+    db.commit()
+    return {
+        "message": f"{len(rows)} entité(s) exclue(s) du snapshot.",
+        "snapshot_id": snapshot_id,
+        "excluded_ids": sorted(r.id for r in rows),
+    }
+
+@app.post("/api/review/snapshots/{snapshot_id}/exclusions/remove")
+async def remove_review_exclusions(
+    snapshot_id: str,
+    payload: ExclusionRemoveRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Annule des exclusions posees sur un snapshot encore en attente d'homologation."""
+    _get_pending_snapshot(db, snapshot_id)
+    if not payload.entity_ids:
+        raise HTTPException(status_code=400, detail="entity_ids ne peut pas être vide.")
+    rows = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id == snapshot_id,
+        WatchlistEntity.id.in_(payload.entity_ids)
+    ).all()
+    if len(rows) != len(set(payload.entity_ids)):
+        raise HTTPException(status_code=400, detail="Certaines entités n'appartiennent pas à ce snapshot.")
+    for row in rows:
+        row.excluded = False
+        row.exclusion_justification = None
+        row.exclusion_file_name = None
+        row.exclusion_file_path = None
+        row.excluded_by = None
+        row.excluded_at = None
+    db.commit()
+    return {"message": f"{len(rows)} exclusion(s) annulée(s).", "snapshot_id": snapshot_id}
+
+@app.get("/api/review/exclusion-evidence/{entity_pk}")
+async def download_exclusion_evidence(
+    entity_pk: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Telecharge la piece justificative associee a l'exclusion d'une entite (audit)."""
+    row = db.query(WatchlistEntity).filter(WatchlistEntity.id == entity_pk).first()
+    if not row or not row.exclusion_file_path:
+        raise HTTPException(status_code=404, detail="Aucune pièce justificative pour cette entité.")
+    file_path = Path(row.exclusion_file_path)
+    # La piece doit rester dans le repertoire d'archivage des exclusions
+    if not file_path.exists() or EXCLUSION_EVIDENCE_DIR.resolve() not in file_path.resolve().parents:
+        raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
+    return FileResponse(str(file_path), filename=row.exclusion_file_name or file_path.name)
+
+@app.post("/api/review/snapshots/{snapshot_id}/approve")
+async def approve_pending_snapshot(
+    snapshot_id: str,
+    payload: ReviewDecisionRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Approuve un snapshot en attente : promotion en production (READY), les
+    anciens snapshots du meme type passent en SUPERSEDED et le cache de
+    criblage est recharge sans les entites exclues.
+    """
+    snap = _get_pending_snapshot(db, snapshot_id)
+
+    # Filet de securite : si les exigences de justification ont durci depuis la
+    # pose des exclusions, on refuse la promotion tant qu'elles ne sont pas conformes.
+    requirements = exclusion_requirements(db)
+    excluded_rows = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id == snapshot_id,
+        WatchlistEntity.excluded.is_(True)
+    ).all()
+    if requirements["justification_required"] and any(not (r.exclusion_justification or "").strip() for r in excluded_rows):
+        raise HTTPException(
+            status_code=400,
+            detail="Des exclusions n'ont pas de justification alors que le réglage l'exige. Complétez-les avant d'approuver."
+        )
+    if requirements["file_required"] and any(not r.exclusion_file_path for r in excluded_rows):
+        raise HTTPException(
+            status_code=400,
+            detail="Des exclusions n'ont pas de pièce jointe alors que le réglage l'exige. Complétez-les avant d'approuver."
+        )
+
+    snap.status = "READY"
+    snap.reviewed_by = reviewer["username"]
+    snap.reviewed_at = datetime.utcnow()
+    snap.review_comment = (payload.comment or "").strip() or None
+    _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
+    db.commit()
+    load_watchlist_cache(db)
+    return {
+        "message": "Snapshot approuvé et promu en production.",
+        "snapshot_id": snapshot_id,
+        "status": snap.status,
+        "excluded_count": len(excluded_rows),
+    }
+
+@app.post("/api/review/snapshots/{snapshot_id}/reject")
+async def reject_pending_snapshot(
+    snapshot_id: str,
+    payload: ReviewDecisionRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Rejette un snapshot en attente : il n'entrera jamais en production. Les
+    entites sont conservees en base pour l'audit (meme retention que SUPERSEDED).
+    """
+    snap = _get_pending_snapshot(db, snapshot_id)
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un commentaire est requis pour rejeter un snapshot.")
+    snap.status = "REJECTED"
+    snap.reviewed_by = reviewer["username"]
+    snap.reviewed_at = datetime.utcnow()
+    snap.review_comment = comment
+    db.commit()
+    return {
+        "message": "Snapshot rejeté. Il ne sera pas mis en production.",
+        "snapshot_id": snapshot_id,
+        "status": snap.status,
+    }
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"
