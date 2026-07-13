@@ -20,7 +20,11 @@ class Snapshot(Base):
     file_hash = Column(String(64), nullable=False)
     record_count = Column(Integer, default=0)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
-    status = Column(String(20), default="PROCESSING") # PROCESSING, READY, SUPERSEDED, ERROR
+    status = Column(String(20), default="PROCESSING") # PROCESSING, PENDING_REVIEW, READY, SUPERSEDED, REJECTED, ERROR
+    # Homologation (pointage humain avant mise en production)
+    reviewed_by = Column(String(100), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_comment = Column(Text, nullable=True)
 
 class WatchlistEntity(Base):
     __tablename__ = "watchlist_entities"
@@ -66,6 +70,14 @@ class WatchlistEntity(Base):
     
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
+
+    # Exclusion par un reviseur lors de l'homologation (NULL = non exclu, lignes legacy)
+    excluded = Column(Boolean, default=False, nullable=True)
+    exclusion_justification = Column(Text, nullable=True)
+    exclusion_file_name = Column(String(255), nullable=True)
+    exclusion_file_path = Column(String(500), nullable=True)
+    excluded_by = Column(String(100), nullable=True)
+    excluded_at = Column(DateTime, nullable=True)
 
 class ClientEntity(Base):
     __tablename__ = "client_entities"
@@ -145,6 +157,14 @@ class SyncReport(Base):
     removed_count = Column(Integer, default=0)
     delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
     email_sent = Column(Boolean, default=False)
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String(100), nullable=True)
 
 class User(Base):
     __tablename__ = "users"
@@ -231,6 +251,33 @@ def init_db():
                 logger.info("Adding missing column watchlist_entities.designation_reasons...")
                 with engine.begin() as conn:
                     conn.execute(text("ALTER TABLE watchlist_entities ADD COLUMN designation_reasons TEXT"))
+
+        # Migrations additives (colonnes nullables) : homologation / exclusions
+        _additive_migrations = {
+            "snapshots": [
+                ("reviewed_by", "VARCHAR(100)"),
+                ("reviewed_at", "TIMESTAMP"),
+                ("review_comment", "TEXT"),
+            ],
+            "watchlist_entities": [
+                ("excluded", "BOOLEAN"),
+                ("exclusion_justification", "TEXT"),
+                ("exclusion_file_name", "VARCHAR(255)"),
+                ("exclusion_file_path", "VARCHAR(500)"),
+                ("excluded_by", "VARCHAR(100)"),
+                ("excluded_at", "TIMESTAMP"),
+            ],
+        }
+        inspector = inspect(engine)
+        for table_name, cols in _additive_migrations.items():
+            if table_name not in inspector.get_table_names():
+                continue
+            existing_cols = [c["name"] for c in inspector.get_columns(table_name)]
+            for col_name, col_type in cols:
+                if col_name not in existing_cols:
+                    logger.info(f"Adding missing column {table_name}.{col_name}...")
+                    with engine.begin() as conn:
+                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
     except Exception as e:
         logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)

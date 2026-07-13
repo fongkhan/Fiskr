@@ -16,6 +16,8 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchAuditHistory();
     fetchSnapshots();
     fetchConfig();
+    fetchIngestionSettings();
+    fetchPendingReviews();
 });
 
 // Check current logged-in user profile
@@ -29,6 +31,9 @@ async function checkAuthUser() {
         const data = await response.json();
         if (data.user) {
             currentUser = data.user;
+            const roles = userRoles(currentUser);
+            const isAdmin = roles.includes("admin");
+            const isReviewer = isAdmin || roles.includes("reviewer");
             const userEl = document.getElementById("sidebar-username");
             const roleEl = document.getElementById("sidebar-role");
             const navUsersItem = document.getElementById("nav-item-users");
@@ -38,15 +43,19 @@ async function checkAuthUser() {
                 userEl.title = `Connecté en tant que @${data.user.username}`;
             }
             if (roleEl) {
-                roleEl.textContent = data.user.role === "admin" ? "Administrateur (ACPR/AMF)" : "Analyste Conformité";
+                const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité" };
+                roleEl.textContent = roles.map(r => labels[r] || r).join(" / ") || "Analyste Conformité";
             }
             if (navUsersItem) {
-                if (data.user.role === "admin") {
-                    navUsersItem.classList.remove("hidden");
-                } else {
-                    navUsersItem.classList.add("hidden");
-                }
+                navUsersItem.classList.toggle("hidden", !isAdmin);
             }
+            // Reglages homologation (admin) et actions de revue (reviewer ou admin)
+            const settingsCard = document.getElementById("review-settings-card");
+            if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
+            const reviewActions = document.getElementById("review-actions");
+            if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
+            const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
+            if (exclusionToolbar) exclusionToolbar.classList.toggle("hidden", !isReviewer);
         }
     } catch (e) {
         console.error("Auth check failed:", e);
@@ -492,10 +501,21 @@ function renderSnapshotsTable(snaps) {
             <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}...</small></td>
             <td>${typeBadge}</td>
             <td>${snap.record_count}</td>
-            <td><span class="status-dot ${snap.status === 'READY' ? 'green' : 'orange'}"></span> ${snap.status}</td>
+            <td>${snapshotStatusBadge(snap.status)}</td>
         `;
         tbody.appendChild(tr);
     });
+}
+
+// Badge de statut d'un snapshot (incl. cycle de vie homologation)
+function snapshotStatusBadge(status) {
+    if (status === "PENDING_REVIEW") {
+        return '<span class="status-dot orange"></span> <span style="color: var(--color-warning); font-weight: 600;">EN ATTENTE D\'HOMOLOGATION</span>';
+    }
+    if (status === "REJECTED") {
+        return '<span class="status-dot" style="background: #f87171;"></span> <span style="color: #f87171; font-weight: 600;">REJETÉ</span>';
+    }
+    return `<span class="status-dot ${status === 'READY' ? 'green' : 'orange'}"></span> ${status}`;
 }
 
 // Populate compare dropdown selectors
@@ -591,6 +611,7 @@ async function handleIngestion(event) {
         fileInput.value = "";
         fetchSnapshots();
         fetchWatchlist();
+        fetchPendingReviews();
     } catch (e) {
         console.error("Error ingesting snapshot:", e);
         alert("Erreur réseau de communication.");
@@ -630,6 +651,7 @@ async function handleSourceSync(source) {
         fetchSyncReports();
         fetchSnapshots();
         fetchWatchlist();
+        fetchPendingReviews();
     } catch (e) {
         console.error("Error running source sync:", e);
         alert("Erreur réseau pendant la synchronisation.");
@@ -1602,10 +1624,16 @@ function renderUsersTable(users) {
     }
 
     tbody.innerHTML = users.map(u => {
-        const isAdmin = u.role === "admin";
-        const roleBadge = isAdmin 
-            ? `<span style="background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.4); color: #a5b4fc; padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">ADMINISTRATEUR</span>`
-            : `<span style="background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600;">ANALYSTE USER</span>`;
+        // Roles empilables : un badge par role ("reviewer,user" -> 2 badges)
+        const badgeStyles = {
+            admin: 'background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.4); color: #a5b4fc; font-weight: 700;',
+            reviewer: 'background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #fbbf24; font-weight: 600;',
+            user: 'background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; font-weight: 600;'
+        };
+        const badgeLabels = { admin: "ADMINISTRATEUR", reviewer: "RÉVISEUR", user: "ANALYSTE USER" };
+        const roleBadge = userRoles(u).map(r =>
+            `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block;">${badgeLabels[r] || escapeHtml(r.toUpperCase())}</span>`
+        ).join("") || `<span style="${badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem;">ANALYSTE USER</span>`;
 
         const dateFormatted = u.created_at ? new Date(u.created_at).toLocaleDateString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "N/A";
         const isSelf = currentUser && currentUser.id === u.id;
@@ -1649,7 +1677,13 @@ function openEditUserModal(userId) {
     document.getElementById("user-input-username").value = user.username;
     document.getElementById("user-input-username").disabled = false;
     document.getElementById("user-input-fullname").value = user.full_name || "";
-    document.getElementById("user-input-role").value = user.role;
+    const roleSelect = document.getElementById("user-input-role");
+    roleSelect.value = user.role;
+    if (roleSelect.value !== user.role) {
+        // Combinaison de roles sans option predefinie : repli sur le role dominant
+        const roles = userRoles(user);
+        roleSelect.value = roles.includes("admin") ? "admin" : (roles.includes("reviewer") ? (roles.includes("user") ? "reviewer,user" : "reviewer") : "user");
+    }
     document.getElementById("user-input-password").value = "";
     document.getElementById("user-input-password").required = false;
     document.getElementById("user-password-hint").style.display = "block";
@@ -1822,3 +1856,344 @@ window.onclick = function(event) {
 };
 
 
+
+// ------------------ HOMOLOGATION (REVUE AVANT PRODUCTION) ------------------
+
+let ingestionSettings = null;
+let pendingReviews = [];
+let reviewCurrentSnapshotId = null;
+let reviewCurrentPage = 1;
+let reviewExcludedSelection = new Set();
+
+// Roles empilables : "user,reviewer" -> ["user", "reviewer"]
+function userRoles(user) {
+    if (!user) return [];
+    if (Array.isArray(user.roles)) return user.roles;
+    return (user.role || "").split(",").map(r => r.trim().toLowerCase()).filter(Boolean);
+}
+
+async function fetchIngestionSettings() {
+    try {
+        const response = await fetch("/api/settings/ingestion");
+        if (!response.ok) return;
+        ingestionSettings = await response.json();
+        const approvalEl = document.getElementById("setting-require-approval");
+        const justifEl = document.getElementById("setting-exclusion-justification");
+        const fileEl = document.getElementById("setting-exclusion-file");
+        if (approvalEl) approvalEl.checked = ingestionSettings.require_approval;
+        if (justifEl) justifEl.checked = ingestionSettings.exclusion_justification_required;
+        if (fileEl) fileEl.checked = ingestionSettings.exclusion_file_required;
+        // Asterisques "obligatoire" de la modale d'exclusion
+        const justifMark = document.getElementById("exclusion-justification-required-mark");
+        const fileMark = document.getElementById("exclusion-file-required-mark");
+        if (justifMark) justifMark.classList.toggle("hidden", !ingestionSettings.exclusion_justification_required);
+        if (fileMark) fileMark.classList.toggle("hidden", !ingestionSettings.exclusion_file_required);
+    } catch (e) {
+        console.error("Error fetching ingestion settings:", e);
+    }
+}
+
+async function saveIngestionSettings() {
+    const payload = {
+        require_approval: document.getElementById("setting-require-approval").checked,
+        exclusion_justification_required: document.getElementById("setting-exclusion-justification").checked,
+        exclusion_file_required: document.getElementById("setting-exclusion-file").checked
+    };
+    try {
+        const response = await fetch("/api/settings/ingestion", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Échec de la mise à jour des réglages."));
+            return;
+        }
+        alert(data.message || "Réglages mis à jour.");
+        fetchIngestionSettings();
+    } catch (e) {
+        console.error("Error saving ingestion settings:", e);
+        alert("Erreur réseau de communication.");
+    }
+}
+
+async function fetchPendingReviews() {
+    try {
+        const response = await fetch("/api/review/pending");
+        if (!response.ok) return;
+        const data = await response.json();
+        pendingReviews = data.pending || [];
+        renderPendingTable(pendingReviews);
+        const badge = document.getElementById("review-pending-badge");
+        if (badge) {
+            badge.textContent = pendingReviews.length;
+            badge.classList.toggle("hidden", pendingReviews.length === 0);
+        }
+    } catch (e) {
+        console.error("Error fetching pending reviews:", e);
+    }
+}
+
+function renderPendingTable(pending) {
+    const tbody = document.querySelector("#review-pending-table tbody");
+    if (!tbody) return;
+    if (!pending || pending.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Aucun snapshot en attente d\'homologation.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = pending.map(snap => {
+        const dateStr = snap.uploaded_at ? new Date(snap.uploaded_at).toLocaleString("fr-FR") : "-";
+        return `
+            <tr>
+                <td>${escapeHtml(dateStr)}</td>
+                <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}...</small></td>
+                <td><span class="status-badge warning">${escapeHtml(snap.file_type)}</span></td>
+                <td>${snap.record_count}</td>
+                <td>${snap.excluded_count || 0}</td>
+                <td><button class="btn btn-sm btn-secondary" onclick="openReviewDetail('${escapeHtml(snap.snapshot_id)}')">🔍 Examiner</button></td>
+            </tr>
+        `;
+    }).join("");
+}
+
+async function openReviewDetail(snapshotId) {
+    reviewCurrentSnapshotId = snapshotId;
+    reviewExcludedSelection = new Set();
+    reviewCurrentPage = 1;
+    const searchInput = document.getElementById("review-entity-search");
+    if (searchInput) searchInput.value = "";
+    const commentEl = document.getElementById("review-comment");
+    if (commentEl) commentEl.value = "";
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Impossible de charger le snapshot."));
+            return;
+        }
+        document.getElementById("review-detail-card").classList.remove("hidden");
+        document.getElementById("review-detail-title").textContent = `Examen du Snapshot — ${data.file_name}`;
+        const uploadedStr = data.uploaded_at ? new Date(data.uploaded_at).toLocaleString("fr-FR") : "-";
+        document.getElementById("review-detail-meta").textContent =
+            `${data.file_type} · ${data.record_count} fiches · importé le ${uploadedStr} · delta calculé par rapport à la production actuelle` +
+            (data.production_snapshot_id ? "" : " (aucune liste du même type en production : tout est en ajout)");
+        const summary = data.delta_summary || {};
+        document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
+        document.getElementById("review-delta-removed").textContent = summary.removed_count ?? 0;
+        document.getElementById("review-delta-modified").textContent = summary.modified_count ?? 0;
+        await loadReviewEntitiesPage(1);
+        document.getElementById("review-detail-card").scrollIntoView({ behavior: "smooth" });
+    } catch (e) {
+        console.error("Error opening review detail:", e);
+        alert("Erreur réseau de communication.");
+    }
+}
+
+async function loadReviewEntitiesPage(page) {
+    if (!reviewCurrentSnapshotId) return;
+    reviewCurrentPage = page;
+    const search = (document.getElementById("review-entity-search").value || "").trim();
+    const params = new URLSearchParams({ page: String(page), page_size: "100" });
+    if (search) params.set("search", search);
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/entities?${params}`);
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Impossible de charger les entités."));
+            return;
+        }
+        renderReviewEntitiesTable(data);
+    } catch (e) {
+        console.error("Error loading review entities:", e);
+    }
+}
+
+function renderReviewEntitiesTable(data) {
+    const tbody = document.querySelector("#review-entities-table tbody");
+    if (!tbody) return;
+    if (!data.items || data.items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Aucune entité trouvée.</td></tr>';
+    } else {
+        tbody.innerHTML = data.items.map(item => {
+            const checked = reviewExcludedSelection.has(item.id) ? "checked" : "";
+            let exclusionCell = '<small style="color: var(--text-muted);">—</small>';
+            if (item.excluded) {
+                const evidenceLink = item.exclusion_file_name
+                    ? ` · <a href="/api/review/exclusion-evidence/${item.id}" target="_blank" style="color: var(--color-accent);">📎 ${escapeHtml(item.exclusion_file_name)}</a>`
+                    : "";
+                exclusionCell = `<span class="status-badge alert">EXCLU</span><br>` +
+                    `<small>${escapeHtml(item.exclusion_justification || "(sans justification)")} — ${escapeHtml(item.excluded_by || "")}${evidenceLink}</small>`;
+            }
+            return `
+                <tr ${item.excluded ? 'style="opacity: 0.65;"' : ""}>
+                    <td><input type="checkbox" ${checked} onchange="toggleReviewSelection(${item.id}, this.checked)"></td>
+                    <td><code>${escapeHtml(item.entity_id)}</code></td>
+                    <td>${escapeHtml(item.entity_type)}</td>
+                    <td><strong>${escapeHtml(item.primary_name)}</strong></td>
+                    <td>${exclusionCell}</td>
+                </tr>
+            `;
+        }).join("");
+    }
+    const pagination = document.getElementById("review-entities-pagination");
+    if (pagination) {
+        const totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 100)));
+        pagination.classList.toggle("hidden", data.total === 0);
+        pagination.innerHTML = `
+            <button class="btn btn-sm" ${data.page <= 1 ? "disabled" : ""} onclick="loadReviewEntitiesPage(${data.page - 1})" style="background: rgba(255,255,255,0.08);">← Précédent</button>
+            <span style="margin: 0 1rem; color: var(--text-muted); font-size: 0.85rem;">Page ${data.page} / ${totalPages} — ${data.total} entité(s)</span>
+            <button class="btn btn-sm" ${data.page >= totalPages ? "disabled" : ""} onclick="loadReviewEntitiesPage(${data.page + 1})" style="background: rgba(255,255,255,0.08);">Suivant →</button>
+        `;
+    }
+    updateReviewSelectionInfo();
+}
+
+function toggleReviewSelection(entityPk, isChecked) {
+    if (isChecked) reviewExcludedSelection.add(entityPk);
+    else reviewExcludedSelection.delete(entityPk);
+    updateReviewSelectionInfo();
+}
+
+function updateReviewSelectionInfo() {
+    const info = document.getElementById("review-selection-info");
+    if (info) info.textContent = reviewExcludedSelection.size > 0 ? `${reviewExcludedSelection.size} entité(s) sélectionnée(s)` : "";
+}
+
+function openExclusionModal() {
+    if (reviewExcludedSelection.size === 0) {
+        alert("Sélectionnez au moins une entité à exclure (cases à cocher).");
+        return;
+    }
+    document.getElementById("exclusion-modal-count").textContent =
+        `${reviewExcludedSelection.size} entité(s) sélectionnée(s) seront exclues de la mise en production (conservées en base pour l'audit).`;
+    document.getElementById("exclusion-justification").value = "";
+    document.getElementById("exclusion-file").value = "";
+    document.getElementById("exclusion-modal").classList.remove("hidden");
+}
+
+function closeExclusionModal() {
+    document.getElementById("exclusion-modal").classList.add("hidden");
+}
+
+async function submitExclusions(event) {
+    event.preventDefault();
+    if (!reviewCurrentSnapshotId || reviewExcludedSelection.size === 0) return;
+    const justification = document.getElementById("exclusion-justification").value.trim();
+    const fileInput = document.getElementById("exclusion-file");
+    // Pre-validation cote client selon les reglages modulaires (le serveur revalide)
+    if (ingestionSettings && ingestionSettings.exclusion_justification_required && !justification) {
+        alert("Une justification est obligatoire pour exclure une entité (réglage actif).");
+        return;
+    }
+    if (ingestionSettings && ingestionSettings.exclusion_file_required && fileInput.files.length === 0) {
+        alert("Une pièce jointe justificative est obligatoire pour exclure une entité (réglage actif).");
+        return;
+    }
+    const formData = new FormData();
+    formData.append("entity_ids", JSON.stringify([...reviewExcludedSelection]));
+    formData.append("justification", justification);
+    if (fileInput.files.length > 0) formData.append("file", fileInput.files[0]);
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/exclusions`, {
+            method: "POST",
+            body: formData
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Échec de l'exclusion."));
+            return;
+        }
+        closeExclusionModal();
+        reviewExcludedSelection = new Set();
+        alert(data.message);
+        loadReviewEntitiesPage(reviewCurrentPage);
+        fetchPendingReviews();
+    } catch (e) {
+        console.error("Error submitting exclusions:", e);
+        alert("Erreur réseau de communication.");
+    }
+}
+
+async function removeExclusions() {
+    if (!reviewCurrentSnapshotId || reviewExcludedSelection.size === 0) {
+        alert("Sélectionnez au moins une entité à réintégrer (cases à cocher).");
+        return;
+    }
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/exclusions/remove`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ entity_ids: [...reviewExcludedSelection] })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Échec de la réintégration."));
+            return;
+        }
+        reviewExcludedSelection = new Set();
+        alert(data.message);
+        loadReviewEntitiesPage(reviewCurrentPage);
+        fetchPendingReviews();
+    } catch (e) {
+        console.error("Error removing exclusions:", e);
+        alert("Erreur réseau de communication.");
+    }
+}
+
+async function approvePendingSnapshot() {
+    if (!reviewCurrentSnapshotId) return;
+    if (!confirm("Approuver ce snapshot ? Il sera mis en production et remplacera les listes antérieures du même type (hors entités exclues).")) return;
+    const comment = document.getElementById("review-comment").value.trim();
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/approve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ comment })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Échec de l'approbation."));
+            return;
+        }
+        alert(`${data.message} (${data.excluded_count} entité(s) exclue(s))`);
+        document.getElementById("review-detail-card").classList.add("hidden");
+        reviewCurrentSnapshotId = null;
+        fetchPendingReviews();
+        fetchSnapshots();
+        fetchWatchlist();
+    } catch (e) {
+        console.error("Error approving snapshot:", e);
+        alert("Erreur réseau de communication.");
+    }
+}
+
+async function rejectPendingSnapshot() {
+    if (!reviewCurrentSnapshotId) return;
+    const comment = document.getElementById("review-comment").value.trim();
+    if (!comment) {
+        alert("Un commentaire est requis pour rejeter un snapshot.");
+        return;
+    }
+    if (!confirm("Rejeter ce snapshot ? Il n'entrera jamais en production (conservé en base pour l'audit).")) return;
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/reject`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ comment })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Échec du rejet."));
+            return;
+        }
+        alert(data.message);
+        document.getElementById("review-detail-card").classList.add("hidden");
+        reviewCurrentSnapshotId = null;
+        fetchPendingReviews();
+        fetchSnapshots();
+    } catch (e) {
+        console.error("Error rejecting snapshot:", e);
+        alert("Erreur réseau de communication.");
+    }
+}

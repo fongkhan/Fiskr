@@ -37,6 +37,7 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import parse_ofac_advanced_xml
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
+from fiskr.settings import require_approval_enabled
 
 logger = logging.getLogger("fiskr.sync")
 
@@ -206,6 +207,33 @@ def _latest_ready_snapshot(db, file_type: str) -> Optional[Snapshot]:
     ).order_by(Snapshot.uploaded_at.desc()).first()
 
 
+def _latest_reviewable_snapshot(db, file_type: str) -> Optional[Snapshot]:
+    """
+    Base de fusion incrementale en mode homologation : le snapshot le plus
+    recent encore vivant (en production OU en attente de pointage). Sans cela,
+    un JO du jour 2 fusionne sur la production perdrait les entites du pending
+    du jour 1 lors de son approbation.
+    """
+    return db.query(Snapshot).filter(
+        Snapshot.file_type == file_type,
+        Snapshot.status.in_(["READY", "PENDING_REVIEW"]),
+        Snapshot.snapshot_id != MANUAL_SNAPSHOT_ID
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+
+
+def _existing_snapshot_with_hash(db, file_type: str, fhash: str) -> Optional[Snapshot]:
+    """
+    Deduplication par hash etendue aux snapshots en attente d'homologation :
+    sans cela, la sync quotidienne recreerait chaque matin un doublon pending
+    du meme fichier tant que le pointage n'a pas eu lieu.
+    """
+    return db.query(Snapshot).filter(
+        Snapshot.file_type == file_type,
+        Snapshot.file_hash == fhash,
+        Snapshot.status.in_(["READY", "PENDING_REVIEW"])
+    ).first()
+
+
 def _snapshot_entity_dicts(db, snapshot_id: str) -> List[Dict[str, Any]]:
     ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == snapshot_id).all()
     return [{c.name: getattr(e, c.name) for c in e.__table__.columns} for e in ents]
@@ -335,11 +363,16 @@ def run_ofac_sync(
         with open(temp_file, "rb") as f:
             fhash = hashlib.sha256(f.read()).hexdigest()
 
-        if previous and previous.file_hash == fhash:
+        duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_OFAC", fhash)
+        if duplicate:
+            if duplicate.status == "PENDING_REVIEW":
+                message = "Le fichier OFAC est identique a un snapshot deja en attente d'homologation."
+            else:
+                message = "Le fichier OFAC est identique a la version active (hash inchange)."
             return _finalize_report(
                 db, source="OFAC", trigger=trigger, status="NO_CHANGE",
-                message="Le fichier OFAC est identique a la version active (hash inchange).",
-                previous_snapshot_id=previous.snapshot_id
+                message=message,
+                previous_snapshot_id=duplicate.snapshot_id
             )
 
         # Ingestion du nouveau snapshot
@@ -356,24 +389,36 @@ def run_ofac_sync(
         db.commit()
 
         record_count = persist_pivot_items(db, snap_id, parse_ofac_advanced_xml(str(temp_file)))
-        snap.status = "READY"
+        # Mode homologation : le snapshot attend un pointage humain, l'ancienne
+        # liste READY reste en production jusqu'a l'approbation.
+        staging = require_approval_enabled(db)
+        snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
         db.commit()
 
-        # Delta puis application (remplacement de la liste OFAC active)
+        # Delta par rapport a la liste active (= production, non supersedee)
         old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
-        _supersede_previous_snapshots(db, "WATCHLIST_OFAC", snap_id)
-        db.commit()
-        if reload_cache:
-            reload_cache()
+        if not staging:
+            # Application immediate (remplacement de la liste OFAC active)
+            _supersede_previous_snapshots(db, "WATCHLIST_OFAC", snap_id)
+            db.commit()
+            if reload_cache:
+                reload_cache()
 
         summary = delta["summary"]
+        if staging:
+            message = (
+                f"{record_count} fiches importees depuis le fichier OFAC officiel, "
+                "snapshot en attente d'homologation (pointage humain requis)."
+            )
+        else:
+            message = f"{record_count} fiches importees depuis le fichier OFAC officiel."
         return _finalize_report(
-            db, source="OFAC", trigger=trigger, status="SUCCESS",
-            message=f"{record_count} fiches importees depuis le fichier OFAC officiel.",
+            db, source="OFAC", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
+            message=message,
             snapshot_id=snap_id,
             previous_snapshot_id=previous.snapshot_id if previous else None,
             added_count=summary["added_count"],
@@ -796,7 +841,9 @@ def run_eurlex_sync(
     pdf_getter = pdf_fetcher or download_to_file
     archive_dir = archive_dir or EURLEX_ARCHIVE_DIR
 
-    previous = _latest_ready_snapshot(db, "WATCHLIST_EU")
+    # Base de fusion : inclut un eventuel snapshot en attente d'homologation pour
+    # que les amendements de jours successifs s'enchainent sans perte.
+    previous = _latest_reviewable_snapshot(db, "WATCHLIST_EU")
     snap_id = None
     try:
         acts, scraped = fetch_eurlex_entities(for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
@@ -826,6 +873,18 @@ def run_eurlex_sync(
         content_hash = hashlib.sha256(
             "|".join(sorted(e["entity_id"] + (compute_checksum(e)) for e in scraped)).encode("utf-8")
         ).hexdigest()
+        duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_EU", content_hash)
+        if duplicate:
+            if duplicate.status == "PENDING_REVIEW":
+                message = "Contenu identique a un snapshot EU deja en attente d'homologation."
+            else:
+                message = "Contenu identique a la liste EU active (hash inchange)."
+            return _finalize_report(
+                db, source="EURLEX", trigger=trigger, status="NO_CHANGE",
+                message=message,
+                previous_snapshot_id=duplicate.snapshot_id,
+                delta_report={"acts": acts}
+            )
         snap = Snapshot(
             snapshot_id=snap_id,
             file_type="WATCHLIST_EU",
@@ -840,12 +899,17 @@ def run_eurlex_sync(
         record_count = persist_pivot_items(db, snap_id, scraped)
         carried = 0
         if previous:
-            prev_rows = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == previous.snapshot_id).all()
+            # Les entites exclues lors d'une revue ne sont pas reconduites
+            prev_rows = db.query(WatchlistEntity).filter(
+                WatchlistEntity.snapshot_id == previous.snapshot_id,
+                WatchlistEntity.excluded.isnot(True)
+            ).all()
             for row in prev_rows:
                 if row.entity_id not in scraped_ids:
                     db.add(_clone_entity_row(snap_id, row))
                     carried += 1
-        snap.status = "READY"
+        staging = require_approval_enabled(db)
+        snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count + carried
         db.commit()
 
@@ -853,17 +917,21 @@ def run_eurlex_sync(
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
-        _supersede_previous_snapshots(db, "WATCHLIST_EU", snap_id)
-        db.commit()
-        if reload_cache:
-            reload_cache()
+        if not staging:
+            _supersede_previous_snapshots(db, "WATCHLIST_EU", snap_id)
+            db.commit()
+            if reload_cache:
+                reload_cache()
 
         summary = delta["summary"]
         delta_stored = _truncate_delta_details(delta)
         delta_stored["acts"] = acts
+        message = f"{len(acts)} acte(s) \"{cfg['keyword']}\" au JO du {for_date.strftime('%d/%m/%Y')} ; {len(scraped)} liste(s) extrait(s), {carried} fiche(s) reconduite(s)."
+        if staging:
+            message += " Snapshot en attente d'homologation (pointage humain requis)."
         return _finalize_report(
-            db, source="EURLEX", trigger=trigger, status="SUCCESS",
-            message=f"{len(acts)} acte(s) \"{cfg['keyword']}\" au JO du {for_date.strftime('%d/%m/%Y')} ; {len(scraped)} liste(s) extrait(s), {carried} fiche(s) reconduite(s).",
+            db, source="EURLEX", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
+            message=message,
             snapshot_id=snap_id,
             previous_snapshot_id=previous.snapshot_id if previous else None,
             added_count=summary["added_count"],

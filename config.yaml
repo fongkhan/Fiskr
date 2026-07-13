@@ -27,6 +27,15 @@ database:
   fallback_to_sqlite: true
   sqlite_path: "fiskr.sqlite3"
 
+# Mode homologation : environnement de validation avant mise en production.
+# Ces valeurs sont des defauts : un admin peut les modifier a chaud depuis le
+# dashboard (elles sont alors stockees en base et priment sur ce fichier).
+ingestion:
+  require_approval: false   # true = tout snapshot watchlist entrant attend un pointage humain
+review:
+  exclusion_justification_required: true   # justification texte obligatoire lors d'une exclusion
+  exclusion_file_required: false           # piece jointe justificative obligatoire lors d'une exclusion
+
 # Synchronisation automatique des sources officielles (OFAC / EUR-Lex)
 sync:
   auto_enabled: false        # true = execution automatique chaque matin
