@@ -937,11 +937,47 @@ DGT_NATURE_TO_TYPE = {
     "navire": "V",
 }
 
-# Normalisation des pays/nationalites du registre DGT (libelles francais) vers
-# ISO2, indispensable pour que les cles de blocking coincident avec celles du
-# referentiel clients (codes ISO). Radicaux sans accents, minuscules : ils
-# couvrent le nom du pays ET l'adjectif de nationalite (masculin/feminin/pluriel).
-_DGT_COUNTRY_STEMS = [
+# Normalisation des pays/nationalites (libelles francais du registre DGT et
+# anglais de la liste ONU) vers ISO2, indispensable pour que les cles de
+# blocking coincident avec celles du referentiel clients (codes ISO).
+# Radicaux sans accents, minuscules : ils couvrent le nom du pays ET
+# l'adjectif de nationalite. L'ordre compte (nigeria avant niger, etc.).
+_COUNTRY_STEMS = [
+    # --- Libelles anglais (liste consolidee ONU) ---
+    ("democratic people's republic of korea", "KP"), ("north korea", "KP"),
+    ("russian", "RU"), ("russia", "RU"),
+    ("syrian arab republic", "SY"), ("syria", "SY"),
+    ("iranian", "IR"), ("iran", "IR"),
+    ("myanmar", "MM"), ("burma", "MM"),
+    ("libyan arab jamahiriya", "LY"), ("libya", "LY"),
+    ("venezuela", "VE"), ("china", "CN"), ("chinese", "CN"),
+    ("iraqi", "IQ"), ("iraq", "IQ"),
+    ("afghanistan", "AF"), ("afghan", "AF"),
+    ("yemeni", "YE"), ("yemen", "YE"), ("lebanese", "LB"), ("lebanon", "LB"),
+    ("south sudan", "SS"), ("sudanese", "SD"), ("sudan", "SD"),
+    ("democratic republic of the congo", "CD"),
+    ("central african", "CF"), ("somalia", "SO"), ("somali", "SO"),
+    ("guinea-bissau", "GW"), ("guinea", "GN"),
+    ("zimbabwe", "ZW"), ("turkey", "TR"), ("turkish", "TR"),
+    ("ukraine", "UA"), ("ukrainian", "UA"), ("moldova", "MD"),
+    ("tunisia", "TN"), ("tunisian", "TN"), ("egypt", "EG"),
+    ("pakistani", "PK"), ("pakistan", "PK"),
+    ("saudi arabia", "SA"), ("saudi", "SA"),
+    ("jordanian", "JO"), ("jordan", "JO"),
+    ("israeli", "IL"), ("israel", "IL"),
+    ("united kingdom", "GB"), ("british", "GB"),
+    ("united states", "US"), ("american", "US"),
+    ("united arab emirates", "AE"), ("kuwait", "KW"),
+    ("eritrea", "ER"), ("ethiopia", "ET"),
+    ("kyrgyz", "KG"), ("tajikistan", "TJ"), ("uzbekistan", "UZ"), ("kazakhstan", "KZ"),
+    ("indonesian", "ID"), ("indonesia", "ID"),
+    ("philippines", "PH"), ("filipino", "PH"),
+    ("sri lanka", "LK"), ("bangladesh", "BD"),
+    ("nigerian", "NG"), ("nigeria", "NG"),
+    ("burkina faso", "BF"), ("cameroon", "CM"),
+    ("germany", "DE"), ("german", "DE"), ("belgium", "BE"), ("belgian", "BE"),
+    ("spain", "ES"), ("spanish", "ES"), ("italy", "IT"), ("italian", "IT"),
+    # --- Libelles francais (registre DGT) ---
     ("coree du nord", "KP"), ("nord-coreen", "KP"), ("nord coreen", "KP"),
     ("russ", "RU"), ("bielorus", "BY"), ("belarus", "BY"),
     ("syrie", "SY"), ("syrien", "SY"),
@@ -987,20 +1023,25 @@ def _strip_accents_lower(text: str) -> str:
     ).strip()
 
 
-def dgt_country_to_iso2(value: str) -> str:
+def country_label_to_iso2(value: str) -> str:
     """
-    Convertit un pays / une nationalite du registre DGT (libelle francais,
-    ex. "Russe", "Russie") en code ISO2. Repli sur la valeur d'origine si
-    aucun radical connu ne correspond (la cle de blocking reste coherente
-    en interne, meme si elle ne croisera pas les codes ISO clients).
+    Convertit un pays / une nationalite en libelle francais (registre DGT :
+    "Russe", "Russie") ou anglais (liste ONU : "Russian Federation") en code
+    ISO2. Repli sur la valeur d'origine si aucun radical connu ne correspond
+    (la cle de blocking reste coherente en interne, meme si elle ne croisera
+    pas les codes ISO clients).
     """
     normalized = _strip_accents_lower(value)
     if re.fullmatch(r"[a-z]{2}", normalized):
         return normalized.upper()
-    for stem, iso2 in _DGT_COUNTRY_STEMS:
+    for stem, iso2 in _COUNTRY_STEMS:
         if normalized.startswith(stem) or f" {stem}" in f" {normalized}":
             return iso2
     return str(value).strip()
+
+
+# Alias historique (connecteur DGT)
+dgt_country_to_iso2 = country_label_to_iso2
 
 
 def _dgt_value_text(value_obj: Any, *preferred_keys: str) -> str:
@@ -1215,6 +1256,345 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
             "other_registration_ids": other_registrations,
             "passport_documents": passports,
             "national_id_documents": [],
+            "other_id_documents": []
+        }
+
+
+# ------------------ LISTE CONSOLIDEE UE (FSF XML OFFICIEL) ------------------
+# Fichier XML consolide des sanctions financieres de l'UE, publie par la
+# Commission (webgate FSD/FSF). Contrairement au scraping du Journal Officiel,
+# ce fichier fait autorite et permet de detecter les radiations. Structure :
+# <export><sanctionEntity euReferenceNumber=... logicalId=...>
+#   <subjectType code="person|enterprise" classificationCode="P|E"/>
+#   <regulation programme=... numberTitle=...><publicationUrl/></regulation>
+#   <nameAlias wholeName=... firstName=... lastName=... gender=... function=... strong=.../>
+#   <citizenship countryIso2Code=.../>
+#   <birthdate birthdate=... year=... city=... countryIso2Code=.../>
+#   <identification identificationTypeCode=... number=... countryIso2Code=.../>
+#   <address street=... city=... countryIso2Code=.../>
+#   <remark>...</remark>
+# </sanctionEntity></export>
+
+
+def _child_local(elem: ET.Element, local: str) -> List[ET.Element]:
+    """Enfants directs dont le nom local (sans namespace) correspond."""
+    return [c for c in elem if c.tag.split('}')[-1] == local]
+
+
+def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse le XML consolide officiel des sanctions financieres de l'UE (FSF)."""
+    for _, entity in _stream_target_elements(file_path, {'sanctionEntity'}):
+        logical_id = get_attrib_insensitive(entity, "logicalId")
+        eu_ref = get_attrib_insensitive(entity, "euReferenceNumber")
+        entity_key = eu_ref or logical_id
+        if not entity_key:
+            continue
+
+        entity_type = "E"
+        for st in _child_local(entity, "subjectType"):
+            code = (get_attrib_insensitive(st, "code") or "").lower()
+            classification = (get_attrib_insensitive(st, "classificationCode") or "").upper()
+            if "person" in code or classification == "P":
+                entity_type = "I"
+
+        primary_name = ""
+        first_name = ""
+        last_name = ""
+        gender = "U"
+        designation = None
+        aliases_raw = []
+        for alias in _child_local(entity, "nameAlias"):
+            whole = (get_attrib_insensitive(alias, "wholeName") or "").strip()
+            fn = (get_attrib_insensitive(alias, "firstName") or "").strip()
+            mn = (get_attrib_insensitive(alias, "middleName") or "").strip()
+            ln = (get_attrib_insensitive(alias, "lastName") or "").strip()
+            name = whole or " ".join(p for p in (fn, mn, ln) if p)
+            if not name:
+                continue
+            g = (get_attrib_insensitive(alias, "gender") or "").upper()
+            if g in ("M", "F") and gender == "U":
+                gender = g
+            func = (get_attrib_insensitive(alias, "function") or "").strip()
+            title = (get_attrib_insensitive(alias, "title") or "").strip()
+            if not designation and (func or title):
+                designation = func or title
+            if not primary_name:
+                primary_name = name
+                first_name = " ".join(p for p in (fn, mn) if p)
+                last_name = ln
+            else:
+                strong = (get_attrib_insensitive(alias, "strong") or "true").lower()
+                aliases_raw.append({"name": name, "type": "Strong" if strong == "true" else "Weak"})
+        if not primary_name:
+            continue
+
+        citizenships = []
+        for cit in _child_local(entity, "citizenship"):
+            iso2 = (get_attrib_insensitive(cit, "countryIso2Code") or "").strip()
+            desc = (get_attrib_insensitive(cit, "countryDescription") or "").strip()
+            code = iso2 or (country_label_to_iso2(desc) if desc else "")
+            if code and code.upper() != "00":
+                citizenships.append(code.upper() if len(code) == 2 else code)
+
+        dobs = []
+        place_of_birth = None
+        birth_countries = []
+        for bd in _child_local(entity, "birthdate"):
+            full = (get_attrib_insensitive(bd, "birthdate") or "").strip()
+            if full:
+                dobs.append(full)
+            else:
+                year = (get_attrib_insensitive(bd, "year") or "").strip()
+                if year.isdigit():
+                    month = (get_attrib_insensitive(bd, "monthOfYear") or get_attrib_insensitive(bd, "month") or "1").strip() or "1"
+                    day = (get_attrib_insensitive(bd, "dayOfMonth") or get_attrib_insensitive(bd, "day") or "1").strip() or "1"
+                    dobs.append(f"{year}-{month.zfill(2)}-{day.zfill(2)}")
+            city = (get_attrib_insensitive(bd, "city") or get_attrib_insensitive(bd, "place") or "").strip()
+            country_desc = (get_attrib_insensitive(bd, "countryDescription") or "").strip()
+            iso2 = (get_attrib_insensitive(bd, "countryIso2Code") or "").strip()
+            if not place_of_birth and (city or country_desc):
+                place_of_birth = ", ".join(p for p in (city, country_desc) if p)
+            if iso2 and iso2.upper() != "00":
+                birth_countries.append(iso2.upper())
+
+        passports = []
+        national_ids = []
+        other_registrations = []
+        for ident in _child_local(entity, "identification"):
+            number = (get_attrib_insensitive(ident, "number") or get_attrib_insensitive(ident, "latinNumber") or "").strip()
+            if not number:
+                continue
+            type_code = (get_attrib_insensitive(ident, "identificationTypeCode") or "").lower()
+            type_desc = (get_attrib_insensitive(ident, "identificationTypeDescription") or "").lower()
+            iso2 = (get_attrib_insensitive(ident, "countryIso2Code") or "XX").strip().upper() or "XX"
+            if "passport" in type_code or "passport" in type_desc:
+                passports.append({"number": number, "issuing_country": iso2, "expiration_date": None})
+            elif type_code == "id" or "national" in type_desc:
+                national_ids.append({"number": number, "issuing_country": iso2})
+            else:
+                other_registrations.append({"id_type": type_desc or type_code or "OtherRegistration", "number": number})
+
+        addresses = []
+        address_countries = []
+        for addr in _child_local(entity, "address"):
+            parts = [
+                (get_attrib_insensitive(addr, key) or "").strip()
+                for key in ("street", "poBox", "zipCode", "city", "region", "place")
+            ]
+            country_desc = (get_attrib_insensitive(addr, "countryDescription") or "").strip()
+            iso2 = (get_attrib_insensitive(addr, "countryIso2Code") or "").strip().upper()
+            full = ", ".join(p for p in parts + [country_desc] if p)
+            if full:
+                addresses.append({"full": full, "city": parts[3], "country": country_desc})
+            if iso2 and iso2 != "00":
+                address_countries.append(iso2)
+
+        programme = None
+        extra_info = []
+        for reg in _child_local(entity, "regulation"):
+            prog = (get_attrib_insensitive(reg, "programme") or "").strip()
+            if prog and not programme:
+                programme = prog
+            number_title = (get_attrib_insensitive(reg, "numberTitle") or "").strip()
+            if number_title:
+                extra_info.append(f"Regulation: {number_title}")
+        for remark in _child_local(entity, "remark"):
+            if remark.text and remark.text.strip():
+                extra_info.append(remark.text.strip())
+        un_id = (get_attrib_insensitive(entity, "unitedNationId") or "").strip()
+        if un_id:
+            extra_info.append(f"UN ID: {un_id}")
+
+        primary_addr = addresses[0] if addresses else {}
+        yield {
+            "entity_id": f"EUFSF-{entity_key}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name if entity_type == "I" else "",
+                "last_name": last_name if entity_type == "I" else "",
+                "maiden_name": ""
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": gender,
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else []
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": designation,
+            "designation_reasons": programme,
+            "additional_informations": "; ".join(extra_info) or None,
+            "origin": "EU FSF Consolidated",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": []
+        }
+
+
+# ------------------ LISTE CONSOLIDEE ONU (XML OFFICIEL) ------------------
+# Liste consolidee du Conseil de securite (scsanctions.un.org), publique et
+# sans authentification. Deux sections : INDIVIDUALS/INDIVIDUAL et
+# ENTITIES/ENTITY, avec champs texte (FIRST_NAME..FOURTH_NAME, UN_LIST_TYPE,
+# REFERENCE_NUMBER, COMMENTS1), listes imbriquees (INDIVIDUAL_ALIAS,
+# INDIVIDUAL_DATE_OF_BIRTH, INDIVIDUAL_PLACE_OF_BIRTH, INDIVIDUAL_DOCUMENT,
+# *_ADDRESS) et valeurs multiples (NATIONALITY/VALUE, DESIGNATION/VALUE).
+
+
+def _un_text(elem: ET.Element, local: str) -> str:
+    children = _child_local(elem, local)
+    if children and children[0].text and children[0].text.strip():
+        return children[0].text.strip()
+    return ""
+
+
+def _un_values(elem: ET.Element, local: str) -> List[str]:
+    """Valeurs des blocs <LOCAL><VALUE>..</VALUE>...</LOCAL>."""
+    out = []
+    for container in _child_local(elem, local):
+        for value in _child_local(container, "VALUE"):
+            if value.text and value.text.strip():
+                out.append(value.text.strip())
+    return out
+
+
+def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee officielle du Conseil de securite de l'ONU."""
+    for local_name, record in _stream_target_elements(file_path, {'INDIVIDUAL', 'ENTITY'}):
+        data_id = _un_text(record, "DATAID")
+        reference = _un_text(record, "REFERENCE_NUMBER")
+        entity_key = reference or data_id
+        if not entity_key:
+            continue
+        entity_type = "I" if local_name == "INDIVIDUAL" else "E"
+
+        name_parts = [
+            _un_text(record, tag)
+            for tag in ("FIRST_NAME", "SECOND_NAME", "THIRD_NAME", "FOURTH_NAME")
+        ]
+        name_parts = [p for p in name_parts if p]
+        primary_name = " ".join(name_parts)
+        if not primary_name:
+            continue
+
+        aliases_raw = []
+        original_script = _un_text(record, "NAME_ORIGINAL_SCRIPT")
+        if original_script:
+            aliases_raw.append({"name": original_script, "type": "Strong"})
+        alias_tag = "INDIVIDUAL_ALIAS" if entity_type == "I" else "ENTITY_ALIAS"
+        for alias in _child_local(record, alias_tag):
+            alias_name = _un_text(alias, "ALIAS_NAME")
+            if not alias_name:
+                continue
+            quality = _un_text(alias, "QUALITY").lower()
+            aliases_raw.append({"name": alias_name, "type": "Weak" if "low" in quality else "Strong"})
+
+        dobs = []
+        for dob in _child_local(record, "INDIVIDUAL_DATE_OF_BIRTH"):
+            date_val = _un_text(dob, "DATE")
+            year = _un_text(dob, "YEAR") or _un_text(dob, "FROM_YEAR")
+            if date_val:
+                dobs.append(date_val[:10])
+            elif year.isdigit():
+                dobs.append(f"{year}-01-01")
+
+        place_of_birth = None
+        birth_countries = []
+        for pob in _child_local(record, "INDIVIDUAL_PLACE_OF_BIRTH"):
+            city = _un_text(pob, "CITY")
+            state = _un_text(pob, "STATE_PROVINCE")
+            country = _un_text(pob, "COUNTRY")
+            if not place_of_birth and (city or state or country):
+                place_of_birth = ", ".join(p for p in (city, state, country) if p)
+            if country:
+                birth_countries.append(country_label_to_iso2(country))
+
+        citizenships = [country_label_to_iso2(v) for v in _un_values(record, "NATIONALITY")]
+
+        passports = []
+        national_ids = []
+        other_registrations = []
+        for doc in _child_local(record, "INDIVIDUAL_DOCUMENT"):
+            number = _un_text(doc, "NUMBER")
+            if not number:
+                continue
+            doc_type = _un_text(doc, "TYPE_OF_DOCUMENT").lower()
+            issuing = _un_text(doc, "ISSUING_COUNTRY") or _un_text(doc, "COUNTRY_OF_ISSUE")
+            iso2 = country_label_to_iso2(issuing) if issuing else "XX"
+            if "passport" in doc_type:
+                passports.append({"number": number, "issuing_country": iso2, "expiration_date": None})
+            elif "national" in doc_type:
+                national_ids.append({"number": number, "issuing_country": iso2})
+            else:
+                other_registrations.append({"id_type": doc_type or "OtherRegistration", "number": number})
+
+        addresses = []
+        address_countries = []
+        addr_tag = "INDIVIDUAL_ADDRESS" if entity_type == "I" else "ENTITY_ADDRESS"
+        for addr in _child_local(record, addr_tag):
+            parts = [_un_text(addr, t) for t in ("STREET", "CITY", "STATE_PROVINCE", "COUNTRY")]
+            full = ", ".join(p for p in parts if p)
+            if full:
+                addresses.append({"full": full, "city": parts[1], "country": parts[3]})
+            if parts[3]:
+                address_countries.append(country_label_to_iso2(parts[3]))
+
+        designation = "; ".join(_un_values(record, "DESIGNATION")) or None
+        un_list_type = _un_text(record, "UN_LIST_TYPE")
+        comments = _un_text(record, "COMMENTS1")
+        extra_info = []
+        if reference:
+            extra_info.append(f"UN Reference: {reference}")
+        if comments:
+            extra_info.append(comments)
+
+        primary_addr = addresses[0] if addresses else {}
+        yield {
+            "entity_id": f"UN-{entity_key}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else []
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": designation,
+            "designation_reasons": un_list_type or None,
+            "additional_informations": "; ".join(extra_info) or None,
+            "origin": "UN Consolidated List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
             "other_id_documents": []
         }
 

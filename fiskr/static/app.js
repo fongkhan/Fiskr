@@ -495,6 +495,7 @@ function renderSnapshotsTable(snaps) {
         else if (snap.file_type === "WATCHLIST_EU") typeBadge = '<span class="status-badge warning">EU CSV/PDF</span>';
         else if (snap.file_type === "WATCHLIST_SSIE") typeBadge = '<span class="status-badge alert">SSIE XML</span>';
         else if (snap.file_type === "WATCHLIST_DGT") typeBadge = '<span class="status-badge warning">DGT JSON</span>';
+        else if (snap.file_type === "WATCHLIST_UN") typeBadge = '<span class="status-badge warning">ONU XML</span>';
         else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
         
         tr.innerHTML = `
@@ -626,7 +627,7 @@ async function handleIngestion(event) {
 
 // Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn" };
+    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn" };
     const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {

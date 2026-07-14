@@ -54,6 +54,18 @@ sync:
   dgt:
     enabled: true
     url: "https://gels-avoirs.dgtresor.gouv.fr/ApiPublic/api/v1/publication/derniere-publication-fichier-json"
+  # Liste consolidee officielle des sanctions financieres de l'UE (fichiers FSF).
+  # Fait autorite sur le scraping du JO (radiations fiables). Necessite un token :
+  # inscription gratuite sur le webgate FSD de la Commission, puis renseigner
+  # sync.eu_fsf.token et passer enabled a true.
+  eu_fsf:
+    enabled: false
+    url: "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token={token}"
+    token: ""
+  # Liste consolidee du Conseil de securite de l'ONU (publique, sans token)
+  un:
+    enabled: true
+    url: "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
 
 # Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
 # Les selecteurs de balises pivots sont surchargables lors de chaque import.

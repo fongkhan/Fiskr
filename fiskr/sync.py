@@ -34,7 +34,9 @@ from urllib.parse import urljoin
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
-from fiskr.ingest import parse_ofac_advanced_xml, parse_dgt_gels_json
+from fiskr.ingest import (
+    parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml
+)
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
 from fiskr.settings import require_approval_enabled
@@ -50,6 +52,14 @@ DEFAULT_EURLEX_KEYWORD = "restrictive measures"
 # publique ENGEL sans authentification) : criblage obligatoire pour les
 # etablissements assujettis francais (lignes directrices ACPR/DGT).
 DEFAULT_DGT_URL = "https://gels-avoirs.dgtresor.gouv.fr/ApiPublic/api/v1/publication/derniere-publication-fichier-json"
+
+# Liste consolidee officielle des sanctions financieres de l'UE (fichiers FSF,
+# webgate FSD). {token} est le nom d'utilisateur cree lors de l'inscription
+# gratuite sur le webgate de la Commission — a renseigner dans config.yaml.
+DEFAULT_EU_FSF_URL = "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token={token}"
+
+# Liste consolidee du Conseil de securite de l'ONU (publique, sans token)
+DEFAULT_UN_URL = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -80,6 +90,16 @@ def get_sync_config() -> Dict[str, Any]:
         "dgt": {
             "enabled": bool((sync_cfg.get("dgt") or {}).get("enabled", True)),
             "url": (sync_cfg.get("dgt") or {}).get("url", DEFAULT_DGT_URL),
+        },
+        # Desactive par defaut : necessite un token (inscription gratuite au webgate FSD)
+        "eu_fsf": {
+            "enabled": bool((sync_cfg.get("eu_fsf") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("eu_fsf") or {}).get("url", DEFAULT_EU_FSF_URL),
+            "token": str((sync_cfg.get("eu_fsf") or {}).get("token", "") or ""),
+        },
+        "un": {
+            "enabled": bool((sync_cfg.get("un") or {}).get("enabled", True)),
+            "url": (sync_cfg.get("un") or {}).get("url", DEFAULT_UN_URL),
         },
     }
 
@@ -554,6 +574,159 @@ def run_dgt_sync(
     finally:
         if temp_file.exists():
             os.remove(temp_file)
+
+
+def _run_list_replacement_sync(
+    db,
+    source: str,
+    file_type: str,
+    url: str,
+    parser: Callable[[str], Any],
+    file_label: str,
+    temp_suffix: str,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Cycle generique de synchronisation d'une liste officielle a remplacement
+    complet : telechargement, deduplication par hash (y compris snapshots en
+    attente d'homologation), ingestion, delta par rapport a la liste active,
+    puis application (supersede + rechargement du cache) ou attente de
+    pointage humain si le mode homologation est actif.
+    """
+    fetch = fetcher or download_to_file
+    temp_dir = PROJECT_ROOT / "temp_ingestion"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_file = temp_dir / f"{source.lower()}_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{temp_suffix}"
+
+    previous = _latest_ready_snapshot(db, file_type)
+    snap_id = None
+    try:
+        logger.info(f"Sync {source}: telechargement de {url}")
+        fetch(url, temp_file)
+
+        with open(temp_file, "rb") as f:
+            fhash = hashlib.sha256(f.read()).hexdigest()
+
+        duplicate = _existing_snapshot_with_hash(db, file_type, fhash)
+        if duplicate:
+            if duplicate.status == "PENDING_REVIEW":
+                message = f"Le fichier {source} est identique a un snapshot deja en attente d'homologation."
+            else:
+                message = f"Le fichier {source} est identique a la version active (hash inchange)."
+            return _finalize_report(
+                db, source=source, trigger=trigger, status="NO_CHANGE",
+                message=message,
+                previous_snapshot_id=duplicate.snapshot_id
+            )
+
+        snap_id = f"{source.lower()}-sync-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        snap = Snapshot(
+            snapshot_id=snap_id,
+            file_type=file_type,
+            file_name=f"{file_label}_{datetime.utcnow().strftime('%Y-%m-%d')}{temp_suffix}",
+            file_hash=fhash,
+            record_count=0,
+            status="PROCESSING"
+        )
+        db.add(snap)
+        db.commit()
+
+        record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)))
+        staging = require_approval_enabled(db)
+        snap.status = "PENDING_REVIEW" if staging else "READY"
+        snap.record_count = record_count
+        db.commit()
+
+        old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
+        new_entities = _snapshot_entity_dicts(db, snap_id)
+        delta = calculate_delta(old_entities, new_entities, "entity_id")
+
+        if not staging:
+            _supersede_previous_snapshots(db, file_type, snap_id)
+            db.commit()
+            if reload_cache:
+                reload_cache()
+
+        summary = delta["summary"]
+        message = f"{record_count} fiches importees depuis la source {source}."
+        if staging:
+            message += " Snapshot en attente d'homologation (pointage humain requis)."
+        return _finalize_report(
+            db, source=source, trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
+            message=message,
+            snapshot_id=snap_id,
+            previous_snapshot_id=previous.snapshot_id if previous else None,
+            added_count=summary["added_count"],
+            modified_count=summary["modified_count"],
+            removed_count=summary["removed_count"],
+            delta_report=_truncate_delta_details(delta)
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Echec de la synchronisation {source}: {e}")
+        if snap_id:
+            error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+            if error_snap:
+                error_snap.status = "ERROR"
+                db.commit()
+        return _finalize_report(
+            db, source=source, trigger=trigger, status="ERROR",
+            message=f"Echec: {e}"
+        )
+    finally:
+        if temp_file.exists():
+            os.remove(temp_file)
+
+
+def run_eu_fsf_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee officielle des sanctions financieres de
+    l'UE (fichiers FSF du webgate FSD) et remplace la liste EU active. Fait
+    autorite sur le scraping du Journal Officiel : les radiations y sont
+    fiables. Necessite un token (inscription gratuite au webgate).
+    """
+    cfg = get_sync_config()["eu_fsf"]
+    url = cfg["url"]
+    if "{token}" in url:
+        if not cfg["token"]:
+            return _finalize_report(
+                db, source="EUFSF", trigger=trigger, status="ERROR",
+                message=(
+                    "Token FSF non configure : creez un compte gratuit sur le webgate FSD "
+                    "de la Commission europeenne puis renseignez sync.eu_fsf.token dans config.yaml."
+                )
+            )
+        url = url.replace("{token}", cfg["token"])
+    return _run_list_replacement_sync(
+        db, source="EUFSF", file_type="WATCHLIST_EU", url=url,
+        parser=parse_eu_fsf_xml, file_label="EU_FSF_Consolidated",
+        temp_suffix=".xml", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_un_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee du Conseil de securite de l'ONU (XML
+    public officiel) et remplace la liste ONU active.
+    """
+    cfg = get_sync_config()["un"]
+    return _run_list_replacement_sync(
+        db, source="UN", file_type="WATCHLIST_UN", url=cfg["url"],
+        parser=parse_un_consolidated_xml, file_label="UN_Consolidated",
+        temp_suffix=".xml", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
 
 
 # ------------------ SCRAPING EUR-LEX ------------------
