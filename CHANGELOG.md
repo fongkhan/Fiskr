@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.7.1] - 2026-07-14
+
+### Fixed
+- **OFAC SDN_ADVANCED party types — every listed party came out as "E" (entity)**: pass 1 of `parse_ofac_advanced_xml` cleared the children of `ReferenceValueSets`/`Locations`/`IDRegDocuments` before reading them (iterparse `end` events fire bottom-up), so the PartyType/PartySubType reference sets stayed empty and the real file — which carries the type as a `PartySubTypeID` attribute on `<Profile>` resolved by name lookup — always fell back to "E". Both passes now use a depth-aware multi-target streaming helper (modeled on the SSIE engine) that only frees elements outside target subtrees; individuals/vessels/aircraft are typed correctly again, which also restores individual name splitting, PP blocking partitions and the individual quality rules.
+- The same premature clear also emptied addresses, citizenship/residence country codes and every ID-document number/classification on the real file — all restored.
+
+### Added
+- **Heuristic type fallback**: when neither the inline mock style nor the reference lookup can type a party, its traits decide (IMO → vessel, tail number → aircraft, gender/DOB/passport/national ID → individual, else entity).
+- **Extended OFAC extraction** (previously dropped despite being present in the file): `place_of_birth`, structured addresses (`address`, `alternative_addresses`, `city`, `state`, `country`), `designation` (title/position features), `designation_reasons` (sanctions program names from `SanctionsEntries`), `additional_informations` (non-pivotable features: vessel call sign/flag, aircraft model, websites, emails, phones…), passport/ID `expiration_date` (from `DocumentDate`), and `origin`. ID documents are now classified by reference-set names on real files (hard-coded mock IDs kept for backward compatibility).
+- 99 automated tests passing (3 new: real-structure SDN_ADVANCED fixture covering party types, locations/documents/programs extraction, and the heuristic fallback).
+
+### Note
+- The first OFAC sync after this upgrade will report most of the list as MODIFIED (checksums change with the corrected types and new fields). This is expected and one-time; with homologation mode enabled it will surface as one large pending snapshot to review.
+
+---
+
 ## [2.7.0] - 2026-07-13
 
 ### Added
