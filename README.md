@@ -231,7 +231,7 @@ Le dashboard interactif se compose de 4 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 96 tests automatisés avec pytest :
+Exécutez la suite complète de 99 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

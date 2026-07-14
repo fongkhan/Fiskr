@@ -2,7 +2,7 @@ import re
 import csv
 import json
 import logging
-from typing import List, Dict, Any, Generator
+from typing import List, Dict, Any, Generator, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
 
 # We try to import pypdf to extract PDF text, fallback to empty text if unavailable.
@@ -85,9 +85,64 @@ class OFACParserContext:
     def __init__(self):
         self.references = {}
         self.ref_links = {}
-        self.locations = {}
+        self.locations = {}  # location_id -> {"full", "parts", "iso2", "country_name"}
         self.location_countries = {} # location_id -> Country ISO2
         self.id_documents = {}  # identity_id -> [doc_dict, ...]
+        self.sanctions_programs = {}  # profile_id -> [program names]
+
+
+def _local_ns(elem: ET.Element) -> str:
+    """Prefixe de namespace ('{uri}') de l'element, ou chaine vide."""
+    return elem.tag.split('}')[0] + '}' if '}' in elem.tag else ''
+
+
+def _stream_target_elements(file_path: str, target_locals: Set[str]) -> Generator[Tuple[str, ET.Element], None, None]:
+    """
+    Streame le XML via iterparse et produit chaque element cible entierement
+    construit, sous la forme (nom_local, element). Seuls les elements termines
+    HORS de tout sous-arbre cible sont liberes au fil de l'eau : les descendants
+    d'une cible restent intacts jusqu'au 'end' de la cible elle-meme (un clear
+    inconditionnel viderait les valeurs des referentiels avant leur lecture,
+    car les evenements 'end' remontent du bas vers le haut).
+    """
+    depth_in_target = 0
+    root = None
+    for event, elem in ET.iterparse(file_path, events=("start", "end")):
+        local_name = elem.tag.split('}')[-1]
+        if event == "start":
+            if root is None:
+                root = elem
+            if depth_in_target > 0 or local_name in target_locals:
+                depth_in_target += 1
+            continue
+
+        if depth_in_target > 0:
+            depth_in_target -= 1
+            if depth_in_target == 0 and local_name in target_locals:
+                yield local_name, elem
+                elem.clear()
+            continue
+
+        # Element termine hors de tout sous-arbre cible : liberation memoire
+        elem.clear()
+        if root is not None:
+            root.clear()
+
+
+def _extract_date_from_period_elem(elem: ET.Element, ns: str) -> Optional[str]:
+    """Extrait une date YYYY-MM-DD depuis un sous-arbre contenant DatePeriod/Start/From."""
+    frm = elem.find(f".//{ns}Start/{ns}From")
+    if frm is None:
+        frm = elem.find(f".//{ns}From")
+    if frm is None:
+        return None
+    def _txt(tag):
+        child = frm.find(f"{ns}{tag}")
+        return child.text.strip() if (child is not None and child.text) else ""
+    y, m, d = _txt("Year"), _txt("Month"), _txt("Day")
+    if not y:
+        return None
+    return f"{y}-{(m or '01').zfill(2)}-{(d or '01').zfill(2)}"
 
 def dict_get_insensitive(d, key):
     if not isinstance(d, dict):
@@ -149,6 +204,183 @@ def elem_to_dict(elem, references):
         d[tag].append(child_dict)
     return d
 
+def _harvest_reference_sets(elem: ET.Element, parser_ctx: OFACParserContext) -> None:
+    """Charge tous les jeux de valeurs de reference (PartyType, Country, FeatureType...)."""
+    for value_set in list(elem):
+        vs_tag = value_set.tag.split('}')[-1]
+        base_tag = vs_tag.replace('Values', '')
+        if base_tag not in parser_ctx.references:
+            parser_ctx.references[base_tag] = {}
+        if base_tag not in parser_ctx.ref_links:
+            parser_ctx.ref_links[base_tag] = {}
+        for child in list(value_set):
+            if 'ID' in child.attrib:
+                id_val = child.attrib['ID']
+                if child.text and child.text.strip():
+                    val = child.text.strip()
+                elif 'Description' in child.attrib:
+                    val = child.attrib['Description']
+                else:
+                    val = str(child.attrib)
+                parser_ctx.references[base_tag][id_val] = val
+                extra = {k: v for k, v in child.attrib.items() if k != 'ID'}
+                if child.text and child.text.strip():
+                    extra['_text'] = child.text.strip()
+                if extra:
+                    parser_ctx.ref_links[base_tag][id_val] = extra
+
+
+def _harvest_location(elem: ET.Element, parser_ctx: OFACParserContext) -> None:
+    """
+    Indexe une localisation par ID : adresse complete, parties structurees
+    (via LocPartType : ADDRESS1, CITY, STATE/PROVINCE, POSTAL CODE, REGION...)
+    et pays (nom + ISO2).
+    """
+    if 'ID' not in elem.attrib:
+        return
+    id_val = elem.attrib['ID']
+    ns = _local_ns(elem)
+
+    parts = {}
+    loc_texts = []
+    for lp in elem.iter(f"{ns}LocationPart"):
+        lp_type_id = get_attrib_insensitive(lp, 'LocPartTypeID')
+        lp_type = parser_ctx.references.get('LocPartType', {}).get(str(lp_type_id or ''), '')
+        texts = [v.text.strip() for v in lp.iter(f"{ns}Value") if v.text and v.text.strip()]
+        if texts:
+            val = ", ".join(texts)
+            loc_texts.append(val)
+            if lp_type:
+                parts[lp_type.upper()] = val
+    if not loc_texts:
+        # Fichiers sans structure LocationPart : toutes les valeurs texte
+        loc_texts = [p.text.strip() for p in elem.iter(f"{ns}Value") if p.text and p.text.strip()]
+
+    country_name = None
+    iso2 = None
+    cid = None
+    for p in elem.iter(f"{ns}LocationCountry"):
+        cid = p.attrib.get('CountryID')
+        if cid and cid in parser_ctx.references.get('Country', {}):
+            country_name = parser_ctx.references['Country'][cid]
+
+    full_parts = list(loc_texts)
+    if country_name:
+        full_parts.append(country_name)
+    if cid:
+        c_links = parser_ctx.ref_links.get('Country', {}).get(cid, {})
+        iso2 = c_links.get('ISO2') or c_links.get('Code')
+        if not iso2 and country_name:
+            iso2 = country_name[:2].upper()
+        if iso2:
+            parser_ctx.location_countries[id_val] = iso2
+
+    parser_ctx.locations[id_val] = {
+        "full": ", ".join(full_parts),
+        "parts": parts,
+        "iso2": iso2,
+        "country_name": country_name,
+    }
+
+
+def _harvest_id_document(elem: ET.Element, parser_ctx: OFACParserContext) -> None:
+    """Indexe un document d'identite par IdentityID (numero, pays emetteur, expiration)."""
+    identity_id = elem.attrib.get('IdentityID')
+    if not identity_id:
+        return
+    ns = _local_ns(elem)
+    doc_type_id = elem.attrib.get('IDRegDocTypeID')
+    doc_num = ""
+    doc_num_el = elem.find(f".//{ns}IDRegistrationNo")
+    if doc_num_el is not None and doc_num_el.text:
+        doc_num = doc_num_el.text.strip()
+
+    issued_by_el = elem.find(f".//{ns}IssuedBy")
+    issuing_country = "XX"
+    if issued_by_el is not None:
+        cid = issued_by_el.attrib.get('CountryID')
+        if cid and cid in parser_ctx.references.get('Country', {}):
+            country_name = parser_ctx.references['Country'][cid]
+            c_links = parser_ctx.ref_links.get('Country', {}).get(cid, {})
+            iso2 = c_links.get('ISO2') or c_links.get('Code') or country_name[:2].upper()
+            issuing_country = iso2
+
+    # Date d'expiration (DocumentDate type "Expiration Date" du referentiel)
+    expiration = None
+    for dd in elem.iter(f"{ns}DocumentDate"):
+        dtype_id = get_attrib_insensitive(dd, 'IDRegDocDateTypeID')
+        dtype_name = parser_ctx.references.get('IDRegDocDateType', {}).get(str(dtype_id or ''), '').lower()
+        date_val = _extract_date_from_period_elem(dd, ns)
+        if date_val and ("expir" in dtype_name):
+            expiration = date_val
+
+    doc_dict = {
+        "doc_type_id": doc_type_id,
+        "number": doc_num,
+        "issuing_country": issuing_country,
+        "expiration_date": expiration
+    }
+    if identity_id not in parser_ctx.id_documents:
+        parser_ctx.id_documents[identity_id] = []
+    parser_ctx.id_documents[identity_id].append(doc_dict)
+
+
+def _harvest_sanctions_entry(elem: ET.Element, parser_ctx: OFACParserContext) -> None:
+    """
+    Recolte les programmes de sanctions d'une SanctionsEntry (liee par ProfileID).
+    Les mesures dont le type se resout en "Program" portent le nom du programme
+    dans leur Comment ; sans referentiel charge, tout Comment est conserve.
+    """
+    profile_id = get_attrib_insensitive(elem, 'ProfileID')
+    if not profile_id:
+        return
+    ns = _local_ns(elem)
+    sanctions_types = parser_ctx.references.get('SanctionsType', {})
+    programs = []
+    for measure in elem.iter(f"{ns}SanctionsMeasure"):
+        type_id = get_attrib_insensitive(measure, 'SanctionsTypeID')
+        type_name = sanctions_types.get(str(type_id or ''), '').lower()
+        comment_el = measure.find(f"{ns}Comment")
+        text = comment_el.text.strip() if (comment_el is not None and comment_el.text) else ""
+        if not text:
+            continue
+        if "program" in type_name or not sanctions_types:
+            programs.append(text)
+    if programs:
+        existing = parser_ctx.sanctions_programs.setdefault(str(profile_id), [])
+        for p in programs:
+            if p not in existing:
+                existing.append(p)
+
+
+def _classify_id_document(doc_type_id, doc_type_name, doc_num, issued_country, expiration_date, buckets):
+    """
+    Route un document d'identite vers le bon compartiment du schema pivot.
+    Les IDs numeriques codes en dur couvrent les fichiers simplifies ; les
+    correspondances par nom (referentiel IDRegDocType) couvrent le fichier
+    officiel dont les IDs varient.
+    """
+    doc_type_id = str(doc_type_id or "")
+    doc_type_name = (doc_type_name or "").lower()
+    if doc_type_id == "392" or "passport" in doc_type_name:
+        buckets["passports"].append({"number": doc_num, "issuing_country": issued_country, "expiration_date": expiration_date})
+    elif doc_type_id == "391" or "national id" in doc_type_name:
+        buckets["national_ids"].append({"number": doc_num, "issuing_country": issued_country})
+    elif doc_type_id in ("386", "390", "394") or "driver" in doc_type_name:
+        buckets["other_ids"].append({"doc_type": "DriverLicense" if doc_type_id == "386" or "driver" in doc_type_name else "Other", "number": doc_num, "issuing_country": issued_country})
+    elif doc_type_id == "15502" or "lei" in doc_type_name:
+        buckets["lei"] = doc_num
+    elif doc_type_id in ("9436", "376", "384") or "tax" in doc_type_name or "commercial" in doc_type_name or "business registration" in doc_type_name:
+        buckets["national_registry"].append({"number": doc_num, "country": issued_country, "registry_name": "CommercialRegistry" if doc_type_id == "9436" or "commercial" in doc_type_name or "business registration" in doc_type_name else "TaxRegistry"})
+    elif doc_type_id == "13886" or "imo" in doc_type_name or "vessel registration" in doc_type_name:
+        digits = re.sub(r"\D", "", doc_num)
+        buckets["imo_number"] = digits[:7]
+    elif doc_type_id == "13887" or "aircraft" in doc_type_name:
+        buckets["aircraft_tail"] = doc_num
+    else:
+        buckets["other_registrations"].append({"id_type": doc_type_name or "OtherRegistration", "number": doc_num})
+
+
 def resolve_party_type(profile, parser_ctx):
     # Try child element style first (from mock XML or simplified schemas)
     pst_list = dict_get_insensitive(profile, 'PartySubType')
@@ -169,26 +401,66 @@ def resolve_party_type(profile, parser_ctx):
     # Try attribute style (from standard Advanced XML)
     pst = dict_get_insensitive(profile, 'PartySubTypeID')
     if not pst:
-        return "E"
+        return None
+    pst_value = ""
     if isinstance(pst, dict):
         pst_id = pst.get('id', '')
+        pst_value = str(pst.get('value') or '')
     elif isinstance(pst, list) and pst:
         pst_id = pst[0].get('id', '') if isinstance(pst[0], dict) else ''
+        pst_value = str(pst[0].get('value') or '') if isinstance(pst[0], dict) else ''
     else:
         pst_id = str(pst)
-    
+
     links = parser_ctx.ref_links.get('PartySubType', {}).get(pst_id, {})
     pt_id = links.get('PartyTypeID', '')
     pt_name = get_reference_value(parser_ctx.references, 'PartyType', pt_id).lower()
-    
-    if "individual" in pt_name:
+    # Le nom du sous-type lui-meme (ex: "Individual") est aussi discriminant
+    combined = f"{pst_value.lower()} {get_reference_value(parser_ctx.references, 'PartySubType', pst_id).lower()} {pt_name}"
+
+    if "individual" in combined:
         return "I"
-    elif "vessel" in pt_name:
+    elif "vessel" in combined:
         return "V"
-    elif "aircraft" in pt_name:
+    elif "aircraft" in combined:
         return "O"
-    else:
+    elif "entity" in combined:
         return "E"
+    # Referentiel absent ou irresoluble : on laisse l'heuristique decider
+    return None
+
+def _feature_version_text(fv) -> str:
+    """
+    Extrait le texte d'une version de feature : valeurs resolues des
+    DetailReferenceID, contenus des DetailReference et texte brut du detail.
+    """
+    out = []
+    version_details = dict_get_insensitive(fv, 'VersionDetail') or []
+    for vd in version_details:
+        ref_obj = dict_get_insensitive(vd, 'DetailReferenceID')
+        if ref_obj:
+            if isinstance(ref_obj, dict):
+                out.append(str(ref_obj.get('value') or ref_obj.get('id') or ''))
+            elif isinstance(ref_obj, list):
+                for child in ref_obj:
+                    if isinstance(child, dict):
+                        out.append(str(child.get('value') or child.get('text') or ''))
+            else:
+                out.append(str(ref_obj))
+        ref_ref = dict_get_insensitive(vd, 'DetailReference')
+        if ref_ref:
+            if isinstance(ref_ref, list):
+                for child in ref_ref:
+                    if isinstance(child, dict):
+                        out.append(str(child.get('value') or child.get('text') or ''))
+            elif isinstance(ref_ref, dict):
+                out.append(str(ref_ref.get('value') or ref_ref.get('text') or ''))
+            else:
+                out.append(str(ref_ref))
+        if isinstance(vd, dict) and vd.get('text'):
+            out.append(vd['text'])
+    return " ".join(t.strip() for t in out if t and t.strip()).strip()
+
 
 def format_alias_name(alias_dict, identity_dict):
     group_map = {}
@@ -237,526 +509,416 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
     to prevent memory ballooning. Yields Pivot Schema dicts.
     """
     parser_ctx = OFACParserContext()
-    
-    # Pass 1: Parse ReferenceValueSets, Locations, IDRegDocuments
-    context1 = ET.iterparse(file_path, events=('start', 'end'))
-    in_ref = False
-    in_locs = False
-    in_id_docs = False
-    root1 = None
-    
-    for event, elem in context1:
-        if event == 'start' and root1 is None:
-            root1 = elem
-            
-        tag = elem.tag.split('}')[-1]
-        
-        if event == 'start' and tag == 'ReferenceValueSets':
-            in_ref = True
-        elif event == 'end' and in_ref and tag == 'ReferenceValueSets':
-            for value_set in list(elem):
-                vs_tag = value_set.tag.split('}')[-1]
-                base_tag = vs_tag.replace('Values', '')
-                if base_tag not in parser_ctx.references:
-                    parser_ctx.references[base_tag] = {}
-                if base_tag not in parser_ctx.ref_links:
-                    parser_ctx.ref_links[base_tag] = {}
-                for child in list(value_set):
-                    if 'ID' in child.attrib:
-                        id_val = child.attrib['ID']
-                        if child.text and child.text.strip():
-                            val = child.text.strip()
-                        elif 'Description' in child.attrib:
-                            val = child.attrib['Description']
-                        else:
-                            val = str(child.attrib)
-                        parser_ctx.references[base_tag][id_val] = val
-                        extra = {k: v for k, v in child.attrib.items() if k != 'ID'}
-                        if child.text and child.text.strip():
-                            extra['_text'] = child.text.strip()
-                        if extra:
-                            parser_ctx.ref_links[base_tag][id_val] = extra
-            elem.clear()
-            if root1 is not None:
-                root1.clear()
-            in_ref = False
-            
-        elif event == 'start' and tag == 'Locations':
-            in_locs = True
-        elif event == 'end' and in_locs and tag == 'Location':
-            if 'ID' in elem.attrib:
-                id_val = elem.attrib['ID']
-                loc_parts = []
-                ns = elem.tag.split('}')[0] + '}'
-                for p in elem.iter(f"{ns}Value"):
-                    if p.text:
-                        loc_parts.append(p.text.strip())
-                cid = None
-                for p in elem.iter(f"{ns}LocationCountry"):
-                    cid = p.attrib.get('CountryID')
-                    if cid and cid in parser_ctx.references.get('Country', {}):
-                        loc_parts.append(parser_ctx.references['Country'][cid])
-                parser_ctx.locations[id_val] = ", ".join(loc_parts)
-                
-                if cid:
-                    c_links = parser_ctx.ref_links.get('Country', {}).get(cid, {})
-                    iso2 = c_links.get('ISO2') or c_links.get('Code')
-                    if not iso2 and cid in parser_ctx.references.get('Country', {}):
-                        country_name = parser_ctx.references['Country'][cid]
-                        iso2 = country_name[:2].upper()
-                    if iso2:
-                        parser_ctx.location_countries[id_val] = iso2
-            elem.clear()
-            if root1 is not None:
-                root1.clear()
-        elif event == 'end' and in_locs and tag == 'Locations':
-            in_locs = False
-            if root1 is not None:
-                root1.clear()
-            
-        elif event == 'start' and tag == 'IDRegDocuments':
-            in_id_docs = True
-        elif event == 'end' and in_id_docs and tag == 'IDRegDocument':
-            identity_id = elem.attrib.get('IdentityID')
-            if identity_id:
-                doc_type_id = elem.attrib.get('IDRegDocTypeID')
-                doc_num = ""
-                ns = elem.tag.split('}')[0] + '}'
-                doc_num_el = elem.find(f".//{ns}IDRegistrationNo")
-                if doc_num_el is not None and doc_num_el.text:
-                    doc_num = doc_num_el.text.strip()
-                
-                issued_by_el = elem.find(f".//{ns}IssuedBy")
-                issuing_country = "XX"
-                if issued_by_el is not None:
-                    cid = issued_by_el.attrib.get('CountryID')
-                    if cid and cid in parser_ctx.references.get('Country', {}):
-                        country_name = parser_ctx.references['Country'][cid]
-                        c_links = parser_ctx.ref_links.get('Country', {}).get(cid, {})
-                        iso2 = c_links.get('ISO2') or c_links.get('Code') or country_name[:2].upper()
-                        issuing_country = iso2
-                
-                doc_dict = {
-                    "doc_type_id": doc_type_id,
-                    "number": doc_num,
-                    "issuing_country": issuing_country,
-                    "expiration_date": None
-                }
-                if identity_id not in parser_ctx.id_documents:
-                    parser_ctx.id_documents[identity_id] = []
-                parser_ctx.id_documents[identity_id].append(doc_dict)
-            elem.clear()
-            if root1 is not None:
-                root1.clear()
-        elif event == 'end' and in_id_docs and tag == 'IDRegDocuments':
-            in_id_docs = False
-            if root1 is not None:
-                root1.clear()
-                
-        # Periodic clear to keep memory low
-        if event == 'end' and tag not in ['ReferenceValueSets', 'Locations', 'IDRegDocuments', 'Location', 'IDRegDocument']:
-            elem.clear()
-            if root1 is not None:
-                root1.clear()
+
+    # Pass 1: recolte des referentiels, localisations, documents d'identite et
+    # programmes de sanctions (SanctionsEntries suit DistinctParties dans le
+    # fichier officiel, d'ou la necessite de deux passes). Le streaming a suivi
+    # de profondeur garantit que les enfants d'une cible ne sont jamais vides
+    # avant la lecture de la cible.
+    for local_name, elem in _stream_target_elements(
+        file_path, {'ReferenceValueSets', 'Location', 'IDRegDocument', 'SanctionsEntry'}
+    ):
+        if local_name == 'ReferenceValueSets':
+            _harvest_reference_sets(elem, parser_ctx)
+        elif local_name == 'Location':
+            _harvest_location(elem, parser_ctx)
+        elif local_name == 'IDRegDocument':
+            _harvest_id_document(elem, parser_ctx)
+        elif local_name == 'SanctionsEntry':
+            _harvest_sanctions_entry(elem, parser_ctx)
 
     # Pass 2: Parse DistinctParties
-    context2 = ET.iterparse(file_path, events=('start', 'end'))
-    root2 = None
-    
-    for event, elem in context2:
-        if event == 'start' and root2 is None:
-            root2 = elem
+    for _, elem in _stream_target_elements(file_path, {'DistinctParty'}):
+        ns = _local_ns(elem)
+        prof_elem = elem.find(f'{ns}Profile')
+        if prof_elem is None:
+            continue
+
+        pid = (
+            get_attrib_insensitive(elem, "fixedRef")
+            or get_attrib_insensitive(elem, "ID")
+            or (get_attrib_insensitive(prof_elem, "ID") if prof_elem is not None else None)
+        )
+        if not pid:
+            continue
             
-        tag = elem.tag.split('}')[-1]
+        profile = elem_to_dict(prof_elem, parser_ctx.references)
         
-        if event == 'end' and tag == 'DistinctParty':
-            ns = elem.tag.split('}')[0] + '}'
-            prof_elem = elem.find(f'{ns}Profile')
-            if prof_elem is None:
-                elem.clear()
-                if root2 is not None:
-                    root2.clear()
-                continue
-                
-            pid = (
-                get_attrib_insensitive(elem, "fixedRef")
-                or get_attrib_insensitive(elem, "ID")
-                or (get_attrib_insensitive(prof_elem, "ID") if prof_elem is not None else None)
-            )
-            if not pid:
-                elem.clear()
-                if root2 is not None:
-                    root2.clear()
-                continue
-                
-            profile = elem_to_dict(prof_elem, parser_ctx.references)
-            
-            # Extract basic fields
-            entity_type_id = resolve_party_type(profile, parser_ctx)
-            primary_name = ""
-            first_name = ""
-            last_name = ""
-            maiden_name = ""
-            aliases_raw = []
-            
-            # Extract names & aliases
-            for identity in profile.get('Identity', []):
-                for alias in identity.get('Alias', []):
-                    is_primary = alias.get('Primary') == 'true'
-                    formatted_name = format_alias_name(alias, identity)
-                    if not formatted_name:
-                        continue
-                        
-                    alias_type_obj = alias.get('AliasTypeID')
-                    alias_type_str = "Strong"
-                    if isinstance(alias_type_obj, dict):
-                        alias_type_str = alias_type_obj.get('value', 'Strong')
-                    elif alias_type_obj:
-                        alias_type_str = str(alias_type_obj)
-                        
-                    if is_primary:
-                        primary_name = formatted_name
-                        
-                        # Extract first, last, maiden name
-                        group_map = {}
-                        for groups in identity.get('NamePartGroups', []):
-                            for mg in groups.get('MasterNamePartGroup', []):
-                                for ng in mg.get('NamePartGroup', []):
-                                    gid = ng.get('ID')
-                                    tid = ng.get('NamePartTypeID', {})
-                                    group_map[gid] = tid.get('value') if isinstance(tid, dict) else str(tid)
-                                    
-                        for dn in alias.get('DocumentedName', []):
-                            for pt in dn.get('DocumentedNamePart', []):
-                                for nv in pt.get('NamePartValue', []):
-                                    if 'text' in nv:
-                                        gid = nv.get('NamePartGroupID')
-                                        ty = group_map.get(gid, "Unknown")
-                                        if ty == "First Name":
-                                            first_name = nv['text']
-                                        elif ty == "Last Name":
-                                            last_name = nv['text']
-                                        elif "maiden" in ty.lower():
-                                            maiden_name = nv['text']
-                    else:
-                        aliases_raw.append({"name": formatted_name, "type": alias_type_str})
-            
-            # Nested DocumentedName fallback
-            if not primary_name:
-                nested_doc_names = find_nested_in_dict(profile, 'DocumentedName')
-                for doc_name in nested_doc_names:
-                    status_id = dict_get_insensitive(doc_name, "DocNameStatusID")
-                    if isinstance(status_id, dict):
-                        status_id = status_id.get('id', '')
-                    is_primary = str(status_id) == "1"
-                    
-                    name_parts = []
-                    parts = find_nested_in_dict(doc_name, 'DocumentedNamePart')
-                    for part in parts:
-                        part_type = dict_get_insensitive(part, "NamePartTypeID")
-                        if isinstance(part_type, dict):
-                            part_type = part_type.get('id', '')
-                        else:
-                            part_type = str(part_type or '')
-                            
-                        part_vals = find_nested_in_dict(part, 'Value')
-                        for pv in part_vals:
-                            text = pv.get('text', '') if isinstance(pv, dict) else str(pv)
-                            if text:
-                                text_clean = text.strip()
-                                name_parts.append(text_clean)
-                                if is_primary:
-                                    if part_type == "1360":
-                                        first_name = text_clean
-                                    elif part_type == "1361":
-                                        last_name = text_clean
-                                        
-                    full_name_resolved = " ".join(name_parts)
-                    if is_primary:
-                        primary_name = full_name_resolved
-                    else:
-                        alias_type = dict_get_insensitive(doc_name, "AliasTypeID")
-                        if isinstance(alias_type, dict):
-                            alias_type = alias_type.get('id', '')
-                        type_str = "Strong" if str(alias_type) == "1" else "Weak"
-                        aliases_raw.append({"name": full_name_resolved, "type": type_str})
-            
-            # Extract features (DOB, Gender, Death/Deceased, countries)
-            dobs = []
-            date_of_death = None
-            is_deceased = False
-            gender = "U"
-            citizenships = []
-            residences = []
-            birth_countries = []
-            jurisdictions = []
-            
-            features = dict_get_insensitive(profile, 'Feature') or []
-            for f in features:
-                ftype_obj = dict_get_insensitive(f, 'FeatureTypeID')
-                if not ftype_obj:
+        # Extract basic fields
+        entity_type_id = resolve_party_type(profile, parser_ctx)
+        primary_name = ""
+        first_name = ""
+        last_name = ""
+        maiden_name = ""
+        aliases_raw = []
+        
+        # Extract names & aliases
+        for identity in profile.get('Identity', []):
+            for alias in identity.get('Alias', []):
+                is_primary = alias.get('Primary') == 'true'
+                formatted_name = format_alias_name(alias, identity)
+                if not formatted_name:
                     continue
-                ftype_str = ftype_obj.get('value', '') if isinstance(ftype_obj, dict) else str(ftype_obj)
-                ftype_str_lower = ftype_str.lower()
-                
-                is_gender = "gender" in ftype_str_lower or ftype_str_lower == "25"
-                is_birth = ("birth" in ftype_str_lower and "date" in ftype_str_lower) or ftype_str_lower in ["8", "12"]
-                is_death = "death" in ftype_str_lower or "deceased" in ftype_str_lower or ftype_str_lower == "24"
-                
-                feature_versions = dict_get_insensitive(f, 'FeatureVersion') or []
-                for fv in feature_versions:
-                    # Gender
-                    if is_gender:
-                         version_details = dict_get_insensitive(fv, 'VersionDetail') or []
-                         for vd in version_details:
-                             ref_val = ""
-                             ref_obj = dict_get_insensitive(vd, 'DetailReferenceID')
-                             if ref_obj:
-                                 if isinstance(ref_obj, dict):
-                                     ref_val = ref_obj.get('value', '')
-                                 elif isinstance(ref_obj, list):
-                                     for child in ref_obj:
-                                         if isinstance(child, dict):
-                                             ref_val += " " + (child.get('value') or child.get('text') or "")
-                                 else:
-                                     ref_val = str(ref_obj)
-                             
-                             # Also check DetailReference (child tag in some mock XML schemas)
-                             ref_ref = dict_get_insensitive(vd, 'DetailReference')
-                             if ref_ref:
-                                 if isinstance(ref_ref, list):
-                                     for child in ref_ref:
-                                         if isinstance(child, dict):
-                                             ref_val += " " + (child.get('value') or child.get('text') or "")
-                                 elif isinstance(ref_ref, dict):
-                                     ref_val += " " + (ref_ref.get('value') or ref_ref.get('text') or "")
-                                 else:
-                                     ref_val += " " + str(ref_ref)
-                                     
-                             ref_val_lower = ref_val.lower()
-                             if "female" in ref_val_lower:
-                                 gender = "F"
-                             elif "male" in ref_val_lower:
-                                 gender = "M"
-                                 
-                    # Birth
-                    elif is_birth:
-                        date_periods = dict_get_insensitive(fv, 'DatePeriod') or []
-                        for dp in date_periods:
-                            start = dict_get_insensitive(dp, 'Start') or []
-                            if start and 'From' in start[0]:
-                                from_date = start[0]['From'][0]
-                                y_el = dict_get_insensitive(from_date, 'Year')
-                                m_el = dict_get_insensitive(from_date, 'Month')
-                                d_el = dict_get_insensitive(from_date, 'Day')
-                                y = y_el[0].get('text', '') if (y_el and isinstance(y_el, list)) else ''
-                                m = m_el[0].get('text', '') if (m_el and isinstance(m_el, list)) else ''
-                                d = d_el[0].get('text', '') if (d_el and isinstance(d_el, list)) else ''
-                                if y:
-                                    m_str = m.strip() if m else "01"
-                                    d_str = d.strip() if d else "01"
-                                    dobs.append(f"{y.strip()}-{m_str.zfill(2)}-{d_str.zfill(2)}")
-                                    
-                    # Death
-                    elif is_death:
-                        is_deceased = True
-                        date_periods = dict_get_insensitive(fv, 'DatePeriod') or []
-                        for dp in date_periods:
-                            start = dict_get_insensitive(dp, 'Start') or []
-                            if start and 'From' in start[0]:
-                                from_date = start[0]['From'][0]
-                                y_el = dict_get_insensitive(from_date, 'Year')
-                                m_el = dict_get_insensitive(from_date, 'Month')
-                                d_el = dict_get_insensitive(from_date, 'Day')
-                                y = y_el[0].get('text', '') if (y_el and isinstance(y_el, list)) else ''
-                                m = m_el[0].get('text', '') if (m_el and isinstance(m_el, list)) else ''
-                                d = d_el[0].get('text', '') if (d_el and isinstance(d_el, list)) else ''
-                                if y:
-                                    m_str = m.strip() if m else "01"
-                                    d_str = d.strip() if d else "01"
-                                    date_of_death = f"{y.strip()}-{m_str.zfill(2)}-{d_str.zfill(2)}"
                     
-                    # Country codes from features
-                    version_locations = dict_get_insensitive(fv, 'VersionLocation') or []
-                    for vl in version_locations:
-                        lid_obj = dict_get_insensitive(vl, 'LocationID')
-                        lid = lid_obj.get('id') if isinstance(lid_obj, dict) else str(lid_obj)
-                        if lid:
-                            country_code = parser_ctx.location_countries.get(lid)
-                            if country_code:
-                                if "citizenship" in ftype_str_lower or "nationality" in ftype_str_lower:
-                                    citizenships.append(country_code)
-                                elif "residence" in ftype_str_lower:
-                                    residences.append(country_code)
-                                elif "birth" in ftype_str_lower:
-                                    birth_countries.append(country_code)
-                                else:
-                                    jurisdictions.append(country_code)
-                                    
-            # Fallback to nested locations
-            if not citizenships and not residences and not birth_countries and not jurisdictions:
-                nested_locations = find_nested_in_dict(profile, 'Location')
-                for loc in nested_locations:
-                    loc_type_list = find_nested_in_dict(loc, 'LocationType')
-                    loc_type = ""
-                    if loc_type_list:
-                        loc_type = loc_type_list[0].get('text', '') if isinstance(loc_type_list[0], dict) else str(loc_type_list[0])
+                alias_type_obj = alias.get('AliasTypeID')
+                alias_type_str = "Strong"
+                if isinstance(alias_type_obj, dict):
+                    alias_type_str = alias_type_obj.get('value', 'Strong')
+                elif alias_type_obj:
+                    alias_type_str = str(alias_type_obj)
+                    
+                if is_primary:
+                    primary_name = formatted_name
+                    
+                    # Extract first, last, maiden name
+                    group_map = {}
+                    for groups in identity.get('NamePartGroups', []):
+                        for mg in groups.get('MasterNamePartGroup', []):
+                            for ng in mg.get('NamePartGroup', []):
+                                gid = ng.get('ID')
+                                tid = ng.get('NamePartTypeID', {})
+                                group_map[gid] = tid.get('value') if isinstance(tid, dict) else str(tid)
+                                
+                    for dn in alias.get('DocumentedName', []):
+                        for pt in dn.get('DocumentedNamePart', []):
+                            for nv in pt.get('NamePartValue', []):
+                                if 'text' in nv:
+                                    gid = nv.get('NamePartGroupID')
+                                    ty = group_map.get(gid, "Unknown")
+                                    if ty == "First Name":
+                                        first_name = nv['text']
+                                    elif ty == "Last Name":
+                                        last_name = nv['text']
+                                    elif "maiden" in ty.lower():
+                                        maiden_name = nv['text']
+                else:
+                    aliases_raw.append({"name": formatted_name, "type": alias_type_str})
+        
+        # Nested DocumentedName fallback
+        if not primary_name:
+            nested_doc_names = find_nested_in_dict(profile, 'DocumentedName')
+            for doc_name in nested_doc_names:
+                status_id = dict_get_insensitive(doc_name, "DocNameStatusID")
+                if isinstance(status_id, dict):
+                    status_id = status_id.get('id', '')
+                is_primary = str(status_id) == "1"
+                
+                name_parts = []
+                parts = find_nested_in_dict(doc_name, 'DocumentedNamePart')
+                for part in parts:
+                    part_type = dict_get_insensitive(part, "NamePartTypeID")
+                    if isinstance(part_type, dict):
+                        part_type = part_type.get('id', '')
+                    else:
+                        part_type = str(part_type or '')
                         
-                    country_list = find_nested_in_dict(loc, 'LocationCountry')
-                    country_code = ""
-                    if country_list:
-                        country_el = country_list[0]
-                        if isinstance(country_el, dict):
-                            country_code = (dict_get_insensitive(country_el, 'CountryISO2') 
-                                            or dict_get_insensitive(country_el, 'CountryID'))
-                            if isinstance(country_code, dict):
-                                country_code = country_code.get('id') or country_code.get('value')
-                        else:
-                            country_code = str(country_el)
-                            
-                    if country_code:
-                        lt_str = str(loc_type).lower()
-                        if "citizenship" in lt_str:
+                    part_vals = find_nested_in_dict(part, 'Value')
+                    for pv in part_vals:
+                        text = pv.get('text', '') if isinstance(pv, dict) else str(pv)
+                        if text:
+                            text_clean = text.strip()
+                            name_parts.append(text_clean)
+                            if is_primary:
+                                if part_type == "1360":
+                                    first_name = text_clean
+                                elif part_type == "1361":
+                                    last_name = text_clean
+                                    
+                full_name_resolved = " ".join(name_parts)
+                if is_primary:
+                    primary_name = full_name_resolved
+                else:
+                    alias_type = dict_get_insensitive(doc_name, "AliasTypeID")
+                    if isinstance(alias_type, dict):
+                        alias_type = alias_type.get('id', '')
+                    type_str = "Strong" if str(alias_type) == "1" else "Weak"
+                    aliases_raw.append({"name": full_name_resolved, "type": type_str})
+        
+        # Extract features (DOB, Gender, Death/Deceased, countries, POB, addresses...)
+        dobs = []
+        date_of_death = None
+        is_deceased = False
+        gender = "U"
+        citizenships = []
+        residences = []
+        birth_countries = []
+        jurisdictions = []
+        place_of_birth = None
+        addresses = []       # [{"full", "parts", ...}] dans l'ordre du fichier
+        designation = None
+        unmapped_features = []  # features non pivotables -> additional_informations
+
+        features = dict_get_insensitive(profile, 'Feature') or []
+        for f in features:
+            ftype_obj = dict_get_insensitive(f, 'FeatureTypeID')
+            if not ftype_obj:
+                continue
+            ftype_str = ftype_obj.get('value', '') if isinstance(ftype_obj, dict) else str(ftype_obj)
+            ftype_str_lower = ftype_str.lower()
+
+            is_gender = "gender" in ftype_str_lower or ftype_str_lower == "25"
+            is_birth = ("birth" in ftype_str_lower and "date" in ftype_str_lower) or ftype_str_lower in ["8", "12"]
+            is_death = "death" in ftype_str_lower or "deceased" in ftype_str_lower or ftype_str_lower == "24"
+            # "place of birth" avant la branche generique "birth" (pays de naissance)
+            is_pob = "place of birth" in ftype_str_lower
+            is_address = "address" in ftype_str_lower or ftype_str_lower == "location"
+            is_designation = any(k in ftype_str_lower for k in ("title", "position", "function", "occupation"))
+
+            feature_versions = dict_get_insensitive(f, 'FeatureVersion') or []
+            for fv in feature_versions:
+                # Gender
+                if is_gender:
+                     ref_val_lower = _feature_version_text(fv).lower()
+                     if "female" in ref_val_lower:
+                         gender = "F"
+                     elif "male" in ref_val_lower:
+                         gender = "M"
+
+                # Birth
+                elif is_birth:
+                    date_periods = dict_get_insensitive(fv, 'DatePeriod') or []
+                    for dp in date_periods:
+                        start = dict_get_insensitive(dp, 'Start') or []
+                        if start and 'From' in start[0]:
+                            from_date = start[0]['From'][0]
+                            y_el = dict_get_insensitive(from_date, 'Year')
+                            m_el = dict_get_insensitive(from_date, 'Month')
+                            d_el = dict_get_insensitive(from_date, 'Day')
+                            y = y_el[0].get('text', '') if (y_el and isinstance(y_el, list)) else ''
+                            m = m_el[0].get('text', '') if (m_el and isinstance(m_el, list)) else ''
+                            d = d_el[0].get('text', '') if (d_el and isinstance(d_el, list)) else ''
+                            if y:
+                                m_str = m.strip() if m else "01"
+                                d_str = d.strip() if d else "01"
+                                dobs.append(f"{y.strip()}-{m_str.zfill(2)}-{d_str.zfill(2)}")
+                                
+                # Death
+                elif is_death:
+                    is_deceased = True
+                    date_periods = dict_get_insensitive(fv, 'DatePeriod') or []
+                    for dp in date_periods:
+                        start = dict_get_insensitive(dp, 'Start') or []
+                        if start and 'From' in start[0]:
+                            from_date = start[0]['From'][0]
+                            y_el = dict_get_insensitive(from_date, 'Year')
+                            m_el = dict_get_insensitive(from_date, 'Month')
+                            d_el = dict_get_insensitive(from_date, 'Day')
+                            y = y_el[0].get('text', '') if (y_el and isinstance(y_el, list)) else ''
+                            m = m_el[0].get('text', '') if (m_el and isinstance(m_el, list)) else ''
+                            d = d_el[0].get('text', '') if (d_el and isinstance(d_el, list)) else ''
+                            if y:
+                                m_str = m.strip() if m else "01"
+                                d_str = d.strip() if d else "01"
+                                date_of_death = f"{y.strip()}-{m_str.zfill(2)}-{d_str.zfill(2)}"
+                
+                # Localisations liees a la feature (pays, lieu de naissance, adresses)
+                version_locations = dict_get_insensitive(fv, 'VersionLocation') or []
+                for vl in version_locations:
+                    lid_obj = dict_get_insensitive(vl, 'LocationID')
+                    lid = lid_obj.get('id') if isinstance(lid_obj, dict) else str(lid_obj)
+                    if not lid:
+                        continue
+                    loc_info = parser_ctx.locations.get(lid) or {}
+                    country_code = parser_ctx.location_countries.get(lid)
+                    if is_pob:
+                        if loc_info.get("full") and not place_of_birth:
+                            place_of_birth = loc_info["full"]
+                        if country_code:
+                            birth_countries.append(country_code)
+                    elif is_address:
+                        if loc_info.get("full"):
+                            addresses.append(loc_info)
+                    elif country_code:
+                        if "citizenship" in ftype_str_lower or "nationality" in ftype_str_lower:
                             citizenships.append(country_code)
-                        elif "residence" in lt_str:
+                        elif "residence" in ftype_str_lower:
                             residences.append(country_code)
-                        elif "birth" in lt_str:
+                        elif "birth" in ftype_str_lower:
                             birth_countries.append(country_code)
                         else:
-                            residences.append(country_code)
-                            
-            # Extract ID registration documents
-            imo_number = None
-            aircraft_tail = None
-            lei = None
-            national_registry = []
-            other_registrations = []
-            passports = []
-            national_ids = []
-            other_ids = []
-            
-            # Load documents linked to any identity in the profile
-            for identity in profile.get('Identity', []):
-                ident_id = identity.get('ID')
-                if not ident_id:
-                    continue
-                docs = parser_ctx.id_documents.get(ident_id, [])
-                for doc in docs:
-                    doc_type_id = doc["doc_type_id"]
-                    doc_num = doc["number"]
-                    issued_country = doc["issuing_country"]
-                    doc_type_name = parser_ctx.references.get('IDRegDocType', {}).get(doc_type_id, "").lower()
-                    
-                    if doc_type_id == "392" or "passport" in doc_type_name:
-                        passports.append({"number": doc_num, "issuing_country": issued_country, "expiration_date": None})
-                    elif doc_type_id == "391" or "national id" in doc_type_name:
-                        national_ids.append({"number": doc_num, "issuing_country": issued_country})
-                    elif doc_type_id in ["386", "390", "394"] or "driver" in doc_type_name:
-                        other_ids.append({"doc_type": "DriverLicense" if doc_type_id == "386" or "driver" in doc_type_name else "Other", "number": doc_num, "issuing_country": issued_country})
-                    elif doc_type_id == "15502" or "lei" in doc_type_name:
-                        lei = doc_num
-                    elif doc_type_id in ["9436", "376", "384"] or "tax" in doc_type_name or "commercial" in doc_type_name:
-                        national_registry.append({"number": doc_num, "country": issued_country, "registry_name": "CommercialRegistry" if doc_type_id == "9436" or "commercial" in doc_type_name else "TaxRegistry"})
-                    elif doc_type_id == "13886" or "imo" in doc_type_name:
-                        digits = re.sub(r"\D", "", doc_num)
-                        imo_number = digits[:7]
-                    elif doc_type_id == "13887" or "aircraft" in doc_type_name:
-                        aircraft_tail = doc_num
-                    else:
-                        other_registrations.append({"id_type": doc_type_name or "OtherRegistration", "number": doc_num})
-            
-            # Fallback to nested IDRegistrationDocument / IDRegDocument elements
-            if not passports and not national_ids and not other_ids and not lei and not national_registry and not imo_number and not aircraft_tail:
-                nested_docs = find_nested_in_dict(profile, 'IDRegistrationDocument') + find_nested_in_dict(profile, 'IDRegDocument')
-                for doc_elem in nested_docs:
-                    doc_type_id = (dict_get_insensitive(doc_elem, "IDRegistrationDocTypeID") 
-                                   or dict_get_insensitive(doc_elem, "IDRegDocTypeID"))
-                    if isinstance(doc_type_id, dict):
-                        doc_type_id = doc_type_id.get('id', '')
-                    else:
-                        doc_type_id = str(doc_type_id or '')
-                        
-                    doc_num_el_list = (find_nested_in_dict(doc_elem, "IDRegistrationDocElement") 
-                                       or find_nested_in_dict(doc_elem, "IDRegistrationNo"))
-                    doc_num = ""
-                    if doc_num_el_list:
-                        if isinstance(doc_num_el_list[0], dict):
-                            doc_num = doc_num_el_list[0].get('text', '')
-                        else:
-                            doc_num = str(doc_num_el_list[0])
-                    
-                    issuing_el_list = find_nested_in_dict(doc_elem, "IssuedBy")
-                    issued_country = "XX"
-                    if issuing_el_list:
-                        issuing_el = issuing_el_list[0]
-                        country_el_list = find_nested_in_dict(issuing_el, "CountryISO2")
-                        if country_el_list:
-                            country_el = country_el_list[0]
-                            if isinstance(country_el, dict):
-                                issued_country = country_el.get('text') or country_el.get('CountryID') or "XX"
-                                if isinstance(issued_country, dict):
-                                    issued_country = issued_country.get('id') or "XX"
-                            else:
-                                issued_country = str(country_el)
-                                
-                    if doc_num:
-                        doc_type_name = parser_ctx.references.get('IDRegDocType', {}).get(doc_type_id, "").lower()
-                        if doc_type_id == "392" or "passport" in doc_type_name:
-                            passports.append({"number": doc_num, "issuing_country": issued_country, "expiration_date": None})
-                        elif doc_type_id == "391" or "national id" in doc_type_name:
-                            national_ids.append({"number": doc_num, "issuing_country": issued_country})
-                        elif doc_type_id in ["386", "390", "394"] or "driver" in doc_type_name:
-                            other_ids.append({"doc_type": "DriverLicense" if doc_type_id == "386" or "driver" in doc_type_name else "Other", "number": doc_num, "issuing_country": issued_country})
-                        elif doc_type_id == "15502" or "lei" in doc_type_name:
-                            lei = doc_num
-                        elif doc_type_id in ["9436", "376", "384"] or "tax" in doc_type_name or "commercial" in doc_type_name:
-                            national_registry.append({"number": doc_num, "country": issued_country, "registry_name": "CommercialRegistry" if doc_type_id == "9436" or "commercial" in doc_type_name else "TaxRegistry"})
-                        elif doc_type_id == "13886" or "imo" in doc_type_name:
-                            digits = re.sub(r"\D", "", doc_num)
-                            imo_number = digits[:7]
-                        elif doc_type_id == "13887" or "aircraft" in doc_type_name:
-                            aircraft_tail = doc_num
-                        else:
-                            other_registrations.append({"id_type": doc_type_name or "OtherRegistration", "number": doc_num})
+                            jurisdictions.append(country_code)
 
-            # Build Pivot structure
-            aliases_categorized = categorize_aliases(aliases_raw)
-            current_party = {
-                "entity_id": pid,
-                "entity_type": entity_type_id or "E",
-                "primary_name": primary_name or "NOM INCONNU",
-                "individual_name_parsed": {
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "maiden_name": maiden_name
-                },
-                "aliases": aliases_categorized,
-                "dates_of_birth": list(set(dobs)),
-                "date_of_death": date_of_death,
-                "is_deceased": is_deceased,
-                "gender": gender,
-                "countries": {
-                    "citizenship": list(set(citizenships)),
-                    "residence": list(set(residences)),
-                    "birth_country": list(set(birth_countries)),
-                    "jurisdiction_country": list(set(jurisdictions))
-                },
-                "imo_number": imo_number,
-                "aircraft_tail_number": aircraft_tail,
-                "lei_number": lei,
-                "national_registry_ids": national_registry,
-                "other_registration_ids": other_registrations,
-                "passport_documents": passports,
-                "national_id_documents": national_ids,
-                "other_id_documents": other_ids
-            }
-            
-            yield current_party
-            
-            # Clear distinct party element from memory
-            elem.clear()
-            if root2 is not None:
-                root2.clear()
+                # Features non pivotables (call sign, pavillon, tonnage, site web,
+                # email, telephone, modele d'aeronef...) : conservees pour
+                # consultation humaine au lieu d'etre perdues
+                if not (is_gender or is_birth or is_death or is_pob or is_address) and not version_locations:
+                    text = _feature_version_text(fv)
+                    if text:
+                        if is_designation and not designation:
+                            designation = text
+                        else:
+                            unmapped_features.append(f"{ftype_str}: {text}")
+
+        # Fallback to nested locations
+        if not citizenships and not residences and not birth_countries and not jurisdictions:
+            nested_locations = find_nested_in_dict(profile, 'Location')
+            for loc in nested_locations:
+                loc_type_list = find_nested_in_dict(loc, 'LocationType')
+                loc_type = ""
+                if loc_type_list:
+                    loc_type = loc_type_list[0].get('text', '') if isinstance(loc_type_list[0], dict) else str(loc_type_list[0])
+                    
+                country_list = find_nested_in_dict(loc, 'LocationCountry')
+                country_code = ""
+                if country_list:
+                    country_el = country_list[0]
+                    if isinstance(country_el, dict):
+                        country_code = (dict_get_insensitive(country_el, 'CountryISO2') 
+                                        or dict_get_insensitive(country_el, 'CountryID'))
+                        if isinstance(country_code, dict):
+                            country_code = country_code.get('id') or country_code.get('value')
+                    else:
+                        country_code = str(country_el)
+                        
+                if country_code:
+                    lt_str = str(loc_type).lower()
+                    if "citizenship" in lt_str:
+                        citizenships.append(country_code)
+                    elif "residence" in lt_str:
+                        residences.append(country_code)
+                    elif "birth" in lt_str:
+                        birth_countries.append(country_code)
+                    else:
+                        residences.append(country_code)
+                        
+        # Extract ID registration documents
+        imo_number = None
+        aircraft_tail = None
+        lei = None
+        national_registry = []
+        other_registrations = []
+        passports = []
+        national_ids = []
+        other_ids = []
+
+        doc_buckets = {
+            "passports": passports,
+            "national_ids": national_ids,
+            "other_ids": other_ids,
+            "national_registry": national_registry,
+            "other_registrations": other_registrations,
+            "lei": None,
+            "imo_number": None,
+            "aircraft_tail": None,
+        }
+
+        # Load documents linked to any identity in the profile
+        for identity in profile.get('Identity', []):
+            ident_id = identity.get('ID')
+            if not ident_id:
+                continue
+            docs = parser_ctx.id_documents.get(ident_id, [])
+            for doc in docs:
+                doc_type_name = parser_ctx.references.get('IDRegDocType', {}).get(doc["doc_type_id"], "")
+                _classify_id_document(
+                    doc["doc_type_id"], doc_type_name, doc["number"],
+                    doc["issuing_country"], doc.get("expiration_date"), doc_buckets
+                )
+        lei = doc_buckets["lei"]
+        imo_number = doc_buckets["imo_number"]
+        aircraft_tail = doc_buckets["aircraft_tail"]
+
+        # Fallback to nested IDRegistrationDocument / IDRegDocument elements
+        if not passports and not national_ids and not other_ids and not lei and not national_registry and not imo_number and not aircraft_tail:
+            nested_docs = find_nested_in_dict(profile, 'IDRegistrationDocument') + find_nested_in_dict(profile, 'IDRegDocument')
+            for doc_elem in nested_docs:
+                doc_type_id = (dict_get_insensitive(doc_elem, "IDRegistrationDocTypeID") 
+                               or dict_get_insensitive(doc_elem, "IDRegDocTypeID"))
+                if isinstance(doc_type_id, dict):
+                    doc_type_id = doc_type_id.get('id', '')
+                else:
+                    doc_type_id = str(doc_type_id or '')
+                    
+                doc_num_el_list = (find_nested_in_dict(doc_elem, "IDRegistrationDocElement") 
+                                   or find_nested_in_dict(doc_elem, "IDRegistrationNo"))
+                doc_num = ""
+                if doc_num_el_list:
+                    if isinstance(doc_num_el_list[0], dict):
+                        doc_num = doc_num_el_list[0].get('text', '')
+                    else:
+                        doc_num = str(doc_num_el_list[0])
+                
+                issuing_el_list = find_nested_in_dict(doc_elem, "IssuedBy")
+                issued_country = "XX"
+                if issuing_el_list:
+                    issuing_el = issuing_el_list[0]
+                    country_el_list = find_nested_in_dict(issuing_el, "CountryISO2")
+                    if country_el_list:
+                        country_el = country_el_list[0]
+                        if isinstance(country_el, dict):
+                            issued_country = country_el.get('text') or country_el.get('CountryID') or "XX"
+                            if isinstance(issued_country, dict):
+                                issued_country = issued_country.get('id') or "XX"
+                        else:
+                            issued_country = str(country_el)
+                            
+                if doc_num:
+                    doc_type_name = parser_ctx.references.get('IDRegDocType', {}).get(doc_type_id, "")
+                    _classify_id_document(doc_type_id, doc_type_name, doc_num, issued_country, None, doc_buckets)
+            lei = doc_buckets["lei"]
+            imo_number = doc_buckets["imo_number"]
+            aircraft_tail = doc_buckets["aircraft_tail"]
+
+        # Repli heuristique quand ni le style enfant ni le referentiel n'ont
+        # permis de typer le liste (fichiers simplifies ou referentiel absent)
+        if not entity_type_id:
+            if imo_number:
+                entity_type_id = "V"
+            elif aircraft_tail:
+                entity_type_id = "O"
+            elif gender != "U" or dobs or passports or national_ids or first_name or maiden_name:
+                entity_type_id = "I"
+            else:
+                entity_type_id = "E"
+
+        # Adresses structurees : premiere adresse = principale, le reste en alternatives
+        primary_addr = addresses[0] if addresses else {}
+        addr_parts = primary_addr.get("parts", {})
+
+        # Build Pivot structure
+        aliases_categorized = categorize_aliases(aliases_raw)
+        current_party = {
+            "entity_id": pid,
+            "entity_type": entity_type_id,
+            "primary_name": primary_name or "NOM INCONNU",
+            "individual_name_parsed": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "maiden_name": maiden_name
+            },
+            "aliases": aliases_categorized,
+            "dates_of_birth": list(set(dobs)),
+            "date_of_death": date_of_death,
+            "is_deceased": is_deceased,
+            "gender": gender,
+            "countries": {
+                "citizenship": list(set(citizenships)),
+                "residence": list(set(residences)),
+                "birth_country": list(set(birth_countries)),
+                "jurisdiction_country": list(set(jurisdictions))
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:] if a.get("full")],
+            "city": addr_parts.get("CITY"),
+            "state": addr_parts.get("STATE/PROVINCE") or addr_parts.get("REGION"),
+            "country": primary_addr.get("country_name"),
+            "designation": designation,
+            "designation_reasons": "; ".join(parser_ctx.sanctions_programs.get(str(pid), [])) or None,
+            "additional_informations": "; ".join(unmapped_features) or None,
+            "origin": "OFAC SDN_ADVANCED",
+            "imo_number": imo_number,
+            "aircraft_tail_number": aircraft_tail,
+            "lei_number": lei,
+            "national_registry_ids": national_registry,
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": other_ids
+        }
+
+        yield current_party
+        
                 
 
 
