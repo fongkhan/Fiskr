@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Documentation
+- **Competitive benchmark & improvement roadmap** (`Documentation/BENCHMARK_CONCURRENTS.md`): market analysis of sanctions/PEP screening solutions (LSEG World-Check One, Dow Jones, ComplyAdvantage, SymphonyAI Sensa, Fircosoft, Napier, and open-source engines OpenSanctions/yente and Moov Watchman), regulatory framework review (Wolfsberg sanctions screening guidance, ACPR/DGT asset-freeze guidelines, official machine-readable lists), capability comparison matrix, 7-point gap analysis mapped to the codebase, and a prioritized roadmap (P0: DGT national asset-freeze register connector, EU FSF consolidated XML replacing the OJ scraping, UN consolidated list · P1: alert lifecycle with 4-eyes, client×entity whitelist, automatic post-delta rescreening · P2: multi-script transliteration, per-list thresholds, decision-tree rendering, PEP source, KPIs · P3: transaction filtering, adverse media, AI narratives).
+
+---
+
 ## [2.7.1] - 2026-07-14
 
 ### Fixed

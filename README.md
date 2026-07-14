@@ -237,3 +237,10 @@ python -m pytest
 ```
 
 
+
+---
+
+## 📚 Documentation Complémentaire
+
+* **[Document d'Architecture Technique](Documentation/Document%20Architecture%20Technique.md)** — conception détaillée des modules.
+* **[Benchmark Concurrentiel & Feuille de Route](Documentation/BENCHMARK_CONCURRENTS.md)** — analyse du marché du criblage sanctions/PEP (World-Check, ComplyAdvantage, yente, Watchman...), cadre réglementaire (Wolfsberg, ACPR/DGT) et feuille de route d'amélioration priorisée (P0 → P3).
