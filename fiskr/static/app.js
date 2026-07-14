@@ -494,6 +494,7 @@ function renderSnapshotsTable(snaps) {
         if (snap.file_type === "WATCHLIST_OFAC") typeBadge = '<span class="status-badge alert">OFAC XML</span>';
         else if (snap.file_type === "WATCHLIST_EU") typeBadge = '<span class="status-badge warning">EU CSV/PDF</span>';
         else if (snap.file_type === "WATCHLIST_SSIE") typeBadge = '<span class="status-badge alert">SSIE XML</span>';
+        else if (snap.file_type === "WATCHLIST_DGT") typeBadge = '<span class="status-badge warning">DGT JSON</span>';
         else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
         
         tr.innerHTML = `
@@ -625,7 +626,8 @@ async function handleIngestion(event) {
 
 // Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
 async function handleSourceSync(source) {
-    const btn = document.getElementById(source === "OFAC" ? "sync-ofac-btn" : "sync-eurlex-btn");
+    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn" };
+    const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
         const dateVal = document.getElementById("sync-eurlex-date").value;

@@ -104,6 +104,7 @@ Ainsi, un changement de nomenclature de l'émetteur (ex: `<DistinctParty>` deven
 L'onglet **Gestion des Watchlists → Sources Automatiques** permet de récupérer les listes directement auprès des émetteurs officiels, manuellement ou automatiquement chaque matin :
 
 * **🇺🇸 OFAC — SDN Advanced** : Téléchargement du fichier officiel [`SDN_ADVANCED.XML`](https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML), ingestion en snapshot, **delta** (ADDED / MODIFIED / REMOVED) par rapport à la liste OFAC active, puis application : le nouveau snapshot remplace l'ancien (statut `SUPERSEDED`) dans le cache de criblage. Si le hash du fichier est inchangé, le rapport indique `NO_CHANGE` sans retraitement.
+* **🇫🇷 DGT — Registre national des gels des avoirs** : Téléchargement du registre officiel de la Direction générale du Trésor via son **API publique** ([gels-avoirs.dgtresor.gouv.fr](https://gels-avoirs.dgtresor.gouv.fr/)), ingestion en snapshot (personnes physiques → I, personnes morales → E, navires → V, avec normalisation ISO2 des nationalités françaises pour le blocking), **delta** et remplacement de la liste DGT active. La mise en œuvre des mesures de gel nationales étant une **obligation autonome** des établissements assujettis (lignes directrices ACPR/DGT), ce connecteur couvre nativement l'exigence française. Compatible mode homologation et planification quotidienne.
 * **🇪🇺 EUR-Lex — Journal Officiel du jour (édition anglaise)** : Lecture de la page du Journal Officiel (série L, **version anglaise, qui fait référence pour la réglementation européenne**) de la date choisie, détection des actes dont le titre mentionne **« restrictive measures »**, puis scraping heuristique des annexes (tableaux et listes numérotées) pour en extraire les listés — Individus (avec date de naissance), Entités, Navires (IMO) et Aéronefs. Le type du listé est déduit de toute la ligne d'annexe, **motifs de la désignation compris** (les indices personnels — pronoms, fonctions, données de naissance — priment sur les mots-clés d'entités cités dans les motifs). Les fiches extraites sont **fusionnées de manière incrémentale** avec la liste EU active (le JO amende la liste, il ne la remplace pas) et le delta est calculé. En l'absence d'acte pertinent, le rapport indique `NO_PUBLICATION`.
 * **Archivage probant** : le **PDF officiel** de chaque acte retenu — la version qui **fait foi lors des audits** — est téléchargé dans `eurlex_archives/` avec son empreinte SHA-256 d'intégrité, référencé dans le rapport de synchronisation et téléchargeable depuis l'application (`GET /api/sync/evidence/{fichier}`).
 
@@ -122,6 +123,9 @@ sync:
     enabled: true
     daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
     keyword: "restrictive measures"
+  dgt:
+    enabled: true
+    url: "https://gels-avoirs.dgtresor.gouv.fr/ApiPublic/api/v1/publication/derniere-publication-fichier-json"
 ```
 
 Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé aux administrateurs), `GET /api/sync/reports` (historique des rapports) et `GET /api/sync/config` (configuration active).
@@ -231,7 +235,7 @@ Le dashboard interactif se compose de 4 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 99 tests automatisés avec pytest :
+Exécutez la suite complète de 102 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

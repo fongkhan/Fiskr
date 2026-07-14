@@ -21,7 +21,7 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import generate_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.delta import calculate_delta
-from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist
+from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
@@ -29,7 +29,7 @@ from fiskr.database import (
     SyncReport
 )
 from fiskr.sync import (
-    run_ofac_sync, run_eurlex_sync, get_sync_config, EURLEX_ARCHIVE_DIR,
+    run_ofac_sync, run_eurlex_sync, run_dgt_sync, get_sync_config, EURLEX_ARCHIVE_DIR,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
     _truncate_delta_details
 )
@@ -48,7 +48,7 @@ from fiskr.settings import (
 logger = logging.getLogger("fiskr.api")
 
 # Snapshot file types persisted as WatchlistEntity records
-WATCHLIST_FILE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE"]
+WATCHLIST_FILE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT"]
 
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
@@ -206,6 +206,8 @@ def _run_scheduled_syncs():
             run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
         if sync_cfg["eurlex"]["enabled"]:
             run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+        if sync_cfg["dgt"]["enabled"]:
+            run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
     finally:
         db.close()
 
@@ -757,8 +759,11 @@ async def ingest_snapshot(
         record_count = 0
         
         # 3. Parse contents based on File Type
-        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE"):
-            if file_type == "WATCHLIST_SSIE":
+        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT"):
+            if file_type == "WATCHLIST_DGT":
+                # Registre national des gels (DGT) : fichier JSON officiel
+                parser_stream = parse_dgt_gels_json(str(temp_file_path))
+            elif file_type == "WATCHLIST_SSIE":
                 # Smart Sanctions Ingestion Engine: config-driven agnostic XML pipeline
                 ssie_config = config.get("ssie", {}) or {}
                 selectors = merge_ssie_selectors(ssie_config.get("selectors"))
@@ -1352,10 +1357,12 @@ def run_source_sync(
                     detail="Format de date invalide (attendu: YYYY-MM-DD)."
                 )
         report = run_eurlex_sync(db, for_date=for_date, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "DGT":
+        report = run_dgt_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, EURLEX)."
+            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, DGT)."
         )
 
     return _serialize_sync_report(report)

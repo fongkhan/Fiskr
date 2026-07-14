@@ -34,7 +34,7 @@ from urllib.parse import urljoin
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
-from fiskr.ingest import parse_ofac_advanced_xml
+from fiskr.ingest import parse_ofac_advanced_xml, parse_dgt_gels_json
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
 from fiskr.settings import require_approval_enabled
@@ -45,6 +45,11 @@ DEFAULT_OFAC_URL = "https://sanctionslistservice.ofac.treas.gov/api/PublicationP
 # Version anglaise du Journal Officiel : c'est la reference reglementaire retenue
 DEFAULT_EURLEX_DAILY_URL = "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
 DEFAULT_EURLEX_KEYWORD = "restrictive measures"
+
+# Registre national des gels des avoirs (Direction generale du Tresor, API
+# publique ENGEL sans authentification) : criblage obligatoire pour les
+# etablissements assujettis francais (lignes directrices ACPR/DGT).
+DEFAULT_DGT_URL = "https://gels-avoirs.dgtresor.gouv.fr/ApiPublic/api/v1/publication/derniere-publication-fichier-json"
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -71,6 +76,10 @@ def get_sync_config() -> Dict[str, Any]:
             "enabled": bool((sync_cfg.get("eurlex") or {}).get("enabled", True)),
             "daily_journal_url": (sync_cfg.get("eurlex") or {}).get("daily_journal_url", DEFAULT_EURLEX_DAILY_URL),
             "keyword": (sync_cfg.get("eurlex") or {}).get("keyword", DEFAULT_EURLEX_KEYWORD),
+        },
+        "dgt": {
+            "enabled": bool((sync_cfg.get("dgt") or {}).get("enabled", True)),
+            "url": (sync_cfg.get("dgt") or {}).get("url", DEFAULT_DGT_URL),
         },
     }
 
@@ -436,6 +445,110 @@ def run_ofac_sync(
                 db.commit()
         return _finalize_report(
             db, source="OFAC", trigger=trigger, status="ERROR",
+            message=f"Echec: {e}"
+        )
+    finally:
+        if temp_file.exists():
+            os.remove(temp_file)
+
+
+def run_dgt_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge le registre national des gels des avoirs (DGT, JSON officiel),
+    l'ingere en snapshot, calcule le delta par rapport a la liste active et
+    applique le remplacement (ou attend l'homologation si le mode est actif).
+    """
+    cfg = get_sync_config()["dgt"]
+    url = cfg["url"]
+    fetch = fetcher or download_to_file
+
+    temp_dir = PROJECT_ROOT / "temp_ingestion"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_file = temp_dir / f"dgt_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
+
+    previous = _latest_ready_snapshot(db, "WATCHLIST_DGT")
+    snap_id = None
+    try:
+        logger.info(f"Sync DGT: telechargement de {url}")
+        fetch(url, temp_file)
+
+        with open(temp_file, "rb") as f:
+            fhash = hashlib.sha256(f.read()).hexdigest()
+
+        duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_DGT", fhash)
+        if duplicate:
+            if duplicate.status == "PENDING_REVIEW":
+                message = "Le registre DGT est identique a un snapshot deja en attente d'homologation."
+            else:
+                message = "Le registre DGT est identique a la version active (hash inchange)."
+            return _finalize_report(
+                db, source="DGT", trigger=trigger, status="NO_CHANGE",
+                message=message,
+                previous_snapshot_id=duplicate.snapshot_id
+            )
+
+        snap_id = f"dgt-sync-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        snap = Snapshot(
+            snapshot_id=snap_id,
+            file_type="WATCHLIST_DGT",
+            file_name=f"Registre_gels_DGT_{datetime.utcnow().strftime('%Y-%m-%d')}.json",
+            file_hash=fhash,
+            record_count=0,
+            status="PROCESSING"
+        )
+        db.add(snap)
+        db.commit()
+
+        record_count = persist_pivot_items(db, snap_id, parse_dgt_gels_json(str(temp_file)))
+        staging = require_approval_enabled(db)
+        snap.status = "PENDING_REVIEW" if staging else "READY"
+        snap.record_count = record_count
+        db.commit()
+
+        # Delta par rapport a la liste active (= production, non supersedee)
+        old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
+        new_entities = _snapshot_entity_dicts(db, snap_id)
+        delta = calculate_delta(old_entities, new_entities, "entity_id")
+
+        if not staging:
+            _supersede_previous_snapshots(db, "WATCHLIST_DGT", snap_id)
+            db.commit()
+            if reload_cache:
+                reload_cache()
+
+        summary = delta["summary"]
+        if staging:
+            message = (
+                f"{record_count} fiches importees depuis le registre national des gels (DGT), "
+                "snapshot en attente d'homologation (pointage humain requis)."
+            )
+        else:
+            message = f"{record_count} fiches importees depuis le registre national des gels (DGT)."
+        return _finalize_report(
+            db, source="DGT", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
+            message=message,
+            snapshot_id=snap_id,
+            previous_snapshot_id=previous.snapshot_id if previous else None,
+            added_count=summary["added_count"],
+            modified_count=summary["modified_count"],
+            removed_count=summary["removed_count"],
+            delta_report=_truncate_delta_details(delta)
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Echec de la synchronisation DGT: {e}")
+        if snap_id:
+            error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+            if error_snap:
+                error_snap.status = "ERROR"
+                db.commit()
+        return _finalize_report(
+            db, source="DGT", trigger=trigger, status="ERROR",
             message=f"Echec: {e}"
         )
     finally:

@@ -141,6 +141,7 @@
                                         <option value="WATCHLIST_OFAC">Watchlist OFAC (XML)</option>
                                         <option value="WATCHLIST_EU">Watchlist Européenne / Gels d'avoirs (CSV ou PDF)</option>
                                         <option value="WATCHLIST_SSIE">Smart Sanctions — XML générique (Moteur SSIE)</option>
+                                        <option value="WATCHLIST_DGT">Registre national des gels — DGT (JSON)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -490,6 +491,14 @@
                                 <h3 style="margin-top: 0;">🇺🇸 OFAC — SDN Advanced (XML)</h3>
                                 <p class="section-desc">Téléchargement du fichier officiel <code>SDN_ADVANCED.XML</code>, ingestion, delta et remplacement de la liste OFAC active.</p>
                                 <button id="sync-ofac-btn" class="btn btn-primary" onclick="handleSourceSync('OFAC')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇫🇷 DGT — Registre national des gels des avoirs (JSON)</h3>
+                                <p class="section-desc">Téléchargement du registre officiel de la Direction générale du Trésor (API publique <code>gels-avoirs.dgtresor.gouv.fr</code>), ingestion, delta et remplacement de la liste DGT active. Obligation autonome pour les établissements assujettis français (lignes directrices ACPR/DGT).</p>
+                                <button id="sync-dgt-btn" class="btn btn-primary" onclick="handleSourceSync('DGT')">
                                     Synchroniser maintenant
                                 </button>
                             </div>

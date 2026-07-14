@@ -923,6 +923,302 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
 
 
 
+# ------------------ REGISTRE NATIONAL DES GELS (DGT) ------------------
+# Connecteur du registre national des gels des avoirs publie par la Direction
+# generale du Tresor (gels-avoirs.dgtresor.gouv.fr, API publique ENGEL).
+# Structure du fichier JSON : Publications.PublicationDetail[] avec IdRegistre,
+# Nature (Personne physique / Personne morale / Navire), Nom et RegistreDetail[]
+# (paires TypeChamp / Valeur[]). Le parseur est tolerant aux variations de cles
+# des objets Valeur (recherche insensible a la casse, repli sur toute valeur texte).
+
+DGT_NATURE_TO_TYPE = {
+    "personne physique": "I",
+    "personne morale": "E",
+    "navire": "V",
+}
+
+# Normalisation des pays/nationalites du registre DGT (libelles francais) vers
+# ISO2, indispensable pour que les cles de blocking coincident avec celles du
+# referentiel clients (codes ISO). Radicaux sans accents, minuscules : ils
+# couvrent le nom du pays ET l'adjectif de nationalite (masculin/feminin/pluriel).
+_DGT_COUNTRY_STEMS = [
+    ("coree du nord", "KP"), ("nord-coreen", "KP"), ("nord coreen", "KP"),
+    ("russ", "RU"), ("bielorus", "BY"), ("belarus", "BY"),
+    ("syrie", "SY"), ("syrien", "SY"),
+    ("iranien", "IR"), ("iran", "IR"),
+    ("birman", "MM"), ("myanmar", "MM"), ("birmanie", "MM"),
+    ("libye", "LY"), ("libyen", "LY"),
+    ("malien", "ML"), ("mali", "ML"),
+    ("venezuel", "VE"), ("chin", "CN"),
+    ("irakien", "IQ"), ("irak", "IQ"),
+    ("afghan", "AF"), ("yemen", "YE"), ("liban", "LB"),
+    ("soudan du sud", "SS"), ("sud-soudan", "SS"),
+    ("soudan", "SD"), ("congolais", "CD"),
+    ("republique democratique du congo", "CD"), ("rdc", "CD"), ("congo", "CD"),
+    ("centrafri", "CF"), ("somal", "SO"), ("nicaragua", "NI"),
+    ("guinee-bissau", "GW"), ("bissau", "GW"), ("guine", "GN"),
+    ("zimbabw", "ZW"), ("haiti", "HT"), ("hait", "HT"),
+    ("turc", "TR"), ("turq", "TR"), ("ukrain", "UA"), ("moldav", "MD"),
+    ("tunis", "TN"), ("egypt", "EG"), ("pakistan", "PK"),
+    ("saoudien", "SA"), ("arabie saoudite", "SA"),
+    ("jordan", "JO"), ("israel", "IL"), ("palestin", "PS"),
+    ("franc", "FR"), ("algeri", "DZ"), ("marocain", "MA"), ("maroc", "MA"),
+    ("burundi", "BI"), ("erythre", "ER"), ("ethiopi", "ET"),
+    ("kirghiz", "KG"), ("tadjik", "TJ"), ("ouzbek", "UZ"), ("kazakh", "KZ"),
+    ("armeni", "AM"), ("azerbaidjan", "AZ"), ("georgi", "GE"),
+    ("serbe", "RS"), ("serbie", "RS"), ("bosni", "BA"), ("kosov", "XK"),
+    ("indien", "IN"), ("inde", "IN"), ("indonesi", "ID"),
+    ("philippin", "PH"), ("sri lank", "LK"), ("bangladesh", "BD"),
+    ("nigeria", "NG"), ("nigerian", "NG"), ("nigerien", "NE"), ("niger", "NE"),
+    ("burkin", "BF"), ("tchad", "TD"), ("tchadien", "TD"),
+    ("camerou", "CM"), ("senegal", "SN"), ("mauritani", "MR"),
+    ("kowei", "KW"), ("qatar", "QA"), ("emirat", "AE"), ("bahrein", "BH"),
+    ("britanni", "GB"), ("royaume-uni", "GB"), ("americain", "US"), ("etats-unis", "US"),
+    ("allemand", "DE"), ("allemagne", "DE"), ("belge", "BE"), ("belgique", "BE"),
+    ("espagnol", "ES"), ("espagne", "ES"), ("italien", "IT"), ("italie", "IT"),
+]
+
+
+def _strip_accents_lower(text: str) -> str:
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", str(text or "").lower())
+        if unicodedata.category(c) != "Mn"
+    ).strip()
+
+
+def dgt_country_to_iso2(value: str) -> str:
+    """
+    Convertit un pays / une nationalite du registre DGT (libelle francais,
+    ex. "Russe", "Russie") en code ISO2. Repli sur la valeur d'origine si
+    aucun radical connu ne correspond (la cle de blocking reste coherente
+    en interne, meme si elle ne croisera pas les codes ISO clients).
+    """
+    normalized = _strip_accents_lower(value)
+    if re.fullmatch(r"[a-z]{2}", normalized):
+        return normalized.upper()
+    for stem, iso2 in _DGT_COUNTRY_STEMS:
+        if normalized.startswith(stem) or f" {stem}" in f" {normalized}":
+            return iso2
+    return str(value).strip()
+
+
+def _dgt_value_text(value_obj: Any, *preferred_keys: str) -> str:
+    """
+    Extrait le texte d'un objet Valeur du registre DGT : cherche d'abord les
+    cles preferees (insensible a la casse), sinon joint toutes les valeurs
+    texte non vides de l'objet.
+    """
+    if not isinstance(value_obj, dict):
+        return str(value_obj or "").strip()
+    for key in preferred_keys:
+        val = dict_get_insensitive(value_obj, key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return " ".join(
+        str(v).strip() for v in value_obj.values()
+        if v is not None and isinstance(v, (str, int, float)) and str(v).strip()
+    ).strip()
+
+
+def _dgt_details_by_type(record: Dict[str, Any]) -> Dict[str, List[Any]]:
+    """Indexe les RegistreDetail par TypeChamp -> liste d'objets Valeur."""
+    indexed: Dict[str, List[Any]] = {}
+    for detail in record.get("RegistreDetail") or []:
+        type_champ = str(detail.get("TypeChamp") or "").strip().upper()
+        if not type_champ:
+            continue
+        values = detail.get("Valeur")
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            values = [values]
+        indexed.setdefault(type_champ, []).extend(values)
+    return indexed
+
+
+def _dgt_date(value_obj: Any) -> Optional[str]:
+    """Assemble une date YYYY-MM-DD depuis un objet {Jour, Mois, Annee} (jour/mois optionnels)."""
+    if not isinstance(value_obj, dict):
+        return None
+    year = _dgt_value_text(value_obj, "Annee", "Year")
+    if not year or not re.fullmatch(r"\d{4}", year):
+        # Certains enregistrements portent la date complete dans un seul champ
+        raw = _dgt_value_text(value_obj)
+        match = re.search(r"(\d{4})(?:-(\d{1,2})-(\d{1,2}))?", raw)
+        if not match:
+            return None
+        year, month, day = match.group(1), match.group(2) or "01", match.group(3) or "01"
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    month = _dgt_value_text(value_obj, "Mois", "Month") or "01"
+    day = _dgt_value_text(value_obj, "Jour", "Day") or "01"
+    if not month.isdigit():
+        month = "01"
+    if not day.isdigit():
+        day = "01"
+    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+
+def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse le fichier JSON du registre national des gels (DGT) et produit des
+    enregistrements au schema pivot Fiskr.
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    publications = dict_get_insensitive(data, "Publications") or {}
+    if isinstance(publications, list):
+        publications = publications[0] if publications else {}
+    records = dict_get_insensitive(publications, "PublicationDetail") or []
+
+    for record in records:
+        id_registre = record.get("IdRegistre")
+        if id_registre is None:
+            continue
+        nature = str(record.get("Nature") or "").strip().lower()
+        entity_type = DGT_NATURE_TO_TYPE.get(nature, "E")
+        last_name = str(record.get("Nom") or "").strip()
+
+        details = _dgt_details_by_type(record)
+
+        first_name = ""
+        for v in details.get("PRENOM", []):
+            first_name = _dgt_value_text(v, "Prenom")
+            if first_name:
+                break
+
+        if entity_type == "I":
+            primary_name = f"{first_name} {last_name}".strip()
+        else:
+            primary_name = last_name
+        if not primary_name:
+            continue
+
+        gender = "U"
+        for v in details.get("SEXE", []):
+            sexe = _dgt_value_text(v, "Sexe").lower()
+            if sexe.startswith("f"):
+                gender = "F"
+            elif sexe.startswith("m"):
+                gender = "M"
+
+        dobs = []
+        for v in details.get("DATE_DE_NAISSANCE", []):
+            date_val = _dgt_date(v)
+            if date_val:
+                dobs.append(date_val)
+
+        place_of_birth = None
+        birth_countries = []
+        for v in details.get("LIEU_DE_NAISSANCE", []):
+            lieu = _dgt_value_text(v, "Lieu")
+            pays = _dgt_value_text(v, "Pays")
+            if not place_of_birth and (lieu or pays):
+                place_of_birth = ", ".join(p for p in (lieu, pays) if p)
+            if pays:
+                birth_countries.append(dgt_country_to_iso2(pays))
+
+        citizenships = []
+        for v in details.get("NATIONALITE", []):
+            pays = _dgt_value_text(v, "Pays", "Nationalite")
+            if pays:
+                citizenships.append(dgt_country_to_iso2(pays))
+
+        aliases_raw = [
+            {"name": alias, "type": "Strong"}
+            for alias in (_dgt_value_text(v, "Alias") for v in details.get("ALIAS", []))
+            if alias
+        ]
+
+        designation = None
+        for v in details.get("TITRE", []):
+            titre = _dgt_value_text(v, "Titre")
+            if titre:
+                designation = titre
+                break
+
+        addresses = []
+        address_countries = []
+        for type_champ in ("ADRESSE_PP", "ADRESSE_PM"):
+            for v in details.get(type_champ, []):
+                adresse = _dgt_value_text(v, "Adresse")
+                pays = _dgt_value_text(v, "Pays")
+                full = ", ".join(p for p in (adresse, pays) if p)
+                if full:
+                    addresses.append(full)
+                if pays:
+                    address_countries.append(pays)
+
+        passports = []
+        for v in details.get("PASSEPORT", []):
+            numero = _dgt_value_text(v, "NumeroPasseport", "Numero")
+            if numero:
+                passports.append({"number": numero, "issuing_country": "XX", "expiration_date": None})
+
+        other_registrations = []
+        for type_champ in ("IDENTIFICATION", "AUTRE_IDENTITE"):
+            for v in details.get(type_champ, []):
+                ident = _dgt_value_text(v, "Identification", "NumeroCarte", "Numero")
+                if ident:
+                    other_registrations.append({"id_type": type_champ.title(), "number": ident})
+
+        motifs = []
+        for v in details.get("MOTIFS", []):
+            motif = _dgt_value_text(v, "Motifs", "Motif")
+            if motif:
+                motifs.append(motif)
+
+        extra_info = []
+        for type_champ, keys in (
+            ("FONDEMENT_JURIDIQUE", ("FondementJuridiqueLabel", "FondementJuridique")),
+            ("REFERENCE_UE", ("ReferenceUe",)),
+            ("REFERENCE_ONU", ("ReferenceOnu",)),
+        ):
+            for v in details.get(type_champ, []):
+                text = _dgt_value_text(v, *keys)
+                if text:
+                    extra_info.append(f"{type_champ.replace('_', ' ').title()}: {text}")
+
+        yield {
+            "entity_id": f"DGT-{id_registre}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name,
+                "last_name": last_name if entity_type == "I" else "",
+                "maiden_name": ""
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": gender,
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted({dgt_country_to_iso2(c) for c in address_countries}) if entity_type != "I" else []
+            },
+            "place_of_birth": place_of_birth,
+            "address": addresses[0] if addresses else None,
+            "alternative_addresses": addresses[1:],
+            "country": address_countries[0] if address_countries else None,
+            "designation": designation,
+            "designation_reasons": "; ".join(motifs) or None,
+            "additional_informations": "; ".join(extra_info) or None,
+            "origin": "DGT Registre national des gels",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": [],
+            "other_id_documents": []
+        }
+
+
 # ------------------ CSV CONNECTOR ------------------
 
 def parse_csv_file(file_path: str, delimiter: str = ",", mapping_dict: dict = None) -> Generator[Dict[str, Any], None, None]:
