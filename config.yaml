@@ -86,6 +86,22 @@ sync:
     enabled: false
     url: "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
 
+# Recherche adverse media (revue de presse negative) : purement informative
+# pour l'analyste, ne modifie jamais un score ni un statut de criblage.
+adverse_media:
+  enabled: true
+  provider: "google_news_rss"   # flux RSS public Google News (gratuit, remplacable)
+  language: "fr"
+  max_results: 10
+  # Mots-cles LCB-FT combines au nom recherche (vide = liste par defaut)
+  keywords: []
+
+# Narratifs d'alertes : projet de narratif genere depuis le decision_tree
+# (deterministe, donc contexte fiable). La decision reste humaine (4-yeux).
+narrative:
+  llm_enabled: false            # true = reformulation en prose via l'API Claude
+  llm_model: "claude-opus-4-8"  # necessite ANTHROPIC_API_KEY et `pip install anthropic`
+
 # Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
 # Les selecteurs de balises pivots sont surchargables lors de chaque import.
 ssie:

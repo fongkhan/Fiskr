@@ -740,6 +740,9 @@
                     <button id="sub-btn-screening-batch" class="sub-tab-btn" onclick="switchSubTab('screening', 'screening-batch')">
                         Screening de Masse (Batch)
                     </button>
+                    <button id="sub-btn-screening-transactions" class="sub-tab-btn" onclick="switchSubTab('screening', 'screening-transactions')">
+                        Filtrage Transactionnel (ISO 20022)
+                    </button>
                 </div>
 
                 <div id="sub-sec-screening-realtime" class="sub-tab-content active">
@@ -1062,6 +1065,44 @@
                         </div>
                     </div>
                 </div>
+
+                <div id="sub-sec-screening-transactions" class="sub-tab-content hidden">
+                    <div class="card">
+                        <h2>Filtrage Transactionnel ISO 20022</h2>
+                        <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques — sont criblées contre les listes en production. Verdict <strong>PASS</strong> ou <strong>HIT</strong> ; chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+                        <div class="form-row" style="align-items: flex-end;">
+                            <div class="form-group" style="flex: 1;">
+                                <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
+                                <input type="file" id="txn-file-input" accept=".xml">
+                            </div>
+                            <div class="form-group">
+                                <button id="txn-screen-btn" class="btn btn-primary" onclick="runTransactionScreening()">Filtrer le paiement</button>
+                            </div>
+                        </div>
+                        <div id="txn-results-container" class="hidden">
+                            <hr>
+                            <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
+                            <p class="section-desc" id="txn-message-info"></p>
+                            <div class="table-container max-height-table">
+                                <table id="txn-results-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Partie</th>
+                                            <th>Rôle(s)</th>
+                                            <th>Pays</th>
+                                            <th>BIC</th>
+                                            <th>Score</th>
+                                            <th>Meilleur match</th>
+                                            <th>Statut</th>
+                                            <th>Alerte</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- SECTION 3: AUDIT -->
@@ -1376,7 +1417,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=4.1"></script>
+    <script src="/static/app.js?v=4.2"></script>
 
 
 

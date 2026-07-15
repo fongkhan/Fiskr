@@ -245,8 +245,8 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
 Le dashboard interactif se compose de 6 onglets principaux :
 * **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 26 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF, JSON), de comparer les versions historiques via le **Delta Engine**, de piloter le **mode homologation** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
-* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**) et le crible de masse (simulateur batch).
-* **Alertes** : File de travail des alertes de criblage avec **cycle de vie complet** (ouverte → en cours → décision proposée → close vrai/faux positif, escalade possible), **validation 4-yeux** (le validateur, rôle `reviewer` ou `admin`, doit être différent du proposeur — désactivable à chaud), explication du score (decision tree) et **historique append-only** de chaque action.
+* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**), le crible de masse (simulateur batch) et le **filtrage transactionnel ISO 20022** : soumission d'un message de paiement `pain.001` ou `pacs.008` (toute version mineure), extraction et criblage de **toutes les parties** (donneur d'ordre, bénéficiaire, ultimes, banques par BIC), verdict global **PASS / HIT** (`POST /api/transactions/screen`) — chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.
+* **Alertes** : File de travail des alertes de criblage avec **cycle de vie complet** (ouverte → en cours → décision proposée → close vrai/faux positif, escalade possible), **validation 4-yeux** (le validateur, rôle `reviewer` ou `admin`, doit être différent du proposeur — désactivable à chaud), explication du score (decision tree) et **historique append-only** de chaque action. La modale d'investigation propose aussi un **projet de narratif** généré depuis les données d'audit (`POST /api/alerts/{id}/narrative` — déterministe par construction, reformulation Claude optionnelle via `narrative.llm_enabled`, la décision restant humaine) et une recherche **adverse media** (revue de presse négative par mots-clés LCB-FT, `GET /api/adverse-media` — purement informative).
 * **Liste blanche & surveillance continue** *(dans l'onglet Alertes)* : paires client×listé en **liste blanche** (« Good Guys ») avec justification gouvernée, expiration de revue et révocation motivée — chaque suppression d'alerte reste tracée dans l'audit (statut `WHITELISTED`) ; **re-criblage automatique** du référentiel clients contre les seules entités nouvelles/modifiées à chaque mise à jour de liste (sync, upload, approbation d'homologation), plus un **lookback manuel** admin (`POST /api/rescreen/run`).
 * **Pilotage** : Page de KPI conformité (`GET /api/kpi`) — encours d'alertes par statut, **taux de faux positifs**, délai moyen de décision, paires en liste blanche actives, volumétrie des listes en production par type, snapshots par statut, répartition des décisions de criblage et dernières synchronisations.
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
@@ -255,7 +255,7 @@ Le dashboard interactif se compose de 6 onglets principaux :
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 130 tests automatisés avec pytest :
+Exécutez la suite complète de 144 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

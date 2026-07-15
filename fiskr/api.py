@@ -41,6 +41,9 @@ from fiskr.sync import (
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
+from fiskr.transactions import parse_iso20022_payment, screen_payment_message
+from fiskr.adverse_media import search_adverse_media
+from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, create_access_token,
     decode_access_token, parse_roles, normalize_roles
@@ -734,6 +737,54 @@ async def screen_client(
         "whitelisted": whitelist_pair_id is not None,
         "whitelist_pair_id": whitelist_pair_id
     }
+
+@app.post("/api/transactions/screen")
+async def screen_transaction_message(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Filtrage transactionnel ISO 20022 : parse un message de paiement pain.001
+    ou pacs.008, crible chaque partie (donneur d'ordre, bénéficiaire, ultimes,
+    agents bancaires) contre les listes en production et rend un verdict
+    global PASS / HIT. Chaque partie criblée est tracée dans le journal
+    d'audit ; chaque hit ouvre une alerte de travail.
+    """
+    content = await file.read()
+    try:
+        parsed = parse_iso20022_payment(content)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    result = screen_payment_message(
+        db, parsed, watchlist_index, watchlist_version, watchlist_hash,
+        current_user["username"]
+    )
+    return result
+
+
+@app.get("/api/adverse-media")
+async def adverse_media_lookup(
+    name: str = Query(..., min_length=2),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Revue de presse négative (adverse media) sur un nom, via le fournisseur
+    configuré (Google News RSS par défaut). Purement informatif : ne modifie
+    jamais un score ni un statut de criblage.
+    """
+    try:
+        return search_adverse_media(name)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Le fournisseur adverse media est injoignable : {e}"
+        )
+
 
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
@@ -2118,6 +2169,32 @@ async def validate_alert_decision(
         message = "Décision refusée, alerte renvoyée en analyse."
     db.commit()
     return {"message": message, **_alert_summary(alert)}
+
+@app.post("/api/alerts/{alert_id}/narrative")
+async def generate_narrative(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Génère un PROJET de narratif d'investigation depuis les données tracées
+    de l'alerte (decision_tree, identités, historique). Déterministe par
+    construction, reformulation LLM optionnelle (narrative.llm_enabled).
+    Jamais de décision automatique : le narratif est un brouillon à relire.
+    """
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    narrative, llm_used = generate_alert_narrative(alert, audit, events)
+    _log_alert_event(
+        db, alert.id, current_user["username"], "NARRATIVE",
+        f"Projet de narratif généré ({'reformulation LLM' if llm_used else 'composeur déterministe'})."
+    )
+    db.commit()
+    return {"narrative": narrative, "llm_used": llm_used, "alert_id": alert.id}
 
 # ------------------ LISTE BLANCHE CLIENT x LISTE & RE-CRIBLAGE ------------------
 

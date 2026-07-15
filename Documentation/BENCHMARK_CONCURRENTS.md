@@ -57,7 +57,7 @@ Les 5 améliorations au meilleur ratio impact/effort :
 | **Homologation humaine des listes avant prod** | ✅✅ (différenciant) | ❌ | ❌ | ❌ | ❌ |
 | Piste d'audit immuable + config figée par décision | ✅ | n/a | ✅ | ❌ | ❌ |
 | Archivage probant des actes officiels | ✅ (PDF EUR-Lex + SHA-256) | ❌ | ❌ | ❌ | ❌ |
-| Narratifs IA / copilote | ❌ | ❌ | ✅ | ❌ (explications structurées) | ❌ |
+| Narratifs IA / copilote | ✅ (déterministe + LLM opt-in) | ❌ | ✅ | ❌ (explications structurées) | ❌ |
 
 ---
 
@@ -165,9 +165,13 @@ La guidance du Wolfsberg Group structure un programme de criblage autour de : l'
 | UK OFSI | Couverture internationale complète | S | ✅ `run_ofsi_sync` (opt-in) |
 | Page KPI conformité | Pilotage du dispositif | M | ✅ onglet Pilotage + `GET /api/kpi` |
 
-### P3 — Horizon
+### P3 — Horizon — ✅ livré
 
-Filtrage transactionnel ISO 20022 · adverse media (partenariat données requis) · narratifs d'alertes IA human-in-the-loop fondés sur le `decision_tree`.
+| Item | Statut |
+|---|---|
+| Filtrage transactionnel ISO 20022 | ✅ parseur pain.001/pacs.008 + criblage de toutes les parties, verdict PASS/HIT, audit + alertes (`POST /api/transactions/screen`) |
+| Adverse media | ✅ connecteur Google News RSS gratuit (mots-clés LCB-FT, fournisseur remplaçable) — informatif uniquement ; un partenariat données (Dow Jones/Factiva) reste supérieur en couverture |
+| Narratifs d'alertes IA human-in-the-loop | ✅ projet de narratif déterministe fondé sur le `decision_tree` (+ reformulation Claude opt-in), décision humaine 4-yeux inchangée |
 
 ---
 
