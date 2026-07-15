@@ -165,6 +165,20 @@ Endpoints associés : `GET/PUT /api/settings/ingestion`, `GET /api/review/pendin
 
 ---
 
+## 🚨 Traitement des Alertes & Surveillance Continue
+
+Le flux de travail post-criblage est documenté en détail dans **[Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md](Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md)**. En synthèse :
+
+* **Cycle de vie des alertes & 4-yeux** : chaque décision `ALERT` ouvre un objet de travail dédupliqué (`OPEN → IN_PROGRESS → PENDING_VALIDATION → CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE`, escalade possible) ; la clôture exige un validateur **différent du proposeur** (rôle `reviewer`/`admin`, désactivable à chaud), avec historique append-only de chaque action.
+* **Liste blanche client×listé** (« Good Guys », Wolfsberg) : suppression gouvernée des faux positifs récurrents — justification et pièce jointe modulaires, expiration de revue, révocation douce, et suppression **jamais silencieuse** (statut `WHITELISTED` tracé dans l'audit).
+* **Re-criblage automatique post-delta** : à chaque mise en production d'une liste, le référentiel clients est re-criblé contre les seules entités nouvelles/modifiées ; **lookback manuel** admin (`POST /api/rescreen/run`).
+* **Narratifs d'alertes** : projet de narratif d'investigation composé exclusivement depuis les données tracées (decision_tree, seuil, historique), reformulation Claude optionnelle — la décision reste humaine.
+* **Adverse media** : revue de presse négative par mots-clés LCB-FT (Google News RSS, fournisseur remplaçable), strictement informative.
+* **Filtrage transactionnel ISO 20022** : criblage de toutes les parties d'un message `pain.001` / `pacs.008`, verdict `PASS`/`HIT`, audit + alertes.
+* **Pilotage** : KPI conformité (`GET /api/kpi`) — taux de faux positifs, délais de décision, volumétrie, synchronisations.
+
+---
+
 ## 📋 Référentiel des 26 Champs Réglementaires de Criblage
 
 Le moteur intègre 26 champs obligatoires de conformité AML/CFT, tous exploitables lors de l'ingestion de fichiers ou du screening temps réel :
@@ -220,7 +234,7 @@ ADMIN_PASSWORD=adminpassword
 
 ### Prérequis
 * Python 3.10 ou supérieur (développé et validé sous Python 3.13.1)
-* Dépendances principales : `fastapi`, `uvicorn`, `sqlalchemy`, `pydantic`, `pyyaml`, `python-dotenv`, `pyjwt`, `python-multipart`, `pypdf`, `faker`, `pytest`.
+* Dépendances principales : `fastapi`, `uvicorn`, `sqlalchemy`, `pydantic`, `pyyaml`, `python-dotenv`, `pyjwt`, `python-multipart`, `pypdf`, `anyascii`, `faker`, `pytest`. Optionnel : `anthropic` (reformulation LLM des narratifs d'alertes, voir `narrative.llm_enabled`).
 
 ### Déploiement local
 1. Installez les dépendances :
@@ -245,10 +259,9 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
 Le dashboard interactif se compose de 6 onglets principaux :
 * **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 26 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF, JSON), de comparer les versions historiques via le **Delta Engine**, de piloter le **mode homologation** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
-* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**), le crible de masse (simulateur batch) et le **filtrage transactionnel ISO 20022** : soumission d'un message de paiement `pain.001` ou `pacs.008` (toute version mineure), extraction et criblage de **toutes les parties** (donneur d'ordre, bénéficiaire, ultimes, banques par BIC), verdict global **PASS / HIT** (`POST /api/transactions/screen`) — chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.
-* **Alertes** : File de travail des alertes de criblage avec **cycle de vie complet** (ouverte → en cours → décision proposée → close vrai/faux positif, escalade possible), **validation 4-yeux** (le validateur, rôle `reviewer` ou `admin`, doit être différent du proposeur — désactivable à chaud), explication du score (decision tree) et **historique append-only** de chaque action. La modale d'investigation propose aussi un **projet de narratif** généré depuis les données d'audit (`POST /api/alerts/{id}/narrative` — déterministe par construction, reformulation Claude optionnelle via `narrative.llm_enabled`, la décision restant humaine) et une recherche **adverse media** (revue de presse négative par mots-clés LCB-FT, `GET /api/adverse-media` — purement informative).
-* **Liste blanche & surveillance continue** *(dans l'onglet Alertes)* : paires client×listé en **liste blanche** (« Good Guys ») avec justification gouvernée, expiration de revue et révocation motivée — chaque suppression d'alerte reste tracée dans l'audit (statut `WHITELISTED`) ; **re-criblage automatique** du référentiel clients contre les seules entités nouvelles/modifiées à chaque mise à jour de liste (sync, upload, approbation d'homologation), plus un **lookback manuel** admin (`POST /api/rescreen/run`).
-* **Pilotage** : Page de KPI conformité (`GET /api/kpi`) — encours d'alertes par statut, **taux de faux positifs**, délai moyen de décision, paires en liste blanche actives, volumétrie des listes en production par type, snapshots par statut, répartition des décisions de criblage et dernières synchronisations.
+* **Criblage** : Crible temps réel unitaire (Sandbox avec champs s'adaptant au type de tiers), crible de masse (simulateur batch) et **filtrage transactionnel ISO 20022** (messages `pain.001` / `pacs.008`).
+* **Alertes** : File de travail des alertes avec **cycle de vie complet et validation 4-yeux**, liste blanche client×listé, **projet de narratif** et recherche **adverse media** dans la modale d'investigation.
+* **Pilotage** : Page de KPI conformité (taux de faux positifs, délais de décision, volumétrie des listes, dernières synchronisations).
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
 * **Utilisateurs** *(Réservé aux Administrateurs)* : Interface de gestion des utilisateurs, création de comptes, réinitialisation de mots de passe et attribution des rôles empilables (`admin` / `reviewer` / `user`).
 
@@ -267,4 +280,5 @@ python -m pytest
 ## 📚 Documentation Complémentaire
 
 * **[Document d'Architecture Technique](Documentation/Document%20Architecture%20Technique.md)** — conception détaillée des modules.
-* **[Benchmark Concurrentiel & Feuille de Route](Documentation/BENCHMARK_CONCURRENTS.md)** — analyse du marché du criblage sanctions/PEP (World-Check, ComplyAdvantage, yente, Watchman...), cadre réglementaire (Wolfsberg, ACPR/DGT) et feuille de route d'amélioration priorisée (P0 → P3).
+* **[Traitement des Alertes & Surveillance Continue](Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md)** — guide fonctionnel du flux post-criblage : cycle de vie des alertes et 4-yeux, liste blanche, re-criblage automatique et lookback, narratifs, adverse media, filtrage transactionnel ISO 20022, KPI et récapitulatif des réglages à chaud.
+* **[Benchmark Concurrentiel & Feuille de Route](Documentation/BENCHMARK_CONCURRENTS.md)** — analyse du marché du criblage sanctions/PEP (World-Check, ComplyAdvantage, yente, Watchman...), cadre réglementaire (Wolfsberg, ACPR/DGT) et feuille de route d'amélioration priorisée — **intégralement livrée (P0 → P3)**.
