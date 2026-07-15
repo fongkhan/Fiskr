@@ -21,15 +21,21 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import generate_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.delta import calculate_delta
-from fiskr.ingest import parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist
+from fiskr.ingest import (
+    parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
+    parse_eu_fsf_xml, parse_un_consolidated_xml
+)
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
-    SyncReport
+    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair
 )
+from fiskr.alerts import open_or_redetect_alert, is_whitelisted
+from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.sync import (
-    run_ofac_sync, run_eurlex_sync, get_sync_config, EURLEX_ARCHIVE_DIR,
+    run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
+    get_sync_config, EURLEX_ARCHIVE_DIR,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
     _truncate_delta_details
 )
@@ -39,8 +45,13 @@ from fiskr.auth import (
     decode_access_token, parse_roles, normalize_roles
 )
 from fiskr.settings import (
-    require_approval_enabled, exclusion_requirements, get_setting_with_source, set_setting,
-    SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, SETTING_EXCLUSION_FILE_REQUIRED
+    require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
+    whitelist_requirements, auto_rescreen_enabled,
+    get_setting_with_source, set_setting,
+    SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
+    SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
+    SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
+    SETTING_AUTO_RESCREEN
 )
 
 
@@ -48,7 +59,7 @@ from fiskr.settings import (
 logger = logging.getLogger("fiskr.api")
 
 # Snapshot file types persisted as WatchlistEntity records
-WATCHLIST_FILE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE"]
+WATCHLIST_FILE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN"]
 
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
@@ -201,11 +212,26 @@ def _run_scheduled_syncs():
     """Execute les synchronisations de sources activees (appel planifie quotidien)."""
     sync_cfg = get_sync_config()
     db = next(get_db())
+
+    def _apply_rescreen(report):
+        # Surveillance continue : re-criblage post-delta apres chaque application
+        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
+            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
+            if snap:
+                rescreen_after_snapshot_change(db, snap.file_type, report.snapshot_id, report.previous_snapshot_id)
+
     try:
         if sync_cfg["ofac"]["enabled"]:
-            run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        # FSF (liste consolidee, fait autorite) avant le scraping du JO du jour
+        if sync_cfg["eu_fsf"]["enabled"]:
+            _apply_rescreen(run_eu_fsf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["eurlex"]["enabled"]:
-            run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["dgt"]["enabled"]:
+            _apply_rescreen(run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["un"]["enabled"]:
+            _apply_rescreen(run_un_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -631,7 +657,20 @@ async def screen_client(
             
     # Audit trail persistence
     audit_id = None
+    alert_id = None
+    whitelist_pair_id = None
     if best_match:
+        # Liste blanche client x liste : la suppression n'est JAMAIS silencieuse,
+        # le journal d'audit trace la decision avec le statut WHITELISTED
+        if best_match.get("status") == "ALERT":
+            wl_pair = is_whitelisted(
+                db, client_dict.get("client_id"),
+                (best_match.get("watchlist_entity") or {}).get("entity_id")
+            )
+            if wl_pair:
+                best_match["status"] = "WHITELISTED"
+                best_match["whitelist_pair_id"] = wl_pair.id
+                whitelist_pair_id = wl_pair.id
         audit_record = log_compliance_decision(
             db,
             client_dict,
@@ -641,6 +680,11 @@ async def screen_client(
             watchlist_hash
         )
         audit_id = audit_record.id
+        # Une decision ALERT ouvre (ou re-detecte) une alerte de travail
+        if best_match.get("status") == "ALERT":
+            alert_id = open_or_redetect_alert(
+                db, audit_record, client_dict.get("client_id"), best_match, current_user["username"]
+            )
     else:
         # Log dummy NO_MATCH result
         no_match_result = {
@@ -674,7 +718,10 @@ async def screen_client(
         "candidates_count": len(candidates),
         "best_match": best_match,
         "all_matches": sorted(matches, key=lambda x: x["final_score"], reverse=True),
-        "audit_trail_id": audit_id
+        "audit_trail_id": audit_id,
+        "alert_id": alert_id,
+        "whitelisted": whitelist_pair_id is not None,
+        "whitelist_pair_id": whitelist_pair_id
     }
 
 @app.post("/api/snapshots/ingest")
@@ -757,8 +804,18 @@ async def ingest_snapshot(
         record_count = 0
         
         # 3. Parse contents based on File Type
-        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE"):
-            if file_type == "WATCHLIST_SSIE":
+        eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
+        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN") or eu_fsf_upload:
+            if eu_fsf_upload:
+                # Liste consolidee UE au format FSF XML officiel
+                parser_stream = parse_eu_fsf_xml(str(temp_file_path))
+            elif file_type == "WATCHLIST_UN":
+                # Liste consolidee du Conseil de securite de l'ONU (XML officiel)
+                parser_stream = parse_un_consolidated_xml(str(temp_file_path))
+            elif file_type == "WATCHLIST_DGT":
+                # Registre national des gels (DGT) : fichier JSON officiel
+                parser_stream = parse_dgt_gels_json(str(temp_file_path))
+            elif file_type == "WATCHLIST_SSIE":
                 # Smart Sanctions Ingestion Engine: config-driven agnostic XML pipeline
                 ssie_config = config.get("ssie", {}) or {}
                 selectors = merge_ssie_selectors(ssie_config.get("selectors"))
@@ -985,8 +1042,13 @@ async def ingest_snapshot(
         db.commit()
 
         # Reload cache to integrate newly loaded watchlists
+        rescreen_result = None
         if file_type in WATCHLIST_FILE_TYPES and not staging:
             load_watchlist_cache(db)
+            # Surveillance continue : re-criblage du referentiel clients
+            # contre les entites du nouveau snapshot
+            if auto_rescreen_enabled(db):
+                rescreen_result = rescreen_after_snapshot_change(db, file_type, snap_id, None)
 
         if staging:
             message = (
@@ -999,7 +1061,8 @@ async def ingest_snapshot(
             "message": message,
             "snapshot_id": snap_id,
             "record_count": record_count,
-            "status": snap.status
+            "status": snap.status,
+            "rescreen": rescreen_result
         }
     except Exception as e:
         db.rollback()
@@ -1352,13 +1415,28 @@ def run_source_sync(
                     detail="Format de date invalide (attendu: YYYY-MM-DD)."
                 )
         report = run_eurlex_sync(db, for_date=for_date, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "DGT":
+        report = run_dgt_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source in ("EUFSF", "EU_FSF", "FSF"):
+        report = run_eu_fsf_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source in ("UN", "ONU"):
+        report = run_un_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, EURLEX)."
+            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN)."
         )
 
-    return _serialize_sync_report(report)
+    response = _serialize_sync_report(report)
+    # Surveillance continue : re-criblage du referentiel clients contre les
+    # entites nouvelles/modifiees du snapshot applique
+    if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
+        if snap:
+            response["rescreen"] = rescreen_after_snapshot_change(
+                db, snap.file_type, report.snapshot_id, report.previous_snapshot_id
+            )
+    return response
 
 @app.get("/api/sync/reports")
 async def get_sync_reports(
@@ -1411,6 +1489,10 @@ class IngestionSettingsUpdate(BaseModel):
     require_approval: Optional[bool] = None
     exclusion_justification_required: Optional[bool] = None
     exclusion_file_required: Optional[bool] = None
+    alert_four_eyes_required: Optional[bool] = None
+    whitelist_justification_required: Optional[bool] = None
+    whitelist_file_required: Optional[bool] = None
+    auto_rescreen: Optional[bool] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -1422,14 +1504,26 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
     approval = get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
     justif = get_setting_with_source(db, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, True)
     evidence = get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)
+    four_eyes = get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)
+    wl_justif = get_setting_with_source(db, SETTING_WHITELIST_JUSTIFICATION_REQUIRED, True)
+    wl_file = get_setting_with_source(db, SETTING_WHITELIST_FILE_REQUIRED, False)
+    rescreen = get_setting_with_source(db, SETTING_AUTO_RESCREEN, True)
     return {
         "require_approval": bool(approval["value"]),
         "exclusion_justification_required": bool(justif["value"]),
         "exclusion_file_required": bool(evidence["value"]),
+        "alert_four_eyes_required": bool(four_eyes["value"]),
+        "whitelist_justification_required": bool(wl_justif["value"]),
+        "whitelist_file_required": bool(wl_file["value"]),
+        "auto_rescreen": bool(rescreen["value"]),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
             "exclusion_file_required": evidence["source"],
+            "alert_four_eyes_required": four_eyes["source"],
+            "whitelist_justification_required": wl_justif["source"],
+            "whitelist_file_required": wl_file["source"],
+            "auto_rescreen": rescreen["source"],
         },
     }
 
@@ -1452,6 +1546,10 @@ async def update_ingestion_settings(
         SETTING_REQUIRE_APPROVAL: payload.require_approval,
         SETTING_EXCLUSION_JUSTIFICATION_REQUIRED: payload.exclusion_justification_required,
         SETTING_EXCLUSION_FILE_REQUIRED: payload.exclusion_file_required,
+        SETTING_ALERT_FOUR_EYES: payload.alert_four_eyes_required,
+        SETTING_WHITELIST_JUSTIFICATION_REQUIRED: payload.whitelist_justification_required,
+        SETTING_WHITELIST_FILE_REQUIRED: payload.whitelist_file_required,
+        SETTING_AUTO_RESCREEN: payload.auto_rescreen,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
     if not changed:
@@ -1707,6 +1805,9 @@ async def approve_pending_snapshot(
             detail="Des exclusions n'ont pas de pièce jointe alors que le réglage l'exige. Complétez-les avant d'approuver."
         )
 
+    # Snapshot de production remplace (pour cibler le re-criblage post-delta)
+    previous_prod = _latest_ready_snapshot(db, snap.file_type)
+
     snap.status = "READY"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
@@ -1714,11 +1815,19 @@ async def approve_pending_snapshot(
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     db.commit()
     load_watchlist_cache(db)
+
+    rescreen_result = None
+    if auto_rescreen_enabled(db):
+        rescreen_result = rescreen_after_snapshot_change(
+            db, snap.file_type, snap.snapshot_id,
+            previous_prod.snapshot_id if previous_prod else None
+        )
     return {
         "message": "Snapshot approuvé et promu en production.",
         "snapshot_id": snapshot_id,
         "status": snap.status,
         "excluded_count": len(excluded_rows),
+        "rescreen": rescreen_result,
     }
 
 @app.post("/api/review/snapshots/{snapshot_id}/reject")
@@ -1746,6 +1855,426 @@ async def reject_pending_snapshot(
         "snapshot_id": snapshot_id,
         "status": snap.status,
     }
+
+# ------------------ GESTION DES ALERTES (CYCLE DE VIE + 4-YEUX) ------------------
+
+class AlertAssignRequest(BaseModel):
+    assignee: Optional[str] = None
+
+class AlertCommentRequest(BaseModel):
+    comment: str
+
+class AlertProposeRequest(BaseModel):
+    decision: str  # CONFIRMED | FALSE_POSITIVE
+    comment: str
+
+class AlertValidateRequest(BaseModel):
+    approve: bool
+    comment: Optional[str] = None
+
+def _alert_summary(alert: Alert) -> Dict[str, Any]:
+    return {
+        "id": alert.id,
+        "audit_id": alert.audit_id,
+        "created_at": alert.created_at.isoformat() if alert.created_at else None,
+        "client_id": alert.client_id,
+        "client_name": alert.client_name,
+        "watchlist_entity_id": alert.watchlist_entity_id,
+        "watchlist_name": alert.watchlist_name,
+        "final_score": alert.final_score,
+        "status": alert.status,
+        "assigned_to": alert.assigned_to,
+        "proposed_decision": alert.proposed_decision,
+        "proposed_by": alert.proposed_by,
+        "proposed_at": alert.proposed_at.isoformat() if alert.proposed_at else None,
+        "proposal_comment": alert.proposal_comment,
+        "decided_by": alert.decided_by,
+        "decided_at": alert.decided_at.isoformat() if alert.decided_at else None,
+        "decision_comment": alert.decision_comment,
+    }
+
+def _get_open_alert(db: Session, alert_id: int) -> Alert:
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    if alert.status in ALERT_CLOSED_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Alerte déjà close ({alert.status}).")
+    return alert
+
+def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
+    db.add(AlertEvent(alert_id=alert_id, username=username, action=action, detail=detail or None))
+
+@app.get("/api/alerts")
+async def list_alerts(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    assigned_to: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """File de travail des alertes, triee par risque (score) puis date."""
+    query = db.query(Alert)
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        query = query.filter(Alert.status.in_(statuses))
+    if assigned_to:
+        query = query.filter(Alert.assigned_to == assigned_to)
+    total = query.count()
+    open_count = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
+    rows = query.order_by(Alert.final_score.desc(), Alert.created_at.desc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "total": total,
+        "open_count": open_count,
+        "page": page,
+        "page_size": page_size,
+        "items": [_alert_summary(a) for a in rows],
+    }
+
+@app.get("/api/alerts/{alert_id}")
+async def get_alert_detail(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Detail d'une alerte : decision_tree du journal d'audit lie + historique des actions."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    return {
+        **_alert_summary(alert),
+        "decision_tree": audit.decision_tree if audit else None,
+        "watchlist_version": audit.watchlist_version if audit else None,
+        "events": [
+            {
+                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "username": e.username,
+                "action": e.action,
+                "detail": e.detail,
+            }
+            for e in events
+        ],
+    }
+
+@app.post("/api/alerts/{alert_id}/assign")
+async def assign_alert(
+    alert_id: int,
+    payload: AlertAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """S'assigner une alerte (ou l'assigner a un autre analyste : admin uniquement)."""
+    alert = _get_open_alert(db, alert_id)
+    assignee = (payload.assignee or "").strip() or current_user["username"]
+    if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
+        raise HTTPException(status_code=403, detail="Seul un administrateur peut assigner une alerte à un autre analyste.")
+    alert.assigned_to = assignee
+    if alert.status == "OPEN":
+        alert.status = "IN_PROGRESS"
+    _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED", f"Assignée à {assignee}.")
+    db.commit()
+    return {"message": f"Alerte assignée à {assignee}.", **_alert_summary(alert)}
+
+@app.post("/api/alerts/{alert_id}/comment")
+async def comment_alert(
+    alert_id: int,
+    payload: AlertCommentRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Ajoute un commentaire a l'historique de l'alerte."""
+    alert = _get_open_alert(db, alert_id)
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Le commentaire ne peut pas être vide.")
+    _log_alert_event(db, alert.id, current_user["username"], "COMMENT", comment)
+    db.commit()
+    return {"message": "Commentaire ajouté."}
+
+@app.post("/api/alerts/{alert_id}/escalate")
+async def escalate_alert(
+    alert_id: int,
+    payload: AlertCommentRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Escalade l'alerte (motif obligatoire)."""
+    alert = _get_open_alert(db, alert_id)
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un motif est requis pour escalader une alerte.")
+    alert.status = "ESCALATED"
+    _log_alert_event(db, alert.id, current_user["username"], "ESCALATED", comment)
+    db.commit()
+    return {"message": "Alerte escaladée.", **_alert_summary(alert)}
+
+def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
+    alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
+    alert.decided_by = username
+    alert.decided_at = datetime.utcnow()
+    alert.decision_comment = comment
+
+@app.post("/api/alerts/{alert_id}/propose")
+async def propose_alert_decision(
+    alert_id: int,
+    payload: AlertProposeRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Propose une decision (vrai positif confirme / faux positif), commentaire
+    obligatoire. Avec le 4-yeux actif, l'alerte attend la validation d'un
+    reviewer DIFFERENT ; sinon la proposition clot directement l'alerte.
+    """
+    alert = _get_open_alert(db, alert_id)
+    if alert.status == "PENDING_VALIDATION":
+        raise HTTPException(status_code=409, detail="Une décision est déjà en attente de validation.")
+    decision = (payload.decision or "").strip().upper()
+    if decision not in ("CONFIRMED", "FALSE_POSITIVE"):
+        raise HTTPException(status_code=400, detail="Décision invalide (CONFIRMED ou FALSE_POSITIVE).")
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
+
+    username = current_user["username"]
+    alert.proposed_decision = decision
+    alert.proposed_by = username
+    alert.proposed_at = datetime.utcnow()
+    alert.proposal_comment = comment
+    label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
+
+    if alert_four_eyes_required(db):
+        alert.status = "PENDING_VALIDATION"
+        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
+        message = "Décision proposée, en attente de validation 4-yeux."
+    else:
+        _close_alert(alert, decision, username, comment)
+        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
+        _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
+        message = "Alerte clôturée (validation 4-yeux désactivée)."
+    db.commit()
+    return {"message": message, **_alert_summary(alert)}
+
+@app.post("/api/alerts/{alert_id}/validate")
+async def validate_alert_decision(
+    alert_id: int,
+    payload: AlertValidateRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Validation 4-yeux d'une decision proposee (reviewer ou admin). Le
+    validateur doit etre DIFFERENT du proposeur. Refuser renvoie l'alerte
+    en cours d'analyse (commentaire obligatoire).
+    """
+    alert = _get_open_alert(db, alert_id)
+    if alert.status != "PENDING_VALIDATION":
+        raise HTTPException(status_code=409, detail="Aucune décision en attente de validation sur cette alerte.")
+    username = reviewer["username"]
+    if username == alert.proposed_by:
+        raise HTTPException(
+            status_code=403,
+            detail="Validation 4-yeux : le validateur doit être différent du proposeur."
+        )
+    comment = (payload.comment or "").strip()
+    if payload.approve:
+        _close_alert(alert, alert.proposed_decision, username, comment or alert.proposal_comment)
+        _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
+        message = f"Décision validée, alerte clôturée ({alert.status})."
+    else:
+        if not comment:
+            raise HTTPException(status_code=400, detail="Un commentaire est requis pour refuser une décision.")
+        alert.status = "IN_PROGRESS"
+        alert.proposed_decision = None
+        alert.proposed_by = None
+        alert.proposed_at = None
+        alert.proposal_comment = None
+        _log_alert_event(db, alert.id, username, "RETURNED", comment)
+        message = "Décision refusée, alerte renvoyée en analyse."
+    db.commit()
+    return {"message": message, **_alert_summary(alert)}
+
+# ------------------ LISTE BLANCHE CLIENT x LISTE & RE-CRIBLAGE ------------------
+
+# Pieces justificatives des mises en liste blanche (valeur probante en audit)
+WHITELIST_EVIDENCE_DIR = PROJECT_ROOT / "whitelist_evidence"
+
+class WhitelistRevokeRequest(BaseModel):
+    comment: str
+
+class RescreenRunRequest(BaseModel):
+    file_type: Optional[str] = None
+
+def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    if pair.revoked_at:
+        state = "REVOKED"
+    elif pair.expires_at and pair.expires_at <= now:
+        state = "EXPIRED"
+    else:
+        state = "ACTIVE"
+    return {
+        "id": pair.id,
+        "client_id": pair.client_id,
+        "client_name": pair.client_name,
+        "watchlist_entity_id": pair.watchlist_entity_id,
+        "watchlist_name": pair.watchlist_name,
+        "justification": pair.justification,
+        "evidence_file_name": pair.evidence_file_name,
+        "created_by": pair.created_by,
+        "created_at": pair.created_at.isoformat() if pair.created_at else None,
+        "expires_at": pair.expires_at.isoformat() if pair.expires_at else None,
+        "revoked_by": pair.revoked_by,
+        "revoked_at": pair.revoked_at.isoformat() if pair.revoked_at else None,
+        "revoke_comment": pair.revoke_comment,
+        "state": state,
+    }
+
+@app.post("/api/whitelist")
+async def create_whitelist_pair(
+    client_id: str = Form(...),
+    watchlist_entity_id: str = Form(...),
+    justification: Optional[str] = Form(None),
+    expires_at: Optional[str] = Form(None),
+    client_name: Optional[str] = Form(None),
+    watchlist_name: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Met une paire client x liste en liste blanche (« Good Guys ») : les
+    alertes futures de cette paire sont supprimees de facon TRACEE (statut
+    WHITELISTED dans le journal d'audit). Justification et piece jointe
+    exigees selon les reglages modulaires.
+    """
+    client_id = client_id.strip()
+    watchlist_entity_id = watchlist_entity_id.strip()
+    if not client_id or not watchlist_entity_id:
+        raise HTTPException(status_code=400, detail="client_id et watchlist_entity_id sont requis.")
+
+    if is_whitelisted(db, client_id, watchlist_entity_id):
+        raise HTTPException(status_code=409, detail="Une paire active existe déjà pour ce couple client × listé.")
+
+    requirements = whitelist_requirements(db)
+    justification = (justification or "").strip()
+    if requirements["justification_required"] and not justification:
+        raise HTTPException(status_code=400, detail="Une justification est obligatoire pour une mise en liste blanche (réglage actif).")
+    if requirements["file_required"] and (file is None or not file.filename):
+        raise HTTPException(status_code=400, detail="Une pièce jointe justificative est obligatoire pour une mise en liste blanche (réglage actif).")
+
+    expires_dt = None
+    if expires_at and expires_at.strip():
+        try:
+            expires_dt = datetime.strptime(expires_at.strip()[:10], "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Format de date d'expiration invalide (attendu: YYYY-MM-DD).")
+
+    evidence_name = None
+    evidence_path = None
+    if file is not None and file.filename:
+        safe_name = os.path.basename(file.filename).replace("..", "_")
+        WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        evidence_name = safe_name
+        evidence_path = str(target_path)
+
+    pair = WhitelistPair(
+        client_id=client_id,
+        watchlist_entity_id=watchlist_entity_id,
+        client_name=(client_name or "").strip() or None,
+        watchlist_name=(watchlist_name or "").strip() or None,
+        justification=justification or None,
+        evidence_file_name=evidence_name,
+        evidence_file_path=evidence_path,
+        created_by=reviewer["username"],
+        expires_at=expires_dt,
+    )
+    db.add(pair)
+    db.commit()
+    db.refresh(pair)
+    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+
+@app.get("/api/whitelist")
+async def list_whitelist_pairs(
+    active_only: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Liste des paires en liste blanche avec leur etat (active / expiree / revoquee)."""
+    query = db.query(WhitelistPair)
+    if active_only:
+        now = datetime.utcnow()
+        query = query.filter(
+            WhitelistPair.revoked_at.is_(None),
+            (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
+        )
+    total = query.count()
+    rows = query.order_by(WhitelistPair.created_at.desc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+    return {"total": total, "page": page, "page_size": page_size,
+            "items": [_whitelist_summary(p) for p in rows]}
+
+@app.post("/api/whitelist/{pair_id}/revoke")
+async def revoke_whitelist_pair(
+    pair_id: int,
+    payload: WhitelistRevokeRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Revocation douce d'une paire (motif obligatoire) : les alertes reprennent."""
+    pair = db.query(WhitelistPair).filter(WhitelistPair.id == pair_id).first()
+    if not pair:
+        raise HTTPException(status_code=404, detail="Paire introuvable.")
+    if pair.revoked_at:
+        raise HTTPException(status_code=409, detail="Paire déjà révoquée.")
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un motif est requis pour révoquer une paire.")
+    pair.revoked_by = reviewer["username"]
+    pair.revoked_at = datetime.utcnow()
+    pair.revoke_comment = comment
+    db.commit()
+    return {"message": "Paire révoquée : les alertes de ce couple reprendront.", **_whitelist_summary(pair)}
+
+@app.get("/api/whitelist/evidence/{pair_id}")
+async def download_whitelist_evidence(
+    pair_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Telecharge la piece justificative d'une mise en liste blanche (audit)."""
+    pair = db.query(WhitelistPair).filter(WhitelistPair.id == pair_id).first()
+    if not pair or not pair.evidence_file_path:
+        raise HTTPException(status_code=404, detail="Aucune pièce justificative pour cette paire.")
+    file_path = Path(pair.evidence_file_path)
+    if not file_path.exists() or WHITELIST_EVIDENCE_DIR.resolve() not in file_path.resolve().parents:
+        raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
+    return FileResponse(str(file_path), filename=pair.evidence_file_name or file_path.name)
+
+@app.post("/api/rescreen/run")
+async def run_manual_rescreen(
+    payload: RescreenRunRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Lookback manuel (guidance Wolfsberg) : re-crible tout le referentiel
+    clients contre les listes en production (un type donne, ou toutes).
+    """
+    file_type = (payload.file_type or "").strip().upper() or None
+    if file_type and file_type not in WATCHLIST_FILE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Type de liste inconnu ({', '.join(WATCHLIST_FILE_TYPES)}).")
+    result = rescreen_lookback(db, file_type)
+    return {"message": "Lookback exécuté.", **result}
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

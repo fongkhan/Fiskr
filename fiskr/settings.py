@@ -17,6 +17,13 @@ SETTING_REQUIRE_APPROVAL = "ingestion.require_approval"
 # Exigences modulaires lors de l'exclusion d'entites pendant la revue
 SETTING_EXCLUSION_JUSTIFICATION_REQUIRED = "review.exclusion_justification_required"
 SETTING_EXCLUSION_FILE_REQUIRED = "review.exclusion_file_required"
+# Validation 4-yeux des decisions d'alertes (validateur different du proposeur)
+SETTING_ALERT_FOUR_EYES = "review.alert_four_eyes_required"
+# Exigences modulaires lors d'une mise en liste blanche client x liste
+SETTING_WHITELIST_JUSTIFICATION_REQUIRED = "review.whitelist_justification_required"
+SETTING_WHITELIST_FILE_REQUIRED = "review.whitelist_file_required"
+# Re-criblage automatique du referentiel clients apres chaque mise a jour de liste
+SETTING_AUTO_RESCREEN = "ingestion.auto_rescreen"
 
 
 def _config_default(key: str, default: Any = None) -> Any:
@@ -54,6 +61,28 @@ def set_setting(db, key: str, value: Any, updated_by: Optional[str] = None) -> A
 def require_approval_enabled(db) -> bool:
     """True si le mode homologation est actif (base d'abord, sinon config.yaml)."""
     return bool(get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)["value"])
+
+
+def alert_four_eyes_required(db) -> bool:
+    """True si la decision d'alerte exige un second regard (defaut : oui)."""
+    return bool(get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)["value"])
+
+
+def whitelist_requirements(db) -> Dict[str, bool]:
+    """Exigences modulaires de justification lors d'une mise en liste blanche."""
+    return {
+        "justification_required": bool(
+            get_setting_with_source(db, SETTING_WHITELIST_JUSTIFICATION_REQUIRED, True)["value"]
+        ),
+        "file_required": bool(
+            get_setting_with_source(db, SETTING_WHITELIST_FILE_REQUIRED, False)["value"]
+        ),
+    }
+
+
+def auto_rescreen_enabled(db) -> bool:
+    """True si le re-criblage automatique post-delta est actif (defaut : oui)."""
+    return bool(get_setting_with_source(db, SETTING_AUTO_RESCREEN, True)["value"])
 
 
 def exclusion_requirements(db) -> Dict[str, bool]:

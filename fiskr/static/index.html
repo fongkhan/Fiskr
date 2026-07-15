@@ -33,6 +33,11 @@
                         </button>
                     </li>
                     <li>
+                        <button id="nav-btn-alerts" class="nav-item" onclick="switchTab('alerts')">
+                            <span class="nav-icon">🚨</span> Alertes <span id="alerts-open-badge" class="status-badge warning hidden" style="margin-left: 0.35rem;">0</span>
+                        </button>
+                    </li>
+                    <li>
                         <button id="nav-btn-audit" class="nav-item" onclick="switchTab('audit')">
                             <span class="nav-icon">📜</span> Audit
                         </button>
@@ -141,6 +146,8 @@
                                         <option value="WATCHLIST_OFAC">Watchlist OFAC (XML)</option>
                                         <option value="WATCHLIST_EU">Watchlist Européenne / Gels d'avoirs (CSV ou PDF)</option>
                                         <option value="WATCHLIST_SSIE">Smart Sanctions — XML générique (Moteur SSIE)</option>
+                                        <option value="WATCHLIST_DGT">Registre national des gels — DGT (JSON)</option>
+                                        <option value="WATCHLIST_UN">Liste consolidée ONU (XML)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -494,6 +501,30 @@
                                 </button>
                             </div>
 
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇫🇷 DGT — Registre national des gels des avoirs (JSON)</h3>
+                                <p class="section-desc">Téléchargement du registre officiel de la Direction générale du Trésor (API publique <code>gels-avoirs.dgtresor.gouv.fr</code>), ingestion, delta et remplacement de la liste DGT active. Obligation autonome pour les établissements assujettis français (lignes directrices ACPR/DGT).</p>
+                                <button id="sync-dgt-btn" class="btn btn-primary" onclick="handleSourceSync('DGT')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇺🇳 ONU — Liste consolidée du Conseil de sécurité (XML)</h3>
+                                <p class="section-desc">Téléchargement de la liste consolidée officielle (<code>scsanctions.un.org</code>, publique), ingestion, delta et remplacement de la liste ONU active.</p>
+                                <button id="sync-un-btn" class="btn btn-primary" onclick="handleSourceSync('UN')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇪🇺 UE — Liste consolidée officielle (FSF XML)</h3>
+                                <p class="section-desc">Fichier consolidé des sanctions financières de l'UE (webgate FSD) : fait autorité sur le scraping du JO, les <strong>radiations</strong> y sont fiables. Nécessite un token gratuit (inscription au webgate, puis <code>sync.eu_fsf.token</code> dans <code>config.yaml</code>).</p>
+                                <button id="sync-eufsf-btn" class="btn btn-primary" onclick="handleSourceSync('EUFSF')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
                             <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
                                 <h3 style="margin-top: 0;">🇪🇺 EUR-Lex — Journal Officiel du jour (version anglaise)</h3>
                                 <p class="section-desc">Recherche des actes mentionnant « restrictive measures » au Journal Officiel (édition anglaise, qui fait référence), scraping des listés (Individus, Entités, Navires, Aéronefs), fusion incrémentale avec la liste EU active et archivage du PDF officiel de chaque acte (valeur probante en audit).</p>
@@ -557,10 +588,34 @@
                                     Justification texte obligatoire lors d'une exclusion d'entité
                                 </label>
                             </div>
-                            <div class="form-group" style="margin-bottom: 1rem;">
+                            <div class="form-group" style="margin-bottom: 0.75rem;">
                                 <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
                                     <input type="checkbox" id="setting-exclusion-file" style="width: 18px; height: 18px;">
                                     Pièce jointe justificative obligatoire lors d'une exclusion d'entité
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0.75rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="setting-alert-four-eyes" style="width: 18px; height: 18px;">
+                                    Validation 4-yeux obligatoire des décisions d'alertes (validateur ≠ proposeur)
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0.75rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="setting-whitelist-justification" style="width: 18px; height: 18px;">
+                                    Justification obligatoire pour une mise en liste blanche
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0.75rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="setting-whitelist-file" style="width: 18px; height: 18px;">
+                                    Pièce jointe obligatoire pour une mise en liste blanche
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 1rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="setting-auto-rescreen" style="width: 18px; height: 18px;">
+                                    Re-criblage automatique du référentiel clients après chaque mise à jour de liste
                                 </label>
                             </div>
                             <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
@@ -987,6 +1042,64 @@
             </section>
 
             <!-- SECTION 3: AUDIT -->
+            <!-- SECTION: ALERTES (cycle de vie + 4-yeux) -->
+            <section id="sec-alerts" class="tab-content">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <div class="card result-card">
+                        <h2>File de Travail des Alertes</h2>
+                        <p class="section-desc">Chaque décision de criblage en statut ALERT ouvre une alerte à instruire : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. L'historique complet des actions est conservé.</p>
+                        <div id="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                            <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('')">Toutes</button>
+                            <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
+                            <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
+                            <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
+                        </div>
+                        <div class="table-container max-height-table" id="alerts-table-container">
+                            <table id="alerts-table">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Client</th>
+                                        <th>Listé</th>
+                                        <th>Score</th>
+                                        <th>Statut</th>
+                                        <th>Assignée à</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Liste blanche client x listé (Good Guys) -->
+                    <div class="card result-card">
+                        <h2>Liste Blanche (paires client × listé)</h2>
+                        <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
+                        <div class="table-container max-height-table">
+                            <table id="whitelist-table">
+                                <thead>
+                                    <tr>
+                                        <th>Client</th>
+                                        <th>Listé</th>
+                                        <th>Justification</th>
+                                        <th>Créée par</th>
+                                        <th>Expiration</th>
+                                        <th>État</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <section id="sec-audit" class="tab-content">
                 <div class="card">
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
@@ -1108,6 +1221,48 @@
         </div>
     </div>
 
+    <!-- Whitelist Creation Modal (Good Guys) -->
+    <div id="whitelist-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 540px;">
+            <span class="close-modal" onclick="closeWhitelistModal()">&times;</span>
+            <h2>Mettre en Liste Blanche</h2>
+            <p class="section-desc" id="whitelist-modal-pair"></p>
+            <form id="whitelist-form" onsubmit="submitWhitelist(event)" style="margin-top: 1rem;">
+                <input type="hidden" id="whitelist-client-id">
+                <input type="hidden" id="whitelist-entity-id">
+                <input type="hidden" id="whitelist-client-name">
+                <input type="hidden" id="whitelist-entity-name">
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="whitelist-justification">Justification <span id="whitelist-justification-required-mark" class="hidden" style="color: var(--color-alert);">*</span></label>
+                    <textarea id="whitelist-justification" rows="3" placeholder="Faux positif avéré : motif détaillé..." style="width: 100%;"></textarea>
+                </div>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="whitelist-file">Pièce jointe justificative <span id="whitelist-file-required-mark" class="hidden" style="color: var(--color-alert);">*</span></label>
+                    <input type="file" id="whitelist-file" style="border: none; padding: 0.5rem 0;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1.5rem; max-width: 220px;">
+                    <label for="whitelist-expires">Expiration (revue périodique, optionnel)</label>
+                    <input type="date" id="whitelist-expires">
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+                    <button type="button" class="btn" onclick="closeWhitelistModal()" style="background: rgba(255,255,255,0.1);">Annuler</button>
+                    <button type="submit" class="btn btn-primary">Confirmer la mise en liste blanche</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Alert Detail Modal (cycle de vie + 4-yeux) -->
+    <div id="alert-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 820px;">
+            <span class="close-modal" onclick="closeAlertModal()">&times;</span>
+            <h2 id="alert-modal-title">Alerte</h2>
+            <div id="alert-modal-body" class="modal-body-content">
+                <!-- Populated dynamically -->
+            </div>
+        </div>
+    </div>
+
     <!-- Exclusion Justification Modal (Homologation) -->
     <div id="exclusion-modal" class="modal hidden">
         <div class="modal-content" style="max-width: 540px;">
@@ -1165,7 +1320,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=3.8"></script>
+    <script src="/static/app.js?v=4.0"></script>
 
 
 

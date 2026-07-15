@@ -923,6 +923,682 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
 
 
 
+# ------------------ REGISTRE NATIONAL DES GELS (DGT) ------------------
+# Connecteur du registre national des gels des avoirs publie par la Direction
+# generale du Tresor (gels-avoirs.dgtresor.gouv.fr, API publique ENGEL).
+# Structure du fichier JSON : Publications.PublicationDetail[] avec IdRegistre,
+# Nature (Personne physique / Personne morale / Navire), Nom et RegistreDetail[]
+# (paires TypeChamp / Valeur[]). Le parseur est tolerant aux variations de cles
+# des objets Valeur (recherche insensible a la casse, repli sur toute valeur texte).
+
+DGT_NATURE_TO_TYPE = {
+    "personne physique": "I",
+    "personne morale": "E",
+    "navire": "V",
+}
+
+# Normalisation des pays/nationalites (libelles francais du registre DGT et
+# anglais de la liste ONU) vers ISO2, indispensable pour que les cles de
+# blocking coincident avec celles du referentiel clients (codes ISO).
+# Radicaux sans accents, minuscules : ils couvrent le nom du pays ET
+# l'adjectif de nationalite. L'ordre compte (nigeria avant niger, etc.).
+_COUNTRY_STEMS = [
+    # --- Libelles anglais (liste consolidee ONU) ---
+    ("democratic people's republic of korea", "KP"), ("north korea", "KP"),
+    ("russian", "RU"), ("russia", "RU"),
+    ("syrian arab republic", "SY"), ("syria", "SY"),
+    ("iranian", "IR"), ("iran", "IR"),
+    ("myanmar", "MM"), ("burma", "MM"),
+    ("libyan arab jamahiriya", "LY"), ("libya", "LY"),
+    ("venezuela", "VE"), ("china", "CN"), ("chinese", "CN"),
+    ("iraqi", "IQ"), ("iraq", "IQ"),
+    ("afghanistan", "AF"), ("afghan", "AF"),
+    ("yemeni", "YE"), ("yemen", "YE"), ("lebanese", "LB"), ("lebanon", "LB"),
+    ("south sudan", "SS"), ("sudanese", "SD"), ("sudan", "SD"),
+    ("democratic republic of the congo", "CD"),
+    ("central african", "CF"), ("somalia", "SO"), ("somali", "SO"),
+    ("guinea-bissau", "GW"), ("guinea", "GN"),
+    ("zimbabwe", "ZW"), ("turkey", "TR"), ("turkish", "TR"),
+    ("ukraine", "UA"), ("ukrainian", "UA"), ("moldova", "MD"),
+    ("tunisia", "TN"), ("tunisian", "TN"), ("egypt", "EG"),
+    ("pakistani", "PK"), ("pakistan", "PK"),
+    ("saudi arabia", "SA"), ("saudi", "SA"),
+    ("jordanian", "JO"), ("jordan", "JO"),
+    ("israeli", "IL"), ("israel", "IL"),
+    ("united kingdom", "GB"), ("british", "GB"),
+    ("united states", "US"), ("american", "US"),
+    ("united arab emirates", "AE"), ("kuwait", "KW"),
+    ("eritrea", "ER"), ("ethiopia", "ET"),
+    ("kyrgyz", "KG"), ("tajikistan", "TJ"), ("uzbekistan", "UZ"), ("kazakhstan", "KZ"),
+    ("indonesian", "ID"), ("indonesia", "ID"),
+    ("philippines", "PH"), ("filipino", "PH"),
+    ("sri lanka", "LK"), ("bangladesh", "BD"),
+    ("nigerian", "NG"), ("nigeria", "NG"),
+    ("burkina faso", "BF"), ("cameroon", "CM"),
+    ("germany", "DE"), ("german", "DE"), ("belgium", "BE"), ("belgian", "BE"),
+    ("spain", "ES"), ("spanish", "ES"), ("italy", "IT"), ("italian", "IT"),
+    # --- Libelles francais (registre DGT) ---
+    ("coree du nord", "KP"), ("nord-coreen", "KP"), ("nord coreen", "KP"),
+    ("russ", "RU"), ("bielorus", "BY"), ("belarus", "BY"),
+    ("syrie", "SY"), ("syrien", "SY"),
+    ("iranien", "IR"), ("iran", "IR"),
+    ("birman", "MM"), ("myanmar", "MM"), ("birmanie", "MM"),
+    ("libye", "LY"), ("libyen", "LY"),
+    ("malien", "ML"), ("mali", "ML"),
+    ("venezuel", "VE"), ("chin", "CN"),
+    ("irakien", "IQ"), ("irak", "IQ"),
+    ("afghan", "AF"), ("yemen", "YE"), ("liban", "LB"),
+    ("soudan du sud", "SS"), ("sud-soudan", "SS"),
+    ("soudan", "SD"), ("congolais", "CD"),
+    ("republique democratique du congo", "CD"), ("rdc", "CD"), ("congo", "CD"),
+    ("centrafri", "CF"), ("somal", "SO"), ("nicaragua", "NI"),
+    ("guinee-bissau", "GW"), ("bissau", "GW"), ("guine", "GN"),
+    ("zimbabw", "ZW"), ("haiti", "HT"), ("hait", "HT"),
+    ("turc", "TR"), ("turq", "TR"), ("ukrain", "UA"), ("moldav", "MD"),
+    ("tunis", "TN"), ("egypt", "EG"), ("pakistan", "PK"),
+    ("saoudien", "SA"), ("arabie saoudite", "SA"),
+    ("jordan", "JO"), ("israel", "IL"), ("palestin", "PS"),
+    ("franc", "FR"), ("algeri", "DZ"), ("marocain", "MA"), ("maroc", "MA"),
+    ("burundi", "BI"), ("erythre", "ER"), ("ethiopi", "ET"),
+    ("kirghiz", "KG"), ("tadjik", "TJ"), ("ouzbek", "UZ"), ("kazakh", "KZ"),
+    ("armeni", "AM"), ("azerbaidjan", "AZ"), ("georgi", "GE"),
+    ("serbe", "RS"), ("serbie", "RS"), ("bosni", "BA"), ("kosov", "XK"),
+    ("indien", "IN"), ("inde", "IN"), ("indonesi", "ID"),
+    ("philippin", "PH"), ("sri lank", "LK"), ("bangladesh", "BD"),
+    ("nigeria", "NG"), ("nigerian", "NG"), ("nigerien", "NE"), ("niger", "NE"),
+    ("burkin", "BF"), ("tchad", "TD"), ("tchadien", "TD"),
+    ("camerou", "CM"), ("senegal", "SN"), ("mauritani", "MR"),
+    ("kowei", "KW"), ("qatar", "QA"), ("emirat", "AE"), ("bahrein", "BH"),
+    ("britanni", "GB"), ("royaume-uni", "GB"), ("americain", "US"), ("etats-unis", "US"),
+    ("allemand", "DE"), ("allemagne", "DE"), ("belge", "BE"), ("belgique", "BE"),
+    ("espagnol", "ES"), ("espagne", "ES"), ("italien", "IT"), ("italie", "IT"),
+]
+
+
+def _strip_accents_lower(text: str) -> str:
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", str(text or "").lower())
+        if unicodedata.category(c) != "Mn"
+    ).strip()
+
+
+def country_label_to_iso2(value: str) -> str:
+    """
+    Convertit un pays / une nationalite en libelle francais (registre DGT :
+    "Russe", "Russie") ou anglais (liste ONU : "Russian Federation") en code
+    ISO2. Repli sur la valeur d'origine si aucun radical connu ne correspond
+    (la cle de blocking reste coherente en interne, meme si elle ne croisera
+    pas les codes ISO clients).
+    """
+    normalized = _strip_accents_lower(value)
+    if re.fullmatch(r"[a-z]{2}", normalized):
+        return normalized.upper()
+    for stem, iso2 in _COUNTRY_STEMS:
+        if normalized.startswith(stem) or f" {stem}" in f" {normalized}":
+            return iso2
+    return str(value).strip()
+
+
+# Alias historique (connecteur DGT)
+dgt_country_to_iso2 = country_label_to_iso2
+
+
+def _dgt_value_text(value_obj: Any, *preferred_keys: str) -> str:
+    """
+    Extrait le texte d'un objet Valeur du registre DGT : cherche d'abord les
+    cles preferees (insensible a la casse), sinon joint toutes les valeurs
+    texte non vides de l'objet.
+    """
+    if not isinstance(value_obj, dict):
+        return str(value_obj or "").strip()
+    for key in preferred_keys:
+        val = dict_get_insensitive(value_obj, key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return " ".join(
+        str(v).strip() for v in value_obj.values()
+        if v is not None and isinstance(v, (str, int, float)) and str(v).strip()
+    ).strip()
+
+
+def _dgt_details_by_type(record: Dict[str, Any]) -> Dict[str, List[Any]]:
+    """Indexe les RegistreDetail par TypeChamp -> liste d'objets Valeur."""
+    indexed: Dict[str, List[Any]] = {}
+    for detail in record.get("RegistreDetail") or []:
+        type_champ = str(detail.get("TypeChamp") or "").strip().upper()
+        if not type_champ:
+            continue
+        values = detail.get("Valeur")
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            values = [values]
+        indexed.setdefault(type_champ, []).extend(values)
+    return indexed
+
+
+def _dgt_date(value_obj: Any) -> Optional[str]:
+    """Assemble une date YYYY-MM-DD depuis un objet {Jour, Mois, Annee} (jour/mois optionnels)."""
+    if not isinstance(value_obj, dict):
+        return None
+    year = _dgt_value_text(value_obj, "Annee", "Year")
+    if not year or not re.fullmatch(r"\d{4}", year):
+        # Certains enregistrements portent la date complete dans un seul champ
+        raw = _dgt_value_text(value_obj)
+        match = re.search(r"(\d{4})(?:-(\d{1,2})-(\d{1,2}))?", raw)
+        if not match:
+            return None
+        year, month, day = match.group(1), match.group(2) or "01", match.group(3) or "01"
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    month = _dgt_value_text(value_obj, "Mois", "Month") or "01"
+    day = _dgt_value_text(value_obj, "Jour", "Day") or "01"
+    if not month.isdigit():
+        month = "01"
+    if not day.isdigit():
+        day = "01"
+    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+
+def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse le fichier JSON du registre national des gels (DGT) et produit des
+    enregistrements au schema pivot Fiskr.
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    publications = dict_get_insensitive(data, "Publications") or {}
+    if isinstance(publications, list):
+        publications = publications[0] if publications else {}
+    records = dict_get_insensitive(publications, "PublicationDetail") or []
+
+    for record in records:
+        id_registre = record.get("IdRegistre")
+        if id_registre is None:
+            continue
+        nature = str(record.get("Nature") or "").strip().lower()
+        entity_type = DGT_NATURE_TO_TYPE.get(nature, "E")
+        last_name = str(record.get("Nom") or "").strip()
+
+        details = _dgt_details_by_type(record)
+
+        first_name = ""
+        for v in details.get("PRENOM", []):
+            first_name = _dgt_value_text(v, "Prenom")
+            if first_name:
+                break
+
+        if entity_type == "I":
+            primary_name = f"{first_name} {last_name}".strip()
+        else:
+            primary_name = last_name
+        if not primary_name:
+            continue
+
+        gender = "U"
+        for v in details.get("SEXE", []):
+            sexe = _dgt_value_text(v, "Sexe").lower()
+            if sexe.startswith("f"):
+                gender = "F"
+            elif sexe.startswith("m"):
+                gender = "M"
+
+        dobs = []
+        for v in details.get("DATE_DE_NAISSANCE", []):
+            date_val = _dgt_date(v)
+            if date_val:
+                dobs.append(date_val)
+
+        place_of_birth = None
+        birth_countries = []
+        for v in details.get("LIEU_DE_NAISSANCE", []):
+            lieu = _dgt_value_text(v, "Lieu")
+            pays = _dgt_value_text(v, "Pays")
+            if not place_of_birth and (lieu or pays):
+                place_of_birth = ", ".join(p for p in (lieu, pays) if p)
+            if pays:
+                birth_countries.append(dgt_country_to_iso2(pays))
+
+        citizenships = []
+        for v in details.get("NATIONALITE", []):
+            pays = _dgt_value_text(v, "Pays", "Nationalite")
+            if pays:
+                citizenships.append(dgt_country_to_iso2(pays))
+
+        aliases_raw = [
+            {"name": alias, "type": "Strong"}
+            for alias in (_dgt_value_text(v, "Alias") for v in details.get("ALIAS", []))
+            if alias
+        ]
+
+        designation = None
+        for v in details.get("TITRE", []):
+            titre = _dgt_value_text(v, "Titre")
+            if titre:
+                designation = titre
+                break
+
+        addresses = []
+        address_countries = []
+        for type_champ in ("ADRESSE_PP", "ADRESSE_PM"):
+            for v in details.get(type_champ, []):
+                adresse = _dgt_value_text(v, "Adresse")
+                pays = _dgt_value_text(v, "Pays")
+                full = ", ".join(p for p in (adresse, pays) if p)
+                if full:
+                    addresses.append(full)
+                if pays:
+                    address_countries.append(pays)
+
+        passports = []
+        for v in details.get("PASSEPORT", []):
+            numero = _dgt_value_text(v, "NumeroPasseport", "Numero")
+            if numero:
+                passports.append({"number": numero, "issuing_country": "XX", "expiration_date": None})
+
+        other_registrations = []
+        for type_champ in ("IDENTIFICATION", "AUTRE_IDENTITE"):
+            for v in details.get(type_champ, []):
+                ident = _dgt_value_text(v, "Identification", "NumeroCarte", "Numero")
+                if ident:
+                    other_registrations.append({"id_type": type_champ.title(), "number": ident})
+
+        motifs = []
+        for v in details.get("MOTIFS", []):
+            motif = _dgt_value_text(v, "Motifs", "Motif")
+            if motif:
+                motifs.append(motif)
+
+        extra_info = []
+        for type_champ, keys in (
+            ("FONDEMENT_JURIDIQUE", ("FondementJuridiqueLabel", "FondementJuridique")),
+            ("REFERENCE_UE", ("ReferenceUe",)),
+            ("REFERENCE_ONU", ("ReferenceOnu",)),
+        ):
+            for v in details.get(type_champ, []):
+                text = _dgt_value_text(v, *keys)
+                if text:
+                    extra_info.append(f"{type_champ.replace('_', ' ').title()}: {text}")
+
+        yield {
+            "entity_id": f"DGT-{id_registre}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name,
+                "last_name": last_name if entity_type == "I" else "",
+                "maiden_name": ""
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": gender,
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted({dgt_country_to_iso2(c) for c in address_countries}) if entity_type != "I" else []
+            },
+            "place_of_birth": place_of_birth,
+            "address": addresses[0] if addresses else None,
+            "alternative_addresses": addresses[1:],
+            "country": address_countries[0] if address_countries else None,
+            "designation": designation,
+            "designation_reasons": "; ".join(motifs) or None,
+            "additional_informations": "; ".join(extra_info) or None,
+            "origin": "DGT Registre national des gels",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": [],
+            "other_id_documents": []
+        }
+
+
+# ------------------ LISTE CONSOLIDEE UE (FSF XML OFFICIEL) ------------------
+# Fichier XML consolide des sanctions financieres de l'UE, publie par la
+# Commission (webgate FSD/FSF). Contrairement au scraping du Journal Officiel,
+# ce fichier fait autorite et permet de detecter les radiations. Structure :
+# <export><sanctionEntity euReferenceNumber=... logicalId=...>
+#   <subjectType code="person|enterprise" classificationCode="P|E"/>
+#   <regulation programme=... numberTitle=...><publicationUrl/></regulation>
+#   <nameAlias wholeName=... firstName=... lastName=... gender=... function=... strong=.../>
+#   <citizenship countryIso2Code=.../>
+#   <birthdate birthdate=... year=... city=... countryIso2Code=.../>
+#   <identification identificationTypeCode=... number=... countryIso2Code=.../>
+#   <address street=... city=... countryIso2Code=.../>
+#   <remark>...</remark>
+# </sanctionEntity></export>
+
+
+def _child_local(elem: ET.Element, local: str) -> List[ET.Element]:
+    """Enfants directs dont le nom local (sans namespace) correspond."""
+    return [c for c in elem if c.tag.split('}')[-1] == local]
+
+
+def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse le XML consolide officiel des sanctions financieres de l'UE (FSF)."""
+    for _, entity in _stream_target_elements(file_path, {'sanctionEntity'}):
+        logical_id = get_attrib_insensitive(entity, "logicalId")
+        eu_ref = get_attrib_insensitive(entity, "euReferenceNumber")
+        entity_key = eu_ref or logical_id
+        if not entity_key:
+            continue
+
+        entity_type = "E"
+        for st in _child_local(entity, "subjectType"):
+            code = (get_attrib_insensitive(st, "code") or "").lower()
+            classification = (get_attrib_insensitive(st, "classificationCode") or "").upper()
+            if "person" in code or classification == "P":
+                entity_type = "I"
+
+        primary_name = ""
+        first_name = ""
+        last_name = ""
+        gender = "U"
+        designation = None
+        aliases_raw = []
+        for alias in _child_local(entity, "nameAlias"):
+            whole = (get_attrib_insensitive(alias, "wholeName") or "").strip()
+            fn = (get_attrib_insensitive(alias, "firstName") or "").strip()
+            mn = (get_attrib_insensitive(alias, "middleName") or "").strip()
+            ln = (get_attrib_insensitive(alias, "lastName") or "").strip()
+            name = whole or " ".join(p for p in (fn, mn, ln) if p)
+            if not name:
+                continue
+            g = (get_attrib_insensitive(alias, "gender") or "").upper()
+            if g in ("M", "F") and gender == "U":
+                gender = g
+            func = (get_attrib_insensitive(alias, "function") or "").strip()
+            title = (get_attrib_insensitive(alias, "title") or "").strip()
+            if not designation and (func or title):
+                designation = func or title
+            if not primary_name:
+                primary_name = name
+                first_name = " ".join(p for p in (fn, mn) if p)
+                last_name = ln
+            else:
+                strong = (get_attrib_insensitive(alias, "strong") or "true").lower()
+                aliases_raw.append({"name": name, "type": "Strong" if strong == "true" else "Weak"})
+        if not primary_name:
+            continue
+
+        citizenships = []
+        for cit in _child_local(entity, "citizenship"):
+            iso2 = (get_attrib_insensitive(cit, "countryIso2Code") or "").strip()
+            desc = (get_attrib_insensitive(cit, "countryDescription") or "").strip()
+            code = iso2 or (country_label_to_iso2(desc) if desc else "")
+            if code and code.upper() != "00":
+                citizenships.append(code.upper() if len(code) == 2 else code)
+
+        dobs = []
+        place_of_birth = None
+        birth_countries = []
+        for bd in _child_local(entity, "birthdate"):
+            full = (get_attrib_insensitive(bd, "birthdate") or "").strip()
+            if full:
+                dobs.append(full)
+            else:
+                year = (get_attrib_insensitive(bd, "year") or "").strip()
+                if year.isdigit():
+                    month = (get_attrib_insensitive(bd, "monthOfYear") or get_attrib_insensitive(bd, "month") or "1").strip() or "1"
+                    day = (get_attrib_insensitive(bd, "dayOfMonth") or get_attrib_insensitive(bd, "day") or "1").strip() or "1"
+                    dobs.append(f"{year}-{month.zfill(2)}-{day.zfill(2)}")
+            city = (get_attrib_insensitive(bd, "city") or get_attrib_insensitive(bd, "place") or "").strip()
+            country_desc = (get_attrib_insensitive(bd, "countryDescription") or "").strip()
+            iso2 = (get_attrib_insensitive(bd, "countryIso2Code") or "").strip()
+            if not place_of_birth and (city or country_desc):
+                place_of_birth = ", ".join(p for p in (city, country_desc) if p)
+            if iso2 and iso2.upper() != "00":
+                birth_countries.append(iso2.upper())
+
+        passports = []
+        national_ids = []
+        other_registrations = []
+        for ident in _child_local(entity, "identification"):
+            number = (get_attrib_insensitive(ident, "number") or get_attrib_insensitive(ident, "latinNumber") or "").strip()
+            if not number:
+                continue
+            type_code = (get_attrib_insensitive(ident, "identificationTypeCode") or "").lower()
+            type_desc = (get_attrib_insensitive(ident, "identificationTypeDescription") or "").lower()
+            iso2 = (get_attrib_insensitive(ident, "countryIso2Code") or "XX").strip().upper() or "XX"
+            if "passport" in type_code or "passport" in type_desc:
+                passports.append({"number": number, "issuing_country": iso2, "expiration_date": None})
+            elif type_code == "id" or "national" in type_desc:
+                national_ids.append({"number": number, "issuing_country": iso2})
+            else:
+                other_registrations.append({"id_type": type_desc or type_code or "OtherRegistration", "number": number})
+
+        addresses = []
+        address_countries = []
+        for addr in _child_local(entity, "address"):
+            parts = [
+                (get_attrib_insensitive(addr, key) or "").strip()
+                for key in ("street", "poBox", "zipCode", "city", "region", "place")
+            ]
+            country_desc = (get_attrib_insensitive(addr, "countryDescription") or "").strip()
+            iso2 = (get_attrib_insensitive(addr, "countryIso2Code") or "").strip().upper()
+            full = ", ".join(p for p in parts + [country_desc] if p)
+            if full:
+                addresses.append({"full": full, "city": parts[3], "country": country_desc})
+            if iso2 and iso2 != "00":
+                address_countries.append(iso2)
+
+        programme = None
+        extra_info = []
+        for reg in _child_local(entity, "regulation"):
+            prog = (get_attrib_insensitive(reg, "programme") or "").strip()
+            if prog and not programme:
+                programme = prog
+            number_title = (get_attrib_insensitive(reg, "numberTitle") or "").strip()
+            if number_title:
+                extra_info.append(f"Regulation: {number_title}")
+        for remark in _child_local(entity, "remark"):
+            if remark.text and remark.text.strip():
+                extra_info.append(remark.text.strip())
+        un_id = (get_attrib_insensitive(entity, "unitedNationId") or "").strip()
+        if un_id:
+            extra_info.append(f"UN ID: {un_id}")
+
+        primary_addr = addresses[0] if addresses else {}
+        yield {
+            "entity_id": f"EUFSF-{entity_key}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name if entity_type == "I" else "",
+                "last_name": last_name if entity_type == "I" else "",
+                "maiden_name": ""
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": gender,
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else []
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": designation,
+            "designation_reasons": programme,
+            "additional_informations": "; ".join(extra_info) or None,
+            "origin": "EU FSF Consolidated",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": []
+        }
+
+
+# ------------------ LISTE CONSOLIDEE ONU (XML OFFICIEL) ------------------
+# Liste consolidee du Conseil de securite (scsanctions.un.org), publique et
+# sans authentification. Deux sections : INDIVIDUALS/INDIVIDUAL et
+# ENTITIES/ENTITY, avec champs texte (FIRST_NAME..FOURTH_NAME, UN_LIST_TYPE,
+# REFERENCE_NUMBER, COMMENTS1), listes imbriquees (INDIVIDUAL_ALIAS,
+# INDIVIDUAL_DATE_OF_BIRTH, INDIVIDUAL_PLACE_OF_BIRTH, INDIVIDUAL_DOCUMENT,
+# *_ADDRESS) et valeurs multiples (NATIONALITY/VALUE, DESIGNATION/VALUE).
+
+
+def _un_text(elem: ET.Element, local: str) -> str:
+    children = _child_local(elem, local)
+    if children and children[0].text and children[0].text.strip():
+        return children[0].text.strip()
+    return ""
+
+
+def _un_values(elem: ET.Element, local: str) -> List[str]:
+    """Valeurs des blocs <LOCAL><VALUE>..</VALUE>...</LOCAL>."""
+    out = []
+    for container in _child_local(elem, local):
+        for value in _child_local(container, "VALUE"):
+            if value.text and value.text.strip():
+                out.append(value.text.strip())
+    return out
+
+
+def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee officielle du Conseil de securite de l'ONU."""
+    for local_name, record in _stream_target_elements(file_path, {'INDIVIDUAL', 'ENTITY'}):
+        data_id = _un_text(record, "DATAID")
+        reference = _un_text(record, "REFERENCE_NUMBER")
+        entity_key = reference or data_id
+        if not entity_key:
+            continue
+        entity_type = "I" if local_name == "INDIVIDUAL" else "E"
+
+        name_parts = [
+            _un_text(record, tag)
+            for tag in ("FIRST_NAME", "SECOND_NAME", "THIRD_NAME", "FOURTH_NAME")
+        ]
+        name_parts = [p for p in name_parts if p]
+        primary_name = " ".join(name_parts)
+        if not primary_name:
+            continue
+
+        aliases_raw = []
+        original_script = _un_text(record, "NAME_ORIGINAL_SCRIPT")
+        if original_script:
+            aliases_raw.append({"name": original_script, "type": "Strong"})
+        alias_tag = "INDIVIDUAL_ALIAS" if entity_type == "I" else "ENTITY_ALIAS"
+        for alias in _child_local(record, alias_tag):
+            alias_name = _un_text(alias, "ALIAS_NAME")
+            if not alias_name:
+                continue
+            quality = _un_text(alias, "QUALITY").lower()
+            aliases_raw.append({"name": alias_name, "type": "Weak" if "low" in quality else "Strong"})
+
+        dobs = []
+        for dob in _child_local(record, "INDIVIDUAL_DATE_OF_BIRTH"):
+            date_val = _un_text(dob, "DATE")
+            year = _un_text(dob, "YEAR") or _un_text(dob, "FROM_YEAR")
+            if date_val:
+                dobs.append(date_val[:10])
+            elif year.isdigit():
+                dobs.append(f"{year}-01-01")
+
+        place_of_birth = None
+        birth_countries = []
+        for pob in _child_local(record, "INDIVIDUAL_PLACE_OF_BIRTH"):
+            city = _un_text(pob, "CITY")
+            state = _un_text(pob, "STATE_PROVINCE")
+            country = _un_text(pob, "COUNTRY")
+            if not place_of_birth and (city or state or country):
+                place_of_birth = ", ".join(p for p in (city, state, country) if p)
+            if country:
+                birth_countries.append(country_label_to_iso2(country))
+
+        citizenships = [country_label_to_iso2(v) for v in _un_values(record, "NATIONALITY")]
+
+        passports = []
+        national_ids = []
+        other_registrations = []
+        for doc in _child_local(record, "INDIVIDUAL_DOCUMENT"):
+            number = _un_text(doc, "NUMBER")
+            if not number:
+                continue
+            doc_type = _un_text(doc, "TYPE_OF_DOCUMENT").lower()
+            issuing = _un_text(doc, "ISSUING_COUNTRY") or _un_text(doc, "COUNTRY_OF_ISSUE")
+            iso2 = country_label_to_iso2(issuing) if issuing else "XX"
+            if "passport" in doc_type:
+                passports.append({"number": number, "issuing_country": iso2, "expiration_date": None})
+            elif "national" in doc_type:
+                national_ids.append({"number": number, "issuing_country": iso2})
+            else:
+                other_registrations.append({"id_type": doc_type or "OtherRegistration", "number": number})
+
+        addresses = []
+        address_countries = []
+        addr_tag = "INDIVIDUAL_ADDRESS" if entity_type == "I" else "ENTITY_ADDRESS"
+        for addr in _child_local(record, addr_tag):
+            parts = [_un_text(addr, t) for t in ("STREET", "CITY", "STATE_PROVINCE", "COUNTRY")]
+            full = ", ".join(p for p in parts if p)
+            if full:
+                addresses.append({"full": full, "city": parts[1], "country": parts[3]})
+            if parts[3]:
+                address_countries.append(country_label_to_iso2(parts[3]))
+
+        designation = "; ".join(_un_values(record, "DESIGNATION")) or None
+        un_list_type = _un_text(record, "UN_LIST_TYPE")
+        comments = _un_text(record, "COMMENTS1")
+        extra_info = []
+        if reference:
+            extra_info.append(f"UN Reference: {reference}")
+        if comments:
+            extra_info.append(comments)
+
+        primary_addr = addresses[0] if addresses else {}
+        yield {
+            "entity_id": f"UN-{entity_key}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else []
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": designation,
+            "designation_reasons": un_list_type or None,
+            "additional_informations": "; ".join(extra_info) or None,
+            "origin": "UN Consolidated List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": []
+        }
+
+
 # ------------------ CSV CONNECTOR ------------------
 
 def parse_csv_file(file_path: str, delimiter: str = ",", mapping_dict: dict = None) -> Generator[Dict[str, Any], None, None]:
