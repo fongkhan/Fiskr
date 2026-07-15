@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [2.10.0] - 2026-07-15
+
+Roadmap items **P2 (technical differentiation)** and **P3 (horizon)** — completes the competitive-benchmark roadmap (P0 → P3). Merged via PR #9.
+
 ### Added
 - **ISO 20022 transaction filtering** (roadmap item P3-1, Fircosoft-like): new `fiskr/transactions.py` parses `pain.001` (customer credit transfer initiation) and `pacs.008` (FI-to-FI credit transfer) payment messages version-agnostically (local-name matching), extracts every party — debtor, creditor, ultimate debtor/creditor, initiating party and financial agents (BICFI/BIC, country derived from the BIC when absent, birth date/country from `PrvtId`) — and screens each distinct party against the production watchlists. Candidate retrieval deliberately ignores the blocking country (payment data is too sparse to filter on it) and matches phonetics on every word of the free-text name; each party is scored with the profile variant (PP/PM) matching the candidate's type. Global verdict **PASS / HIT**; every screened party leaves an immutable audit line and every hit opens a deduplicated work-item alert (`TXN:{msg_id}` client ids). Endpoint `POST /api/transactions/screen`; the dashboard Screening tab gains a third sub-tab with file upload, verdict banner and per-party results (linking straight to the opened alerts).
 - **Adverse media search** (roadmap item P3-2): new `fiskr/adverse_media.py` queries the free public Google News RSS feed for the name combined with AML keywords (money laundering, sanctions, fraud, corruption... configurable via `adverse_media.keywords`), with a replaceable provider (`adverse_media.provider`). Strictly informational: results never alter a score or a screening status. Endpoint `GET /api/adverse-media?name=`; the alert investigation modal gains "Presse : client" / "Presse : listé" buttons showing the headlines with sources and dates.
@@ -21,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Compliance KPI page** (roadmap item P2-6): new **Pilotage** dashboard tab backed by `GET /api/kpi` — open/in-progress/pending-validation/closed alert counts, **false-positive rate** and average decision time (last 500 closed alerts), active whitelist pairs, production entity counts per list type, snapshots per status, screening decision distribution and the 15 most recent sync reports.
 - Screening results now render the `WHITELISTED` outcome with a dedicated badge ("Supprimée par liste blanche") instead of falling through to the generic style (roadmap item P2-3 companion; the decision-tree rendering itself shipped with P1-1).
 - 130 automated tests passing (8 new: Cyrillic transliteration and cross-script scoring, per-list threshold resolution and ALERT→NO_MATCH flip, PEP CSV mapping, OFSI ConList mapping incl. preamble and multi-row alias groups, PEP+OFSI sync lifecycle with hash dedup, KPI endpoint structure).
+
+### Documentation
+- New functional guide `Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md` (post-screening workflow: alert lifecycle, 4-eyes, whitelist, rescreening/lookback, narratives, adverse media, transaction filtering, KPIs); the README keeps a compact summary. Benchmark updated: P0 → P3 all marked delivered, capability matrix refreshed.
+
+---
+
+## [2.9.0] - 2026-07-15
+
+Roadmap items **P1 (analyst efficiency)** — alert case management with 4-eyes validation, client×listed-party whitelist, continuous screening. Merged via PR #8.
+
+### Added
 - **Client×listed-party whitelist — "Good Guys"** (roadmap item P1-2, Wolfsberg guidance): a reviewer can whitelist a client×entity pair (typically after a validated false-positive), suppressing its recurring alerts. Suppression is **never silent**: every whitelisted hit is still logged in the immutable audit trail with full scores under the explicit `WHITELISTED` status. Creation is governed (justification and evidence file with independently hot-toggleable requirements — `review.whitelist_justification_required` / `review.whitelist_file_required` — evidence archived under `whitelist_evidence/` and downloadable), optionally time-boxed via `expires_at` for periodic review, and revocation is soft-only with a mandatory reason (alerts resume). Endpoints `POST/GET /api/whitelist`, `POST /api/whitelist/{id}/revoke`, `GET /api/whitelist/evidence/{id}`; the dashboard Alerts tab gains a whitelist management card and closed false-positive alerts offer a one-click "Mettre en liste blanche" prefilled modal.
 - **Automatic post-delta rescreening** (roadmap item P1-3): whenever a watchlist snapshot goes live — manual sync, scheduled sync, manual upload, or homologation approval — the client base (`CLIENT_BASE` snapshots) is automatically rescreened against **only the new or modified entities** (checksum diff vs the replaced snapshot), using a local blocking index. New hits open work-item alerts through the P1-1 lifecycle (deduplicated; events authored by `rescreen-auto`), and whitelisted pairs are suppressed with an audit trace (counted as `whitelisted_suppressed`). Hot-toggleable via `ingestion.auto_rescreen` (default on); counters returned in sync/upload/approve responses. New shared module `fiskr/alerts.py` (alert dedup + whitelist lookup) reused by the API and the new `fiskr/rescreen.py` engine.
 - **Manual lookback** (`POST /api/rescreen/run`, admin): rescreens the whole client base against all production lists (or one list type) — the Wolfsberg lookback capability.
@@ -28,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Alert lifecycle with 4-eyes validation** (roadmap item P1-1): every real-time screening decision with `ALERT` status now opens a work item in the new `alerts` table (deduplicated per client×listed-party pair — re-screenings append a `REDETECTED` event instead of duplicating). Lifecycle: `OPEN → IN_PROGRESS (assigned) → PENDING_VALIDATION (decision proposed) → CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE`, with `ESCALATED` as a side path. Proposing a decision (true/false positive) requires a comment; **validation requires a reviewer or admin different from the proposer** (HTTP 403 on self-validation), and a refusal returns the alert to analysis with a mandatory reason. The requirement is hot-toggleable (`review.alert_four_eyes_required`, default on): when off, a proposal closes the alert directly. Every action is recorded in the append-only `alert_events` history; the immutable `compliance_audit_trail` stays untouched and linked (`audit_id`).
 - New endpoints: `GET /api/alerts` (worklist with status/assignee filters, sorted by risk), `GET /api/alerts/{id}` (detail with the linked audit `decision_tree` and full event history), and actions `assign`, `comment`, `escalate`, `propose`, `validate`. Dashboard gains an **Alertes** sidebar tab with an open-count badge, status filters, and an investigation modal that renders the score explanation (decision-tree adjustments), the action timeline, and role-aware buttons; the admin settings card gains the 4-eyes toggle.
 - 114 automated tests passing (7 new: creation/no-match/dedup, full 4-eyes lifecycle incl. self-validation and role rejections, refusal path, toggle-off direct closure, escalation and worklist filters). End-to-end verified over HTTP: screen → alert → propose → self-validate 403 → second reviewer closes.
+- **Continuous integration** (`.github/workflows/ci.yml`): GitHub Actions workflow running the full pytest suite (Python 3.11, pip cache) and a dashboard JavaScript syntax check (`node --check`) on every push and pull request to `master`.
+
+### Note
+- Alerts are opened by the real-time screening path only; the optional Spark batch engine does not create work items yet.
+
+---
+
+## [2.8.0] - 2026-07-14
+
+Roadmap items **P0 (compliance & quick wins)** — native connectors for the official DGT, EU FSF and UN consolidated lists. Merged via PR #8.
+
+### Added
 - **UN consolidated list connector** (roadmap item P0-3): `run_un_sync` downloads the official Security Council consolidated XML (`scsanctions.un.org`, public), parses individuals and entities (`parse_un_consolidated_xml`: names, original-script and Good/Low aliases, birth dates/places, nationalities, documents, designations, UN list type and reference), normalizes English country labels to ISO2 for blocking, and replaces the active `WATCHLIST_UN` list with delta + supersede — homologation-aware like every other source.
 - **EU FSF consolidated list connector** (roadmap item P0-2): `run_eu_fsf_sync` downloads the Commission's authoritative consolidated financial-sanctions XML (FSF files, FSD webgate — requires a free registration token, `sync.eu_fsf.token`). `parse_eu_fsf_xml` maps sanctionEntity records (subjectType P/E, name aliases with strong/weak quality, gender/function, birthdates, ISO2 citizenships, identifications, addresses, regulation programme and remarks). Shares the `WATCHLIST_EU` file type so the consolidated snapshot supersedes the scraped OJ list (**removals finally become reliable**) while the daily OJ scraping remains an optional same-day freshness complement merging on top. Disabled by default until a token is configured; a missing token yields an explicit error report instead of a failed download.
 - Both sources are wired into the daily scheduler (OFAC → EU FSF → EUR-Lex OJ → DGT → UN), `POST /api/sync/run` (`EUFSF`/`UN`), manual dashboard upload (UN XML file type; an `.xml` file uploaded as `WATCHLIST_EU` is parsed as FSF), sync tab cards and snapshot badges. Shared replacement-cycle helper `_run_list_replacement_sync` (hash dedup incl. pending snapshots, delta, supersede, homologation gating) now backs both connectors.
@@ -40,7 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Note
 - The first EU FSF sync will report most of the EU list as ADDED/REMOVED against a previously scraped OJ snapshot (different stable identifiers). Expected and one-time; with homologation mode enabled it surfaces as one large pending snapshot to review.
-- Alerts are opened by the real-time screening path only; the optional Spark batch engine does not create work items yet.
 
 ### Documentation
 - **Competitive benchmark & improvement roadmap** (`Documentation/BENCHMARK_CONCURRENTS.md`): market analysis of sanctions/PEP screening solutions (LSEG World-Check One, Dow Jones, ComplyAdvantage, SymphonyAI Sensa, Fircosoft, Napier, and open-source engines OpenSanctions/yente and Moov Watchman), regulatory framework review (Wolfsberg sanctions screening guidance, ACPR/DGT asset-freeze guidelines, official machine-readable lists), capability comparison matrix, 7-point gap analysis mapped to the codebase, and a prioritized roadmap (P0: DGT national asset-freeze register connector, EU FSF consolidated XML replacing the OJ scraping, UN consolidated list · P1: alert lifecycle with 4-eyes, client×entity whitelist, automatic post-delta rescreening · P2: multi-script transliteration, per-list thresholds, decision-tree rendering, PEP source, KPIs · P3: transaction filtering, adverse media, AI narratives).
