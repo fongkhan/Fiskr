@@ -23,7 +23,7 @@ from fiskr.scoring import match_entities
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
-    parse_eu_fsf_xml, parse_un_consolidated_xml
+    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv
 )
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
@@ -35,11 +35,15 @@ from fiskr.alerts import open_or_redetect_alert, is_whitelisted
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
+    run_pep_sync, run_ofsi_sync,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
+from fiskr.transactions import parse_iso20022_payment, screen_payment_message
+from fiskr.adverse_media import search_adverse_media
+from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, create_access_token,
     decode_access_token, parse_roles, normalize_roles
@@ -59,7 +63,10 @@ from fiskr.settings import (
 logger = logging.getLogger("fiskr.api")
 
 # Snapshot file types persisted as WatchlistEntity records
-WATCHLIST_FILE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN"]
+WATCHLIST_FILE_TYPES = [
+    "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
+    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI"
+]
 
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
@@ -97,17 +104,20 @@ def load_watchlist_cache(db: Session):
     # Load all entities for these active snapshots (excluded entities stay out
     # of production but are kept in DB for audit; NULL = legacy rows, not excluded)
     snapshot_ids = [s.snapshot_id for s in snapshots]
+    snapshot_types = {s.snapshot_id: s.file_type for s in snapshots}
     entities = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True)
     ).all()
-    
+
     temp_store = []
     temp_index = {}
-    
+
     for ent in entities:
         # Convert SQLAlchemy object to dictionary for cache
         ent_dict = {c.name: getattr(ent, c.name) for c in ent.__table__.columns}
+        # Type de liste d'origine : permet les seuils de cut-off par liste
+        ent_dict["_list_type"] = snapshot_types.get(ent.snapshot_id)
         temp_store.append(ent_dict)
         
         # Index by blocking key
@@ -232,6 +242,10 @@ def _run_scheduled_syncs():
             _apply_rescreen(run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["un"]["enabled"]:
             _apply_rescreen(run_un_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["pep"]["enabled"]:
+            _apply_rescreen(run_pep_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["ofsi"]["enabled"]:
+            _apply_rescreen(run_ofsi_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -724,6 +738,54 @@ async def screen_client(
         "whitelist_pair_id": whitelist_pair_id
     }
 
+@app.post("/api/transactions/screen")
+async def screen_transaction_message(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Filtrage transactionnel ISO 20022 : parse un message de paiement pain.001
+    ou pacs.008, crible chaque partie (donneur d'ordre, bénéficiaire, ultimes,
+    agents bancaires) contre les listes en production et rend un verdict
+    global PASS / HIT. Chaque partie criblée est tracée dans le journal
+    d'audit ; chaque hit ouvre une alerte de travail.
+    """
+    content = await file.read()
+    try:
+        parsed = parse_iso20022_payment(content)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    result = screen_payment_message(
+        db, parsed, watchlist_index, watchlist_version, watchlist_hash,
+        current_user["username"]
+    )
+    return result
+
+
+@app.get("/api/adverse-media")
+async def adverse_media_lookup(
+    name: str = Query(..., min_length=2),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Revue de presse négative (adverse media) sur un nom, via le fournisseur
+    configuré (Google News RSS par défaut). Purement informatif : ne modifie
+    jamais un score ni un statut de criblage.
+    """
+    try:
+        return search_adverse_media(name)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Le fournisseur adverse media est injoignable : {e}"
+        )
+
+
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
 async def ingest_snapshot(
@@ -805,10 +867,16 @@ async def ingest_snapshot(
         
         # 3. Parse contents based on File Type
         eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
-        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN") or eu_fsf_upload:
+        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI") or eu_fsf_upload:
             if eu_fsf_upload:
                 # Liste consolidee UE au format FSF XML officiel
                 parser_stream = parse_eu_fsf_xml(str(temp_file_path))
+            elif file_type == "WATCHLIST_PEP":
+                # Dataset PEP OpenSanctions (targets.simple.csv)
+                parser_stream = parse_pep_targets_csv(str(temp_file_path))
+            elif file_type == "WATCHLIST_OFSI":
+                # Liste consolidee UK OFSI (ConList.csv format 2022)
+                parser_stream = parse_ofsi_conlist_csv(str(temp_file_path))
             elif file_type == "WATCHLIST_UN":
                 # Liste consolidee du Conseil de securite de l'ONU (XML officiel)
                 parser_stream = parse_un_consolidated_xml(str(temp_file_path))
@@ -1421,10 +1489,14 @@ def run_source_sync(
         report = run_eu_fsf_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     elif source in ("UN", "ONU"):
         report = run_un_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "PEP":
+        report = run_pep_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "OFSI":
+        report = run_ofsi_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN)."
+            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN, PEP, OFSI)."
         )
 
     response = _serialize_sync_report(report)
@@ -2098,6 +2170,32 @@ async def validate_alert_decision(
     db.commit()
     return {"message": message, **_alert_summary(alert)}
 
+@app.post("/api/alerts/{alert_id}/narrative")
+async def generate_narrative(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Génère un PROJET de narratif d'investigation depuis les données tracées
+    de l'alerte (decision_tree, identités, historique). Déterministe par
+    construction, reformulation LLM optionnelle (narrative.llm_enabled).
+    Jamais de décision automatique : le narratif est un brouillon à relire.
+    """
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    narrative, llm_used = generate_alert_narrative(alert, audit, events)
+    _log_alert_event(
+        db, alert.id, current_user["username"], "NARRATIVE",
+        f"Projet de narratif généré ({'reformulation LLM' if llm_used else 'composeur déterministe'})."
+    )
+    db.commit()
+    return {"narrative": narrative, "llm_used": llm_used, "alert_id": alert.id}
+
 # ------------------ LISTE BLANCHE CLIENT x LISTE & RE-CRIBLAGE ------------------
 
 # Pieces justificatives des mises en liste blanche (valeur probante en audit)
@@ -2275,6 +2373,95 @@ async def run_manual_rescreen(
         raise HTTPException(status_code=400, detail=f"Type de liste inconnu ({', '.join(WATCHLIST_FILE_TYPES)}).")
     result = rescreen_lookback(db, file_type)
     return {"message": "Lookback exécuté.", **result}
+
+# ------------------ KPI CONFORMITE (PILOTAGE) ------------------
+
+@app.get("/api/kpi")
+async def get_compliance_kpis(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Indicateurs de pilotage du dispositif : volumes et statuts d'alertes,
+    taux de faux positifs, delai moyen de decision, liste blanche, etat des
+    listes en production et historique des synchronisations.
+    """
+    from sqlalchemy import func
+
+    # Alertes par statut
+    alert_counts = dict(
+        db.query(Alert.status, func.count(Alert.id)).group_by(Alert.status).all()
+    )
+    open_alerts = sum(alert_counts.get(s, 0) for s in ALERT_OPEN_STATUSES)
+    closed_fp = alert_counts.get("CLOSED_FALSE_POSITIVE", 0)
+    closed_tp = alert_counts.get("CLOSED_CONFIRMED", 0)
+    closed_total = closed_fp + closed_tp
+    fp_rate = round(closed_fp / closed_total * 100.0, 1) if closed_total else None
+
+    # Delai moyen de decision (creation -> cloture) sur les 500 dernieres closes
+    closed_rows = db.query(Alert.created_at, Alert.decided_at).filter(
+        Alert.status.in_(ALERT_CLOSED_STATUSES),
+        Alert.decided_at.isnot(None)
+    ).order_by(Alert.decided_at.desc()).limit(500).all()
+    if closed_rows:
+        avg_hours = sum(
+            (decided - created).total_seconds() for created, decided in closed_rows
+        ) / len(closed_rows) / 3600.0
+        avg_decision_hours = round(avg_hours, 1)
+    else:
+        avg_decision_hours = None
+
+    # Liste blanche active
+    now = datetime.utcnow()
+    active_whitelist = db.query(WhitelistPair).filter(
+        WhitelistPair.revoked_at.is_(None),
+        (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
+    ).count()
+
+    # Listes en production (entites par type) et snapshots par statut
+    ready_by_type = dict(
+        db.query(Snapshot.file_type, func.sum(Snapshot.record_count))
+          .filter(Snapshot.status == "READY", Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+          .group_by(Snapshot.file_type).all()
+    )
+    snapshot_counts = dict(
+        db.query(Snapshot.status, func.count(Snapshot.snapshot_id)).group_by(Snapshot.status).all()
+    )
+
+    # Decisions d'audit par statut (volumetrie de criblage)
+    audit_counts = dict(
+        db.query(AuditTrail.status, func.count(AuditTrail.id)).group_by(AuditTrail.status).all()
+    )
+
+    # Dernieres synchronisations
+    recent_syncs = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(15).all()
+
+    return {
+        "alerts": {
+            "by_status": alert_counts,
+            "open": open_alerts,
+            "closed_false_positive": closed_fp,
+            "closed_confirmed": closed_tp,
+            "false_positive_rate_pct": fp_rate,
+            "avg_decision_hours": avg_decision_hours,
+        },
+        "whitelist_active_pairs": active_whitelist,
+        "screening": {"decisions_by_status": audit_counts},
+        "lists": {
+            "production_entities_by_type": {k: int(v or 0) for k, v in ready_by_type.items()},
+            "snapshots_by_status": snapshot_counts,
+        },
+        "recent_syncs": [
+            {
+                "source": r.source,
+                "executed_at": r.executed_at.isoformat() if r.executed_at else None,
+                "trigger": r.trigger,
+                "status": r.status,
+                "added": r.added_count, "modified": r.modified_count, "removed": r.removed_count,
+            }
+            for r in recent_syncs
+        ],
+    }
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

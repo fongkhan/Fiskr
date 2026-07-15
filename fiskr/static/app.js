@@ -192,6 +192,9 @@ function switchTab(tabId) {
         fetchAlerts();
         fetchWhitelist();
     }
+    if (tabId === "kpi") {
+        fetchKpis();
+    }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
         if (activeSubBtn) {
@@ -502,6 +505,8 @@ function renderSnapshotsTable(snaps) {
         else if (snap.file_type === "WATCHLIST_SSIE") typeBadge = '<span class="status-badge alert">SSIE XML</span>';
         else if (snap.file_type === "WATCHLIST_DGT") typeBadge = '<span class="status-badge warning">DGT JSON</span>';
         else if (snap.file_type === "WATCHLIST_UN") typeBadge = '<span class="status-badge warning">ONU XML</span>';
+        else if (snap.file_type === "WATCHLIST_PEP") typeBadge = '<span class="status-badge warning">PEP CSV</span>';
+        else if (snap.file_type === "WATCHLIST_OFSI") typeBadge = '<span class="status-badge warning">OFSI CSV</span>';
         else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
         
         tr.innerHTML = `
@@ -633,7 +638,7 @@ async function handleIngestion(event) {
 
 // Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn" };
+    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn" };
     const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
@@ -1182,10 +1187,19 @@ function renderScreeningResult(data) {
         statusBadge.textContent = "ALERT";
         statusBadge.className = "status-badge alert";
         progress.style.stroke = "var(--color-alert)";
+    } else if (best && best.status === "WHITELISTED") {
+        statusBadge.textContent = "SUPPRIMÉE PAR LISTE BLANCHE";
+        statusBadge.className = "status-badge warning";
+        progress.style.stroke = "var(--color-warning)";
     } else {
         statusBadge.textContent = "NO_MATCH";
         statusBadge.className = "status-badge no_match";
         progress.style.stroke = "var(--color-safe)";
+    }
+    // Transparence du seuil applique (variable par type de liste)
+    if (best && best.cut_off_applied !== undefined) {
+        const listType = (best.watchlist_entity && best.watchlist_entity._list_type) || "";
+        statusBadge.title = `Seuil appliqué : ${best.cut_off_applied}%${listType ? " (" + listType + ")" : ""}`;
     }
     
     // 4. Decision Tree
@@ -2350,7 +2364,15 @@ async function openAlertModal(alertId) {
             <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
             <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
             ${actionsHtml}
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+                <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()">📝 Générer un narratif</button>
+                <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="fetchAlertAdverseMedia('client')">📰 Presse : client</button>
+                <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="fetchAlertAdverseMedia('watchlist')">📰 Presse : listé</button>
+            </div>
+            <div id="alert-narrative-container" class="hidden" style="margin-top: 0.75rem;"></div>
+            <div id="alert-adverse-container" class="hidden" style="margin-top: 0.75rem;"></div>
         `;
+        currentAlertNames = { client: a.client_name || "", watchlist: a.watchlist_name || "" };
         document.getElementById("alert-modal").classList.remove("hidden");
     } catch (e) {
         console.error("Error opening alert:", e);
@@ -2509,5 +2531,177 @@ async function submitWhitelist(event) {
     } catch (e) {
         console.error("Error creating whitelist pair:", e);
         alert("Erreur réseau de communication.");
+    }
+}
+
+// ------------------ PILOTAGE (KPI CONFORMITE) ------------------
+
+async function fetchKpis() {
+    try {
+        const response = await fetch("/api/kpi");
+        if (!response.ok) return;
+        const k = await response.json();
+
+        const tile = (label, value, color) => `
+            <div class="metric" style="flex: 1; min-width: 170px; background: rgba(255,255,255,0.04); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
+                <span class="metric-label" style="font-weight: 600;">${label}</span>
+                <span class="metric-value" style="font-size: 1.5rem; ${color ? "color: " + color + ";" : ""}">${value}</span>
+            </div>`;
+
+        const a = k.alerts || {};
+        document.getElementById("kpi-tiles").innerHTML =
+            tile("Alertes ouvertes", a.open ?? 0, "var(--color-warning)") +
+            tile("Faux positifs clos", a.closed_false_positive ?? 0, "var(--color-safe)") +
+            tile("Vrais positifs confirmés", a.closed_confirmed ?? 0, "var(--color-alert)") +
+            tile("Taux de faux positifs", a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined ? a.false_positive_rate_pct + " %" : "—") +
+            tile("Délai moyen de décision", a.avg_decision_hours !== null && a.avg_decision_hours !== undefined ? a.avg_decision_hours + " h" : "—") +
+            tile("Paires en liste blanche", k.whitelist_active_pairs ?? 0);
+
+        const listsBody = document.querySelector("#kpi-lists-table tbody");
+        const byType = (k.lists || {}).production_entities_by_type || {};
+        listsBody.innerHTML = Object.keys(byType).length
+            ? Object.entries(byType).map(([t, n]) => `<tr><td>${escapeHtml(t)}</td><td><strong>${n}</strong></td></tr>`).join("")
+            : '<tr><td colspan="2" style="color: var(--text-muted); text-align: center;">Aucune liste en production.</td></tr>';
+
+        const syncsBody = document.querySelector("#kpi-syncs-table tbody");
+        const syncs = k.recent_syncs || [];
+        syncsBody.innerHTML = syncs.length
+            ? syncs.map(s => `<tr>
+                <td>${s.executed_at ? new Date(s.executed_at).toLocaleString("fr-FR") : "-"}</td>
+                <td>${escapeHtml(s.source)} <small style="color:var(--text-muted)">${escapeHtml(s.trigger)}</small></td>
+                <td>${escapeHtml(s.status)}</td>
+                <td><small>+${s.added} / ~${s.modified} / -${s.removed}</small></td>
+              </tr>`).join("")
+            : '<tr><td colspan="4" style="color: var(--text-muted); text-align: center;">Aucune synchronisation.</td></tr>';
+    } catch (e) {
+        console.error("Error fetching KPIs:", e);
+    }
+}
+
+// ------------------ P3 : FILTRAGE TRANSACTIONNEL ISO 20022 ------------------
+
+async function runTransactionScreening() {
+    const input = document.getElementById("txn-file-input");
+    if (!input.files || !input.files.length) {
+        alert("Sélectionnez un message de paiement XML (pain.001 ou pacs.008).");
+        return;
+    }
+    const btn = document.getElementById("txn-screen-btn");
+    btn.disabled = true;
+    btn.textContent = "Filtrage en cours...";
+    try {
+        const formData = new FormData();
+        formData.append("file", input.files[0]);
+        const response = await fetch("/api/transactions/screen", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (typeof data.detail === "string" ? data.detail : "message invalide."));
+            return;
+        }
+        renderTransactionResult(data);
+    } catch (e) {
+        console.error("Transaction screening error:", e);
+        alert("Erreur lors du filtrage transactionnel.");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Filtrer le paiement";
+    }
+}
+
+function renderTransactionResult(data) {
+    document.getElementById("txn-results-container").classList.remove("hidden");
+    const verdictLine = document.getElementById("txn-verdict-line");
+    if (data.verdict === "HIT") {
+        verdictLine.innerHTML = `Verdict : <span class="status-badge alert">HIT — ${data.hits_count} partie(s) en alerte</span>`;
+    } else {
+        verdictLine.innerHTML = `Verdict : <span class="status-badge safe">PASS — aucune correspondance</span>`;
+    }
+    const m = data.message || {};
+    document.getElementById("txn-message-info").textContent =
+        `Message ${m.message_type || "?"} · MsgId ${m.msg_id || "—"} · ${data.transactions_count} transaction(s) · ` +
+        `${(data.parties || []).length} partie(s) distincte(s) criblée(s).`;
+
+    const tbody = document.querySelector("#txn-results-table tbody");
+    tbody.innerHTML = (data.parties || []).map(p => {
+        let badge;
+        if (p.status === "ALERT") badge = '<span class="status-badge alert">ALERT</span>';
+        else if (p.status === "WHITELISTED") badge = '<span class="status-badge warning">WHITELISTED</span>';
+        else badge = '<span class="status-badge safe">NO_MATCH</span>';
+        return `<tr>
+            <td>${escapeHtml(p.name)}${p.is_agent ? ' <small style="color:var(--text-muted)">(banque)</small>' : ""}</td>
+            <td><small>${escapeHtml((p.roles || []).join(", "))}</small></td>
+            <td>${escapeHtml(p.country || "—")}</td>
+            <td><small>${escapeHtml(p.bic || "—")}</small></td>
+            <td>${p.best_watchlist_name ? p.final_score.toFixed(1) + " %" : "—"}</td>
+            <td>${p.best_watchlist_name ? escapeHtml(p.best_watchlist_name) + (p.list_type ? ` <small style="color:var(--text-muted)">${escapeHtml(p.list_type)}</small>` : "") : "—"}</td>
+            <td>${badge}${p.hard_match ? ' <small style="color:var(--color-alert)">hard match</small>' : ""}</td>
+            <td>${p.alert_id ? `<a href="#" onclick="switchTab('alerts'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
+        </tr>`;
+    }).join("");
+}
+
+// ------------------ P3 : NARRATIF D'ALERTE & ADVERSE MEDIA ------------------
+
+let currentAlertNames = { client: "", watchlist: "" };
+
+async function generateAlertNarrative() {
+    if (!currentAlertId) return;
+    const container = document.getElementById("alert-narrative-container");
+    container.classList.remove("hidden");
+    container.innerHTML = '<small style="color: var(--text-muted);">Génération du narratif...</small>';
+    try {
+        const response = await fetch(`/api/alerts/${currentAlertId}/narrative`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) {
+            container.innerHTML = `<small style="color: var(--color-alert);">Erreur : ${escapeHtml(data.detail || "génération impossible.")}</small>`;
+            return;
+        }
+        container.innerHTML = `
+            <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Projet de narratif ${data.llm_used ? '<small style="color: var(--text-muted);">(reformulé par IA — à relire)</small>' : '<small style="color: var(--text-muted);">(déterministe, fondé sur l\'audit)</small>'}</h3>
+            <textarea id="alert-narrative-text" rows="12" style="width: 100%; font-size: 0.85rem;">${escapeHtml(data.narrative)}</textarea>
+            <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                <button class="btn btn-sm btn-secondary" onclick="copyNarrative()">📋 Copier</button>
+            </div>
+            <small style="color: var(--text-muted);">La décision (vrai/faux positif) reste humaine et soumise à la validation 4-yeux — ce texte est un brouillon éditable.</small>
+        `;
+    } catch (e) {
+        console.error("Narrative error:", e);
+        container.innerHTML = '<small style="color: var(--color-alert);">Erreur lors de la génération.</small>';
+    }
+}
+
+function copyNarrative() {
+    const ta = document.getElementById("alert-narrative-text");
+    if (!ta) return;
+    ta.select();
+    navigator.clipboard.writeText(ta.value).then(() => {}, () => document.execCommand("copy"));
+}
+
+async function fetchAlertAdverseMedia(which) {
+    const name = which === "watchlist" ? currentAlertNames.watchlist : currentAlertNames.client;
+    if (!name) return;
+    const container = document.getElementById("alert-adverse-container");
+    container.classList.remove("hidden");
+    container.innerHTML = `<small style="color: var(--text-muted);">Recherche presse sur « ${escapeHtml(name)} »...</small>`;
+    try {
+        const response = await fetch(`/api/adverse-media?name=${encodeURIComponent(name)}`);
+        const data = await response.json();
+        if (!response.ok) {
+            container.innerHTML = `<small style="color: var(--color-alert);">Erreur : ${escapeHtml(data.detail || "recherche impossible.")}</small>`;
+            return;
+        }
+        const articles = data.articles || [];
+        container.innerHTML = `
+            <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Adverse media — « ${escapeHtml(data.name)} » <small style="color: var(--text-muted);">(${articles.length} article(s), informatif uniquement)</small></h3>
+            ${articles.length ? articles.map(art => `
+                <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
+                    <a href="${escapeHtml(art.link)}" target="_blank" rel="noopener noreferrer" style="font-size: 0.85rem;">${escapeHtml(art.title)}</a>
+                    <div><small style="color: var(--text-muted);">${escapeHtml(art.source || "")} ${art.published ? "· " + escapeHtml(art.published) : ""}</small></div>
+                </div>
+            `).join("") : '<small style="color: var(--text-muted);">Aucun article trouvé avec les mots-clés LCB-FT configurés.</small>'}
+        `;
+    } catch (e) {
+        console.error("Adverse media error:", e);
+        container.innerHTML = '<small style="color: var(--color-alert);">Le fournisseur presse est injoignable.</small>';
     }
 }

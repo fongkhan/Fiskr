@@ -38,6 +38,11 @@
                         </button>
                     </li>
                     <li>
+                        <button id="nav-btn-kpi" class="nav-item" onclick="switchTab('kpi')">
+                            <span class="nav-icon">📈</span> Pilotage
+                        </button>
+                    </li>
+                    <li>
                         <button id="nav-btn-audit" class="nav-item" onclick="switchTab('audit')">
                             <span class="nav-icon">📜</span> Audit
                         </button>
@@ -148,6 +153,8 @@
                                         <option value="WATCHLIST_SSIE">Smart Sanctions — XML générique (Moteur SSIE)</option>
                                         <option value="WATCHLIST_DGT">Registre national des gels — DGT (JSON)</option>
                                         <option value="WATCHLIST_UN">Liste consolidée ONU (XML)</option>
+                                        <option value="WATCHLIST_PEP">PEP — OpenSanctions (CSV)</option>
+                                        <option value="WATCHLIST_OFSI">UK OFSI — ConList (CSV)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -518,6 +525,22 @@
                             </div>
 
                             <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
+                                <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
+                                <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">👤 PEP — Dataset OpenSanctions (CSV)</h3>
+                                <p class="section-desc">Personnes Politiquement Exposées agrégées par OpenSanctions. <strong>Licence</strong> : usage non commercial libre, licence requise pour un usage commercial (<code>sync.pep.enabled</code>, désactivé par défaut).</p>
+                                <button id="sync-pep-btn" class="btn btn-primary" onclick="handleSourceSync('PEP')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
                                 <h3 style="margin-top: 0;">🇪🇺 UE — Liste consolidée officielle (FSF XML)</h3>
                                 <p class="section-desc">Fichier consolidé des sanctions financières de l'UE (webgate FSD) : fait autorité sur le scraping du JO, les <strong>radiations</strong> y sont fiables. Nécessite un token gratuit (inscription au webgate, puis <code>sync.eu_fsf.token</code> dans <code>config.yaml</code>).</p>
                                 <button id="sync-eufsf-btn" class="btn btn-primary" onclick="handleSourceSync('EUFSF')">
@@ -716,6 +739,9 @@
                     </button>
                     <button id="sub-btn-screening-batch" class="sub-tab-btn" onclick="switchSubTab('screening', 'screening-batch')">
                         Screening de Masse (Batch)
+                    </button>
+                    <button id="sub-btn-screening-transactions" class="sub-tab-btn" onclick="switchSubTab('screening', 'screening-transactions')">
+                        Filtrage Transactionnel (ISO 20022)
                     </button>
                 </div>
 
@@ -1039,6 +1065,44 @@
                         </div>
                     </div>
                 </div>
+
+                <div id="sub-sec-screening-transactions" class="sub-tab-content hidden">
+                    <div class="card">
+                        <h2>Filtrage Transactionnel ISO 20022</h2>
+                        <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques — sont criblées contre les listes en production. Verdict <strong>PASS</strong> ou <strong>HIT</strong> ; chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+                        <div class="form-row" style="align-items: flex-end;">
+                            <div class="form-group" style="flex: 1;">
+                                <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
+                                <input type="file" id="txn-file-input" accept=".xml">
+                            </div>
+                            <div class="form-group">
+                                <button id="txn-screen-btn" class="btn btn-primary" onclick="runTransactionScreening()">Filtrer le paiement</button>
+                            </div>
+                        </div>
+                        <div id="txn-results-container" class="hidden">
+                            <hr>
+                            <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
+                            <p class="section-desc" id="txn-message-info"></p>
+                            <div class="table-container max-height-table">
+                                <table id="txn-results-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Partie</th>
+                                            <th>Rôle(s)</th>
+                                            <th>Pays</th>
+                                            <th>BIC</th>
+                                            <th>Score</th>
+                                            <th>Meilleur match</th>
+                                            <th>Statut</th>
+                                            <th>Alerte</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- SECTION 3: AUDIT -->
@@ -1095,6 +1159,39 @@
                                     <!-- Populated dynamically -->
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION: PILOTAGE (KPI conformité) -->
+            <section id="sec-kpi" class="tab-content">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <div class="card result-card">
+                        <h2>Indicateurs de Pilotage du Dispositif</h2>
+                        <p class="section-desc">Volumes d'alertes, taux de faux positifs, délai moyen de décision, liste blanche active, listes en production et historique des synchronisations.</p>
+                        <div id="kpi-tiles" class="score-metrics" style="flex-direction: row; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem;">
+                            <!-- Populated dynamically -->
+                        </div>
+                        <div class="grid-layout" style="grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                            <div>
+                                <h3 style="font-size: 0.95rem;">Listes en production (fiches par type)</h3>
+                                <div class="table-container">
+                                    <table id="kpi-lists-table">
+                                        <thead><tr><th>Liste</th><th>Fiches</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <h3 style="font-size: 0.95rem;">Dernières synchronisations</h3>
+                                <div class="table-container max-height-table">
+                                    <table id="kpi-syncs-table">
+                                        <thead><tr><th>Date</th><th>Source</th><th>Statut</th><th>Delta</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1320,7 +1417,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=4.0"></script>
+    <script src="/static/app.js?v=4.2"></script>
 
 
 

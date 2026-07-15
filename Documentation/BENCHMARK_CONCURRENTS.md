@@ -45,19 +45,19 @@ Les 5 améliorations au meilleur ratio impact/effort :
 
 | Capacité | Fiskr | World-Check One | ComplyAdvantage | yente | Watchman |
 |---|---|---|---|---|---|
-| Sources sanctions natives | OFAC + EU (scraping JO) + SSIE générique | Référentiel propriétaire mondial | Référentiel propriétaire temps réel | ~Toutes (agrégat OpenSanctions) | OFAC, CSL US/UK/EU, ONU, OpenSanctions |
-| Registre gel des avoirs FR (DGT) | ❌ | ✅ (agrégé) | ✅ (agrégé) | ✅ (dataset) | ❌ |
-| PEP | ❌ (schéma prêt, pas de source) | ✅ | ✅ | ✅ | via OpenSanctions |
+| Sources sanctions natives | OFAC + EU (FSF consolidé + JO) + ONU + UK OFSI + SSIE générique | Référentiel propriétaire mondial | Référentiel propriétaire temps réel | ~Toutes (agrégat OpenSanctions) | OFAC, CSL US/UK/EU, ONU, OpenSanctions |
+| Registre gel des avoirs FR (DGT) | ✅ (API publique, natif) | ✅ (agrégé) | ✅ (agrégé) | ✅ (dataset) | ❌ |
+| PEP | ✅ (dataset OpenSanctions, opt-in licence) | ✅ | ✅ | ✅ | via OpenSanctions |
 | Matching fuzzy explicable | ✅ (`decision_tree`) | n/a (donnée) | ✅ | ✅ (explications API) | partiel |
 | Hard match identifiants | ✅ (LEI, passeport, IMO...) | n/a | ✅ | ✅ | partiel |
-| Multi-écritures (cyrillique/arabe/CJK) | ❌ (aplatissement ASCII) | ✅ | ✅ | ✅ | partiel |
-| Cycle de vie des alertes / case management | ❌ (journal en écriture seule) | via partenaires | ✅ | ❌ (moteur pur) | ❌ |
-| Liste blanche / suppression FP | ❌ | via partenaires | ✅ | ❌ | ❌ |
-| Re-criblage continu post-delta | ❌ (delta calculé mais non exploité) | ✅ | ✅ | ❌ (à la charge du client) | ❌ |
+| Multi-écritures (cyrillique/arabe/CJK) | ✅ (translittération `anyascii`) | ✅ | ✅ | ✅ | partiel |
+| Cycle de vie des alertes / case management | ✅ (4-yeux, historique append-only) | via partenaires | ✅ | ❌ (moteur pur) | ❌ |
+| Liste blanche / suppression FP | ✅ (gouvernée, jamais silencieuse) | via partenaires | ✅ | ❌ | ❌ |
+| Re-criblage continu post-delta | ✅ (+ lookback manuel) | ✅ | ✅ | ❌ (à la charge du client) | ❌ |
 | **Homologation humaine des listes avant prod** | ✅✅ (différenciant) | ❌ | ❌ | ❌ | ❌ |
 | Piste d'audit immuable + config figée par décision | ✅ | n/a | ✅ | ❌ | ❌ |
 | Archivage probant des actes officiels | ✅ (PDF EUR-Lex + SHA-256) | ❌ | ❌ | ❌ | ❌ |
-| Narratifs IA / copilote | ❌ | ❌ | ✅ | ❌ (explications structurées) | ❌ |
+| Narratifs IA / copilote | ✅ (déterministe + LLM opt-in) | ❌ | ✅ | ❌ (explications structurées) | ❌ |
 
 ---
 
@@ -138,7 +138,7 @@ La guidance du Wolfsberg Group structure un programme de criblage autour de : l'
 
 ## 5. Feuille de route priorisée
 
-### P0 — Conformité & quick wins (différenciant réglementaire français)
+### P0 — Conformité & quick wins (différenciant réglementaire français) — ✅ livré
 
 | Item | Bénéfice | Effort | Dépendances | Fichiers principaux |
 |---|---|---|---|---|
@@ -146,7 +146,7 @@ La guidance du Wolfsberg Group structure un programme de criblage autour de : l'
 | **EU FSF XML consolidé** en remplacement du scraping JO | Radiations fiables, robustesse | M | — | `ingest.py` ou profil SSIE, `sync.py::run_eurlex_sync` |
 | **ONU consolidée XML** | Couverture socle du marché | S | — | `ingest.py`/SSIE, `sync.py` |
 
-### P1 — Efficacité analyste (cœur produit)
+### P1 — Efficacité analyste (cœur produit) — ✅ livré
 
 | Item | Bénéfice | Effort | Dépendances | Fichiers principaux |
 |---|---|---|---|---|
@@ -154,20 +154,24 @@ La guidance du Wolfsberg Group structure un programme de criblage autour de : l'
 | **Liste blanche client×listé** avec justification modulaire | 1er levier de réduction des FP (Wolfsberg) | M | motif exclusions existant | `database.py`, `api.py::screen`, dashboard |
 | **Re-criblage automatique post-delta** + lookback | Surveillance continue | M | delta engine existant | `sync.py`, `api.py` (hook post-promotion), scheduler |
 
-### P2 — Différenciation technique
+### P2 — Différenciation technique — ✅ livré
 
-| Item | Bénéfice | Effort |
-|---|---|---|
-| Translittération multi-écritures (cyrillique/arabe/CJK) | Rappel sur les alias non latins des listes | M |
-| Seuils par liste / type d'entité (réglages à chaud) | Calibration fine façon Napier/yente | S |
-| Restitution lisible du `decision_tree` dans le dashboard | Explicabilité analyste façon yente `explanations` | S |
-| Source PEP (dataset OpenSanctions) | Ouvre le criblage PEP annoncé dans le README | M |
-| UK OFSI | Couverture internationale complète | S |
-| Page KPI conformité | Pilotage du dispositif | M |
+| Item | Bénéfice | Effort | Statut |
+|---|---|---|---|
+| Translittération multi-écritures (cyrillique/arabe/CJK) | Rappel sur les alias non latins des listes | M | ✅ `anyascii` dans `quality.strip_accents` |
+| Seuils par liste / type d'entité (réglages à chaud) | Calibration fine façon Napier/yente | S | ✅ `scoring.cut_off_overrides` par type de liste (config) |
+| Restitution lisible du `decision_tree` dans le dashboard | Explicabilité analyste façon yente `explanations` | S | ✅ livré avec P1-1 (modale d'alerte) + badge WHITELISTED/tooltip seuil |
+| Source PEP (dataset OpenSanctions) | Ouvre le criblage PEP annoncé dans le README | M | ✅ `run_pep_sync` (opt-in, contrainte de licence) |
+| UK OFSI | Couverture internationale complète | S | ✅ `run_ofsi_sync` (opt-in) |
+| Page KPI conformité | Pilotage du dispositif | M | ✅ onglet Pilotage + `GET /api/kpi` |
 
-### P3 — Horizon
+### P3 — Horizon — ✅ livré
 
-Filtrage transactionnel ISO 20022 · adverse media (partenariat données requis) · narratifs d'alertes IA human-in-the-loop fondés sur le `decision_tree`.
+| Item | Statut |
+|---|---|
+| Filtrage transactionnel ISO 20022 | ✅ parseur pain.001/pacs.008 + criblage de toutes les parties, verdict PASS/HIT, audit + alertes (`POST /api/transactions/screen`) |
+| Adverse media | ✅ connecteur Google News RSS gratuit (mots-clés LCB-FT, fournisseur remplaçable) — informatif uniquement ; un partenariat données (Dow Jones/Factiva) reste supérieur en couverture |
+| Narratifs d'alertes IA human-in-the-loop | ✅ projet de narratif déterministe fondé sur le `decision_tree` (+ reformulation Claude opt-in), décision humaine 4-yeux inchangée |
 
 ---
 

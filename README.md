@@ -31,6 +31,7 @@ Le système est structuré autour des modules définis dans le Document d'Archit
      5. Moyens de Transport (Vessel IMO à 7 chiffres, Aircraft Tail registration).
      6. Autres documents d'identité et codes (SWIFT, SWIFT-BIC, etc.).
      * Si l'un des contrôles correspond, le score est verrouillé à `100.0%` avec statut `ALERT`.
+   * **Translittération multi-écritures** : les noms en cyrillique, arabe, chinois, grec... sont automatiquement translittérés en latin (bibliothèque `anyascii`) avant normalisation, de sorte que *Владимир Путин* et *VLADIMIR PUTIN* obtiennent un score de 100%.
    * **Score Textuel de Base (Fuzzy)** : Moyenne pondérée hybride : $S_{base} = (0.4 \times JW) + (0.4 \times DL) + (0.2 \times TS)$
      * *Jaro-Winkler (JW)* : Fautes d'orthographe en début de chaîne.
      * *Damerau-Levenshtein (DL)* : Inversions, omissions et insertions.
@@ -40,7 +41,7 @@ Le système est structuré autour des modules définis dans le Document d'Archit
      * Date de Naissance (DOB) : Match exact (`+15`), dans la fenêtre de tolérance (`+5`), hors tolérance (`-15`).
      * Genre : Contradiction homme/femme (`-20`).
      * Géographie : Match sur pays (`+10`), aucun contact trouvé (`-10`).
-   * **Seuil Réglementaire (Cut-off)** : Alertes générées si le Score Final $\ge 75\%$.
+   * **Seuil Réglementaire (Cut-off)** : Alertes générées si le Score Final $\ge 75\%$. Le seuil est **surchargeable par type de liste** (`scoring.cut_off_overrides`, ex. seuil plus tolérant sur les PEP que sur le gel des avoirs) ; le seuil effectivement appliqué est restitué dans chaque résultat (`cut_off_applied`).
 
 4. **Module 4 & 6 : API Temps Réel & Piste d'Audit (`fiskr/api.py`, `fiskr/database.py`)**
    * Service API asynchrone écrit en **FastAPI**.
@@ -107,6 +108,8 @@ L'onglet **Gestion des Watchlists → Sources Automatiques** permet de récupér
 * **🇫🇷 DGT — Registre national des gels des avoirs** : Téléchargement du registre officiel de la Direction générale du Trésor via son **API publique** ([gels-avoirs.dgtresor.gouv.fr](https://gels-avoirs.dgtresor.gouv.fr/)), ingestion en snapshot (personnes physiques → I, personnes morales → E, navires → V, avec normalisation ISO2 des nationalités françaises pour le blocking), **delta** et remplacement de la liste DGT active. La mise en œuvre des mesures de gel nationales étant une **obligation autonome** des établissements assujettis (lignes directrices ACPR/DGT), ce connecteur couvre nativement l'exigence française. Compatible mode homologation et planification quotidienne.
 * **🇺🇳 ONU — Liste consolidée du Conseil de sécurité** : Téléchargement du XML officiel public ([scsanctions.un.org](https://scsanctions.un.org/resources/xml/en/consolidated.xml)), ingestion (individus → I, entités → E, alias Good/Low → priorités haute/basse, pays anglais normalisés en ISO2), **delta** et remplacement de la liste ONU active.
 * **🇪🇺 UE — Liste consolidée officielle (fichiers FSF)** : Téléchargement du XML consolidé des sanctions financières publié par la Commission (webgate FSD) — la source qui **fait autorité** sur le scraping du JO, avec des **radiations fiables**. Nécessite un token gratuit : créez un compte sur le webgate FSD puis renseignez `sync.eu_fsf.token` dans `config.yaml` et passez `sync.eu_fsf.enabled` à `true`. Partage le type `WATCHLIST_EU` : le snapshot FSF remplace la liste scrapée, et le scraping quotidien du JO (ci-dessous) reste un complément « fraîcheur J+0 » optionnel qui fusionne par-dessus.
+* **🇬🇧 UK OFSI — Liste consolidée HM Treasury** *(opt-in)* : Téléchargement du fichier officiel `ConList.csv` (format 2022) publié par l'Office of Financial Sanctions Implementation, regroupement des lignes par Group ID (nom principal + alias), typage Individual → I / Ship → V / autres → E, conversion des dates `jj/mm/aaaa` et normalisation ISO2 des nationalités. À activer (`sync.ofsi.enabled`) selon l'exposition UK de l'établissement.
+* **🌐 PEP — OpenSanctions** *(opt-in)* : Téléchargement du dataset consolidé des Personnes Politiquement Exposées d'OpenSanctions (`targets.simple.csv`), ingestion en liste `WATCHLIST_PEP` (individus et organisations liées, alias, dates de naissance partielles normalisées, pays ISO2). ⚠️ **Licence** : l'usage commercial des données OpenSanctions requiert une licence payante ([opensanctions.org/licensing](https://www.opensanctions.org/licensing/)) — le connecteur est désactivé par défaut (`sync.pep.enabled`).
 * **🇪🇺 EUR-Lex — Journal Officiel du jour (édition anglaise)** : Lecture de la page du Journal Officiel (série L, **version anglaise, qui fait référence pour la réglementation européenne**) de la date choisie, détection des actes dont le titre mentionne **« restrictive measures »**, puis scraping heuristique des annexes (tableaux et listes numérotées) pour en extraire les listés — Individus (avec date de naissance), Entités, Navires (IMO) et Aéronefs. Le type du listé est déduit de toute la ligne d'annexe, **motifs de la désignation compris** (les indices personnels — pronoms, fonctions, données de naissance — priment sur les mots-clés d'entités cités dans les motifs). Les fiches extraites sont **fusionnées de manière incrémentale** avec la liste EU active (le JO amende la liste, il ne la remplace pas) et le delta est calculé. En l'absence d'acte pertinent, le rapport indique `NO_PUBLICATION`.
 * **Archivage probant** : le **PDF officiel** de chaque acte retenu — la version qui **fait foi lors des audits** — est téléchargé dans `eurlex_archives/` avec son empreinte SHA-256 d'intégrité, référencé dans le rapport de synchronisation et téléchargeable depuis l'application (`GET /api/sync/evidence/{fichier}`).
 
@@ -134,6 +137,12 @@ sync:
   un:
     enabled: true
     url: "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
+  pep:
+    enabled: false            # attention a la licence OpenSanctions (usage commercial payant)
+    url: "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
+  ofsi:
+    enabled: false            # liste UK : opt-in selon l'exposition
+    url: "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
 ```
 
 Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé aux administrateurs), `GET /api/sync/reports` (historique des rapports) et `GET /api/sync/config` (configuration active).
@@ -234,18 +243,19 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
-Le dashboard interactif se compose de 5 onglets principaux :
+Le dashboard interactif se compose de 6 onglets principaux :
 * **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 26 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF, JSON), de comparer les versions historiques via le **Delta Engine**, de piloter le **mode homologation** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
-* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**) et le crible de masse (simulateur batch).
-* **Alertes** : File de travail des alertes de criblage avec **cycle de vie complet** (ouverte → en cours → décision proposée → close vrai/faux positif, escalade possible), **validation 4-yeux** (le validateur, rôle `reviewer` ou `admin`, doit être différent du proposeur — désactivable à chaud), explication du score (decision tree) et **historique append-only** de chaque action.
+* **Criblage** : Regroupe le crible temps réel unitaire (Sandbox avec **champs de saisie s'adaptant dynamiquement au type de tiers recherché**), le crible de masse (simulateur batch) et le **filtrage transactionnel ISO 20022** : soumission d'un message de paiement `pain.001` ou `pacs.008` (toute version mineure), extraction et criblage de **toutes les parties** (donneur d'ordre, bénéficiaire, ultimes, banques par BIC), verdict global **PASS / HIT** (`POST /api/transactions/screen`) — chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.
+* **Alertes** : File de travail des alertes de criblage avec **cycle de vie complet** (ouverte → en cours → décision proposée → close vrai/faux positif, escalade possible), **validation 4-yeux** (le validateur, rôle `reviewer` ou `admin`, doit être différent du proposeur — désactivable à chaud), explication du score (decision tree) et **historique append-only** de chaque action. La modale d'investigation propose aussi un **projet de narratif** généré depuis les données d'audit (`POST /api/alerts/{id}/narrative` — déterministe par construction, reformulation Claude optionnelle via `narrative.llm_enabled`, la décision restant humaine) et une recherche **adverse media** (revue de presse négative par mots-clés LCB-FT, `GET /api/adverse-media` — purement informative).
 * **Liste blanche & surveillance continue** *(dans l'onglet Alertes)* : paires client×listé en **liste blanche** (« Good Guys ») avec justification gouvernée, expiration de revue et révocation motivée — chaque suppression d'alerte reste tracée dans l'audit (statut `WHITELISTED`) ; **re-criblage automatique** du référentiel clients contre les seules entités nouvelles/modifiées à chaque mise à jour de liste (sync, upload, approbation d'homologation), plus un **lookback manuel** admin (`POST /api/rescreen/run`).
+* **Pilotage** : Page de KPI conformité (`GET /api/kpi`) — encours d'alertes par statut, **taux de faux positifs**, délai moyen de décision, paires en liste blanche actives, volumétrie des listes en production par type, snapshots par statut, répartition des décisions de criblage et dernières synchronisations.
 * **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
 * **Utilisateurs** *(Réservé aux Administrateurs)* : Interface de gestion des utilisateurs, création de comptes, réinitialisation de mots de passe et attribution des rôles empilables (`admin` / `reviewer` / `user`).
 
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 122 tests automatisés avec pytest :
+Exécutez la suite complète de 144 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

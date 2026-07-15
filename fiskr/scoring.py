@@ -107,6 +107,25 @@ def token_sort_similarity(s1: str, s2: str) -> float:
     return jaro_wink_similarity(sorted_s1, sorted_s2)
 
 
+def resolve_cut_off(config: dict, watchlist_entry: dict = None) -> float:
+    """
+    Seuil de cut-off applicable : surcharge par type de liste
+    (scoring.cut_off_overrides, cle = file_type du snapshot, ex. WATCHLIST_PEP)
+    sinon seuil global. Le type est porte par la cle _list_type annotee au
+    chargement du cache et lors du re-criblage.
+    """
+    scoring_cfg = config.get("scoring", {}) or {}
+    cut_off = scoring_cfg.get("cut_off_threshold", 75.0)
+    overrides = scoring_cfg.get("cut_off_overrides") or {}
+    list_type = (watchlist_entry or {}).get("_list_type")
+    if list_type and list_type in overrides:
+        try:
+            return float(overrides[list_type])
+        except (TypeError, ValueError):
+            return float(cut_off)
+    return float(cut_off)
+
+
 def compute_base_score(s1: str, s2: str, config: dict) -> float:
     """
     Computes S_base = (w_jw * JW) + (w_dl * DL) + (w_ts * TS)
@@ -356,7 +375,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
             },
             "hard_match_triggered": True,
             "hard_match_details": hard_match_reason,
-            "cut_off_applied": config.get("scoring", {}).get("cut_off_threshold", 75.0)
+            "cut_off_applied": resolve_cut_off(config, watchlist_entry)
         }
 
     # 2. Gather names for Fuzzy Scoring
@@ -429,7 +448,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
                 "geography": {"score": 0.0, "description": "Noms invalides ou absents"}
             },
             "hard_match_triggered": False,
-            "cut_off_applied": config.get("scoring", {}).get("cut_off_threshold", 75.0)
+            "cut_off_applied": resolve_cut_off(config, watchlist_entry)
         }
         
     # Best Match fuzzy scoring
@@ -492,7 +511,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     final_score = best_base_score + total_adjustments
     final_score = max(0.0, min(100.0, final_score))
     
-    cut_off = config.get("scoring", {}).get("cut_off_threshold", 75.0)
+    cut_off = resolve_cut_off(config, watchlist_entry)
     status = "ALERT" if final_score >= cut_off else "NO_MATCH"
     
     return {
