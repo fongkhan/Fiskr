@@ -19,6 +19,7 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchIngestionSettings();
     fetchPendingReviews();
     fetchAlerts();
+    fetchWhitelist();
 });
 
 // Check current logged-in user profile
@@ -189,6 +190,7 @@ function switchTab(tabId) {
     // Refresh tab-specific data
     if (tabId === "alerts") {
         fetchAlerts();
+        fetchWhitelist();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -1890,10 +1892,16 @@ async function fetchIngestionSettings() {
         const justifEl = document.getElementById("setting-exclusion-justification");
         const fileEl = document.getElementById("setting-exclusion-file");
         const fourEyesEl = document.getElementById("setting-alert-four-eyes");
+        const wlJustifEl = document.getElementById("setting-whitelist-justification");
+        const wlFileEl = document.getElementById("setting-whitelist-file");
+        const rescreenEl = document.getElementById("setting-auto-rescreen");
         if (approvalEl) approvalEl.checked = ingestionSettings.require_approval;
         if (justifEl) justifEl.checked = ingestionSettings.exclusion_justification_required;
         if (fileEl) fileEl.checked = ingestionSettings.exclusion_file_required;
         if (fourEyesEl) fourEyesEl.checked = ingestionSettings.alert_four_eyes_required;
+        if (wlJustifEl) wlJustifEl.checked = ingestionSettings.whitelist_justification_required;
+        if (wlFileEl) wlFileEl.checked = ingestionSettings.whitelist_file_required;
+        if (rescreenEl) rescreenEl.checked = ingestionSettings.auto_rescreen;
         // Asterisques "obligatoire" de la modale d'exclusion
         const justifMark = document.getElementById("exclusion-justification-required-mark");
         const fileMark = document.getElementById("exclusion-file-required-mark");
@@ -1909,7 +1917,10 @@ async function saveIngestionSettings() {
         require_approval: document.getElementById("setting-require-approval").checked,
         exclusion_justification_required: document.getElementById("setting-exclusion-justification").checked,
         exclusion_file_required: document.getElementById("setting-exclusion-file").checked,
-        alert_four_eyes_required: document.getElementById("setting-alert-four-eyes").checked
+        alert_four_eyes_required: document.getElementById("setting-alert-four-eyes").checked,
+        whitelist_justification_required: document.getElementById("setting-whitelist-justification").checked,
+        whitelist_file_required: document.getElementById("setting-whitelist-file").checked,
+        auto_rescreen: document.getElementById("setting-auto-rescreen").checked
     };
     try {
         const response = await fetch("/api/settings/ingestion", {
@@ -2324,6 +2335,10 @@ async function openAlertModal(alertId) {
             actionsHtml += `</div>`;
         } else {
             actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString("fr-FR") : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
+            // Faux positif avere : proposer la mise en liste blanche (reviseurs)
+            if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer) {
+                actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="openWhitelistModal('${escapeHtml(a.client_id || "")}', '${escapeHtml(a.watchlist_entity_id)}', '${escapeHtml(a.client_name)}', '${escapeHtml(a.watchlist_name)}')">🛡️ Mettre en liste blanche</button>`;
+            }
         }
 
         document.getElementById("alert-modal-body").innerHTML = `
@@ -2386,4 +2401,113 @@ async function validateAlertDecision(approve) {
     if (comment === null) return;
     const data = await _postAlertAction("validate", { approve, comment });
     if (data) { alert(data.message); openAlertModal(currentAlertId); fetchAlerts(); }
+}
+
+// ------------------ LISTE BLANCHE CLIENT x LISTÉ (GOOD GUYS) ------------------
+
+async function fetchWhitelist() {
+    try {
+        const response = await fetch("/api/whitelist?page_size=100");
+        if (!response.ok) return;
+        const data = await response.json();
+        renderWhitelistTable(data.items || []);
+    } catch (e) {
+        console.error("Error fetching whitelist:", e);
+    }
+}
+
+function renderWhitelistTable(items) {
+    const tbody = document.querySelector("#whitelist-table tbody");
+    if (!tbody) return;
+    if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Aucune paire en liste blanche.</td></tr>';
+        return;
+    }
+    const stateBadge = (state) => {
+        const map = { ACTIVE: ["#4ade80", "ACTIVE"], EXPIRED: ["#fbbf24", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
+        const [color, label] = map[state] || ["#9ca3af", state];
+        return `<span style="color: ${color}; font-weight: 600; font-size: 0.8rem;">${label}</span>`;
+    };
+    tbody.innerHTML = items.map(p => `
+        <tr ${p.state !== "ACTIVE" ? 'style="opacity: 0.55;"' : ""}>
+            <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
+            <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
+            <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;">📎 ${escapeHtml(p.evidence_file_name)}</a>` : ""}</td>
+            <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString("fr-FR") : ""}</small></td>
+            <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString("fr-FR") : "—"}</td>
+            <td>${stateBadge(p.state)}</td>
+            <td>${p.state === "ACTIVE" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5;" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>` : ""}</td>
+        </tr>
+    `).join("");
+}
+
+async function revokeWhitelistPair(pairId) {
+    const comment = prompt("Motif de la révocation (obligatoire) — les alertes de ce couple reprendront :");
+    if (comment === null) return;
+    try {
+        const response = await fetch(`/api/whitelist/${pairId}/revoke`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ comment })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Révocation refusée."));
+            return;
+        }
+        alert(data.message);
+        fetchWhitelist();
+    } catch (e) {
+        console.error("Error revoking whitelist pair:", e);
+    }
+}
+
+function openWhitelistModal(clientId, entityId, clientName, entityName) {
+    document.getElementById("whitelist-client-id").value = clientId;
+    document.getElementById("whitelist-entity-id").value = entityId;
+    document.getElementById("whitelist-client-name").value = clientName || "";
+    document.getElementById("whitelist-entity-name").value = entityName || "";
+    document.getElementById("whitelist-modal-pair").innerHTML =
+        `Couple <strong>${escapeHtml(clientName || clientId)}</strong> × <strong>${escapeHtml(entityName || entityId)}</strong> : les alertes futures seront supprimées (suppression tracée dans l'audit).`;
+    document.getElementById("whitelist-justification").value = "";
+    document.getElementById("whitelist-file").value = "";
+    document.getElementById("whitelist-expires").value = "";
+    // Asterisques selon les reglages modulaires
+    const jMark = document.getElementById("whitelist-justification-required-mark");
+    const fMark = document.getElementById("whitelist-file-required-mark");
+    if (jMark && ingestionSettings) jMark.classList.toggle("hidden", !ingestionSettings.whitelist_justification_required);
+    if (fMark && ingestionSettings) fMark.classList.toggle("hidden", !ingestionSettings.whitelist_file_required);
+    document.getElementById("whitelist-modal").classList.remove("hidden");
+}
+
+function closeWhitelistModal() {
+    document.getElementById("whitelist-modal").classList.add("hidden");
+}
+
+async function submitWhitelist(event) {
+    event.preventDefault();
+    const formData = new FormData();
+    formData.append("client_id", document.getElementById("whitelist-client-id").value);
+    formData.append("watchlist_entity_id", document.getElementById("whitelist-entity-id").value);
+    formData.append("client_name", document.getElementById("whitelist-client-name").value);
+    formData.append("watchlist_name", document.getElementById("whitelist-entity-name").value);
+    formData.append("justification", document.getElementById("whitelist-justification").value.trim());
+    const expires = document.getElementById("whitelist-expires").value;
+    if (expires) formData.append("expires_at", expires);
+    const fileInput = document.getElementById("whitelist-file");
+    if (fileInput.files.length > 0) formData.append("file", fileInput.files[0]);
+    try {
+        const response = await fetch("/api/whitelist", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (data.detail || "Mise en liste blanche refusée."));
+            return;
+        }
+        closeWhitelistModal();
+        alert(data.message);
+        fetchWhitelist();
+    } catch (e) {
+        console.error("Error creating whitelist pair:", e);
+        alert("Erreur réseau de communication.");
+    }
 }

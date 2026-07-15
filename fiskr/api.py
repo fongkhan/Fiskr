@@ -29,8 +29,10 @@ from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORM
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
-    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES
+    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair
 )
+from fiskr.alerts import open_or_redetect_alert, is_whitelisted
+from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     get_sync_config, EURLEX_ARCHIVE_DIR,
@@ -44,9 +46,12 @@ from fiskr.auth import (
 )
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
+    whitelist_requirements, auto_rescreen_enabled,
     get_setting_with_source, set_setting,
     SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
-    SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES
+    SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
+    SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
+    SETTING_AUTO_RESCREEN
 )
 
 
@@ -207,18 +212,26 @@ def _run_scheduled_syncs():
     """Execute les synchronisations de sources activees (appel planifie quotidien)."""
     sync_cfg = get_sync_config()
     db = next(get_db())
+
+    def _apply_rescreen(report):
+        # Surveillance continue : re-criblage post-delta apres chaque application
+        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
+            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
+            if snap:
+                rescreen_after_snapshot_change(db, snap.file_type, report.snapshot_id, report.previous_snapshot_id)
+
     try:
         if sync_cfg["ofac"]["enabled"]:
-            run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         # FSF (liste consolidee, fait autorite) avant le scraping du JO du jour
         if sync_cfg["eu_fsf"]["enabled"]:
-            run_eu_fsf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_eu_fsf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["eurlex"]["enabled"]:
-            run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["dgt"]["enabled"]:
-            run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["un"]["enabled"]:
-            run_un_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db))
+            _apply_rescreen(run_un_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -645,7 +658,19 @@ async def screen_client(
     # Audit trail persistence
     audit_id = None
     alert_id = None
+    whitelist_pair_id = None
     if best_match:
+        # Liste blanche client x liste : la suppression n'est JAMAIS silencieuse,
+        # le journal d'audit trace la decision avec le statut WHITELISTED
+        if best_match.get("status") == "ALERT":
+            wl_pair = is_whitelisted(
+                db, client_dict.get("client_id"),
+                (best_match.get("watchlist_entity") or {}).get("entity_id")
+            )
+            if wl_pair:
+                best_match["status"] = "WHITELISTED"
+                best_match["whitelist_pair_id"] = wl_pair.id
+                whitelist_pair_id = wl_pair.id
         audit_record = log_compliance_decision(
             db,
             client_dict,
@@ -657,8 +682,8 @@ async def screen_client(
         audit_id = audit_record.id
         # Une decision ALERT ouvre (ou re-detecte) une alerte de travail
         if best_match.get("status") == "ALERT":
-            alert_id = _open_or_redetect_alert(
-                db, audit_record, client_dict, best_match, current_user["username"]
+            alert_id = open_or_redetect_alert(
+                db, audit_record, client_dict.get("client_id"), best_match, current_user["username"]
             )
     else:
         # Log dummy NO_MATCH result
@@ -694,53 +719,10 @@ async def screen_client(
         "best_match": best_match,
         "all_matches": sorted(matches, key=lambda x: x["final_score"], reverse=True),
         "audit_trail_id": audit_id,
-        "alert_id": alert_id
+        "alert_id": alert_id,
+        "whitelisted": whitelist_pair_id is not None,
+        "whitelist_pair_id": whitelist_pair_id
     }
-
-
-def _open_or_redetect_alert(db: Session, audit_record: AuditTrail, client_dict: Dict[str, Any],
-                            best_match: Dict[str, Any], username: str) -> int:
-    """
-    Ouvre une alerte de travail pour une decision ALERT, ou marque la
-    re-detection si une alerte non close existe deja pour la meme paire
-    client x liste (pas de doublons a chaque re-criblage).
-    """
-    wl_entity = best_match.get("watchlist_entity") or {}
-    client_id = client_dict.get("client_id")
-    wl_id = wl_entity.get("entity_id", "NONE")
-
-    existing = db.query(Alert).filter(
-        Alert.client_id == client_id,
-        Alert.watchlist_entity_id == wl_id,
-        Alert.status.in_(ALERT_OPEN_STATUSES)
-    ).first()
-    if existing:
-        if best_match["final_score"] > existing.final_score:
-            existing.final_score = best_match["final_score"]
-        db.add(AlertEvent(
-            alert_id=existing.id, username=username, action="REDETECTED",
-            detail=f"Re-détectée lors d'un nouveau criblage (score {best_match['final_score']:.1f}, audit #{audit_record.id})."
-        ))
-        db.commit()
-        return existing.id
-
-    alert = Alert(
-        audit_id=audit_record.id,
-        client_id=client_id,
-        client_name=audit_record.client_name,
-        watchlist_entity_id=wl_id,
-        watchlist_name=wl_entity.get("primary_name", "Inconnu"),
-        final_score=best_match["final_score"],
-        status="OPEN"
-    )
-    db.add(alert)
-    db.flush()
-    db.add(AlertEvent(
-        alert_id=alert.id, username=username, action="CREATED",
-        detail=f"Alerte créée par le criblage (score {best_match['final_score']:.1f})."
-    ))
-    db.commit()
-    return alert.id
 
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
@@ -1060,8 +1042,13 @@ async def ingest_snapshot(
         db.commit()
 
         # Reload cache to integrate newly loaded watchlists
+        rescreen_result = None
         if file_type in WATCHLIST_FILE_TYPES and not staging:
             load_watchlist_cache(db)
+            # Surveillance continue : re-criblage du referentiel clients
+            # contre les entites du nouveau snapshot
+            if auto_rescreen_enabled(db):
+                rescreen_result = rescreen_after_snapshot_change(db, file_type, snap_id, None)
 
         if staging:
             message = (
@@ -1074,7 +1061,8 @@ async def ingest_snapshot(
             "message": message,
             "snapshot_id": snap_id,
             "record_count": record_count,
-            "status": snap.status
+            "status": snap.status,
+            "rescreen": rescreen_result
         }
     except Exception as e:
         db.rollback()
@@ -1439,7 +1427,16 @@ def run_source_sync(
             detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN)."
         )
 
-    return _serialize_sync_report(report)
+    response = _serialize_sync_report(report)
+    # Surveillance continue : re-criblage du referentiel clients contre les
+    # entites nouvelles/modifiees du snapshot applique
+    if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
+        if snap:
+            response["rescreen"] = rescreen_after_snapshot_change(
+                db, snap.file_type, report.snapshot_id, report.previous_snapshot_id
+            )
+    return response
 
 @app.get("/api/sync/reports")
 async def get_sync_reports(
@@ -1493,6 +1490,9 @@ class IngestionSettingsUpdate(BaseModel):
     exclusion_justification_required: Optional[bool] = None
     exclusion_file_required: Optional[bool] = None
     alert_four_eyes_required: Optional[bool] = None
+    whitelist_justification_required: Optional[bool] = None
+    whitelist_file_required: Optional[bool] = None
+    auto_rescreen: Optional[bool] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -1505,16 +1505,25 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
     justif = get_setting_with_source(db, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, True)
     evidence = get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)
     four_eyes = get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)
+    wl_justif = get_setting_with_source(db, SETTING_WHITELIST_JUSTIFICATION_REQUIRED, True)
+    wl_file = get_setting_with_source(db, SETTING_WHITELIST_FILE_REQUIRED, False)
+    rescreen = get_setting_with_source(db, SETTING_AUTO_RESCREEN, True)
     return {
         "require_approval": bool(approval["value"]),
         "exclusion_justification_required": bool(justif["value"]),
         "exclusion_file_required": bool(evidence["value"]),
         "alert_four_eyes_required": bool(four_eyes["value"]),
+        "whitelist_justification_required": bool(wl_justif["value"]),
+        "whitelist_file_required": bool(wl_file["value"]),
+        "auto_rescreen": bool(rescreen["value"]),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
             "exclusion_file_required": evidence["source"],
             "alert_four_eyes_required": four_eyes["source"],
+            "whitelist_justification_required": wl_justif["source"],
+            "whitelist_file_required": wl_file["source"],
+            "auto_rescreen": rescreen["source"],
         },
     }
 
@@ -1538,6 +1547,9 @@ async def update_ingestion_settings(
         SETTING_EXCLUSION_JUSTIFICATION_REQUIRED: payload.exclusion_justification_required,
         SETTING_EXCLUSION_FILE_REQUIRED: payload.exclusion_file_required,
         SETTING_ALERT_FOUR_EYES: payload.alert_four_eyes_required,
+        SETTING_WHITELIST_JUSTIFICATION_REQUIRED: payload.whitelist_justification_required,
+        SETTING_WHITELIST_FILE_REQUIRED: payload.whitelist_file_required,
+        SETTING_AUTO_RESCREEN: payload.auto_rescreen,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
     if not changed:
@@ -1793,6 +1805,9 @@ async def approve_pending_snapshot(
             detail="Des exclusions n'ont pas de pièce jointe alors que le réglage l'exige. Complétez-les avant d'approuver."
         )
 
+    # Snapshot de production remplace (pour cibler le re-criblage post-delta)
+    previous_prod = _latest_ready_snapshot(db, snap.file_type)
+
     snap.status = "READY"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
@@ -1800,11 +1815,19 @@ async def approve_pending_snapshot(
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     db.commit()
     load_watchlist_cache(db)
+
+    rescreen_result = None
+    if auto_rescreen_enabled(db):
+        rescreen_result = rescreen_after_snapshot_change(
+            db, snap.file_type, snap.snapshot_id,
+            previous_prod.snapshot_id if previous_prod else None
+        )
     return {
         "message": "Snapshot approuvé et promu en production.",
         "snapshot_id": snapshot_id,
         "status": snap.status,
         "excluded_count": len(excluded_rows),
+        "rescreen": rescreen_result,
     }
 
 @app.post("/api/review/snapshots/{snapshot_id}/reject")
@@ -2074,6 +2097,184 @@ async def validate_alert_decision(
         message = "Décision refusée, alerte renvoyée en analyse."
     db.commit()
     return {"message": message, **_alert_summary(alert)}
+
+# ------------------ LISTE BLANCHE CLIENT x LISTE & RE-CRIBLAGE ------------------
+
+# Pieces justificatives des mises en liste blanche (valeur probante en audit)
+WHITELIST_EVIDENCE_DIR = PROJECT_ROOT / "whitelist_evidence"
+
+class WhitelistRevokeRequest(BaseModel):
+    comment: str
+
+class RescreenRunRequest(BaseModel):
+    file_type: Optional[str] = None
+
+def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    if pair.revoked_at:
+        state = "REVOKED"
+    elif pair.expires_at and pair.expires_at <= now:
+        state = "EXPIRED"
+    else:
+        state = "ACTIVE"
+    return {
+        "id": pair.id,
+        "client_id": pair.client_id,
+        "client_name": pair.client_name,
+        "watchlist_entity_id": pair.watchlist_entity_id,
+        "watchlist_name": pair.watchlist_name,
+        "justification": pair.justification,
+        "evidence_file_name": pair.evidence_file_name,
+        "created_by": pair.created_by,
+        "created_at": pair.created_at.isoformat() if pair.created_at else None,
+        "expires_at": pair.expires_at.isoformat() if pair.expires_at else None,
+        "revoked_by": pair.revoked_by,
+        "revoked_at": pair.revoked_at.isoformat() if pair.revoked_at else None,
+        "revoke_comment": pair.revoke_comment,
+        "state": state,
+    }
+
+@app.post("/api/whitelist")
+async def create_whitelist_pair(
+    client_id: str = Form(...),
+    watchlist_entity_id: str = Form(...),
+    justification: Optional[str] = Form(None),
+    expires_at: Optional[str] = Form(None),
+    client_name: Optional[str] = Form(None),
+    watchlist_name: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Met une paire client x liste en liste blanche (« Good Guys ») : les
+    alertes futures de cette paire sont supprimees de facon TRACEE (statut
+    WHITELISTED dans le journal d'audit). Justification et piece jointe
+    exigees selon les reglages modulaires.
+    """
+    client_id = client_id.strip()
+    watchlist_entity_id = watchlist_entity_id.strip()
+    if not client_id or not watchlist_entity_id:
+        raise HTTPException(status_code=400, detail="client_id et watchlist_entity_id sont requis.")
+
+    if is_whitelisted(db, client_id, watchlist_entity_id):
+        raise HTTPException(status_code=409, detail="Une paire active existe déjà pour ce couple client × listé.")
+
+    requirements = whitelist_requirements(db)
+    justification = (justification or "").strip()
+    if requirements["justification_required"] and not justification:
+        raise HTTPException(status_code=400, detail="Une justification est obligatoire pour une mise en liste blanche (réglage actif).")
+    if requirements["file_required"] and (file is None or not file.filename):
+        raise HTTPException(status_code=400, detail="Une pièce jointe justificative est obligatoire pour une mise en liste blanche (réglage actif).")
+
+    expires_dt = None
+    if expires_at and expires_at.strip():
+        try:
+            expires_dt = datetime.strptime(expires_at.strip()[:10], "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Format de date d'expiration invalide (attendu: YYYY-MM-DD).")
+
+    evidence_name = None
+    evidence_path = None
+    if file is not None and file.filename:
+        safe_name = os.path.basename(file.filename).replace("..", "_")
+        WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        evidence_name = safe_name
+        evidence_path = str(target_path)
+
+    pair = WhitelistPair(
+        client_id=client_id,
+        watchlist_entity_id=watchlist_entity_id,
+        client_name=(client_name or "").strip() or None,
+        watchlist_name=(watchlist_name or "").strip() or None,
+        justification=justification or None,
+        evidence_file_name=evidence_name,
+        evidence_file_path=evidence_path,
+        created_by=reviewer["username"],
+        expires_at=expires_dt,
+    )
+    db.add(pair)
+    db.commit()
+    db.refresh(pair)
+    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+
+@app.get("/api/whitelist")
+async def list_whitelist_pairs(
+    active_only: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Liste des paires en liste blanche avec leur etat (active / expiree / revoquee)."""
+    query = db.query(WhitelistPair)
+    if active_only:
+        now = datetime.utcnow()
+        query = query.filter(
+            WhitelistPair.revoked_at.is_(None),
+            (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
+        )
+    total = query.count()
+    rows = query.order_by(WhitelistPair.created_at.desc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+    return {"total": total, "page": page, "page_size": page_size,
+            "items": [_whitelist_summary(p) for p in rows]}
+
+@app.post("/api/whitelist/{pair_id}/revoke")
+async def revoke_whitelist_pair(
+    pair_id: int,
+    payload: WhitelistRevokeRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Revocation douce d'une paire (motif obligatoire) : les alertes reprennent."""
+    pair = db.query(WhitelistPair).filter(WhitelistPair.id == pair_id).first()
+    if not pair:
+        raise HTTPException(status_code=404, detail="Paire introuvable.")
+    if pair.revoked_at:
+        raise HTTPException(status_code=409, detail="Paire déjà révoquée.")
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un motif est requis pour révoquer une paire.")
+    pair.revoked_by = reviewer["username"]
+    pair.revoked_at = datetime.utcnow()
+    pair.revoke_comment = comment
+    db.commit()
+    return {"message": "Paire révoquée : les alertes de ce couple reprendront.", **_whitelist_summary(pair)}
+
+@app.get("/api/whitelist/evidence/{pair_id}")
+async def download_whitelist_evidence(
+    pair_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Telecharge la piece justificative d'une mise en liste blanche (audit)."""
+    pair = db.query(WhitelistPair).filter(WhitelistPair.id == pair_id).first()
+    if not pair or not pair.evidence_file_path:
+        raise HTTPException(status_code=404, detail="Aucune pièce justificative pour cette paire.")
+    file_path = Path(pair.evidence_file_path)
+    if not file_path.exists() or WHITELIST_EVIDENCE_DIR.resolve() not in file_path.resolve().parents:
+        raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
+    return FileResponse(str(file_path), filename=pair.evidence_file_name or file_path.name)
+
+@app.post("/api/rescreen/run")
+async def run_manual_rescreen(
+    payload: RescreenRunRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Lookback manuel (guidance Wolfsberg) : re-crible tout le referentiel
+    clients contre les listes en production (un type donne, ou toutes).
+    """
+    file_type = (payload.file_type or "").strip().upper() or None
+    if file_type and file_type not in WATCHLIST_FILE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Type de liste inconnu ({', '.join(WATCHLIST_FILE_TYPES)}).")
+    result = rescreen_lookback(db, file_type)
+    return {"message": "Lookback exécuté.", **result}
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

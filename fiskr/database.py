@@ -203,6 +203,30 @@ class AlertEvent(Base):
     action = Column(String(30), nullable=False)  # CREATED, REDETECTED, ASSIGNED, COMMENT, ESCALATED, PROPOSED, VALIDATED, RETURNED
     detail = Column(Text, nullable=True)
 
+class WhitelistPair(Base):
+    """
+    Liste blanche client x liste (« Good Guys », guidance Wolfsberg) : supprime
+    les alertes recurrentes d'un faux positif avere, avec justification
+    gouvernee. Revocation douce uniquement (jamais de suppression physique) ;
+    chaque suppression d'alerte reste tracee dans le journal d'audit.
+    """
+    __tablename__ = "whitelist_pairs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String(100), nullable=False, index=True)
+    watchlist_entity_id = Column(String(100), nullable=False, index=True)
+    client_name = Column(String(1000), nullable=True)
+    watchlist_name = Column(String(1000), nullable=True)
+    justification = Column(Text, nullable=True)
+    evidence_file_name = Column(String(255), nullable=True)
+    evidence_file_path = Column(String(500), nullable=True)
+    created_by = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)  # gouvernance : revue periodique
+    revoked_by = Column(String(100), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_comment = Column(Text, nullable=True)
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

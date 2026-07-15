@@ -32,10 +32,13 @@ database:
 # dashboard (elles sont alors stockees en base et priment sur ce fichier).
 ingestion:
   require_approval: false   # true = tout snapshot watchlist entrant attend un pointage humain
+  auto_rescreen: true       # re-criblage automatique du referentiel clients apres chaque mise a jour de liste
 review:
   exclusion_justification_required: true   # justification texte obligatoire lors d'une exclusion
   exclusion_file_required: false           # piece jointe justificative obligatoire lors d'une exclusion
   alert_four_eyes_required: true           # validation 4-yeux des decisions d'alertes (validateur != proposeur)
+  whitelist_justification_required: true   # justification obligatoire pour une mise en liste blanche
+  whitelist_file_required: false           # piece jointe obligatoire pour une mise en liste blanche
 
 # Synchronisation automatique des sources officielles (OFAC / EUR-Lex)
 sync:
