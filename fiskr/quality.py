@@ -2,6 +2,17 @@ import re
 import unicodedata
 from datetime import datetime
 
+# Translitteration multi-ecritures (cyrillique, arabe, CJK, grec, hebreu...)
+# vers le latin : indispensable pour que les alias non latins des listes
+# officielles (OFAC, ONU) matchent les noms latins du referentiel clients.
+# Repli silencieux sur l'aplatissement de diacritiques si absent.
+try:
+    from anyascii import anyascii as _transliterate
+    TRANSLIT_AVAILABLE = True
+except ImportError:
+    _transliterate = None
+    TRANSLIT_AVAILABLE = False
+
 def has_non_latin_chars(text: str) -> bool:
     """Checks if text contains characters outside ASCII/extended Latin."""
     for char in text:
@@ -15,7 +26,14 @@ def has_non_latin_chars(text: str) -> bool:
     return False
 
 def strip_accents(text: str) -> str:
-    """Removes accents and diacritics, e.g., Müller -> Muller."""
+    """
+    Normalise un nom vers le latin ASCII : translittere d'abord les ecritures
+    non latines (cyrillique Владимир -> Vladimir, arabe, CJK...) quand le
+    texte en contient, puis retire accents et diacritiques (Müller -> Muller).
+    Utilise partout (nettoyage a l'ingestion, scoring des deux cotes).
+    """
+    if TRANSLIT_AVAILABLE and text and has_non_latin_chars(text):
+        text = _transliterate(text)
     nfkd_form = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 

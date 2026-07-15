@@ -1599,6 +1599,231 @@ def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None,
         }
 
 
+# ------------------ SOURCE PEP (OPENSANCTIONS targets.simple.csv) ------------------
+# Dataset PEP agrege par OpenSanctions (donnees Wikidata et sources officielles).
+# Format targets.simple.csv : id, schema, name, aliases, birth_date, countries,
+# addresses, identifiers, sanctions, phones, emails, dataset, ... (valeurs
+# multiples separees par ";"). Licence : usage non commercial libre, licence
+# requise pour un usage commercial — voir opensanctions.org/licensing.
+
+_PEP_SCHEMA_TO_TYPE = {
+    "person": "I",
+    "company": "E",
+    "organization": "E",
+    "legalentity": "E",
+    "publicbody": "E",
+    "vessel": "V",
+    "airplane": "O",
+}
+
+
+def _csv_multi(value: str) -> List[str]:
+    return [v.strip() for v in (value or "").split(";") if v and v.strip()]
+
+
+def _normalize_partial_date(raw: str) -> Optional[str]:
+    """'1952' -> 1952-01-01 ; '1952-10' -> 1952-10-01 ; '1952-10-07' inchange."""
+    raw = (raw or "").strip()
+    match = re.match(r"^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?", raw)
+    if not match:
+        return None
+    y, m, d = match.group(1), match.group(2) or "01", match.group(3) or "01"
+    return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+
+
+def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse le dataset PEP OpenSanctions (targets.simple.csv) vers le schema pivot."""
+    with open(file_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row = {(k or "").strip().lower(): (v or "") for k, v in row.items()}
+            os_id = row.get("id", "").strip()
+            name = row.get("name", "").strip()
+            if not os_id or not name:
+                continue
+            schema = row.get("schema", "").strip().lower()
+            entity_type = _PEP_SCHEMA_TO_TYPE.get(schema, "E")
+
+            aliases_raw = [{"name": a, "type": "Strong"} for a in _csv_multi(row.get("aliases"))]
+            dobs = [d for d in (
+                _normalize_partial_date(b) for b in _csv_multi(row.get("birth_date"))
+            ) if d]
+            countries = [c.upper() for c in _csv_multi(row.get("countries")) if c]
+            addresses = _csv_multi(row.get("addresses"))
+            identifiers = _csv_multi(row.get("identifiers"))
+            positions = _csv_multi(row.get("sanctions")) or _csv_multi(row.get("position"))
+
+            yield {
+                "entity_id": f"PEP-{os_id}",
+                "entity_type": entity_type,
+                "primary_name": name,
+                "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+                "aliases": categorize_aliases(aliases_raw),
+                "dates_of_birth": sorted(set(dobs)),
+                "date_of_death": None,
+                "is_deceased": False,
+                "gender": "U",
+                "countries": {
+                    "citizenship": sorted(set(countries)),
+                    "residence": [],
+                    "birth_country": [],
+                    "jurisdiction_country": []
+                },
+                "place_of_birth": None,
+                "address": addresses[0] if addresses else None,
+                "alternative_addresses": addresses[1:],
+                "country": None,
+                "designation": positions[0] if positions else None,
+                "designation_reasons": "Personne Politiquement Exposée (PEP)",
+                "additional_informations": "; ".join(identifiers) or None,
+                "origin": "OpenSanctions PEP",
+                "imo_number": None,
+                "aircraft_tail_number": None,
+                "lei_number": None,
+                "national_registry_ids": [],
+                "other_registration_ids": [{"id_type": "OpenSanctionsId", "number": os_id}],
+                "passport_documents": [],
+                "national_id_documents": [],
+                "other_id_documents": []
+            }
+
+
+# ------------------ LISTE UK OFSI (ConList.csv, format 2022) ------------------
+# Liste consolidee de l'OFSI (HM Treasury). CSV avec une ligne de preambule
+# ("Last Updated..."), puis en-tetes : Name 6 (nom de famille), Name 1..5
+# (prenoms), Title, DOB (jj/mm/aaaa), Town/Country of Birth, Nationality,
+# Position, Address 1..6, Country, Other Information, Group Type
+# (Individual/Entity/Ship), Alias Type (Primary name / aka), Regime, Group ID.
+# Plusieurs lignes par Group ID : la ligne "Primary name" porte l'identite,
+# les autres sont des alias.
+
+
+def _ofsi_get(row: Dict[str, str], *keys: str) -> str:
+    for key in keys:
+        for k, v in row.items():
+            if k and k.strip().lower() == key.lower():
+                return (v or "").strip()
+    return ""
+
+
+def _ofsi_date(raw: str) -> Optional[str]:
+    raw = (raw or "").strip()
+    match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
+    if match:
+        d, m, y = match.groups()
+        return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+    return _normalize_partial_date(raw)
+
+
+def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee UK OFSI (ConList.csv) vers le schema pivot."""
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+        lines = f.read().splitlines()
+    # Saute le preambule jusqu'a la ligne d'en-tetes (contient "Group Type")
+    header_idx = next(
+        (i for i, line in enumerate(lines[:10]) if "group type" in line.lower()), 0
+    )
+    reader = csv.DictReader(lines[header_idx:])
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for row in reader:
+        group_id = _ofsi_get(row, "Group ID", "GroupID")
+        if not group_id:
+            continue
+        name_parts = [
+            _ofsi_get(row, f"Name {i}") for i in (1, 2, 3, 4, 5)
+        ]
+        family = _ofsi_get(row, "Name 6")
+        first = " ".join(p for p in name_parts if p)
+        full_name = " ".join(p for p in (first, family) if p)
+        if not full_name:
+            continue
+        alias_type = _ofsi_get(row, "Alias Type", "AliasType").lower()
+        is_primary = "primary" in alias_type or alias_type == ""
+
+        group = groups.setdefault(group_id, {
+            "primary": None, "first": "", "family": "", "aliases": [],
+            "row": None
+        })
+        if is_primary and not group["primary"]:
+            group["primary"] = full_name
+            group["first"] = first
+            group["family"] = family
+            group["row"] = row
+        else:
+            group["aliases"].append({"name": full_name, "type": "Strong"})
+
+    for group_id, group in groups.items():
+        row = group["row"]
+        if row is None:
+            # Aucune ligne primaire : premier alias promu
+            if not group["aliases"]:
+                continue
+            group["primary"] = group["aliases"][0]["name"]
+            group["aliases"] = group["aliases"][1:]
+            row = {}
+
+        group_type = _ofsi_get(row, "Group Type", "GroupType").lower()
+        if "individual" in group_type:
+            entity_type = "I"
+        elif "ship" in group_type:
+            entity_type = "V"
+        else:
+            entity_type = "E"
+
+        dob = _ofsi_date(_ofsi_get(row, "DOB"))
+        town_birth = _ofsi_get(row, "Town of Birth")
+        country_birth = _ofsi_get(row, "Country of Birth")
+        nationality = _ofsi_get(row, "Nationality")
+        position = _ofsi_get(row, "Position")
+        regime = _ofsi_get(row, "Regime")
+        other_info = _ofsi_get(row, "Other Information")
+        addr_parts = [
+            _ofsi_get(row, f"Address {i}") for i in (1, 2, 3, 4, 5, 6)
+        ] + [_ofsi_get(row, "Post/Zip Code"), _ofsi_get(row, "Country")]
+        address = ", ".join(p for p in addr_parts if p)
+
+        citizenships = [country_label_to_iso2(n) for n in nationality.replace("(1)", ";").split(";") if n.strip()] if nationality else []
+
+        yield {
+            "entity_id": f"OFSI-{group_id}",
+            "entity_type": entity_type,
+            "primary_name": group["primary"],
+            "individual_name_parsed": {
+                "first_name": group["first"] if entity_type == "I" else "",
+                "last_name": group["family"] if entity_type == "I" else "",
+                "maiden_name": ""
+            },
+            "aliases": categorize_aliases(group["aliases"]),
+            "dates_of_birth": [dob] if dob else [],
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": [country_label_to_iso2(country_birth)] if country_birth else [],
+                "jurisdiction_country": []
+            },
+            "place_of_birth": ", ".join(p for p in (town_birth, country_birth) if p) or None,
+            "address": address or None,
+            "alternative_addresses": [],
+            "country": _ofsi_get(row, "Country") or None,
+            "designation": position or None,
+            "designation_reasons": regime or None,
+            "additional_informations": other_info or None,
+            "origin": "UK OFSI Consolidated",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": []
+        }
+
+
 # ------------------ CSV CONNECTOR ------------------
 
 def parse_csv_file(file_path: str, delimiter: str = ",", mapping_dict: dict = None) -> Generator[Dict[str, Any], None, None]:

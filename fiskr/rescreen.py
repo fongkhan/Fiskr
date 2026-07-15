@@ -23,11 +23,21 @@ RESCREEN_USERNAME = "rescreen-auto"
 
 
 def _entity_dicts(db, snapshot_ids: List[str]) -> List[Dict[str, Any]]:
+    snapshot_types = {
+        s.snapshot_id: s.file_type
+        for s in db.query(Snapshot).filter(Snapshot.snapshot_id.in_(snapshot_ids)).all()
+    }
     rows = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True)
     ).all()
-    return [{c.name: getattr(r, c.name) for c in r.__table__.columns} for r in rows]
+    out = []
+    for r in rows:
+        d = {c.name: getattr(r, c.name) for c in r.__table__.columns}
+        # Type de liste d'origine : seuils de cut-off par liste
+        d["_list_type"] = snapshot_types.get(r.snapshot_id)
+        out.append(d)
+    return out
 
 
 def _client_dicts(db) -> List[Dict[str, Any]]:

@@ -35,7 +35,8 @@ from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
-    parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml
+    parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
+    parse_pep_targets_csv, parse_ofsi_conlist_csv
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
@@ -60,6 +61,13 @@ DEFAULT_EU_FSF_URL = "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullS
 
 # Liste consolidee du Conseil de securite de l'ONU (publique, sans token)
 DEFAULT_UN_URL = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
+
+# Dataset PEP OpenSanctions (usage non commercial libre ; licence requise pour
+# un usage commercial — opensanctions.org/licensing)
+DEFAULT_PEP_URL = "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
+
+# Liste consolidee UK OFSI (HM Treasury, publique, format 2022)
+DEFAULT_OFSI_URL = "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -100,6 +108,16 @@ def get_sync_config() -> Dict[str, Any]:
         "un": {
             "enabled": bool((sync_cfg.get("un") or {}).get("enabled", True)),
             "url": (sync_cfg.get("un") or {}).get("url", DEFAULT_UN_URL),
+        },
+        # Desactives par defaut : PEP (volumetrie + licence commerciale
+        # OpenSanctions) et OFSI (liste UK, opt-in selon l'exposition)
+        "pep": {
+            "enabled": bool((sync_cfg.get("pep") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("pep") or {}).get("url", DEFAULT_PEP_URL),
+        },
+        "ofsi": {
+            "enabled": bool((sync_cfg.get("ofsi") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("ofsi") or {}).get("url", DEFAULT_OFSI_URL),
         },
     }
 
@@ -726,6 +744,43 @@ def run_un_sync(
         db, source="UN", file_type="WATCHLIST_UN", url=cfg["url"],
         parser=parse_un_consolidated_xml, file_label="UN_Consolidated",
         temp_suffix=".xml", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_pep_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge le dataset PEP OpenSanctions (targets.simple.csv) et remplace
+    la liste PEP active. Usage non commercial libre ; licence OpenSanctions
+    requise pour un usage commercial.
+    """
+    cfg = get_sync_config()["pep"]
+    return _run_list_replacement_sync(
+        db, source="PEP", file_type="WATCHLIST_PEP", url=cfg["url"],
+        parser=parse_pep_targets_csv, file_label="OpenSanctions_PEP",
+        temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_ofsi_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee UK OFSI (ConList.csv, format 2022) et
+    remplace la liste OFSI active.
+    """
+    cfg = get_sync_config()["ofsi"]
+    return _run_list_replacement_sync(
+        db, source="OFSI", file_type="WATCHLIST_OFSI", url=cfg["url"],
+        parser=parse_ofsi_conlist_csv, file_label="UK_OFSI_ConList",
+        temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 

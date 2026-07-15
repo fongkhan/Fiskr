@@ -192,6 +192,9 @@ function switchTab(tabId) {
         fetchAlerts();
         fetchWhitelist();
     }
+    if (tabId === "kpi") {
+        fetchKpis();
+    }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
         if (activeSubBtn) {
@@ -502,6 +505,8 @@ function renderSnapshotsTable(snaps) {
         else if (snap.file_type === "WATCHLIST_SSIE") typeBadge = '<span class="status-badge alert">SSIE XML</span>';
         else if (snap.file_type === "WATCHLIST_DGT") typeBadge = '<span class="status-badge warning">DGT JSON</span>';
         else if (snap.file_type === "WATCHLIST_UN") typeBadge = '<span class="status-badge warning">ONU XML</span>';
+        else if (snap.file_type === "WATCHLIST_PEP") typeBadge = '<span class="status-badge warning">PEP CSV</span>';
+        else if (snap.file_type === "WATCHLIST_OFSI") typeBadge = '<span class="status-badge warning">OFSI CSV</span>';
         else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
         
         tr.innerHTML = `
@@ -633,7 +638,7 @@ async function handleIngestion(event) {
 
 // Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn" };
+    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn" };
     const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
@@ -1182,10 +1187,19 @@ function renderScreeningResult(data) {
         statusBadge.textContent = "ALERT";
         statusBadge.className = "status-badge alert";
         progress.style.stroke = "var(--color-alert)";
+    } else if (best && best.status === "WHITELISTED") {
+        statusBadge.textContent = "SUPPRIMÉE PAR LISTE BLANCHE";
+        statusBadge.className = "status-badge warning";
+        progress.style.stroke = "var(--color-warning)";
     } else {
         statusBadge.textContent = "NO_MATCH";
         statusBadge.className = "status-badge no_match";
         progress.style.stroke = "var(--color-safe)";
+    }
+    // Transparence du seuil applique (variable par type de liste)
+    if (best && best.cut_off_applied !== undefined) {
+        const listType = (best.watchlist_entity && best.watchlist_entity._list_type) || "";
+        statusBadge.title = `Seuil appliqué : ${best.cut_off_applied}%${listType ? " (" + listType + ")" : ""}`;
     }
     
     // 4. Decision Tree
@@ -2509,5 +2523,49 @@ async function submitWhitelist(event) {
     } catch (e) {
         console.error("Error creating whitelist pair:", e);
         alert("Erreur réseau de communication.");
+    }
+}
+
+// ------------------ PILOTAGE (KPI CONFORMITE) ------------------
+
+async function fetchKpis() {
+    try {
+        const response = await fetch("/api/kpi");
+        if (!response.ok) return;
+        const k = await response.json();
+
+        const tile = (label, value, color) => `
+            <div class="metric" style="flex: 1; min-width: 170px; background: rgba(255,255,255,0.04); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
+                <span class="metric-label" style="font-weight: 600;">${label}</span>
+                <span class="metric-value" style="font-size: 1.5rem; ${color ? "color: " + color + ";" : ""}">${value}</span>
+            </div>`;
+
+        const a = k.alerts || {};
+        document.getElementById("kpi-tiles").innerHTML =
+            tile("Alertes ouvertes", a.open ?? 0, "var(--color-warning)") +
+            tile("Faux positifs clos", a.closed_false_positive ?? 0, "var(--color-safe)") +
+            tile("Vrais positifs confirmés", a.closed_confirmed ?? 0, "var(--color-alert)") +
+            tile("Taux de faux positifs", a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined ? a.false_positive_rate_pct + " %" : "—") +
+            tile("Délai moyen de décision", a.avg_decision_hours !== null && a.avg_decision_hours !== undefined ? a.avg_decision_hours + " h" : "—") +
+            tile("Paires en liste blanche", k.whitelist_active_pairs ?? 0);
+
+        const listsBody = document.querySelector("#kpi-lists-table tbody");
+        const byType = (k.lists || {}).production_entities_by_type || {};
+        listsBody.innerHTML = Object.keys(byType).length
+            ? Object.entries(byType).map(([t, n]) => `<tr><td>${escapeHtml(t)}</td><td><strong>${n}</strong></td></tr>`).join("")
+            : '<tr><td colspan="2" style="color: var(--text-muted); text-align: center;">Aucune liste en production.</td></tr>';
+
+        const syncsBody = document.querySelector("#kpi-syncs-table tbody");
+        const syncs = k.recent_syncs || [];
+        syncsBody.innerHTML = syncs.length
+            ? syncs.map(s => `<tr>
+                <td>${s.executed_at ? new Date(s.executed_at).toLocaleString("fr-FR") : "-"}</td>
+                <td>${escapeHtml(s.source)} <small style="color:var(--text-muted)">${escapeHtml(s.trigger)}</small></td>
+                <td>${escapeHtml(s.status)}</td>
+                <td><small>+${s.added} / ~${s.modified} / -${s.removed}</small></td>
+              </tr>`).join("")
+            : '<tr><td colspan="4" style="color: var(--text-muted); text-align: center;">Aucune synchronisation.</td></tr>';
+    } catch (e) {
+        console.error("Error fetching KPIs:", e);
     }
 }

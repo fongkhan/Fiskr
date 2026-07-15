@@ -38,6 +38,11 @@
                         </button>
                     </li>
                     <li>
+                        <button id="nav-btn-kpi" class="nav-item" onclick="switchTab('kpi')">
+                            <span class="nav-icon">📈</span> Pilotage
+                        </button>
+                    </li>
+                    <li>
                         <button id="nav-btn-audit" class="nav-item" onclick="switchTab('audit')">
                             <span class="nav-icon">📜</span> Audit
                         </button>
@@ -148,6 +153,8 @@
                                         <option value="WATCHLIST_SSIE">Smart Sanctions — XML générique (Moteur SSIE)</option>
                                         <option value="WATCHLIST_DGT">Registre national des gels — DGT (JSON)</option>
                                         <option value="WATCHLIST_UN">Liste consolidée ONU (XML)</option>
+                                        <option value="WATCHLIST_PEP">PEP — OpenSanctions (CSV)</option>
+                                        <option value="WATCHLIST_OFSI">UK OFSI — ConList (CSV)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -513,6 +520,22 @@
                                 <h3 style="margin-top: 0;">🇺🇳 ONU — Liste consolidée du Conseil de sécurité (XML)</h3>
                                 <p class="section-desc">Téléchargement de la liste consolidée officielle (<code>scsanctions.un.org</code>, publique), ingestion, delta et remplacement de la liste ONU active.</p>
                                 <button id="sync-un-btn" class="btn btn-primary" onclick="handleSourceSync('UN')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
+                                <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
+                                <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">👤 PEP — Dataset OpenSanctions (CSV)</h3>
+                                <p class="section-desc">Personnes Politiquement Exposées agrégées par OpenSanctions. <strong>Licence</strong> : usage non commercial libre, licence requise pour un usage commercial (<code>sync.pep.enabled</code>, désactivé par défaut).</p>
+                                <button id="sync-pep-btn" class="btn btn-primary" onclick="handleSourceSync('PEP')">
                                     Synchroniser maintenant
                                 </button>
                             </div>
@@ -1100,6 +1123,39 @@
                 </div>
             </section>
 
+            <!-- SECTION: PILOTAGE (KPI conformité) -->
+            <section id="sec-kpi" class="tab-content">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <div class="card result-card">
+                        <h2>Indicateurs de Pilotage du Dispositif</h2>
+                        <p class="section-desc">Volumes d'alertes, taux de faux positifs, délai moyen de décision, liste blanche active, listes en production et historique des synchronisations.</p>
+                        <div id="kpi-tiles" class="score-metrics" style="flex-direction: row; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem;">
+                            <!-- Populated dynamically -->
+                        </div>
+                        <div class="grid-layout" style="grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                            <div>
+                                <h3 style="font-size: 0.95rem;">Listes en production (fiches par type)</h3>
+                                <div class="table-container">
+                                    <table id="kpi-lists-table">
+                                        <thead><tr><th>Liste</th><th>Fiches</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <h3 style="font-size: 0.95rem;">Dernières synchronisations</h3>
+                                <div class="table-container max-height-table">
+                                    <table id="kpi-syncs-table">
+                                        <thead><tr><th>Date</th><th>Source</th><th>Statut</th><th>Delta</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <section id="sec-audit" class="tab-content">
                 <div class="card">
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
@@ -1320,7 +1376,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=4.0"></script>
+    <script src="/static/app.js?v=4.1"></script>
 
 
 
