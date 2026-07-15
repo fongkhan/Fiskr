@@ -29,7 +29,7 @@ from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORM
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
-    SyncReport
+    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES
 )
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
@@ -43,8 +43,10 @@ from fiskr.auth import (
     decode_access_token, parse_roles, normalize_roles
 )
 from fiskr.settings import (
-    require_approval_enabled, exclusion_requirements, get_setting_with_source, set_setting,
-    SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, SETTING_EXCLUSION_FILE_REQUIRED
+    require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
+    get_setting_with_source, set_setting,
+    SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
+    SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES
 )
 
 
@@ -642,6 +644,7 @@ async def screen_client(
             
     # Audit trail persistence
     audit_id = None
+    alert_id = None
     if best_match:
         audit_record = log_compliance_decision(
             db,
@@ -652,6 +655,11 @@ async def screen_client(
             watchlist_hash
         )
         audit_id = audit_record.id
+        # Une decision ALERT ouvre (ou re-detecte) une alerte de travail
+        if best_match.get("status") == "ALERT":
+            alert_id = _open_or_redetect_alert(
+                db, audit_record, client_dict, best_match, current_user["username"]
+            )
     else:
         # Log dummy NO_MATCH result
         no_match_result = {
@@ -685,8 +693,54 @@ async def screen_client(
         "candidates_count": len(candidates),
         "best_match": best_match,
         "all_matches": sorted(matches, key=lambda x: x["final_score"], reverse=True),
-        "audit_trail_id": audit_id
+        "audit_trail_id": audit_id,
+        "alert_id": alert_id
     }
+
+
+def _open_or_redetect_alert(db: Session, audit_record: AuditTrail, client_dict: Dict[str, Any],
+                            best_match: Dict[str, Any], username: str) -> int:
+    """
+    Ouvre une alerte de travail pour une decision ALERT, ou marque la
+    re-detection si une alerte non close existe deja pour la meme paire
+    client x liste (pas de doublons a chaque re-criblage).
+    """
+    wl_entity = best_match.get("watchlist_entity") or {}
+    client_id = client_dict.get("client_id")
+    wl_id = wl_entity.get("entity_id", "NONE")
+
+    existing = db.query(Alert).filter(
+        Alert.client_id == client_id,
+        Alert.watchlist_entity_id == wl_id,
+        Alert.status.in_(ALERT_OPEN_STATUSES)
+    ).first()
+    if existing:
+        if best_match["final_score"] > existing.final_score:
+            existing.final_score = best_match["final_score"]
+        db.add(AlertEvent(
+            alert_id=existing.id, username=username, action="REDETECTED",
+            detail=f"Re-détectée lors d'un nouveau criblage (score {best_match['final_score']:.1f}, audit #{audit_record.id})."
+        ))
+        db.commit()
+        return existing.id
+
+    alert = Alert(
+        audit_id=audit_record.id,
+        client_id=client_id,
+        client_name=audit_record.client_name,
+        watchlist_entity_id=wl_id,
+        watchlist_name=wl_entity.get("primary_name", "Inconnu"),
+        final_score=best_match["final_score"],
+        status="OPEN"
+    )
+    db.add(alert)
+    db.flush()
+    db.add(AlertEvent(
+        alert_id=alert.id, username=username, action="CREATED",
+        detail=f"Alerte créée par le criblage (score {best_match['final_score']:.1f})."
+    ))
+    db.commit()
+    return alert.id
 
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
@@ -1438,6 +1492,7 @@ class IngestionSettingsUpdate(BaseModel):
     require_approval: Optional[bool] = None
     exclusion_justification_required: Optional[bool] = None
     exclusion_file_required: Optional[bool] = None
+    alert_four_eyes_required: Optional[bool] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -1449,14 +1504,17 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
     approval = get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
     justif = get_setting_with_source(db, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, True)
     evidence = get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)
+    four_eyes = get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)
     return {
         "require_approval": bool(approval["value"]),
         "exclusion_justification_required": bool(justif["value"]),
         "exclusion_file_required": bool(evidence["value"]),
+        "alert_four_eyes_required": bool(four_eyes["value"]),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
             "exclusion_file_required": evidence["source"],
+            "alert_four_eyes_required": four_eyes["source"],
         },
     }
 
@@ -1479,6 +1537,7 @@ async def update_ingestion_settings(
         SETTING_REQUIRE_APPROVAL: payload.require_approval,
         SETTING_EXCLUSION_JUSTIFICATION_REQUIRED: payload.exclusion_justification_required,
         SETTING_EXCLUSION_FILE_REQUIRED: payload.exclusion_file_required,
+        SETTING_ALERT_FOUR_EYES: payload.alert_four_eyes_required,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
     if not changed:
@@ -1773,6 +1832,248 @@ async def reject_pending_snapshot(
         "snapshot_id": snapshot_id,
         "status": snap.status,
     }
+
+# ------------------ GESTION DES ALERTES (CYCLE DE VIE + 4-YEUX) ------------------
+
+class AlertAssignRequest(BaseModel):
+    assignee: Optional[str] = None
+
+class AlertCommentRequest(BaseModel):
+    comment: str
+
+class AlertProposeRequest(BaseModel):
+    decision: str  # CONFIRMED | FALSE_POSITIVE
+    comment: str
+
+class AlertValidateRequest(BaseModel):
+    approve: bool
+    comment: Optional[str] = None
+
+def _alert_summary(alert: Alert) -> Dict[str, Any]:
+    return {
+        "id": alert.id,
+        "audit_id": alert.audit_id,
+        "created_at": alert.created_at.isoformat() if alert.created_at else None,
+        "client_id": alert.client_id,
+        "client_name": alert.client_name,
+        "watchlist_entity_id": alert.watchlist_entity_id,
+        "watchlist_name": alert.watchlist_name,
+        "final_score": alert.final_score,
+        "status": alert.status,
+        "assigned_to": alert.assigned_to,
+        "proposed_decision": alert.proposed_decision,
+        "proposed_by": alert.proposed_by,
+        "proposed_at": alert.proposed_at.isoformat() if alert.proposed_at else None,
+        "proposal_comment": alert.proposal_comment,
+        "decided_by": alert.decided_by,
+        "decided_at": alert.decided_at.isoformat() if alert.decided_at else None,
+        "decision_comment": alert.decision_comment,
+    }
+
+def _get_open_alert(db: Session, alert_id: int) -> Alert:
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    if alert.status in ALERT_CLOSED_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Alerte déjà close ({alert.status}).")
+    return alert
+
+def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
+    db.add(AlertEvent(alert_id=alert_id, username=username, action=action, detail=detail or None))
+
+@app.get("/api/alerts")
+async def list_alerts(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    assigned_to: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """File de travail des alertes, triee par risque (score) puis date."""
+    query = db.query(Alert)
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        query = query.filter(Alert.status.in_(statuses))
+    if assigned_to:
+        query = query.filter(Alert.assigned_to == assigned_to)
+    total = query.count()
+    open_count = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
+    rows = query.order_by(Alert.final_score.desc(), Alert.created_at.desc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "total": total,
+        "open_count": open_count,
+        "page": page,
+        "page_size": page_size,
+        "items": [_alert_summary(a) for a in rows],
+    }
+
+@app.get("/api/alerts/{alert_id}")
+async def get_alert_detail(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Detail d'une alerte : decision_tree du journal d'audit lie + historique des actions."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    return {
+        **_alert_summary(alert),
+        "decision_tree": audit.decision_tree if audit else None,
+        "watchlist_version": audit.watchlist_version if audit else None,
+        "events": [
+            {
+                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "username": e.username,
+                "action": e.action,
+                "detail": e.detail,
+            }
+            for e in events
+        ],
+    }
+
+@app.post("/api/alerts/{alert_id}/assign")
+async def assign_alert(
+    alert_id: int,
+    payload: AlertAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """S'assigner une alerte (ou l'assigner a un autre analyste : admin uniquement)."""
+    alert = _get_open_alert(db, alert_id)
+    assignee = (payload.assignee or "").strip() or current_user["username"]
+    if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
+        raise HTTPException(status_code=403, detail="Seul un administrateur peut assigner une alerte à un autre analyste.")
+    alert.assigned_to = assignee
+    if alert.status == "OPEN":
+        alert.status = "IN_PROGRESS"
+    _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED", f"Assignée à {assignee}.")
+    db.commit()
+    return {"message": f"Alerte assignée à {assignee}.", **_alert_summary(alert)}
+
+@app.post("/api/alerts/{alert_id}/comment")
+async def comment_alert(
+    alert_id: int,
+    payload: AlertCommentRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Ajoute un commentaire a l'historique de l'alerte."""
+    alert = _get_open_alert(db, alert_id)
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Le commentaire ne peut pas être vide.")
+    _log_alert_event(db, alert.id, current_user["username"], "COMMENT", comment)
+    db.commit()
+    return {"message": "Commentaire ajouté."}
+
+@app.post("/api/alerts/{alert_id}/escalate")
+async def escalate_alert(
+    alert_id: int,
+    payload: AlertCommentRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Escalade l'alerte (motif obligatoire)."""
+    alert = _get_open_alert(db, alert_id)
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un motif est requis pour escalader une alerte.")
+    alert.status = "ESCALATED"
+    _log_alert_event(db, alert.id, current_user["username"], "ESCALATED", comment)
+    db.commit()
+    return {"message": "Alerte escaladée.", **_alert_summary(alert)}
+
+def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
+    alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
+    alert.decided_by = username
+    alert.decided_at = datetime.utcnow()
+    alert.decision_comment = comment
+
+@app.post("/api/alerts/{alert_id}/propose")
+async def propose_alert_decision(
+    alert_id: int,
+    payload: AlertProposeRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Propose une decision (vrai positif confirme / faux positif), commentaire
+    obligatoire. Avec le 4-yeux actif, l'alerte attend la validation d'un
+    reviewer DIFFERENT ; sinon la proposition clot directement l'alerte.
+    """
+    alert = _get_open_alert(db, alert_id)
+    if alert.status == "PENDING_VALIDATION":
+        raise HTTPException(status_code=409, detail="Une décision est déjà en attente de validation.")
+    decision = (payload.decision or "").strip().upper()
+    if decision not in ("CONFIRMED", "FALSE_POSITIVE"):
+        raise HTTPException(status_code=400, detail="Décision invalide (CONFIRMED ou FALSE_POSITIVE).")
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
+
+    username = current_user["username"]
+    alert.proposed_decision = decision
+    alert.proposed_by = username
+    alert.proposed_at = datetime.utcnow()
+    alert.proposal_comment = comment
+    label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
+
+    if alert_four_eyes_required(db):
+        alert.status = "PENDING_VALIDATION"
+        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
+        message = "Décision proposée, en attente de validation 4-yeux."
+    else:
+        _close_alert(alert, decision, username, comment)
+        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
+        _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
+        message = "Alerte clôturée (validation 4-yeux désactivée)."
+    db.commit()
+    return {"message": message, **_alert_summary(alert)}
+
+@app.post("/api/alerts/{alert_id}/validate")
+async def validate_alert_decision(
+    alert_id: int,
+    payload: AlertValidateRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Validation 4-yeux d'une decision proposee (reviewer ou admin). Le
+    validateur doit etre DIFFERENT du proposeur. Refuser renvoie l'alerte
+    en cours d'analyse (commentaire obligatoire).
+    """
+    alert = _get_open_alert(db, alert_id)
+    if alert.status != "PENDING_VALIDATION":
+        raise HTTPException(status_code=409, detail="Aucune décision en attente de validation sur cette alerte.")
+    username = reviewer["username"]
+    if username == alert.proposed_by:
+        raise HTTPException(
+            status_code=403,
+            detail="Validation 4-yeux : le validateur doit être différent du proposeur."
+        )
+    comment = (payload.comment or "").strip()
+    if payload.approve:
+        _close_alert(alert, alert.proposed_decision, username, comment or alert.proposal_comment)
+        _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
+        message = f"Décision validée, alerte clôturée ({alert.status})."
+    else:
+        if not comment:
+            raise HTTPException(status_code=400, detail="Un commentaire est requis pour refuser une décision.")
+        alert.status = "IN_PROGRESS"
+        alert.proposed_decision = None
+        alert.proposed_by = None
+        alert.proposed_at = None
+        alert.proposal_comment = None
+        _log_alert_event(db, alert.id, username, "RETURNED", comment)
+        message = "Décision refusée, alerte renvoyée en analyse."
+    db.commit()
+    return {"message": message, **_alert_summary(alert)}
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

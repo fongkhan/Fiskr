@@ -18,6 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchConfig();
     fetchIngestionSettings();
     fetchPendingReviews();
+    fetchAlerts();
 });
 
 // Check current logged-in user profile
@@ -186,6 +187,9 @@ function switchTab(tabId) {
     if (activeSec) activeSec.classList.add("active");
     
     // Refresh tab-specific data
+    if (tabId === "alerts") {
+        fetchAlerts();
+    }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
         if (activeSubBtn) {
@@ -1108,8 +1112,10 @@ async function handleScreening(event) {
         
         placeholder.classList.add("hidden");
         resultsCard.classList.remove("hidden");
-        
+
         renderScreeningResult(data);
+        // Une decision ALERT ouvre une alerte de travail : rafraichir le badge
+        if (data.alert_id) fetchAlerts();
     } catch (e) {
         console.error("Error screening:", e);
         alert("Erreur réseau lors de l'appel au moteur.");
@@ -1883,9 +1889,11 @@ async function fetchIngestionSettings() {
         const approvalEl = document.getElementById("setting-require-approval");
         const justifEl = document.getElementById("setting-exclusion-justification");
         const fileEl = document.getElementById("setting-exclusion-file");
+        const fourEyesEl = document.getElementById("setting-alert-four-eyes");
         if (approvalEl) approvalEl.checked = ingestionSettings.require_approval;
         if (justifEl) justifEl.checked = ingestionSettings.exclusion_justification_required;
         if (fileEl) fileEl.checked = ingestionSettings.exclusion_file_required;
+        if (fourEyesEl) fourEyesEl.checked = ingestionSettings.alert_four_eyes_required;
         // Asterisques "obligatoire" de la modale d'exclusion
         const justifMark = document.getElementById("exclusion-justification-required-mark");
         const fileMark = document.getElementById("exclusion-file-required-mark");
@@ -1900,7 +1908,8 @@ async function saveIngestionSettings() {
     const payload = {
         require_approval: document.getElementById("setting-require-approval").checked,
         exclusion_justification_required: document.getElementById("setting-exclusion-justification").checked,
-        exclusion_file_required: document.getElementById("setting-exclusion-file").checked
+        exclusion_file_required: document.getElementById("setting-exclusion-file").checked,
+        alert_four_eyes_required: document.getElementById("setting-alert-four-eyes").checked
     };
     try {
         const response = await fetch("/api/settings/ingestion", {
@@ -2199,4 +2208,182 @@ async function rejectPendingSnapshot() {
         console.error("Error rejecting snapshot:", e);
         alert("Erreur réseau de communication.");
     }
+}
+
+// ------------------ ALERTES (CYCLE DE VIE + 4-YEUX) ------------------
+
+let alertsFilter = "OPEN,IN_PROGRESS,ESCALATED,PENDING_VALIDATION";
+let currentAlertId = null;
+
+async function fetchAlerts() {
+    try {
+        const params = new URLSearchParams({ page: "1", page_size: "100" });
+        if (alertsFilter) params.set("status", alertsFilter);
+        const response = await fetch(`/api/alerts?${params}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        renderAlertsTable(data.items || []);
+        const badge = document.getElementById("alerts-open-badge");
+        if (badge) {
+            badge.textContent = data.open_count;
+            badge.classList.toggle("hidden", !data.open_count);
+        }
+    } catch (e) {
+        console.error("Error fetching alerts:", e);
+    }
+}
+
+function setAlertFilter(filter) {
+    alertsFilter = filter;
+    document.querySelectorAll("#alerts-status-filters button").forEach(btn => {
+        const active = btn.dataset.filter === filter;
+        btn.classList.toggle("btn-secondary", active);
+        btn.style.background = active ? "" : "rgba(255,255,255,0.08)";
+    });
+    fetchAlerts();
+}
+
+function alertStatusBadge(status) {
+    const styles = {
+        OPEN: ["#fbbf24", "OUVERTE"],
+        IN_PROGRESS: ["#38bdf8", "EN COURS"],
+        ESCALATED: ["#f87171", "ESCALADÉE"],
+        PENDING_VALIDATION: ["#c084fc", "À VALIDER (4-YEUX)"],
+        CLOSED_CONFIRMED: ["#f87171", "VRAI POSITIF"],
+        CLOSED_FALSE_POSITIVE: ["#4ade80", "FAUX POSITIF"],
+    };
+    const [color, label] = styles[status] || ["#9ca3af", status];
+    return `<span style="color: ${color}; font-weight: 600; font-size: 0.8rem;">${label}</span>`;
+}
+
+function renderAlertsTable(items) {
+    const tbody = document.querySelector("#alerts-table tbody");
+    if (!tbody) return;
+    if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Aucune alerte pour ce filtre.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = items.map(a => `
+        <tr>
+            <td>${a.created_at ? new Date(a.created_at).toLocaleString("fr-FR") : "-"}</td>
+            <td><strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small></td>
+            <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
+            <td><strong style="color: ${a.final_score >= 90 ? '#f87171' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
+            <td>${alertStatusBadge(a.status)}</td>
+            <td>${escapeHtml(a.assigned_to || "—")}</td>
+            <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})">🔎 Instruire</button></td>
+        </tr>
+    `).join("");
+}
+
+async function openAlertModal(alertId) {
+    currentAlertId = alertId;
+    try {
+        const response = await fetch(`/api/alerts/${alertId}`);
+        const a = await response.json();
+        if (!response.ok) {
+            alert("Erreur : " + (a.detail || "Impossible de charger l'alerte."));
+            return;
+        }
+        document.getElementById("alert-modal-title").innerHTML =
+            `Alerte #${a.id} — ${escapeHtml(a.client_name)} × ${escapeHtml(a.watchlist_name)} ${alertStatusBadge(a.status)}`;
+
+        const roles = userRoles(currentUser);
+        const isReviewer = roles.includes("admin") || roles.includes("reviewer");
+        const isClosed = a.status.startsWith("CLOSED");
+        const me = currentUser ? currentUser.username : "";
+
+        const adjustments = ((a.decision_tree || {}).adjustments) || {};
+        const adjRows = Object.entries(adjustments).map(([k, v]) =>
+            `<tr><td>${escapeHtml(k)}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`
+        ).join("");
+
+        const eventsHtml = (a.events || []).map(e => `
+            <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
+                <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString("fr-FR") : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+                ${e.detail ? `<div style="font-size: 0.85rem;">${escapeHtml(e.detail)}</div>` : ""}
+            </div>
+        `).join("");
+
+        let actionsHtml = "";
+        if (!isClosed) {
+            actionsHtml += `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">`;
+            if (a.status !== "PENDING_VALIDATION") {
+                actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')">📌 M'assigner</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="alertActionWithComment('comment', 'Commentaire')">💬 Commenter</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5;" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')">⚠️ Escalader</button>`;
+                actionsHtml += `<button class="btn btn-sm btn-primary" onclick="proposeAlertDecision('FALSE_POSITIVE')">✅ Proposer : Faux positif</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposeAlertDecision('CONFIRMED')">🚨 Proposer : Vrai positif</button>`;
+            } else if (isReviewer && a.proposed_by !== me) {
+                actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Proposé par @${escapeHtml(a.proposed_by)} : <strong>${a.proposed_decision === "CONFIRMED" ? "vrai positif" : "faux positif"}</strong></span>`;
+                actionsHtml += `<button class="btn btn-sm btn-primary" onclick="validateAlertDecision(true)">✔️ Valider (4-yeux)</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5;" onclick="validateAlertDecision(false)">↩️ Refuser & renvoyer</button>`;
+            } else {
+                actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Décision proposée par @${escapeHtml(a.proposed_by)} — en attente d'un validateur différent (rôle réviseur).</span>`;
+            }
+            actionsHtml += `</div>`;
+        } else {
+            actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString("fr-FR") : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
+        }
+
+        document.getElementById("alert-modal-body").innerHTML = `
+            <p class="section-desc">Score final <strong>${a.final_score.toFixed(1)}%</strong> · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong> · journal d'audit #${a.audit_id} (${escapeHtml(a.watchlist_version || "")})</p>
+            <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score (decision tree)</h3>
+            <div class="table-container" style="max-height: 160px;">
+                <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
+            </div>
+            <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
+            <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
+            ${actionsHtml}
+        `;
+        document.getElementById("alert-modal").classList.remove("hidden");
+    } catch (e) {
+        console.error("Error opening alert:", e);
+    }
+}
+
+function closeAlertModal() {
+    document.getElementById("alert-modal").classList.add("hidden");
+    currentAlertId = null;
+}
+
+async function _postAlertAction(path, body) {
+    const response = await fetch(`/api/alerts/${currentAlertId}/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        alert("Erreur : " + (data.detail || "Action refusée."));
+        return null;
+    }
+    return data;
+}
+
+async function alertAction(action) {
+    const data = await _postAlertAction(action, {});
+    if (data) { openAlertModal(currentAlertId); fetchAlerts(); }
+}
+
+async function alertActionWithComment(action, promptLabel) {
+    const comment = prompt(promptLabel + " :");
+    if (comment === null) return;
+    const data = await _postAlertAction(action, { comment });
+    if (data) { openAlertModal(currentAlertId); fetchAlerts(); }
+}
+
+async function proposeAlertDecision(decision) {
+    const label = decision === "CONFIRMED" ? "vrai positif" : "faux positif";
+    const comment = prompt(`Commentaire obligatoire pour proposer « ${label} » :`);
+    if (comment === null) return;
+    const data = await _postAlertAction("propose", { decision, comment });
+    if (data) { alert(data.message); openAlertModal(currentAlertId); fetchAlerts(); }
+}
+
+async function validateAlertDecision(approve) {
+    const comment = prompt(approve ? "Commentaire (optionnel) :" : "Motif du refus (obligatoire) :");
+    if (comment === null) return;
+    const data = await _postAlertAction("validate", { approve, comment });
+    if (data) { alert(data.message); openAlertModal(currentAlertId); fetchAlerts(); }
 }

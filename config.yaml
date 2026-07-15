@@ -35,6 +35,7 @@ ingestion:
 review:
   exclusion_justification_required: true   # justification texte obligatoire lors d'une exclusion
   exclusion_file_required: false           # piece jointe justificative obligatoire lors d'une exclusion
+  alert_four_eyes_required: true           # validation 4-yeux des decisions d'alertes (validateur != proposeur)
 
 # Synchronisation automatique des sources officielles (OFAC / EUR-Lex)
 sync:

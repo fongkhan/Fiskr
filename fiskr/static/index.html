@@ -33,6 +33,11 @@
                         </button>
                     </li>
                     <li>
+                        <button id="nav-btn-alerts" class="nav-item" onclick="switchTab('alerts')">
+                            <span class="nav-icon">🚨</span> Alertes <span id="alerts-open-badge" class="status-badge warning hidden" style="margin-left: 0.35rem;">0</span>
+                        </button>
+                    </li>
+                    <li>
                         <button id="nav-btn-audit" class="nav-item" onclick="switchTab('audit')">
                             <span class="nav-icon">📜</span> Audit
                         </button>
@@ -583,10 +588,16 @@
                                     Justification texte obligatoire lors d'une exclusion d'entité
                                 </label>
                             </div>
-                            <div class="form-group" style="margin-bottom: 1rem;">
+                            <div class="form-group" style="margin-bottom: 0.75rem;">
                                 <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
                                     <input type="checkbox" id="setting-exclusion-file" style="width: 18px; height: 18px;">
                                     Pièce jointe justificative obligatoire lors d'une exclusion d'entité
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 1rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="setting-alert-four-eyes" style="width: 18px; height: 18px;">
+                                    Validation 4-yeux obligatoire des décisions d'alertes (validateur ≠ proposeur)
                                 </label>
                             </div>
                             <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
@@ -1013,6 +1024,40 @@
             </section>
 
             <!-- SECTION 3: AUDIT -->
+            <!-- SECTION: ALERTES (cycle de vie + 4-yeux) -->
+            <section id="sec-alerts" class="tab-content">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <div class="card result-card">
+                        <h2>File de Travail des Alertes</h2>
+                        <p class="section-desc">Chaque décision de criblage en statut ALERT ouvre une alerte à instruire : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. L'historique complet des actions est conservé.</p>
+                        <div id="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                            <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('')">Toutes</button>
+                            <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
+                            <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
+                            <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
+                        </div>
+                        <div class="table-container max-height-table">
+                            <table id="alerts-table">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Client</th>
+                                        <th>Listé</th>
+                                        <th>Score</th>
+                                        <th>Statut</th>
+                                        <th>Assignée à</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <section id="sec-audit" class="tab-content">
                 <div class="card">
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
@@ -1134,6 +1179,17 @@
         </div>
     </div>
 
+    <!-- Alert Detail Modal (cycle de vie + 4-yeux) -->
+    <div id="alert-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 820px;">
+            <span class="close-modal" onclick="closeAlertModal()">&times;</span>
+            <h2 id="alert-modal-title">Alerte</h2>
+            <div id="alert-modal-body" class="modal-body-content">
+                <!-- Populated dynamically -->
+            </div>
+        </div>
+    </div>
+
     <!-- Exclusion Justification Modal (Homologation) -->
     <div id="exclusion-modal" class="modal hidden">
         <div class="modal-content" style="max-width: 540px;">
@@ -1191,7 +1247,7 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=3.8"></script>
+    <script src="/static/app.js?v=3.9"></script>
 
 
 

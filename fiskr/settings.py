@@ -17,6 +17,8 @@ SETTING_REQUIRE_APPROVAL = "ingestion.require_approval"
 # Exigences modulaires lors de l'exclusion d'entites pendant la revue
 SETTING_EXCLUSION_JUSTIFICATION_REQUIRED = "review.exclusion_justification_required"
 SETTING_EXCLUSION_FILE_REQUIRED = "review.exclusion_file_required"
+# Validation 4-yeux des decisions d'alertes (validateur different du proposeur)
+SETTING_ALERT_FOUR_EYES = "review.alert_four_eyes_required"
 
 
 def _config_default(key: str, default: Any = None) -> Any:
@@ -54,6 +56,11 @@ def set_setting(db, key: str, value: Any, updated_by: Optional[str] = None) -> A
 def require_approval_enabled(db) -> bool:
     """True si le mode homologation est actif (base d'abord, sinon config.yaml)."""
     return bool(get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)["value"])
+
+
+def alert_four_eyes_required(db) -> bool:
+    """True si la decision d'alerte exige un second regard (defaut : oui)."""
+    return bool(get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)["value"])
 
 
 def exclusion_requirements(db) -> Dict[str, bool]:

@@ -158,6 +158,51 @@ class SyncReport(Base):
     delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
     email_sent = Column(Boolean, default=False)
 
+class Alert(Base):
+    """
+    Alerte de criblage : objet de travail avec cycle de vie et decision 4-yeux.
+    OPEN -> IN_PROGRESS (assignee) -> PENDING_VALIDATION (decision proposee)
+    -> CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE ; ESCALATED en derivation.
+    Le journal immuable reste compliance_audit_trail (audit_id).
+    """
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    audit_id = Column(Integer, ForeignKey("compliance_audit_trail.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Denormalise pour la file de travail
+    client_id = Column(String(100), nullable=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    final_score = Column(Float, nullable=False)
+    # Cycle de vie
+    status = Column(String(30), default="OPEN", index=True)
+    assigned_to = Column(String(100), nullable=True)
+    # Decision proposee (1er regard)
+    proposed_decision = Column(String(30), nullable=True)  # CONFIRMED, FALSE_POSITIVE
+    proposed_by = Column(String(100), nullable=True)
+    proposed_at = Column(DateTime, nullable=True)
+    proposal_comment = Column(Text, nullable=True)
+    # Decision finale (2e regard, ou 1er si 4-yeux desactive)
+    decided_by = Column(String(100), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_comment = Column(Text, nullable=True)
+
+ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
+ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE")
+
+class AlertEvent(Base):
+    """Historique append-only des actions sur une alerte (jamais modifie)."""
+    __tablename__ = "alert_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    username = Column(String(100), nullable=False)
+    action = Column(String(30), nullable=False)  # CREATED, REDETECTED, ASSIGNED, COMMENT, ESCALATED, PROPOSED, VALIDATED, RETURNED
+    detail = Column(Text, nullable=True)
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 
