@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Business-process/UX overhaul of the dashboard plus list-type scoping across the product.
+
+### Added
+- **List-type everywhere (`list_type`)**: additive migrations denormalize the originating list type onto `alerts`, `compliance_audit_trail` and `whitelist_pairs`, populated at write time (`log_compliance_decision`, `open_or_redetect_alert` — with progressive backfill of open alerts on redetection — and server-side derivation on whitelist creation). Old rows are **never rewritten** (immutable audit): `NULL` renders as "Inconnue" and is targetable with the `UNKNOWN` filter value, while `/api/history` falls back to the type stored in the `decision_tree` for display.
+- **"Liste" filters and columns on every screen**: active watchlist (new column + combined text/list filter; "Type" is renamed "Type d'entité" to remove the I/E/V/O ambiguity), alerts worklist (`GET /api/alerts?list_type=`), audit trail, whitelist (`GET /api/whitelist?list_type=`) and snapshot history. One shared label map (`LIST_TYPE_LABELS`) is used across snapshots, homologation, KPI, compare selects and badges.
+- **Audit trail pagination**: `GET /api/history` now returns a `{total, page, page_size, items}` envelope (default 50, max 200) with `status` and `list_type` filters and explicit serialization, replacing the unbounded ORM dump; the dashboard gains pager controls.
+- **Restricted screening (`screening_lists`)**: real-time screening, the batch simulator and ISO 20022 transaction filtering can screen against a subset of lists ("certaines banques n'ont pas besoin de tout utiliser"). Compliance guardrails: absent/empty = **all lists** (default), unknown values → 400, and every restriction is traced — in the immutable `decision_tree` (`screening_lists_restriction`), in the response (`screening_lists`) and in the alert event detail. Checkbox groups (all checked by default) with an explicit audit warning in both screening forms.
+- **Lightweight `GET /api/counters`** (open alerts, pending homologations) polled every 60 s to keep the sidebar badges alive without reloading the tables.
+- 153 automated tests passing (9 new in `tests/test_list_scope.py`: unrestricted default, restriction excluding/including the matching list with decision-tree tracing, unknown-list 400 on both endpoints, `list_type` persistence and filters on alerts/history/whitelist, whitelist derivation, counters, transaction restriction PASS/HIT).
+
+### Changed — dashboard UX (audit follow-up)
+- **Flow continuity**: a screening that opens an alert now shows a direct **"Instruire l'alerte #N"** button (also on batch ALERT rows and transaction hits); the Homologation sub-tab reloads its queue on every opening; sidebar badges refresh automatically.
+- **Menu reorganization**: new admin **"⚙️ Paramètres"** tab hosting the 7 hot-toggleable governance settings (previously buried in Watchlists → Homologation); the whitelist becomes an **Alertes sub-tab**; snapshot upload moves to a dedicated **"Import de Fichiers"** sub-tab, separated from the Delta comparator.
+- **No more native browser popups**: all 77 `alert()/confirm()/prompt()` call sites replaced with an integrated toast system and Promise-based confirm/prompt modals — regulatory comments (proposal, 4-eyes validation, whitelist revocation, snapshot rejection) are now typed in proper textareas.
+- **Label consistency**: fixed the sync-report bug that displayed every non-OFAC source as "EUR-Lex JO" (shared `SYNC_SOURCE_LABELS` map, also used by the KPI page); homologation table no longer shows raw `WATCHLIST_*` codes; French-language pass ("Launch Screening Engine" → "Lancer le criblage", "Genders/Gels" → "État / Genre", delta labels, entity-type badges).
+- **Dead code removed**: duplicated and broken early definitions of `fetchAuditHistory`/`renderAuditTable`/`showAuditModal`, duplicate `fetchConfig` and the shadowed `window.onclick` handler (the surviving versions are the correct ones); audit modal display harmonized.
+
+---
+
+## [2.10.1] - 2026-07-16
+
 Documentation-vs-code audit follow-up: every gap found while verifying the implementation against the documentation is fixed, plus two code quick wins.
 
 ### Fixed

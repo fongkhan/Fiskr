@@ -8,9 +8,198 @@ let wlCurrentPage = 1;
 const wlItemsPerPage = 100;
 let wlFilteredItems = [];
 
+// ------------------ LIBELLÉS PARTAGÉS (types de listes & sources) ------------------
+
+// Une seule source de vérité pour les libellés de types de listes, partout dans l'UI
+const LIST_TYPE_LABELS = {
+    WATCHLIST_OFAC: "OFAC",
+    WATCHLIST_EU: "UE",
+    WATCHLIST_UN: "ONU",
+    WATCHLIST_DGT: "DGT",
+    WATCHLIST_PEP: "PEP",
+    WATCHLIST_OFSI: "OFSI",
+    WATCHLIST_SSIE: "SSIE",
+    CLIENT_BASE: "Base clients",
+};
+
+const SYNC_SOURCE_LABELS = {
+    OFAC: "OFAC SDN",
+    EURLEX: "EUR-Lex JO",
+    EUFSF: "UE FSF",
+    DGT: "DGT Gels",
+    UN: "ONU",
+    PEP: "PEP OpenSanctions",
+    OFSI: "UK OFSI",
+};
+
+function listTypeLabel(t) {
+    if (!t) return "Inconnue";
+    return LIST_TYPE_LABELS[t] || t;
+}
+
+function listTypeBadge(t) {
+    const label = listTypeLabel(t);
+    const muted = !t ? ' style="opacity:0.55;"' : "";
+    return `<span class="badge-secondary"${muted} title="${escapeHtml(t || "Type de liste inconnu (enregistrement antérieur)")}">${escapeHtml(label)}</span>`;
+}
+
+// Options des selects de filtre « Liste » (valeur UNKNOWN = enregistrements sans type)
+function listTypeFilterOptions(withUnknown) {
+    let html = '<option value="">Toutes les listes</option>';
+    for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
+        if (value === "CLIENT_BASE") continue;
+        html += `<option value="${value}">${label}</option>`;
+    }
+    if (withUnknown) html += '<option value="UNKNOWN">Inconnue (antérieur)</option>';
+    return html;
+}
+
+// ------------------ NOTIFICATIONS INTÉGRÉES (toasts & dialogs) ------------------
+
+function showToast(message, type = "info", durationMs = 4500) {
+    const container = document.getElementById("toast-container");
+    if (!container) { console.log(`[${type}] ${message}`); return; }
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${type}`;
+    const icons = { success: "✅", error: "⚠️", info: "ℹ️" };
+    toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span class="toast-msg">${escapeHtml(message)}</span>`;
+    toast.onclick = () => toast.remove();
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add("toast-out");
+        setTimeout(() => toast.remove(), 350);
+    }, type === "error" ? Math.max(durationMs, 7000) : durationMs);
+}
+
+// Modale générique : résout une Promise (bouton, Escape = annulation)
+function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel }) {
+    return new Promise((resolve) => {
+        const overlay = document.getElementById("app-dialog");
+        const titleEl = document.getElementById("app-dialog-title");
+        const msgEl = document.getElementById("app-dialog-message");
+        const fieldWrap = document.getElementById("app-dialog-field");
+        const errEl = document.getElementById("app-dialog-error");
+        const okBtn = document.getElementById("app-dialog-confirm");
+        const cancelBtn = document.getElementById("app-dialog-cancel");
+
+        titleEl.textContent = title || "Confirmation";
+        msgEl.textContent = message || "";
+        errEl.classList.add("hidden");
+        okBtn.textContent = confirmLabel || "Confirmer";
+        cancelBtn.textContent = cancelLabel || "Annuler";
+        okBtn.className = danger ? "btn btn-danger" : "btn btn-primary";
+
+        let inputEl = null;
+        fieldWrap.innerHTML = "";
+        if (input || textarea) {
+            inputEl = document.createElement(textarea ? "textarea" : "input");
+            if (textarea) inputEl.rows = 4;
+            inputEl.placeholder = placeholder || "";
+            inputEl.id = "app-dialog-input";
+            fieldWrap.appendChild(inputEl);
+        }
+
+        const cleanup = (value) => {
+            overlay.classList.add("hidden");
+            document.removeEventListener("keydown", onKey);
+            okBtn.onclick = cancelBtn.onclick = null;
+            resolve(value);
+        };
+        const onKey = (e) => { if (e.key === "Escape") cleanup(null); };
+
+        okBtn.onclick = () => {
+            if (inputEl) {
+                const value = inputEl.value.trim();
+                if (required && !value) {
+                    errEl.textContent = "Ce champ est obligatoire.";
+                    errEl.classList.remove("hidden");
+                    inputEl.focus();
+                    return;
+                }
+                cleanup(value);
+            } else {
+                cleanup(true);
+            }
+        };
+        cancelBtn.onclick = () => cleanup(inputEl ? null : false);
+        document.addEventListener("keydown", onKey);
+        overlay.classList.remove("hidden");
+        (inputEl || okBtn).focus();
+    });
+}
+
+function confirmDialog(message, options = {}) {
+    return _openAppDialog({ title: options.title || "Confirmation", message, danger: options.danger,
+                            confirmLabel: options.confirmLabel, cancelLabel: options.cancelLabel });
+}
+
+// Saisie intégrée (remplace prompt() ; textarea pour les commentaires réglementaires)
+function promptDialog(title, options = {}) {
+    return _openAppDialog({ title, message: options.message || "", input: !options.textarea,
+                            textarea: options.textarea, placeholder: options.placeholder,
+                            required: options.required !== false,
+                            confirmLabel: options.confirmLabel || "Valider" });
+}
+
+// ------------------ COMPTEURS DE LA BARRE LATÉRALE (badges) ------------------
+
+async function refreshSidebarCounters() {
+    try {
+        const response = await fetch("/api/counters");
+        if (!response.ok) return;
+        const c = await response.json();
+        const alertBadge = document.getElementById("alerts-open-badge");
+        if (alertBadge) {
+            alertBadge.textContent = c.open_alerts;
+            alertBadge.classList.toggle("hidden", !c.open_alerts);
+        }
+        const reviewBadge = document.getElementById("review-pending-badge");
+        if (reviewBadge) {
+            reviewBadge.textContent = c.pending_reviews;
+            reviewBadge.classList.toggle("hidden", !c.pending_reviews);
+        }
+    } catch (e) { /* silencieux : simple polling de badges */ }
+}
+
+// Peuple les selects de filtre « Liste » et les cases du périmètre de criblage
+function initListTypeControls() {
+    const selects = [
+        ["wl-list-filter", false],
+        ["snapshots-list-filter", false],
+        ["alerts-list-filter", true],
+        ["audit-list-filter", true],
+        ["whitelist-list-filter", true],
+    ];
+    for (const [id, withUnknown] of selects) {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = listTypeFilterOptions(withUnknown);
+    }
+    for (const containerId of ["screening-lists-checkboxes", "batch-lists-checkboxes"]) {
+        const container = document.getElementById(containerId);
+        if (!container) continue;
+        container.innerHTML = Object.entries(LIST_TYPE_LABELS)
+            .filter(([value]) => value !== "CLIENT_BASE")
+            .map(([value, label]) => `
+                <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.85rem;">
+                    <input type="checkbox" class="${containerId}-cb" value="${value}" checked> ${label}
+                </label>`)
+            .join("");
+    }
+}
+
+// Lit les cases cochées d'un périmètre de criblage ; null = toutes (pas de restriction)
+function selectedScreeningLists(containerId) {
+    const boxes = Array.from(document.querySelectorAll(`.${containerId}-cb`));
+    if (!boxes.length) return null;
+    const checked = boxes.filter(b => b.checked).map(b => b.value);
+    if (!checked.length || checked.length === boxes.length) return null;
+    return checked;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     // Check authentication and load user info
     checkAuthUser();
+    initListTypeControls();
     // Initial data loading
     fetchWatchlist();
     fetchAuditHistory();
@@ -20,6 +209,8 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchPendingReviews();
     fetchAlerts();
     fetchWhitelist();
+    // Badges vivants : compteurs légers rafraîchis toutes les 60 s
+    setInterval(refreshSidebarCounters, 60_000);
 });
 
 // Check current logged-in user profile
@@ -51,7 +242,10 @@ async function checkAuthUser() {
             if (navUsersItem) {
                 navUsersItem.classList.toggle("hidden", !isAdmin);
             }
-            // Reglages homologation (admin) et actions de revue (reviewer ou admin)
+            // Onglet Paramètres (réglages transverses) réservé aux admins
+            const navSettingsItem = document.getElementById("nav-item-settings");
+            if (navSettingsItem) navSettingsItem.classList.toggle("hidden", !isAdmin);
+            // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
             const settingsCard = document.getElementById("review-settings-card");
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
@@ -66,7 +260,7 @@ async function checkAuthUser() {
 
 // Handle User Logout
 async function handleLogout() {
-    if (!confirm("Voulez-vous vraiment vous déconnecter de Fiskr ?")) return;
+    if (!await confirmDialog("Voulez-vous vraiment vous déconnecter de Fiskr ?", { title: "Déconnexion" })) return;
     try {
         await fetch("/api/auth/logout", { method: "POST" });
     } catch (e) {
@@ -88,90 +282,8 @@ async function fetchConfig() {
     }
 }
 
-// Fetch Audit Trail History
-async function fetchAuditHistory() {
-    try {
-        const response = await fetch("/api/history");
-        if (response.status === 401) return;
-        auditHistory = await response.json();
-        renderAuditTable(auditHistory);
-    } catch (e) {
-        console.error("Failed to fetch audit history:", e);
-    }
-}
-
-function renderAuditTable(history) {
-    const tbody = document.querySelector("#audit-table tbody");
-    if (!tbody) return;
-    
-    if (!history || history.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucune décision enregistrée dans la piste d\'audit.</td></tr>';
-        return;
-    }
-
-    tbody.innerHTML = history.map(item => {
-        const statusClass = item.status === "ALERT" ? "alert" : "no_match";
-        const scoreFormatted = item.final_score !== null ? `${item.final_score.toFixed(1)}%` : "N/A";
-        const timestampFormatted = item.timestamp ? new Date(item.timestamp).toLocaleString("fr-FR") : "-";
-
-        return `
-            <tr>
-                <td>${timestampFormatted}</td>
-                <td><strong>${escapeHtml(item.client_name || item.client_id || "N/A")}</strong></td>
-                <td>${escapeHtml(item.matched_entity_name || item.matched_entity_id || "Aucun")}</td>
-                <td><strong style="color: ${item.status === 'ALERT' ? '#f87171' : '#4ade80'};">${scoreFormatted}</strong></td>
-                <td><span class="status-badge ${statusClass}">${item.status}</span></td>
-                <td>
-                    <button class="btn btn-sm" onclick="showAuditModal('${item.id}')" style="background: rgba(255, 255, 255, 0.08);">👁️ Détails</button>
-                </td>
-            </tr>
-        `;
-    }).join("");
-}
-
-function showAuditModal(auditId) {
-    const item = auditHistory.find(a => a.id === auditId || String(a.id) === String(auditId));
-    if (!item) return;
-
-    const modal = document.getElementById("audit-modal");
-    const container = document.getElementById("modal-audit-details");
-    if (!modal || !container) return;
-
-    container.innerHTML = `
-        <div class="details-grid">
-            <div class="details-item"><strong>ID Piste d'Audit</strong><span>${item.id}</span></div>
-            <div class="details-item"><strong>Horodatage</strong><span>${new Date(item.timestamp).toLocaleString("fr-FR")}</span></div>
-            <div class="details-item"><strong>ID Client</strong><span>${escapeHtml(item.client_id || "-")}</span></div>
-            <div class="details-item"><strong>Client / Raison Sociale</strong><span>${escapeHtml(item.client_name || "-")}</span></div>
-            <div class="details-item"><strong>ID Watchlist Matchée</strong><span>${escapeHtml(item.matched_entity_id || "-")}</span></div>
-            <div class="details-item"><strong>Fiche Matchée</strong><span>${escapeHtml(item.matched_entity_name || "-")}</span></div>
-            <div class="details-item"><strong>Score Final</strong><span>${item.final_score}%</span></div>
-            <div class="details-item"><strong>Décision / Statut</strong><span>${item.status}</span></div>
-            <div class="details-item"><strong>Version Watchlist</strong><span>${escapeHtml(item.watchlist_version || "-")}</span></div>
-            <div class="details-item"><strong>Hash Watchlist</strong><span><code class="hash-badge">${escapeHtml(item.watchlist_hash || "-")}</code></span></div>
-        </div>
-        <div class="modal-section" style="margin-top: 1.5rem;">
-            <h4>Arbre de Décision / Explication du Score (JSON)</h4>
-            <pre class="pre-block">${JSON.stringify(item.decision_tree, null, 2)}</pre>
-        </div>
-        <div class="modal-section">
-            <h4>État de Configuration au Moment du Screening</h4>
-            <pre class="pre-block">${JSON.stringify(item.config_state, null, 2)}</pre>
-        </div>
-    `;
-
-    modal.classList.remove("hidden");
-    modal.style.display = "flex";
-}
-
-function closeAuditModal() {
-    const modal = document.getElementById("audit-modal");
-    if (modal) {
-        modal.classList.add("hidden");
-        modal.style.display = "none";
-    }
-}
-
+// (Le journal d'audit est géré plus bas : fetchAuditHistory / renderAuditHistoryTable /
+//  viewAuditLogDetail — les anciennes versions dupliquées et boguées ont été supprimées.)
 
 // Tab navigation
 function switchTab(tabId) {
@@ -194,6 +306,9 @@ function switchTab(tabId) {
     }
     if (tabId === "kpi") {
         fetchKpis();
+    }
+    if (tabId === "settings") {
+        fetchIngestionSettings();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -248,6 +363,14 @@ function switchSubTab(sectionId, subTabId) {
         fetchWatchlist();
     } else if (subTabId === "watchlist-snapshots") {
         fetchSnapshots();
+    } else if (subTabId === "watchlist-review") {
+        // Rupture de flux corrigée : les snapshots en attente d'homologation
+        // sont rechargés à chaque ouverture du sous-onglet, plus seulement au load
+        fetchPendingReviews();
+    } else if (subTabId === "alerts-queue") {
+        fetchAlerts();
+    } else if (subTabId === "alerts-whitelist") {
+        fetchWhitelist();
     } else if (subTabId === "watchlist-sync") {
         fetchSyncReports();
         fetchSyncConfig();
@@ -433,12 +556,12 @@ async function handleManualEntity(event) {
         if (!response.ok) {
             const errData = await response.json();
             const errors = errData.detail && errData.detail.errors ? errData.detail.errors.join(", ") : JSON.stringify(errData);
-            alert(`Erreur de validation Quality Gate : ${errors}`);
+            showToast(`Erreur de validation Quality Gate : ${errors}`, "error");
             return;
         }
         
         const data = await response.json();
-        alert(`Entité ajoutée avec succès ! ID : ${data.entity_id}`);
+        showToast(`Entité ajoutée avec succès ! ID : ${data.entity_id}`, "success");
         
         // Reset form
         document.getElementById("manual-entity-form").reset();
@@ -450,7 +573,7 @@ async function handleManualEntity(event) {
         
     } catch (e) {
         console.error("Error manual insert:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     } finally {
         btn.disabled = false;
         btn.textContent = "Ajouter à la Watchlist Active";
@@ -477,42 +600,42 @@ async function fetchSnapshots() {
     try {
         const response = await fetch("/api/snapshots");
         activeSnapshots = await response.json();
-        
-        renderSnapshotsTable(activeSnapshots);
+
+        renderSnapshotsFiltered();
         populateCompareSelects(activeSnapshots);
     } catch (e) {
         console.error("Error fetching snapshots:", e);
     }
 }
 
+// Filtre client-side de l'historique des snapshots par type de liste
+function renderSnapshotsFiltered() {
+    const filterEl = document.getElementById("snapshots-list-filter");
+    const selected = filterEl ? filterEl.value : "";
+    const snaps = selected
+        ? activeSnapshots.filter(s => s.file_type === selected)
+        : activeSnapshots;
+    renderSnapshotsTable(snaps);
+}
+
 // Render Snapshots Table
 function renderSnapshotsTable(snaps) {
     const tbody = document.querySelector("#snapshots-table tbody");
     tbody.innerHTML = "";
-    
+
     if (snaps.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Aucun snapshot importé</td></tr>';
         return;
     }
-    
+
     snaps.forEach(snap => {
         const dateStr = new Date(snap.uploaded_at).toLocaleString("fr-FR");
         const tr = document.createElement("tr");
-        
-        let typeBadge = "";
-        if (snap.file_type === "WATCHLIST_OFAC") typeBadge = '<span class="status-badge alert">OFAC XML</span>';
-        else if (snap.file_type === "WATCHLIST_EU") typeBadge = '<span class="status-badge warning">EU CSV/PDF</span>';
-        else if (snap.file_type === "WATCHLIST_SSIE") typeBadge = '<span class="status-badge alert">SSIE XML</span>';
-        else if (snap.file_type === "WATCHLIST_DGT") typeBadge = '<span class="status-badge warning">DGT JSON</span>';
-        else if (snap.file_type === "WATCHLIST_UN") typeBadge = '<span class="status-badge warning">ONU XML</span>';
-        else if (snap.file_type === "WATCHLIST_PEP") typeBadge = '<span class="status-badge warning">PEP CSV</span>';
-        else if (snap.file_type === "WATCHLIST_OFSI") typeBadge = '<span class="status-badge warning">OFSI CSV</span>';
-        else typeBadge = '<span class="status-badge no_match">CLIENT BASE</span>';
-        
+
         tr.innerHTML = `
             <td>${escapeHtml(dateStr)}</td>
             <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}...</small></td>
-            <td>${typeBadge}</td>
+            <td>${listTypeBadge(snap.file_type)}</td>
             <td>${snap.record_count}</td>
             <td>${snapshotStatusBadge(snap.status)}</td>
         `;
@@ -544,7 +667,7 @@ function populateCompareSelects(snaps) {
     
     snaps.forEach(snap => {
         const dateStr = new Date(snap.uploaded_at).toLocaleString("fr-FR");
-        const optionText = `${snap.file_name} (${snap.file_type}) - ${dateStr}`;
+        const optionText = `${snap.file_name} (${listTypeLabel(snap.file_type)}) - ${dateStr}`;
         
         const opt1 = document.createElement("option");
         opt1.value = snap.snapshot_id;
@@ -578,7 +701,7 @@ async function handleIngestion(event) {
     const btn = document.getElementById("submit-ingest-btn");
 
     if (fileInput.files.length === 0) {
-        alert("Veuillez sélectionner un fichier.");
+        showToast("Veuillez sélectionner un fichier.", "error");
         return;
     }
 
@@ -593,7 +716,7 @@ async function handleIngestion(event) {
             try {
                 JSON.parse(selectorsRaw);
             } catch (e) {
-                alert("Les sélecteurs SSIE ne sont pas un JSON valide.");
+                showToast("Les sélecteurs SSIE ne sont pas un JSON valide.", "error");
                 return;
             }
             formData.append("ssie_selectors", selectorsRaw);
@@ -615,19 +738,19 @@ async function handleIngestion(event) {
         
         if (!response.ok) {
             const data = await response.json();
-            alert(`Erreur d'importation : ${data.detail || JSON.stringify(data)}`);
+            showToast(`Erreur d'importation : ${data.detail || JSON.stringify(data)}`, "error");
             return;
         }
         
         const data = await response.json();
-        alert(`Instantané importé avec succès ! ${data.message}`);
+        showToast(`Instantané importé avec succès ! ${data.message}`, "success");
         fileInput.value = "";
         fetchSnapshots();
         fetchWatchlist();
         fetchPendingReviews();
     } catch (e) {
         console.error("Error ingesting snapshot:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     } finally {
         btn.disabled = false;
         btn.textContent = "Charger & Archiver";
@@ -658,17 +781,23 @@ async function handleSourceSync(source) {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert(`Erreur de synchronisation : ${data.detail || JSON.stringify(data)}`);
+            showToast(`Erreur de synchronisation : ${data.detail || JSON.stringify(data)}`, "error");
             return;
         }
-        alert(`Synchronisation ${data.source} terminée — Statut : ${data.status}\n${data.message || ""}\nDelta : +${data.added_count} / ~${data.modified_count} / -${data.removed_count}`);
+        const srcLabel = SYNC_SOURCE_LABELS[data.source] || data.source;
+        let msg = `Synchronisation ${srcLabel} : ${data.status} — delta +${data.added_count} / ~${data.modified_count} / −${data.removed_count}`;
+        if (data.rescreen && data.rescreen.new_alerts) {
+            msg += ` · re-criblage : ${data.rescreen.new_alerts} nouvelle(s) alerte(s)`;
+        }
+        showToast(msg, data.status === "ERROR" ? "error" : "success", 8000);
         fetchSyncReports();
         fetchSnapshots();
         fetchWatchlist();
         fetchPendingReviews();
+        refreshSidebarCounters();
     } catch (e) {
         console.error("Error running source sync:", e);
-        alert("Erreur réseau pendant la synchronisation.");
+        showToast("Erreur réseau pendant la synchronisation.", "error");
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;
@@ -706,7 +835,7 @@ function renderSyncReportsTable(reports) {
         else if (report.status === "ERROR") statusBadge = '<span class="status-badge alert">ERROR</span>';
         else statusBadge = `<span class="status-badge warning">${escapeHtml(report.status)}</span>`;
 
-        const sourceLabel = report.source === "OFAC" ? "OFAC XML" : "EUR-Lex JO";
+        const sourceLabel = SYNC_SOURCE_LABELS[report.source] || report.source;
 
         tr.innerHTML = `
             <td>${escapeHtml(dateStr)}<br><small style="color:var(--text-muted)">${escapeHtml(report.trigger || "MANUAL")}</small></td>
@@ -781,7 +910,7 @@ async function handleCompareSnapshots(event) {
     const btn = document.getElementById("submit-compare-btn");
     
     if (!oldId || !newId) {
-        alert("Sélectionnez deux snapshots différents pour comparer.");
+        showToast("Sélectionnez deux snapshots différents pour comparer.", "error");
         return;
     }
     
@@ -800,7 +929,7 @@ async function handleCompareSnapshots(event) {
         
         if (!response.ok) {
             const data = await response.json();
-            alert(`Erreur de comparaison : ${data.detail || JSON.stringify(data)}`);
+            showToast(`Erreur de comparaison : ${data.detail || JSON.stringify(data)}`, "error");
             return;
         }
         
@@ -866,7 +995,7 @@ async function handleCompareSnapshots(event) {
         
     } catch (e) {
         console.error("Comparison failed:", e);
-        alert("Erreur lors de la comparaison des versions.");
+        showToast("Erreur lors de la comparaison des versions.", "error");
     } finally {
         btn.disabled = false;
         btn.textContent = "Comparer les versions";
@@ -880,16 +1009,15 @@ async function fetchWatchlist() {
         const data = await response.json();
         
         activeWatchlist = data.items || [];
-        wlFilteredItems = activeWatchlist;
-        wlCurrentPage = 1;
-        
+
         const hashEl = document.getElementById("sidebar-wl-hash");
         if (hashEl) {
             hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "NONE";
             hashEl.title = data.hash;
         }
-        
-        renderWatchlistTable(wlFilteredItems, wlCurrentPage);
+
+        // Réapplique les filtres courants (texte + type de liste)
+        filterWatchlist();
     } catch (e) {
         console.error("Error loading watchlist:", e);
     }
@@ -901,7 +1029,7 @@ function renderWatchlistTable(items, page = 1) {
     tbody.innerHTML = "";
     
     if (items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted)">Aucune entité de sanctions active chargée</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucune entité de sanctions active chargée</td></tr>';
         updatePaginationControls(0, 0);
         return;
     }
@@ -930,13 +1058,14 @@ function renderWatchlistTable(items, page = 1) {
         const decStr = item.is_deceased ? "🪦 Mort" : "Vivant";
         
         let typeBadge = "";
-        if (item.entity_type === "I") typeBadge = '<span class="status-badge no_match">I (Indiv)</span>';
-        else if (item.entity_type === "E") typeBadge = '<span class="status-badge alert">E (Entity)</span>';
-        else if (item.entity_type === "V") typeBadge = '<span class="status-badge warning">V (Vessel)</span>';
-        else typeBadge = '<span class="status-badge">O (Other)</span>';
-        
+        if (item.entity_type === "I") typeBadge = '<span class="status-badge no_match">I (Individu)</span>';
+        else if (item.entity_type === "E") typeBadge = '<span class="status-badge alert">E (Entité)</span>';
+        else if (item.entity_type === "V") typeBadge = '<span class="status-badge warning">V (Navire)</span>';
+        else typeBadge = '<span class="status-badge">O (Autre)</span>';
+
         tr.innerHTML = `
             <td><code>${escapeHtml(item.entity_id)}</code></td>
+            <td>${listTypeBadge(item._list_type)}</td>
             <td>${typeBadge}</td>
             <td>
                 <strong>${escapeHtml(item.primary_name)}</strong>
@@ -956,24 +1085,22 @@ function renderWatchlistTable(items, page = 1) {
     updatePaginationControls(items.length, page);
 }
 
-// Filter Watchlist active items
+// Filter Watchlist active items (texte + type de liste combinés)
 function filterWatchlist() {
     const query = document.getElementById("wl-search-input").value.toLowerCase().trim();
-    if (!query) {
-        wlFilteredItems = activeWatchlist;
-        wlCurrentPage = 1;
-        renderWatchlistTable(wlFilteredItems, wlCurrentPage);
-        return;
-    }
-    
+    const listFilterEl = document.getElementById("wl-list-filter");
+    const listFilter = listFilterEl ? listFilterEl.value : "";
+
     wlFilteredItems = activeWatchlist.filter(item => {
+        if (listFilter && item._list_type !== listFilter) return false;
+        if (!query) return true;
         const id = (item.entity_id || "").toLowerCase();
         const name = (item.primary_name || "").toLowerCase();
         const lei = (item.lei_number || "").toLowerCase();
         const imo = (item.imo_number || "").toLowerCase();
         return id.includes(query) || name.includes(query) || lei.includes(query) || imo.includes(query);
     });
-    
+
     wlCurrentPage = 1;
     renderWatchlistTable(wlFilteredItems, wlCurrentPage);
 }
@@ -1093,6 +1220,10 @@ async function handleScreening(event) {
         client_alternative_addresses: altAddressesList,
         client_date_of_death: dateOfDeath || null
     };
+
+    // Périmètre des listes criblées (défaut : toutes ; restriction tracée dans l'audit)
+    const restrictedLists = selectedScreeningLists("screening-lists-checkboxes");
+    if (restrictedLists) payload.screening_lists = restrictedLists;
     
     const placeholder = document.getElementById("screening-results-placeholder");
     const resultsCard = document.getElementById("screening-results-card");
@@ -1111,24 +1242,47 @@ async function handleScreening(event) {
         if (!response.ok) {
             const errData = await response.json();
             const errors = errData.detail && errData.detail.errors ? errData.detail.errors.join(", ") : JSON.stringify(errData);
-            alert(`Criblage rejeté par le Data Quality Gate : ${errors}`);
+            showToast(`Criblage rejeté par le Data Quality Gate : ${errors}`, "error");
             return;
         }
-        
+
         const data = await response.json();
-        
+
         placeholder.classList.add("hidden");
         resultsCard.classList.remove("hidden");
 
         renderScreeningResult(data);
+
+        // Continuité criblage -> alerte : lien direct vers l'alerte ouverte
+        const alertLink = document.getElementById("screening-alert-link");
+        if (alertLink) {
+            if (data.alert_id) {
+                alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('alerts'); openAlertModal(${data.alert_id});">🔎 Instruire l'alerte #${data.alert_id}</button>`;
+                alertLink.classList.remove("hidden");
+            } else {
+                alertLink.classList.add("hidden");
+                alertLink.innerHTML = "";
+            }
+        }
+        // Rappel visuel d'un criblage à périmètre restreint (tracé dans l'audit)
+        const restrictionNote = document.getElementById("screening-restriction-note");
+        if (restrictionNote) {
+            if (data.screening_lists && data.screening_lists !== "ALL") {
+                restrictionNote.innerHTML = `<small style="color: var(--color-warning);">⚠️ Criblage restreint aux listes : <strong>${escapeHtml(data.screening_lists.map(listTypeLabel).join(", "))}</strong> (tracé dans le journal d'audit)</small>`;
+                restrictionNote.classList.remove("hidden");
+            } else {
+                restrictionNote.classList.add("hidden");
+                restrictionNote.innerHTML = "";
+            }
+        }
         // Une decision ALERT ouvre une alerte de travail : rafraichir le badge
         if (data.alert_id) fetchAlerts();
     } catch (e) {
         console.error("Error screening:", e);
-        alert("Erreur réseau lors de l'appel au moteur.");
+        showToast("Erreur réseau lors de l'appel au moteur.", "error");
     } finally {
         submitBtn.disabled = false;
-        submitBtn.textContent = "Launch Screening Engine";
+        submitBtn.textContent = "Lancer le criblage";
     }
 }
 
@@ -1299,7 +1453,7 @@ function loadSampleBatchJSON() {
 async function runBatchScreening() {
     const text = document.getElementById("batch-json-input").value.trim();
     if (!text) {
-        alert("Saisissez des clients.");
+        showToast("Saisissez des clients.", "error");
         return;
     }
     
@@ -1307,13 +1461,16 @@ async function runBatchScreening() {
     try {
         clients = JSON.parse(text);
         if (!Array.isArray(clients)) {
-            alert("Format attendu : Tableau JSON");
+            showToast("Format attendu : tableau JSON.", "error");
             return;
         }
     } catch (e) {
-        alert(`Erreur JSON : ${e.message}`);
+        showToast(`Erreur JSON : ${e.message}`, "error");
         return;
     }
+
+    // Périmètre des listes criblées, appliqué à chaque client du lot
+    const batchRestriction = selectedScreeningLists("batch-lists-checkboxes");
     
     const btn = document.getElementById("run-batch-btn");
     btn.disabled = true;
@@ -1327,10 +1484,11 @@ async function runBatchScreening() {
     
     try {
         for (const client of clients) {
+            const payload = batchRestriction ? { ...client, screening_lists: batchRestriction } : client;
             const response = await fetch("/api/screen", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(client)
+                body: JSON.stringify(payload)
             });
             
             const tr = document.createElement("tr");
@@ -1360,7 +1518,7 @@ async function runBatchScreening() {
                     <td><code>${escapeHtml(best.watchlist_entity.entity_id)}</code></td>
                     <td><strong>${escapeHtml(best.best_watchlist_name)}</strong></td>
                     <td style="color:var(--color-alert); font-weight:700">${best.final_score.toFixed(1)}%</td>
-                    <td><span class="status-badge alert">ALERT</span></td>
+                    <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('alerts'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;">🔎 #${data.alert_id}</a>` : ""}</td>
                 `;
             } else {
                 tr.innerHTML = `
@@ -1377,9 +1535,13 @@ async function runBatchScreening() {
         
         document.getElementById("batch-alerts-count").textContent = alertsCount;
         resultsContainer.classList.remove("hidden");
+        if (batchRestriction) {
+            showToast(`Criblage de masse restreint aux listes : ${batchRestriction.map(listTypeLabel).join(", ")} (tracé dans l'audit).`, "info");
+        }
+        if (alertsCount) fetchAlerts();
     } catch (e) {
         console.error("Batch failure:", e);
-        alert("Erreur lors de l'exécution du batch.");
+        showToast("Erreur lors de l'exécution du criblage de masse.", "error");
     } finally {
         btn.disabled = false;
         btn.textContent = "Lancer le Batch Screening";
@@ -1388,33 +1550,56 @@ async function runBatchScreening() {
 }
 
 // Fetch Audit history
-async function fetchAuditHistory() {
+let auditCurrentPage = 1;
+
+async function fetchAuditHistory(page = null) {
     try {
-        const response = await fetch("/api/history");
-        auditHistory = await response.json();
+        if (page) auditCurrentPage = page;
+        const params = new URLSearchParams({ page: String(auditCurrentPage), page_size: "50" });
+        const listFilterEl = document.getElementById("audit-list-filter");
+        if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+        const statusFilterEl = document.getElementById("audit-status-filter");
+        if (statusFilterEl && statusFilterEl.value) params.set("status", statusFilterEl.value);
+
+        const response = await fetch(`/api/history?${params}`);
+        const data = await response.json();
+        auditHistory = data.items || [];
         renderAuditHistoryTable(auditHistory);
+        renderAuditPagination(data.total || 0, data.page || 1, data.page_size || 50);
     } catch (e) {
         console.error("Error loading history:", e);
     }
 }
 
+function renderAuditPagination(total, page, pageSize) {
+    const container = document.getElementById("audit-pagination");
+    if (!container) return;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    container.innerHTML = `
+        <span class="pagination-info">${total} décision(s) — page ${page} / ${totalPages}</span>
+        <button class="pagination-btn" ${page <= 1 ? "disabled" : ""} onclick="fetchAuditHistory(${page - 1})">Précédent</button>
+        <button class="pagination-btn" ${page >= totalPages ? "disabled" : ""} onclick="fetchAuditHistory(${page + 1})">Suivant</button>
+    `;
+}
+
 function renderAuditHistoryTable(logs) {
     const tbody = document.querySelector("#audit-table tbody");
     tbody.innerHTML = "";
-    
+
     if (logs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucun audit log disponible</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted)">Aucune décision pour ce filtre</td></tr>';
         return;
     }
-    
+
     logs.forEach(log => {
         const dateStr = new Date(log.timestamp + "Z").toLocaleString("fr-FR");
         const tr = document.createElement("tr");
-        
+
         tr.innerHTML = `
             <td>${escapeHtml(dateStr)}</td>
             <td><strong>${escapeHtml(log.client_name)}</strong> <span class="status-badge">${log.client_type}</span></td>
             <td><code>${escapeHtml(log.watchlist_id)}</code> - <strong>${escapeHtml(log.watchlist_name)}</strong></td>
+            <td>${listTypeBadge(log.list_type)}</td>
             <td style="font-weight: 700; color: ${log.status === "ALERT" ? "var(--color-alert)" : "var(--color-safe)"}">${log.final_score.toFixed(1)}%</td>
             <td><span class="status-badge ${log.status === "ALERT" ? "alert" : "no_match"}">${log.status}</span></td>
             <td><button class="btn btn-secondary" style="font-size:0.75rem; padding: 0.25rem 0.5rem;" onclick="viewAuditLogDetail(${log.id})">Inspecter</button></td>
@@ -1455,6 +1640,10 @@ function viewAuditLogDetail(logId) {
                 <div>Statut : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${log.status}</strong></div>
                 <div>Watchlist : <strong><code>${escapeHtml(log.watchlist_id)}</code> - ${escapeHtml(log.watchlist_name)}</strong></div>
                 <div>Client : <strong>${escapeHtml(log.client_name)} (${log.client_type})</strong></div>
+                <div>Liste d'origine : ${listTypeBadge(log.list_type)}</div>
+                ${tree && tree.screening_lists_restriction && tree.screening_lists_restriction !== "ALL"
+                    ? `<div style="color: var(--color-warning);">⚠️ Criblage restreint : <strong>${escapeHtml(tree.screening_lists_restriction.map(listTypeLabel).join(", "))}</strong></div>`
+                    : ""}
             </div>
         </div>
         
@@ -1484,22 +1673,17 @@ function viewAuditLogDetail(logId) {
         </div>
     `;
     
-    modal.style.display = "block";
+    modal.classList.remove("hidden");
+    modal.style.display = "flex";
 }
 
 function closeAuditModal() {
-    document.getElementById("audit-modal").style.display = "none";
+    const modal = document.getElementById("audit-modal");
+    modal.classList.add("hidden");
+    modal.style.display = "none";
 }
 
-async function fetchConfig() {
-    try {
-        const response = await fetch("/api/config");
-        const configData = await response.json();
-        console.log("Active configuration loaded:", configData);
-    } catch (e) {
-        console.error("Error loading config:", e);
-    }
-}
+// (fetchConfig est définie en tête de fichier — le doublon sans gestion du 401 a été supprimé.)
 
 // Escape HTML utility
 const def_escape = {
@@ -1514,16 +1698,12 @@ function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, function(m) { return def_escape[m]; });
 }
 
-window.onclick = function(event) {
-    const modal = document.getElementById("audit-modal");
-    if (event.target == modal) {
-        modal.style.display = "none";
-    }
-}
+// (Le gestionnaire global de clic sur l'arrière-plan des modales est défini plus bas —
+//  l'ancien doublon, qui ne gérait que la modale d'audit, a été supprimé.)
 
 // Purge Failed/Processing Snapshots
 async function purgeFailedSnapshots() {
-    if (!confirm("Voulez-vous vraiment purger tous les snapshots et entités en erreur ou en cours de traitement ? Cette action est irréversible.")) {
+    if (!await confirmDialog("Voulez-vous vraiment purger tous les snapshots et entités en erreur ou en cours de traitement ?\nCette action est irréversible.", { title: "Purger les imports erronés", danger: true, confirmLabel: "Purger" })) {
         return;
     }
     
@@ -1540,17 +1720,17 @@ async function purgeFailedSnapshots() {
         
         if (!response.ok) {
             const data = await response.json();
-            alert(`Erreur lors de la purge : ${data.detail || JSON.stringify(data)}`);
+            showToast(`Erreur lors de la purge : ${data.detail || JSON.stringify(data)}`, "error");
             return;
         }
         
         const data = await response.json();
-        alert(`Purge terminée : ${data.message}`);
+        showToast(`Purge terminée : ${data.message}`, "success");
         fetchSnapshots();
         fetchWatchlist();
     } catch (e) {
         console.error("Purge failed:", e);
-        alert("Erreur réseau lors de l'appel à la purge.");
+        showToast("Erreur réseau lors de l'appel à la purge.", "error");
     } finally {
         if (btn) {
             btn.disabled = false;
@@ -1629,7 +1809,7 @@ async function fetchUsersList() {
     try {
         const response = await fetch("/api/users");
         if (response.status === 401 || response.status === 403) {
-            alert("Accès refusé. Droits d'administrateur requis.");
+            showToast("Accès refusé. Droits d'administrateur requis.", "error");
             return;
         }
         registeredUsers = await response.json();
@@ -1758,7 +1938,7 @@ async function handleSaveUser(event) {
 
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur: " + (data.detail || "Échec de l'enregistrement de l'utilisateur."));
+            showToast("Erreur: " + (data.detail || "Échec de l'enregistrement de l'utilisateur."), "error");
             return;
         }
 
@@ -1769,12 +1949,12 @@ async function handleSaveUser(event) {
         }
     } catch (err) {
         console.error("Save user error:", err);
-        alert("Erreur de communication avec le serveur.");
+        showToast("Erreur de communication avec le serveur.", "error");
     }
 }
 
 async function deleteUserAccount(userId, username) {
-    if (!confirm(`Voulez-vous vraiment supprimer définitivement le compte de @${username} ?`)) return;
+    if (!await confirmDialog(`Voulez-vous vraiment supprimer définitivement le compte de @${username} ?`, { title: "Suppression de compte", danger: true, confirmLabel: "Supprimer" })) return;
 
     try {
         const response = await fetch(`/api/users/${userId}`, {
@@ -1782,14 +1962,14 @@ async function deleteUserAccount(userId, username) {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur: " + (data.detail || "Échec de la suppression du compte."));
+            showToast("Erreur: " + (data.detail || "Échec de la suppression du compte."), "error");
             return;
         }
 
         fetchUsersList();
     } catch (err) {
         console.error("Delete user error:", err);
-        alert("Erreur de connexion lors de la suppression.");
+        showToast("Erreur de connexion lors de la suppression.", "error");
     }
 }
 
@@ -1828,14 +2008,14 @@ async function handleUpdateProfile(event) {
         });
         const profileData = await profileResp.json();
         if (!profileResp.ok) {
-            alert("Erreur Profil: " + (profileData.detail || "Échec de la mise à jour du profil."));
+            showToast("Erreur Profil: " + (profileData.detail || "Échec de la mise à jour du profil."), "error");
             return;
         }
 
         // 2. Update Password if requested
         if (oldPassword || newPassword) {
             if (!oldPassword || !newPassword) {
-                alert("Pour modifier votre mot de passe, veuillez saisir l'ancien ET le nouveau mot de passe.");
+                showToast("Pour modifier votre mot de passe, veuillez saisir l'ancien ET le nouveau mot de passe.", "error");
                 return;
             }
             const passResp = await fetch("/api/users/me/password", {
@@ -1845,17 +2025,17 @@ async function handleUpdateProfile(event) {
             });
             const passData = await passResp.json();
             if (!passResp.ok) {
-                alert("Erreur Mot de Passe: " + (passData.detail || "Échec du changement de mot de passe."));
+                showToast("Erreur Mot de Passe: " + (passData.detail || "Échec du changement de mot de passe."), "error");
                 return;
             }
         }
 
-        alert("Votre profil et vos paramètres de sécurité ont été mis à jour.");
+        showToast("Votre profil et vos paramètres de sécurité ont été mis à jour.", "success");
         closeProfileModal();
         checkAuthUser();
     } catch (err) {
         console.error("Update profile error:", err);
-        alert("Erreur de communication avec le serveur.");
+        showToast("Erreur de communication avec le serveur.", "error");
     }
 }
 
@@ -1944,14 +2124,14 @@ async function saveIngestionSettings() {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Échec de la mise à jour des réglages."));
+            showToast("Erreur : " + (data.detail || "Échec de la mise à jour des réglages."), "error");
             return;
         }
-        alert(data.message || "Réglages mis à jour.");
+        showToast(data.message || "Réglages mis à jour.", "success");
         fetchIngestionSettings();
     } catch (e) {
         console.error("Error saving ingestion settings:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
@@ -1985,7 +2165,7 @@ function renderPendingTable(pending) {
             <tr>
                 <td>${escapeHtml(dateStr)}</td>
                 <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}...</small></td>
-                <td><span class="status-badge warning">${escapeHtml(snap.file_type)}</span></td>
+                <td>${listTypeBadge(snap.file_type)}</td>
                 <td>${snap.record_count}</td>
                 <td>${snap.excluded_count || 0}</td>
                 <td><button class="btn btn-sm btn-secondary" onclick="openReviewDetail('${escapeHtml(snap.snapshot_id)}')">🔍 Examiner</button></td>
@@ -2006,14 +2186,14 @@ async function openReviewDetail(snapshotId) {
         const response = await fetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Impossible de charger le snapshot."));
+            showToast("Erreur : " + (data.detail || "Impossible de charger le snapshot."), "error");
             return;
         }
         document.getElementById("review-detail-card").classList.remove("hidden");
         document.getElementById("review-detail-title").textContent = `Examen du Snapshot — ${data.file_name}`;
         const uploadedStr = data.uploaded_at ? new Date(data.uploaded_at).toLocaleString("fr-FR") : "-";
         document.getElementById("review-detail-meta").textContent =
-            `${data.file_type} · ${data.record_count} fiches · importé le ${uploadedStr} · delta calculé par rapport à la production actuelle` +
+            `Liste ${listTypeLabel(data.file_type)} · ${data.record_count} fiches · importé le ${uploadedStr} · delta calculé par rapport à la production actuelle` +
             (data.production_snapshot_id ? "" : " (aucune liste du même type en production : tout est en ajout)");
         const summary = data.delta_summary || {};
         document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
@@ -2023,7 +2203,7 @@ async function openReviewDetail(snapshotId) {
         document.getElementById("review-detail-card").scrollIntoView({ behavior: "smooth" });
     } catch (e) {
         console.error("Error opening review detail:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
@@ -2037,7 +2217,7 @@ async function loadReviewEntitiesPage(page) {
         const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/entities?${params}`);
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Impossible de charger les entités."));
+            showToast("Erreur : " + (data.detail || "Impossible de charger les entités."), "error");
             return;
         }
         renderReviewEntitiesTable(data);
@@ -2099,7 +2279,7 @@ function updateReviewSelectionInfo() {
 
 function openExclusionModal() {
     if (reviewExcludedSelection.size === 0) {
-        alert("Sélectionnez au moins une entité à exclure (cases à cocher).");
+        showToast("Sélectionnez au moins une entité à exclure (cases à cocher).", "error");
         return;
     }
     document.getElementById("exclusion-modal-count").textContent =
@@ -2120,11 +2300,11 @@ async function submitExclusions(event) {
     const fileInput = document.getElementById("exclusion-file");
     // Pre-validation cote client selon les reglages modulaires (le serveur revalide)
     if (ingestionSettings && ingestionSettings.exclusion_justification_required && !justification) {
-        alert("Une justification est obligatoire pour exclure une entité (réglage actif).");
+        showToast("Une justification est obligatoire pour exclure une entité (réglage actif).", "error");
         return;
     }
     if (ingestionSettings && ingestionSettings.exclusion_file_required && fileInput.files.length === 0) {
-        alert("Une pièce jointe justificative est obligatoire pour exclure une entité (réglage actif).");
+        showToast("Une pièce jointe justificative est obligatoire pour exclure une entité (réglage actif).", "error");
         return;
     }
     const formData = new FormData();
@@ -2138,23 +2318,23 @@ async function submitExclusions(event) {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Échec de l'exclusion."));
+            showToast("Erreur : " + (data.detail || "Échec de l'exclusion."), "error");
             return;
         }
         closeExclusionModal();
         reviewExcludedSelection = new Set();
-        alert(data.message);
+        showToast(data.message, "success");
         loadReviewEntitiesPage(reviewCurrentPage);
         fetchPendingReviews();
     } catch (e) {
         console.error("Error submitting exclusions:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
 async function removeExclusions() {
     if (!reviewCurrentSnapshotId || reviewExcludedSelection.size === 0) {
-        alert("Sélectionnez au moins une entité à réintégrer (cases à cocher).");
+        showToast("Sélectionnez au moins une entité à réintégrer (cases à cocher).", "error");
         return;
     }
     try {
@@ -2165,22 +2345,22 @@ async function removeExclusions() {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Échec de la réintégration."));
+            showToast("Erreur : " + (data.detail || "Échec de la réintégration."), "error");
             return;
         }
         reviewExcludedSelection = new Set();
-        alert(data.message);
+        showToast(data.message, "success");
         loadReviewEntitiesPage(reviewCurrentPage);
         fetchPendingReviews();
     } catch (e) {
         console.error("Error removing exclusions:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
 async function approvePendingSnapshot() {
     if (!reviewCurrentSnapshotId) return;
-    if (!confirm("Approuver ce snapshot ? Il sera mis en production et remplacera les listes antérieures du même type (hors entités exclues).")) return;
+    if (!await confirmDialog("Approuver ce snapshot ?\nIl sera mis en production et remplacera les listes antérieures du même type (hors entités exclues).", { title: "Approbation d'homologation", confirmLabel: "Approuver" })) return;
     const comment = document.getElementById("review-comment").value.trim();
     try {
         const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/approve`, {
@@ -2190,10 +2370,10 @@ async function approvePendingSnapshot() {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Échec de l'approbation."));
+            showToast("Erreur : " + (data.detail || "Échec de l'approbation."), "error");
             return;
         }
-        alert(`${data.message} (${data.excluded_count} entité(s) exclue(s))`);
+        showToast(`${data.message} (${data.excluded_count} entité(s) exclue(s))`, "success");
         document.getElementById("review-detail-card").classList.add("hidden");
         reviewCurrentSnapshotId = null;
         fetchPendingReviews();
@@ -2201,7 +2381,7 @@ async function approvePendingSnapshot() {
         fetchWatchlist();
     } catch (e) {
         console.error("Error approving snapshot:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
@@ -2209,10 +2389,10 @@ async function rejectPendingSnapshot() {
     if (!reviewCurrentSnapshotId) return;
     const comment = document.getElementById("review-comment").value.trim();
     if (!comment) {
-        alert("Un commentaire est requis pour rejeter un snapshot.");
+        showToast("Un commentaire est requis pour rejeter un snapshot.", "error");
         return;
     }
-    if (!confirm("Rejeter ce snapshot ? Il n'entrera jamais en production (conservé en base pour l'audit).")) return;
+    if (!await confirmDialog("Rejeter ce snapshot ?\nIl n'entrera jamais en production (conservé en base pour l'audit).", { title: "Rejet d'homologation", danger: true, confirmLabel: "Rejeter" })) return;
     try {
         const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/reject`, {
             method: "POST",
@@ -2221,17 +2401,17 @@ async function rejectPendingSnapshot() {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Échec du rejet."));
+            showToast("Erreur : " + (data.detail || "Échec du rejet."), "error");
             return;
         }
-        alert(data.message);
+        showToast(data.message, "success");
         document.getElementById("review-detail-card").classList.add("hidden");
         reviewCurrentSnapshotId = null;
         fetchPendingReviews();
         fetchSnapshots();
     } catch (e) {
         console.error("Error rejecting snapshot:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
@@ -2244,6 +2424,8 @@ async function fetchAlerts() {
     try {
         const params = new URLSearchParams({ page: "1", page_size: "100" });
         if (alertsFilter) params.set("status", alertsFilter);
+        const listFilterEl = document.getElementById("alerts-list-filter");
+        if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const response = await fetch(`/api/alerts?${params}`);
         if (!response.ok) return;
         const data = await response.json();
@@ -2285,7 +2467,7 @@ function renderAlertsTable(items) {
     const tbody = document.querySelector("#alerts-table tbody");
     if (!tbody) return;
     if (!items.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Aucune alerte pour ce filtre.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Aucune alerte pour ce filtre.</td></tr>';
         return;
     }
     tbody.innerHTML = items.map(a => `
@@ -2293,6 +2475,7 @@ function renderAlertsTable(items) {
             <td>${a.created_at ? new Date(a.created_at).toLocaleString("fr-FR") : "-"}</td>
             <td><strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small></td>
             <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
+            <td>${listTypeBadge(a.list_type)}</td>
             <td><strong style="color: ${a.final_score >= 90 ? '#f87171' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
             <td>${alertStatusBadge(a.status)}</td>
             <td>${escapeHtml(a.assigned_to || "—")}</td>
@@ -2307,7 +2490,7 @@ async function openAlertModal(alertId) {
         const response = await fetch(`/api/alerts/${alertId}`);
         const a = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (a.detail || "Impossible de charger l'alerte."));
+            showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
             return;
         }
         document.getElementById("alert-modal-title").innerHTML =
@@ -2392,7 +2575,7 @@ async function _postAlertAction(path, body) {
     });
     const data = await response.json();
     if (!response.ok) {
-        alert("Erreur : " + (data.detail || "Action refusée."));
+        showToast("Erreur : " + (data.detail || "Action refusée."), "error");
         return null;
     }
     return data;
@@ -2404,7 +2587,7 @@ async function alertAction(action) {
 }
 
 async function alertActionWithComment(action, promptLabel) {
-    const comment = prompt(promptLabel + " :");
+    const comment = await promptDialog(promptLabel, { textarea: true, placeholder: "Votre commentaire..." });
     if (comment === null) return;
     const data = await _postAlertAction(action, { comment });
     if (data) { openAlertModal(currentAlertId); fetchAlerts(); }
@@ -2412,24 +2595,34 @@ async function alertActionWithComment(action, promptLabel) {
 
 async function proposeAlertDecision(decision) {
     const label = decision === "CONFIRMED" ? "vrai positif" : "faux positif";
-    const comment = prompt(`Commentaire obligatoire pour proposer « ${label} » :`);
+    const comment = await promptDialog(`Proposer « ${label} »`, {
+        message: "Commentaire obligatoire motivant la décision proposée (validation 4-yeux ensuite).",
+        textarea: true, placeholder: "Motivation réglementaire de la décision..."
+    });
     if (comment === null) return;
     const data = await _postAlertAction("propose", { decision, comment });
-    if (data) { alert(data.message); openAlertModal(currentAlertId); fetchAlerts(); }
+    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); fetchAlerts(); }
 }
 
 async function validateAlertDecision(approve) {
-    const comment = prompt(approve ? "Commentaire (optionnel) :" : "Motif du refus (obligatoire) :");
+    const comment = await promptDialog(approve ? "Valider la décision (4-yeux)" : "Refuser et renvoyer en analyse", {
+        message: approve ? "Commentaire (optionnel)." : "Motif du refus (obligatoire) — l'alerte repartira en analyse.",
+        textarea: true, required: !approve,
+        placeholder: approve ? "Commentaire éventuel..." : "Motif du refus..."
+    });
     if (comment === null) return;
     const data = await _postAlertAction("validate", { approve, comment });
-    if (data) { alert(data.message); openAlertModal(currentAlertId); fetchAlerts(); }
+    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); fetchAlerts(); }
 }
 
 // ------------------ LISTE BLANCHE CLIENT x LISTÉ (GOOD GUYS) ------------------
 
 async function fetchWhitelist() {
     try {
-        const response = await fetch("/api/whitelist?page_size=100");
+        const params = new URLSearchParams({ page_size: "100" });
+        const listFilterEl = document.getElementById("whitelist-list-filter");
+        if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+        const response = await fetch(`/api/whitelist?${params}`);
         if (!response.ok) return;
         const data = await response.json();
         renderWhitelistTable(data.items || []);
@@ -2442,7 +2635,7 @@ function renderWhitelistTable(items) {
     const tbody = document.querySelector("#whitelist-table tbody");
     if (!tbody) return;
     if (!items.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Aucune paire en liste blanche.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Aucune paire en liste blanche.</td></tr>';
         return;
     }
     const stateBadge = (state) => {
@@ -2454,6 +2647,7 @@ function renderWhitelistTable(items) {
         <tr ${p.state !== "ACTIVE" ? 'style="opacity: 0.55;"' : ""}>
             <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
             <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
+            <td>${listTypeBadge(p.list_type)}</td>
             <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;">📎 ${escapeHtml(p.evidence_file_name)}</a>` : ""}</td>
             <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString("fr-FR") : ""}</small></td>
             <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString("fr-FR") : "—"}</td>
@@ -2464,7 +2658,10 @@ function renderWhitelistTable(items) {
 }
 
 async function revokeWhitelistPair(pairId) {
-    const comment = prompt("Motif de la révocation (obligatoire) — les alertes de ce couple reprendront :");
+    const comment = await promptDialog("Révoquer la paire de liste blanche", {
+        message: "Motif de la révocation (obligatoire) — les alertes de ce couple reprendront.",
+        textarea: true, placeholder: "Motif réglementaire de la révocation..."
+    });
     if (comment === null) return;
     try {
         const response = await fetch(`/api/whitelist/${pairId}/revoke`, {
@@ -2474,10 +2671,10 @@ async function revokeWhitelistPair(pairId) {
         });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Révocation refusée."));
+            showToast("Erreur : " + (data.detail || "Révocation refusée."), "error");
             return;
         }
-        alert(data.message);
+        showToast(data.message, "success");
         fetchWhitelist();
     } catch (e) {
         console.error("Error revoking whitelist pair:", e);
@@ -2522,15 +2719,15 @@ async function submitWhitelist(event) {
         const response = await fetch("/api/whitelist", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (data.detail || "Mise en liste blanche refusée."));
+            showToast("Erreur : " + (data.detail || "Mise en liste blanche refusée."), "error");
             return;
         }
         closeWhitelistModal();
-        alert(data.message);
+        showToast(data.message, "success");
         fetchWhitelist();
     } catch (e) {
         console.error("Error creating whitelist pair:", e);
-        alert("Erreur réseau de communication.");
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 
@@ -2560,7 +2757,7 @@ async function fetchKpis() {
         const listsBody = document.querySelector("#kpi-lists-table tbody");
         const byType = (k.lists || {}).production_entities_by_type || {};
         listsBody.innerHTML = Object.keys(byType).length
-            ? Object.entries(byType).map(([t, n]) => `<tr><td>${escapeHtml(t)}</td><td><strong>${n}</strong></td></tr>`).join("")
+            ? Object.entries(byType).map(([t, n]) => `<tr><td>${listTypeBadge(t)}</td><td><strong>${n}</strong></td></tr>`).join("")
             : '<tr><td colspan="2" style="color: var(--text-muted); text-align: center;">Aucune liste en production.</td></tr>';
 
         const syncsBody = document.querySelector("#kpi-syncs-table tbody");
@@ -2568,7 +2765,7 @@ async function fetchKpis() {
         syncsBody.innerHTML = syncs.length
             ? syncs.map(s => `<tr>
                 <td>${s.executed_at ? new Date(s.executed_at).toLocaleString("fr-FR") : "-"}</td>
-                <td>${escapeHtml(s.source)} <small style="color:var(--text-muted)">${escapeHtml(s.trigger)}</small></td>
+                <td>${escapeHtml(SYNC_SOURCE_LABELS[s.source] || s.source)} <small style="color:var(--text-muted)">${escapeHtml(s.trigger)}</small></td>
                 <td>${escapeHtml(s.status)}</td>
                 <td><small>+${s.added} / ~${s.modified} / -${s.removed}</small></td>
               </tr>`).join("")
@@ -2583,7 +2780,7 @@ async function fetchKpis() {
 async function runTransactionScreening() {
     const input = document.getElementById("txn-file-input");
     if (!input.files || !input.files.length) {
-        alert("Sélectionnez un message de paiement XML (pain.001 ou pacs.008).");
+        showToast("Sélectionnez un message de paiement XML (pain.001 ou pacs.008).", "error");
         return;
     }
     const btn = document.getElementById("txn-screen-btn");
@@ -2595,13 +2792,13 @@ async function runTransactionScreening() {
         const response = await fetch("/api/transactions/screen", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) {
-            alert("Erreur : " + (typeof data.detail === "string" ? data.detail : "message invalide."));
+            showToast("Erreur : " + (typeof data.detail === "string" ? data.detail : "message invalide."), "error");
             return;
         }
         renderTransactionResult(data);
     } catch (e) {
         console.error("Transaction screening error:", e);
-        alert("Erreur lors du filtrage transactionnel.");
+        showToast("Erreur lors du filtrage transactionnel.", "error");
     } finally {
         btn.disabled = false;
         btn.textContent = "Filtrer le paiement";

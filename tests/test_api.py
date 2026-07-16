@@ -75,11 +75,16 @@ def test_screen_rejected_by_quality_gate(client):
     assert any("Rule_B04" in err for err in data["detail"]["errors"])
 
 def test_get_history(client):
-    # Get screening audit trail
+    # Get screening audit trail (paginated envelope)
     response = client.get("/api/history")
     assert response.status_code == 200
     data = response.json()
-    assert isinstance(data, list)
+    assert isinstance(data["items"], list)
+    assert data["page"] == 1
+    assert "total" in data and "page_size" in data
+    for item in data["items"]:
+        assert "list_type" in item
+        assert "status" in item
 
 
 def test_ingest_reupload_error_snapshot(client):

@@ -337,6 +337,11 @@ class ScreenClientRequest(BaseModel):
     client_national_id_documents: List[Dict[str, Any]] = []
     client_other_id_documents: List[Dict[str, Any]] = []
 
+    # Restriction du criblage a un sous-ensemble de listes (WATCHLIST_*).
+    # Absent ou vide = TOUTES les listes (valeur par defaut conformite).
+    # Toute restriction est tracee dans le journal d'audit.
+    screening_lists: Optional[List[str]] = None
+
 class DeltaRequest(BaseModel):
     snapshot_old_id: str
     snapshot_new_id: str
@@ -619,7 +624,22 @@ async def screen_client(
     3. Runs fuzzy matching and contextual adjustment calculations.
     """
     client_dict = request.model_dump()
-    
+
+    # Restriction eventuelle du perimetre de criblage (defaut : toutes listes).
+    # Validee strictement et retiree du profil client (elle n'en fait pas partie).
+    client_dict.pop("screening_lists", None)
+    requested_lists = None
+    if request.screening_lists:
+        requested_lists = sorted({v.strip().upper() for v in request.screening_lists if v and v.strip()})
+        invalid = [v for v in requested_lists if v not in WATCHLIST_FILE_TYPES]
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Type(s) de liste inconnu(s) : {', '.join(invalid)} (valeurs possibles : {', '.join(WATCHLIST_FILE_TYPES)})."
+            )
+        if set(requested_lists) == set(WATCHLIST_FILE_TYPES):
+            requested_lists = None  # toutes les listes = aucune restriction
+
     # Normalize client_type to PP/PM for internal validation and scoring engine
     if client_dict.get("client_type") in ["I", "PP"]:
         client_dict["client_type"] = "PP"
@@ -653,6 +673,8 @@ async def screen_client(
     candidates = {}
     for key in client_keys:
         for item in watchlist_index.get(key, []):
+            if requested_lists and item.get("_list_type") not in requested_lists:
+                continue
             candidates[item["entity_id"]] = item
             
     # Scoring
@@ -685,6 +707,9 @@ async def screen_client(
                 best_match["status"] = "WHITELISTED"
                 best_match["whitelist_pair_id"] = wl_pair.id
                 whitelist_pair_id = wl_pair.id
+        # Tracabilite : toute restriction du perimetre de criblage est
+        # persistee dans le decision_tree du journal immuable
+        best_match["screening_lists_restriction"] = requested_lists or "ALL"
         audit_record = log_compliance_decision(
             db,
             client_dict,
@@ -697,7 +722,11 @@ async def screen_client(
         # Une decision ALERT ouvre (ou re-detecte) une alerte de travail
         if best_match.get("status") == "ALERT":
             alert_id = open_or_redetect_alert(
-                db, audit_record, client_dict.get("client_id"), best_match, current_user["username"]
+                db, audit_record, client_dict.get("client_id"), best_match, current_user["username"],
+                detail_suffix=(
+                    f" [Criblage restreint aux listes : {', '.join(requested_lists)}]"
+                    if requested_lists else ""
+                )
             )
     else:
         # Log dummy NO_MATCH result
@@ -713,7 +742,8 @@ async def screen_client(
                 "gender": {"score": 0.0, "description": "N/A"},
                 "geography": {"score": 0.0, "description": "N/A"}
             },
-            "cut_off_applied": config.get("scoring", {}).get("cut_off_threshold", 75.0)
+            "cut_off_applied": config.get("scoring", {}).get("cut_off_threshold", 75.0),
+            "screening_lists_restriction": requested_lists or "ALL"
         }
         dummy_wl = {"entity_id": "NONE", "primary_name": "Aucun match"}
         audit_record = log_compliance_decision(
@@ -735,22 +765,37 @@ async def screen_client(
         "audit_trail_id": audit_id,
         "alert_id": alert_id,
         "whitelisted": whitelist_pair_id is not None,
-        "whitelist_pair_id": whitelist_pair_id
+        "whitelist_pair_id": whitelist_pair_id,
+        "screening_lists": requested_lists or "ALL"
     }
 
 @app.post("/api/transactions/screen")
 async def screen_transaction_message(
     file: UploadFile = File(...),
+    screening_lists: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Filtrage transactionnel ISO 20022 : parse un message de paiement pain.001
     ou pacs.008, crible chaque partie (donneur d'ordre, bénéficiaire, ultimes,
-    agents bancaires) contre les listes en production et rend un verdict
-    global PASS / HIT. Chaque partie criblée est tracée dans le journal
-    d'audit ; chaque hit ouvre une alerte de travail.
+    agents bancaires) contre les listes en production — ou le sous-ensemble
+    `screening_lists` (CSV de types WATCHLIST_*, restriction tracée dans
+    l'audit) — et rend un verdict global PASS / HIT. Chaque partie criblée
+    est tracée dans le journal d'audit ; chaque hit ouvre une alerte.
     """
+    requested_lists = None
+    if screening_lists and screening_lists.strip():
+        requested_lists = sorted({v.strip().upper() for v in screening_lists.split(",") if v.strip()})
+        invalid = [v for v in requested_lists if v not in WATCHLIST_FILE_TYPES]
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Type(s) de liste inconnu(s) : {', '.join(invalid)} (valeurs possibles : {', '.join(WATCHLIST_FILE_TYPES)})."
+            )
+        if set(requested_lists) == set(WATCHLIST_FILE_TYPES):
+            requested_lists = None
+
     content = await file.read()
     try:
         parsed = parse_iso20022_payment(content)
@@ -758,7 +803,7 @@ async def screen_transaction_message(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     result = screen_payment_message(
         db, parsed, watchlist_index, watchlist_version, watchlist_hash,
-        current_user["username"]
+        current_user["username"], screening_lists=requested_lists
     )
     return result
 
@@ -1382,10 +1427,66 @@ async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)
 
 @app.get("/api/history")
 async def get_audit_history(
+    list_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    return db.query(AuditTrail).order_by(AuditTrail.timestamp.desc()).all()
+    """
+    Journal d'audit pagine, filtrable par statut de decision et type de liste.
+    Les enregistrements anterieurs a la colonne list_type sont restitues via
+    le decision_tree quand il porte le type (fallback lecture, le journal
+    immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
+    """
+    query = db.query(AuditTrail)
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        query = query.filter(AuditTrail.status.in_(statuses))
+    query = _apply_list_type_filter(query, AuditTrail.list_type, list_type)
+    total = query.count()
+    rows = query.order_by(AuditTrail.timestamp.desc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+
+    def _row(r: AuditTrail) -> Dict[str, Any]:
+        tree = r.decision_tree or {}
+        fallback = ((tree.get("watchlist_entity") or {}).get("_list_type")
+                    if isinstance(tree, dict) else None)
+        return {
+            "id": r.id,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "client_id": r.client_id,
+            "client_name": r.client_name,
+            "client_type": r.client_type,
+            "watchlist_id": r.watchlist_id,
+            "watchlist_name": r.watchlist_name,
+            "base_score": r.base_score,
+            "final_score": r.final_score,
+            "status": r.status,
+            "list_type": r.list_type or fallback,
+            "decision_tree": r.decision_tree,
+            "config_state": r.config_state,
+            "watchlist_version": r.watchlist_version,
+            "watchlist_hash": r.watchlist_hash,
+        }
+
+    return {"total": total, "page": page, "page_size": page_size,
+            "items": [_row(r) for r in rows]}
+
+@app.get("/api/counters")
+async def get_sidebar_counters(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Compteurs legers pour les badges de la barre laterale (polling) :
+    alertes ouvertes et snapshots en attente d'homologation.
+    """
+    return {
+        "open_alerts": db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count(),
+        "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
+    }
 
 @app.get("/api/config")
 async def get_active_config(current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -1956,6 +2057,7 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
         "watchlist_entity_id": alert.watchlist_entity_id,
         "watchlist_name": alert.watchlist_name,
         "final_score": alert.final_score,
+        "list_type": alert.list_type,
         "status": alert.status,
         "assigned_to": alert.assigned_to,
         "proposed_decision": alert.proposed_decision,
@@ -1966,6 +2068,25 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
         "decided_at": alert.decided_at.isoformat() if alert.decided_at else None,
         "decision_comment": alert.decision_comment,
     }
+
+def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
+    """
+    Filtre CSV par type de liste (motif de status_filter). La valeur speciale
+    UNKNOWN cible les enregistrements sans type (anterieurs a la colonne).
+    """
+    if not list_type_param:
+        return query
+    values = [v.strip().upper() for v in list_type_param.split(",") if v.strip()]
+    if not values:
+        return query
+    conditions = []
+    concrete = [v for v in values if v != "UNKNOWN"]
+    if concrete:
+        conditions.append(column.in_(concrete))
+    if "UNKNOWN" in values:
+        conditions.append(column.is_(None))
+    from sqlalchemy import or_
+    return query.filter(or_(*conditions))
 
 def _get_open_alert(db: Session, alert_id: int) -> Alert:
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -1982,6 +2103,7 @@ def _log_alert_event(db: Session, alert_id: int, username: str, action: str, det
 async def list_alerts(
     status_filter: Optional[str] = Query(None, alias="status"),
     assigned_to: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -1994,6 +2116,7 @@ async def list_alerts(
         query = query.filter(Alert.status.in_(statuses))
     if assigned_to:
         query = query.filter(Alert.assigned_to == assigned_to)
+    query = _apply_list_type_filter(query, Alert.list_type, list_type)
     total = query.count()
     open_count = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
     rows = query.order_by(Alert.final_score.desc(), Alert.created_at.desc()) \
@@ -2223,6 +2346,7 @@ def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
         "client_name": pair.client_name,
         "watchlist_entity_id": pair.watchlist_entity_id,
         "watchlist_name": pair.watchlist_name,
+        "list_type": pair.list_type,
         "justification": pair.justification,
         "evidence_file_name": pair.evidence_file_name,
         "created_by": pair.created_by,
@@ -2285,11 +2409,26 @@ async def create_whitelist_pair(
         evidence_name = safe_name
         evidence_path = str(target_path)
 
+    # Type de liste derive cote serveur (jamais fourni par le client) :
+    # cache de production d'abord, sinon la derniere alerte de la paire
+    list_type = next(
+        (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == watchlist_entity_id),
+        None
+    )
+    if list_type is None:
+        last_alert = db.query(Alert).filter(
+            Alert.client_id == client_id,
+            Alert.watchlist_entity_id == watchlist_entity_id,
+            Alert.list_type.isnot(None)
+        ).order_by(Alert.created_at.desc()).first()
+        list_type = last_alert.list_type if last_alert else None
+
     pair = WhitelistPair(
         client_id=client_id,
         watchlist_entity_id=watchlist_entity_id,
         client_name=(client_name or "").strip() or None,
         watchlist_name=(watchlist_name or "").strip() or None,
+        list_type=list_type,
         justification=justification or None,
         evidence_file_name=evidence_name,
         evidence_file_path=evidence_path,
@@ -2304,6 +2443,7 @@ async def create_whitelist_pair(
 @app.get("/api/whitelist")
 async def list_whitelist_pairs(
     active_only: bool = Query(False),
+    list_type: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -2317,6 +2457,7 @@ async def list_whitelist_pairs(
             WhitelistPair.revoked_at.is_(None),
             (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
         )
+    query = _apply_list_type_filter(query, WhitelistPair.list_type, list_type)
     total = query.count()
     rows = query.order_by(WhitelistPair.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
