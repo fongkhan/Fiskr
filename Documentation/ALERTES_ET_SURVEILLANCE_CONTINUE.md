@@ -92,7 +92,7 @@ Filtrage de paiements façon Fircosoft : soumission d'un message **pain.001** (o
 Onglet **Pilotage** alimenté par `GET /api/kpi` :
 
 * encours d'alertes par statut (ouvertes, en cours, en attente de validation, closes) ;
-* **taux de faux positifs** et délai moyen de décision (500 dernières alertes closes) ;
+* **taux de faux positifs** (calculé sur l'ensemble des alertes closes) et délai moyen de décision (calculé sur les 500 dernières alertes closes) ;
 * paires en liste blanche actives ;
 * volumétrie des listes en production par type, snapshots par statut ;
 * répartition des décisions de criblage (journal d'audit) et 15 dernières synchronisations.

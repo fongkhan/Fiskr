@@ -1,5 +1,7 @@
 # Fiskr - Moteur de Criblage LBA-CFT & Personnes Politiquement Exposées (PEP)
 
+[![CI](https://github.com/fongkhan/Fiskr/actions/workflows/ci.yml/badge.svg)](https://github.com/fongkhan/Fiskr/actions/workflows/ci.yml)
+
 Fiskr est un moteur de criblage (Screening Engine) de nouvelle génération destiné aux institutions financières. Il permet de confronter le référentiel tiers (clients, mandataires, bénéficiaires effectifs) aux listes de sanctions et de Personnes Politiquement Exposées (PEP) fournies par les éditeurs officiels (OFAC, UE, ONU, Dow Jones, World-Check) conformément aux exigences réglementaires ACPR/AMF.
 
 Le projet propose une API temps réel asynchrone, un script de traitement de masse (Batch) sous Apache Spark, un comparateur de snapshots historiques (Delta Engine), et un tableau de bord interactif pour les agents de conformité.
@@ -60,11 +62,13 @@ Le système est structuré autour des modules définis dans le Document d'Archit
 
 ## 🏃 Ingestion & Connecteurs d'Entrée (`fiskr/ingest.py`, `fiskr/ssie.py`)
 
-L'outil intègre quatre types de connecteurs pour charger les listes sources :
+L'outil intègre quatre familles de connecteurs génériques pour charger les listes sources :
 * **OFAC XML Connector** : Lecture et traitement séquentiels d'un flux XML via `ElementTree.iterparse` pour éviter la saturation de la mémoire vive.
 * **CSV Connector** : Parseur de fichiers délimités personnalisables (délimiteur et dictionnaire de colonnes).
 * **PDF Connector** : Extracteur textuel via `pypdf` avec analyseur heuritique NER (Named Entity Recognition) pour isoler les navires, identifiants et caractéristiques.
 * **Smart Sanctions Ingestion Engine (SSIE)** : Connecteur XML générique et structurellement agnostique (`fiskr/ssie.py`) pour les flux à références croisées par ID (OFAC Advanced, SWIFT SLD, etc.).
+
+S'y ajoutent des **parseurs dédiés aux formats des sources officielles** (voir la section « Synchronisation Automatique des Sources » ci-dessous) : registre DGT des gels des avoirs (JSON), liste consolidée UE FSF (XML), liste consolidée ONU (XML), dataset PEP OpenSanctions (CSV) et liste UK OFSI `ConList` (CSV) — tous utilisables aussi bien par les synchronisations que par l'upload manuel du dashboard.
 
 ### Moteur de Détection des Noms d'Individus (`fiskr/names.py`)
 
@@ -151,7 +155,7 @@ Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé
 
 ## ✅ Mode Homologation — Environnement de Validation avant Production
 
-Certaines banques exigent un **pointage humain** avant qu'une nouvelle liste ne serve au criblage. Le **mode homologation** répond à ce besoin : lorsqu'il est actif, **tout snapshot watchlist entrant** (upload manuel, synchronisation manuelle ou planifiée OFAC/EUR-Lex) prend le statut `PENDING_REVIEW` au lieu d'entrer directement en production. Il est alors **invisible du moteur de criblage** — la liste `READY` précédente reste active — jusqu'à la décision d'un réviseur.
+Certaines banques exigent un **pointage humain** avant qu'une nouvelle liste ne serve au criblage. Le **mode homologation** répond à ce besoin : lorsqu'il est actif, **tout snapshot watchlist entrant** — upload manuel ou synchronisation (manuelle comme planifiée) de n'importe quelle source : OFAC, EUR-Lex, DGT, ONU, UE FSF, PEP, OFSI — prend le statut `PENDING_REVIEW` au lieu d'entrer directement en production. Il est alors **invisible du moteur de criblage** — la liste `READY` précédente reste active — jusqu'à la décision d'un réviseur.
 
 Cycle de vie des snapshots : `PROCESSING → PENDING_REVIEW → READY | REJECTED → SUPERSEDED` (mode inactif : `PROCESSING → READY`, comportement historique inchangé).
 
@@ -189,7 +193,7 @@ Le moteur intègre 26 champs obligatoires de conformité AML/CFT, tous exploitab
 4. **Last Name** (`client_last_name` / `last_name`) : Nom de famille de l'individu.
 5. **First Name** (`client_first_name` / `first_name`) : Prénom de l'individu.
 6. **Maiden Name** (`client_maiden_name` / `maiden_name`) : Nom de jeune fille.
-7. **Nationality** (`nationality`) : Code pays de nationalité.
+7. **Nationality** (`countries.citizenship` / `client_countries.nationality`) : Codes pays de nationalité — portés par le champ structuré `countries`, qui regroupe aussi résidence, pays de naissance et juridiction.
 8. **Place of Birth** (`place_of_birth` / `client_place_of_birth`) : Lieu de naissance (Ville/Pays).
 9. **Date of Birth** (`dates_of_birth` / `client_dob`) : Dates de naissance multiples (sanctions) ou unitaire (client).
 10. **Adress** (`address` / `client_address`) : Adresse postale principale.

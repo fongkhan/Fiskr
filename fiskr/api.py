@@ -303,14 +303,14 @@ class ScreenCountries(BaseModel):
     registration_country: List[str] = []
 
 class ScreenClientRequest(BaseModel):
-    client_id: Optional[str] = Field(None, example="CUST-0091")
-    client_type: str = Field(..., example="PP", description="PP (Individu) ou PM (Entreprise)")
-    client_first_name: Optional[str] = Field(None, example="Vladimir")
-    client_last_name: Optional[str] = Field(None, example="Putin")
-    client_maiden_name: Optional[str] = Field(None, example="")
-    client_company_name: Optional[str] = Field(None, example="")
-    client_dob: Optional[str] = Field(None, example="1952-10-07")
-    client_gender: Optional[str] = Field("U", example="M")
+    client_id: Optional[str] = Field(None, json_schema_extra={"example": "CUST-0091"})
+    client_type: str = Field(..., description="PP (Individu) ou PM (Entreprise)", json_schema_extra={"example": "PP"})
+    client_first_name: Optional[str] = Field(None, json_schema_extra={"example": "Vladimir"})
+    client_last_name: Optional[str] = Field(None, json_schema_extra={"example": "Putin"})
+    client_maiden_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+    client_company_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+    client_dob: Optional[str] = Field(None, json_schema_extra={"example": "1952-10-07"})
+    client_gender: Optional[str] = Field("U", json_schema_extra={"example": "M"})
     client_is_deceased: Optional[bool] = Field(False)
     client_countries: ScreenCountries = ScreenCountries()
     
@@ -764,7 +764,7 @@ async def screen_transaction_message(
 
 
 @app.get("/api/adverse-media")
-async def adverse_media_lookup(
+def adverse_media_lookup(
     name: str = Query(..., min_length=2),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -772,6 +772,8 @@ async def adverse_media_lookup(
     Revue de presse négative (adverse media) sur un nom, via le fournisseur
     configuré (Google News RSS par défaut). Purement informatif : ne modifie
     jamais un score ni un statut de criblage.
+    Fonction synchrone à dessein : l'appel HTTP sortant est bloquant, FastAPI
+    l'exécute donc dans son threadpool sans geler l'event loop.
     """
     try:
         return search_adverse_media(name)
