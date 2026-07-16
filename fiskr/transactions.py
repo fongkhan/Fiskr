@@ -24,7 +24,7 @@ from fiskr.config import config
 from fiskr.database import log_compliance_decision
 from fiskr.names import parse_individual_name
 from fiskr.phonetics import double_metaphone
-from fiskr.scoring import match_entities
+from fiskr.scoring import match_entities, resolve_cut_off
 from fiskr.alerts import open_or_redetect_alert
 
 logger = logging.getLogger("fiskr.transactions")
@@ -246,25 +246,35 @@ def _phonetic_keys(name: str) -> set:
     return keys
 
 
-def _party_candidates(party: Dict[str, Any],
-                      watchlist_index: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
+def _phonetic_entity_map(watchlist_index: Dict[str, List[Dict[str, Any]]]
+                         ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
-    Candidats de la watchlist pour une partie de paiement. Les cles de
-    blocking sont de la forme PAYS_TYPE_PHONETIQUE : le pays est ignore
-    (donnees de paiement trop pauvres pour filtrer dessus) et la phonetique
-    est comparee a TOUS les mots du nom de la partie, l'ordre des mots d'un
-    champ libre de paiement n'etant pas fiable.
+    Inverse l'index de blocking UNE SEULE FOIS par message : les cles de
+    blocking sont de la forme PAYS_TYPE_PHONETIQUE ; le pays et le type sont
+    ignores (donnees de paiement trop pauvres pour filtrer dessus), seule la
+    composante phonetique sert de cle de recherche.
     """
-    phonetics = _phonetic_keys(party["name"])
-    candidates: Dict[str, Dict[str, Any]] = {}
-    if not phonetics:
-        return candidates
+    phon_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for key, items in watchlist_index.items():
         parts = key.split("_")
-        if len(parts) != 3 or parts[2] not in phonetics:
+        if len(parts) != 3:
             continue
+        bucket = phon_map.setdefault(parts[2], {})
         for item in items:
-            candidates[item["entity_id"]] = item
+            bucket[item["entity_id"]] = item
+    return phon_map
+
+
+def _party_candidates(party: Dict[str, Any],
+                      phon_map: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Candidats de la watchlist pour une partie de paiement : la phonetique est
+    comparee a TOUS les mots du nom de la partie, l'ordre des mots d'un champ
+    libre de paiement n'etant pas fiable.
+    """
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for phon in _phonetic_keys(party["name"]):
+        candidates.update(phon_map.get(phon, {}))
     return candidates
 
 
@@ -307,10 +317,11 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     msg_id = parsed.get("msg_id") or "SANS-ID"
     party_results: List[Dict[str, Any]] = []
     verdict = "PASS"
+    phon_map = _phonetic_entity_map(watchlist_index)
 
     for idx, party in enumerate(_distinct_parties(parsed)):
         client_id = f"TXN:{msg_id}:{idx}"
-        candidates = _party_candidates(party, watchlist_index)
+        candidates = _party_candidates(party, phon_map)
 
         best: Optional[Dict[str, Any]] = None
         best_client: Optional[Dict[str, Any]] = None
@@ -326,11 +337,9 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                 best_client = client
 
         alert_id = None
-        audit_id = None
         if best is not None:
             audit = log_compliance_decision(db, best_client, best["watchlist_entity"],
                                             best, watchlist_version, watchlist_hash)
-            audit_id = audit.id
             if best.get("status") == "ALERT":
                 verdict = "HIT"
                 alert_id = open_or_redetect_alert(
@@ -340,6 +349,28 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                         f"rôle(s) : {', '.join(party['roles'])}]"
                     ),
                 )
+        else:
+            # Aucune partie n'echappe a la piste d'audit : prouver qu'une
+            # partie A ETE criblee importe autant que le resultat (meme motif
+            # que le criblage unitaire sans candidat).
+            no_match = {
+                "status": "NO_MATCH", "base_score": 0.0, "final_score": 0.0,
+                "hard_match_triggered": False,
+                "best_client_name": party["name"],
+                "best_watchlist_name": "Aucun candidat trouvé (Bloqué)",
+                "adjustments": {
+                    "dob": {"score": 0.0, "description": "N/A"},
+                    "gender": {"score": 0.0, "description": "N/A"},
+                    "geography": {"score": 0.0, "description": "N/A"},
+                },
+                "cut_off_applied": resolve_cut_off(config),
+            }
+            audit = log_compliance_decision(
+                db, _party_client_dict(party, False, client_id),
+                {"entity_id": "NONE", "primary_name": "Aucun match"},
+                no_match, watchlist_version, watchlist_hash
+            )
+        audit_id = audit.id
 
         party_results.append({
             "name": party["name"],

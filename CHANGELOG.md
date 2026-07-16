@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+Documentation-vs-code audit follow-up: every gap found while verifying the implementation against the documentation is fixed, plus two code quick wins.
+
+### Fixed
+- **Transaction filtering — parties with no blocking candidate now leave an audit line**: `screen_payment_message` previously only wrote to the immutable audit trail when at least one candidate had been retrieved, contradicting the documented guarantee that *every screened party* is traced. Parties with zero candidates now log a `NO_MATCH` decision ("Aucun candidat trouvé"), mirroring the unit-screening behavior — proving a party *was* screened matters as much as the outcome. `audit_id` is now populated for every party in the response.
+- **`GET /api/adverse-media` no longer blocks the event loop**: the endpoint was `async def` but performed a synchronous outbound HTTP call (up to 30 s); it is now a sync `def`, executed by FastAPI's threadpool like `/api/sync/run`.
+
+### Changed
+- **Transaction filtering candidate retrieval is O(index) once per message** instead of once per party: the blocking index is inverted into a phonetic→entities map a single time (`_phonetic_entity_map`), then each party is a dictionary lookup — noticeable on large production watchlists.
+- Pydantic deprecation cleanup: `Field(..., example=...)` → `json_schema_extra` (removes 8 deprecation warnings from every test run and API startup).
+- CI workflow can now be triggered manually (`workflow_dispatch`).
+
+### Documentation
+- KPI guide: clarified that the false-positive rate is computed over **all** closed alerts while the average decision time is computed over the **last 500** closed alerts.
+- README: CI badge added; the homologation section now lists all seven gated sources (not just OFAC/EUR-Lex); the ingestion section mentions the dedicated official-source parsers (DGT JSON, EU FSF XML, UN XML, PEP/OFSI CSV) beyond the four generic connector families; field 7 "Nationality" now points to its real storage (`countries.citizenship` / `client_countries.nationality` — there is no dedicated `nationality` column).
 
 ---
 

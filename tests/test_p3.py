@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.config import config
-from fiskr.database import Base, Alert
+from fiskr.database import Base, Alert, AuditTrail
 from fiskr.blocking import generate_blocking_keys
 from fiskr.transactions import parse_iso20022_payment, screen_payment_message
 from fiskr.adverse_media import build_google_news_query, parse_rss_items, search_adverse_media
@@ -171,9 +171,15 @@ def test_transaction_screening_hit_opens_alert(db):
     assert alert.status == "OPEN"
     assert alert.client_id.startswith("TXN:PACS-001:")
 
-    # Le beneficiaire inconnu ne matche pas
+    # Le beneficiaire inconnu ne matche pas, mais reste audite
     assert by_name["John Doe"]["status"] == "NO_MATCH"
     assert by_name["John Doe"]["alert_id"] is None
+    assert by_name["John Doe"]["audit_id"] is not None
+
+    # AUCUNE partie n'echappe a la piste d'audit (preuve du criblage),
+    # y compris celles sans le moindre candidat de blocking
+    assert all(p["audit_id"] is not None for p in result["parties"])
+    assert db.query(AuditTrail).count() == len(result["parties"])
 
 
 def test_transaction_screening_pass(db):
@@ -185,6 +191,10 @@ def test_transaction_screening_pass(db):
     assert result["verdict"] == "PASS"
     assert result["hits_count"] == 0
     assert db.query(Alert).count() == 0
+    # Chaque partie criblee laisse une ligne d'audit NO_MATCH meme sans candidat
+    assert db.query(AuditTrail).count() == len(result["parties"])
+    assert all(p["audit_id"] is not None for p in result["parties"])
+    assert {r.status for r in db.query(AuditTrail).all()} == {"NO_MATCH"}
 
 
 # ------------------ ADVERSE MEDIA ------------------
