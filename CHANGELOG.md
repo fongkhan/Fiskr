@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **License — Sustainable Use License (fair-code)**, copyright © 2026 Alexis Vuadelle (`LICENSE.md`): free internal-business and personal use, public source; commercialization (resale, paid hosting for third parties, paid on-premise deployment services and commercial licenses) reserved to the copyright holder, available on paid request via GitHub.
+- **Sponsoring**: `.github/FUNDING.yml` pointing to GitHub Sponsors (`fongkhan`), plus license and sponsor badges and a "Licence & Offre Commerciale" section in the README.
+
+## [2.11.0] - 2026-07-16
+
 Business-process/UX overhaul of the dashboard plus list-type scoping across the product.
 
 ### Added

@@ -1,0 +1,4 @@
+# Affiche le bouton « Sponsor » sur la page GitHub du dépôt.
+# Nécessite l'activation de GitHub Sponsors sur le compte fongkhan
+# (https://github.com/sponsors).
+github: fongkhan
