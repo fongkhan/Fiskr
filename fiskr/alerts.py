@@ -48,6 +48,9 @@ def open_or_redetect_alert(db, audit_record: AuditTrail, client_id: Optional[str
     if existing:
         if best_match["final_score"] > existing.final_score:
             existing.final_score = best_match["final_score"]
+        # Rattrapage progressif des alertes anterieures a la colonne list_type
+        if existing.list_type is None and wl_entity.get("_list_type"):
+            existing.list_type = wl_entity.get("_list_type")
         db.add(AlertEvent(
             alert_id=existing.id, username=username, action="REDETECTED",
             detail=f"Re-détectée lors d'un nouveau criblage (score {best_match['final_score']:.1f}, audit #{audit_record.id}).{detail_suffix}"
@@ -62,6 +65,7 @@ def open_or_redetect_alert(db, audit_record: AuditTrail, client_id: Optional[str
         watchlist_entity_id=wl_id,
         watchlist_name=wl_entity.get("primary_name", "Inconnu"),
         final_score=best_match["final_score"],
+        list_type=wl_entity.get("_list_type"),
         status="OPEN"
     )
     db.add(alert)

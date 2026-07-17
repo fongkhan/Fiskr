@@ -981,3 +981,61 @@ tr:hover td {
     word-break: break-all;
 }
 
+
+/* ------------------ Badges de type de liste ------------------ */
+.badge-secondary {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    background: rgba(96, 165, 250, 0.14);
+    color: #93c5fd;
+    border: 1px solid rgba(96, 165, 250, 0.25);
+    white-space: nowrap;
+}
+
+/* ------------------ Toasts (notifications non bloquantes) ------------------ */
+#toast-container {
+    position: fixed;
+    bottom: 1.25rem;
+    right: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    z-index: 1300;
+    max-width: 380px;
+}
+
+.toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.75rem 1rem;
+    border-radius: 10px;
+    background: var(--bg-card, #1e293b);
+    border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    color: var(--text-main, #e2e8f0);
+    font-size: 0.85rem;
+    cursor: pointer;
+    animation: toast-in 0.25s ease-out;
+}
+
+.toast-success { border-left: 3px solid var(--color-safe, #10b981); }
+.toast-error   { border-left: 3px solid var(--color-alert, #ef4444); }
+.toast-info    { border-left: 3px solid #60a5fa; }
+
+.toast-out { opacity: 0; transform: translateX(12px); transition: all 0.3s ease-in; }
+
+@keyframes toast-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Champ de la modale générique (confirm/prompt intégrés) */
+#app-dialog-field input, #app-dialog-field textarea {
+    width: 100%;
+    resize: vertical;
+}

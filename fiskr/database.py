@@ -140,6 +140,10 @@ class AuditTrail(Base):
     config_state = Column(JSON, nullable=False)
     watchlist_version = Column(String(50), nullable=False)
     watchlist_hash = Column(String(64), nullable=False)
+    # Type de liste d'origine du liste (WATCHLIST_OFAC, WATCHLIST_UN...) —
+    # NULL sur les enregistrements anterieurs a l'ajout (journal immuable,
+    # jamais reecrit) et sur les decisions sans candidat
+    list_type = Column(String(30), nullable=True)
 
 class SyncReport(Base):
     __tablename__ = "sync_reports"
@@ -176,6 +180,8 @@ class Alert(Base):
     watchlist_entity_id = Column(String(100), nullable=False)
     watchlist_name = Column(String(1000), nullable=False)
     final_score = Column(Float, nullable=False)
+    # Type de liste d'origine (NULL sur les alertes anterieures a l'ajout)
+    list_type = Column(String(30), nullable=True)
     # Cycle de vie
     status = Column(String(30), default="OPEN", index=True)
     assigned_to = Column(String(100), nullable=True)
@@ -217,6 +223,8 @@ class WhitelistPair(Base):
     watchlist_entity_id = Column(String(100), nullable=False, index=True)
     client_name = Column(String(1000), nullable=True)
     watchlist_name = Column(String(1000), nullable=True)
+    # Type de liste d'origine du liste (NULL sur les paires anterieures)
+    list_type = Column(String(30), nullable=True)
     justification = Column(Text, nullable=True)
     evidence_file_name = Column(String(255), nullable=True)
     evidence_file_path = Column(String(500), nullable=True)
@@ -336,6 +344,15 @@ def init_db():
                 ("excluded_by", "VARCHAR(100)"),
                 ("excluded_at", "TIMESTAMP"),
             ],
+            "alerts": [
+                ("list_type", "VARCHAR(30)"),
+            ],
+            "compliance_audit_trail": [
+                ("list_type", "VARCHAR(30)"),
+            ],
+            "whitelist_pairs": [
+                ("list_type", "VARCHAR(30)"),
+            ],
         }
         inspector = inspect(engine)
         for table_name, cols in _additive_migrations.items():
@@ -433,7 +450,8 @@ def log_compliance_decision(
         decision_tree=scoring_result,
         config_state=config_audit,
         watchlist_version=wl_version,
-        watchlist_hash=wl_hash
+        watchlist_hash=wl_hash,
+        list_type=watchlist_entry.get("_list_type")
     )
     db.add(db_entry)
     db.commit()

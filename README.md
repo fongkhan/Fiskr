@@ -261,18 +261,21 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
-Le dashboard interactif se compose de 6 onglets principaux :
-* **Gestion des Watchlists** : Permet de consulter la watchlist active (avec pagination rapide et **fenêtre de détails modale** affichant les 26 attributs AML au clic), d'importer de nouveaux snapshots de listes (XML, CSV, PDF, JSON), de comparer les versions historiques via le **Delta Engine**, de piloter le **mode homologation** et d'effectuer des **ajouts manuels à la volée via un formulaire adaptatif** (Individu, Entité, Navire, Autre).
-* **Criblage** : Crible temps réel unitaire (Sandbox avec champs s'adaptant au type de tiers), crible de masse (simulateur batch) et **filtrage transactionnel ISO 20022** (messages `pain.001` / `pacs.008`).
-* **Alertes** : File de travail des alertes avec **cycle de vie complet et validation 4-yeux**, liste blanche client×listé, **projet de narratif** et recherche **adverse media** dans la modale d'investigation.
+Le dashboard interactif se compose de 7 onglets principaux :
+* **Gestion des Watchlists** : Consultation de la watchlist active (colonne et **filtre par type de liste**, fenêtre de détails des 26 attributs AML), **import de fichiers** (sous-onglet dédié), **Snapshots & Comparateur** (Delta Engine, filtre par liste), sources automatiques, **mode homologation** et ajouts manuels via formulaire adaptatif.
+* **Criblage** : Crible temps réel unitaire (Sandbox avec champs s'adaptant au type de tiers), crible de masse (simulateur batch) et **filtrage transactionnel ISO 20022** (messages `pain.001` / `pacs.008`). Les trois acceptent un **périmètre de listes restreint** (`screening_lists`, défaut toutes — toute restriction est tracée dans l'audit) ; un criblage en alerte affiche un **lien direct « Instruire l'alerte »**.
+* **Alertes** : Deux sous-onglets — **File de Travail** (cycle de vie complet, validation 4-yeux, filtre par liste, projet de narratif et adverse media dans la modale) et **Liste Blanche** client×listé.
 * **Pilotage** : Page de KPI conformité (taux de faux positifs, délais de décision, volumétrie des listes, dernières synchronisations).
-* **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF.
+* **Audit** : Historique réglementaire complet (Compliance Audit Trail) conforme aux normes ACPR/AMF — **paginé et filtrable** par décision et type de liste.
+* **Paramètres** *(Réservé aux Administrateurs)* : Les 7 **réglages de gouvernance à chaud** (homologation, exclusions, 4-yeux, liste blanche, re-criblage automatique) regroupés dans un onglet dédié.
 * **Utilisateurs** *(Réservé aux Administrateurs)* : Interface de gestion des utilisateurs, création de comptes, réinitialisation de mots de passe et attribution des rôles empilables (`admin` / `reviewer` / `user`).
+
+L'interface n'utilise **aucun popup natif** du navigateur : confirmations et saisies réglementaires passent par des modales intégrées, les résultats par des toasts ; les badges de la barre latérale (alertes ouvertes, homologations en attente) se rafraîchissent automatiquement (`GET /api/counters`).
 
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 144 tests automatisés avec pytest :
+Exécutez la suite complète de 153 tests automatisés avec pytest :
 ```bash
 python -m pytest
 ```

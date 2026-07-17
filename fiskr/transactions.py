@@ -246,13 +246,15 @@ def _phonetic_keys(name: str) -> set:
     return keys
 
 
-def _phonetic_entity_map(watchlist_index: Dict[str, List[Dict[str, Any]]]
+def _phonetic_entity_map(watchlist_index: Dict[str, List[Dict[str, Any]]],
+                         allowed_lists: Optional[List[str]] = None
                          ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Inverse l'index de blocking UNE SEULE FOIS par message : les cles de
     blocking sont de la forme PAYS_TYPE_PHONETIQUE ; le pays et le type sont
     ignores (donnees de paiement trop pauvres pour filtrer dessus), seule la
-    composante phonetique sert de cle de recherche.
+    composante phonetique sert de cle de recherche. `allowed_lists` restreint
+    l'univers aux types de listes demandes (None = toutes).
     """
     phon_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for key, items in watchlist_index.items():
@@ -261,6 +263,8 @@ def _phonetic_entity_map(watchlist_index: Dict[str, List[Dict[str, Any]]]
             continue
         bucket = phon_map.setdefault(parts[2], {})
         for item in items:
+            if allowed_lists and item.get("_list_type") not in allowed_lists:
+                continue
             bucket[item["entity_id"]] = item
     return phon_map
 
@@ -307,17 +311,20 @@ def _party_client_dict(party: Dict[str, Any], as_individual: bool, client_id: st
 def screen_payment_message(db, parsed: Dict[str, Any],
                            watchlist_index: Dict[str, List[Dict[str, Any]]],
                            watchlist_version: str, watchlist_hash: str,
-                           username: str) -> Dict[str, Any]:
+                           username: str,
+                           screening_lists: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Crible toutes les parties distinctes d'un message de paiement contre les
-    listes en production. Chaque partie criblee laisse une ligne d'audit ;
-    chaque hit ALERT ouvre une alerte de travail. Verdict global : HIT des
-    qu'une partie est en alerte, PASS sinon.
+    listes en production (ou le sous-ensemble `screening_lists`, restriction
+    tracee dans chaque ligne d'audit). Chaque partie criblee laisse une ligne
+    d'audit ; chaque hit ALERT ouvre une alerte de travail. Verdict global :
+    HIT des qu'une partie est en alerte, PASS sinon.
     """
     msg_id = parsed.get("msg_id") or "SANS-ID"
     party_results: List[Dict[str, Any]] = []
     verdict = "PASS"
-    phon_map = _phonetic_entity_map(watchlist_index)
+    restriction = screening_lists or "ALL"
+    phon_map = _phonetic_entity_map(watchlist_index, screening_lists)
 
     for idx, party in enumerate(_distinct_parties(parsed)):
         client_id = f"TXN:{msg_id}:{idx}"
@@ -338,6 +345,7 @@ def screen_payment_message(db, parsed: Dict[str, Any],
 
         alert_id = None
         if best is not None:
+            best["screening_lists_restriction"] = restriction
             audit = log_compliance_decision(db, best_client, best["watchlist_entity"],
                                             best, watchlist_version, watchlist_hash)
             if best.get("status") == "ALERT":
@@ -347,6 +355,8 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                     detail_suffix=(
                         f" [Filtrage transactionnel {parsed['message_type']} {msg_id} — "
                         f"rôle(s) : {', '.join(party['roles'])}]"
+                        + (f" [Criblage restreint aux listes : {', '.join(screening_lists)}]"
+                           if screening_lists else "")
                     ),
                 )
         else:
@@ -364,6 +374,7 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                     "geography": {"score": 0.0, "description": "N/A"},
                 },
                 "cut_off_applied": resolve_cut_off(config),
+                "screening_lists_restriction": restriction,
             }
             audit = log_compliance_decision(
                 db, _party_client_dict(party, False, client_id),
@@ -400,4 +411,5 @@ def screen_payment_message(db, parsed: Dict[str, Any],
         "transactions_count": len(parsed["transactions"]),
         "parties": party_results,
         "hits_count": len(hits),
+        "screening_lists": restriction,
     }

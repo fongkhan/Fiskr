@@ -47,6 +47,11 @@
                             <span class="nav-icon">📜</span> Audit
                         </button>
                     </li>
+                    <li id="nav-item-settings" class="hidden">
+                        <button id="nav-btn-settings" class="nav-item" onclick="switchTab('settings')">
+                            <span class="nav-icon">⚙️</span> Paramètres
+                        </button>
+                    </li>
                     <li id="nav-item-users" class="hidden">
                         <button id="nav-btn-users" class="nav-item" onclick="switchTab('users')">
                             <span class="nav-icon">👥</span> Utilisateurs
@@ -91,6 +96,9 @@
                     <button id="sub-btn-watchlist-active" class="sub-tab-btn active" onclick="switchSubTab('watchlist-mgmt', 'watchlist-active')">
                         Watchlist Active
                     </button>
+                    <button id="sub-btn-watchlist-import" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-import')">
+                        Import de Fichiers
+                    </button>
                     <button id="sub-btn-watchlist-snapshots" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-snapshots')">
                         Snapshots & Comparateur
                     </button>
@@ -112,8 +120,9 @@
                             <h2>Fiches Indexées dans la Cache du Moteur Actif</h2>
                             <p class="section-desc">Liste complète des fiches chargées depuis la base de données relationnelle et indexées par blocage.</p>
                             
-                            <div class="search-box">
-                                <input type="text" id="wl-search-input" placeholder="Filtrer par nom ou ID..." onkeyup="filterWatchlist()">
+                            <div class="search-box" style="display: flex; gap: 0.5rem;">
+                                <input type="text" id="wl-search-input" placeholder="Filtrer par nom ou ID..." onkeyup="filterWatchlist()" style="flex: 1;">
+                                <select id="wl-list-filter" onchange="filterWatchlist()" title="Filtrer par type de liste"></select>
                             </div>
 
                             <div class="table-container max-height-table">
@@ -121,10 +130,11 @@
                                     <thead>
                                         <tr>
                                             <th>ID</th>
-                                            <th>Type</th>
+                                            <th>Liste</th>
+                                            <th>Type d'entité</th>
                                             <th>Nom Principal / Raison Sociale</th>
                                             <th>Pays Rattachés</th>
-                                            <th>Genders / Gels</th>
+                                            <th>État / Genre</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -137,13 +147,13 @@
                     </div>
                 </div>
 
-                <div id="sub-sec-watchlist-snapshots" class="sub-tab-content hidden">
-                    <div class="grid-layout">
+                <div id="sub-sec-watchlist-import" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
                         <!-- Ingest Snapshot Card -->
                         <div class="card form-card">
                             <h2>Importer un Instantané (Snapshot)</h2>
-                            <p class="section-desc">Téléversez un fichier de watchlist ou de clients dans la base de données relationnelle.</p>
-                            
+                            <p class="section-desc">Téléversez un fichier de watchlist ou de clients dans la base de données relationnelle. Le fichier importé apparaît ensuite dans l'onglet « Snapshots & Comparateur » (ou en Homologation si le pointage humain est actif).</p>
+
                             <form id="ingest-form" onsubmit="handleIngestion(event)">
                                 <div class="form-group">
                                     <label for="ingest-file-type">Type de Fichier *</label>
@@ -190,9 +200,14 @@
                                     Charger & Archiver
                                 </button>
                             </form>
+                        </div>
+                    </div>
+                </div>
 
-                            <hr style="margin: 2rem 0; border: 0; border-top: 1px solid var(--border-color);">
-
+                <div id="sub-sec-watchlist-snapshots" class="sub-tab-content hidden">
+                    <div class="grid-layout">
+                        <!-- Comparator Card -->
+                        <div class="card form-card">
                             <h2>Comparateur de Versions (Delta Engine)</h2>
                             <p class="section-desc">Identifiez les modifications structurelles (ADDED, REMOVED, MODIFIED) entre deux versions de snapshots.</p>
                             
@@ -224,6 +239,9 @@
                                 </button>
                             </div>
                             <p class="section-desc" style="margin-bottom: 1rem;">Liste de tous les instantanés et versions importés dans la base de données relationnelle.</p>
+                            <div class="form-group" style="max-width: 260px;">
+                                <select id="snapshots-list-filter" onchange="renderSnapshotsFiltered()" title="Filtrer par type de liste"></select>
+                            </div>
                             <div class="table-container max-height-table">
                                 <table id="snapshots-table">
                                     <thead>
@@ -249,15 +267,15 @@
                         
                         <div class="score-metrics" style="flex-direction: row; gap: 2rem; margin-bottom: 2rem;">
                             <div class="metric" style="flex: 1; background: rgba(16, 185, 129, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.15);">
-                                <span class="metric-label" style="color: var(--color-safe); font-weight: 600;">ADDED (Ajouts)</span>
+                                <span class="metric-label" style="color: var(--color-safe); font-weight: 600;">Ajouts (ADDED)</span>
                                 <span id="delta-added-count" class="metric-value" style="font-size: 1.5rem; color: var(--color-safe);">0</span>
                             </div>
                             <div class="metric" style="flex: 1; background: rgba(239, 68, 68, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.15);">
-                                <span class="metric-label" style="color: var(--color-alert); font-weight: 600;">REMOVED (Suppressions)</span>
+                                <span class="metric-label" style="color: var(--color-alert); font-weight: 600;">Suppressions (REMOVED)</span>
                                 <span id="delta-removed-count" class="metric-value" style="font-size: 1.5rem; color: var(--color-alert);">0</span>
                             </div>
                             <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.15);">
-                                <span class="metric-label" style="color: var(--color-warning); font-weight: 600;">MODIFIED (Modifications)</span>
+                                <span class="metric-label" style="color: var(--color-warning); font-weight: 600;">Modifications (MODIFIED)</span>
                                 <span id="delta-modified-count" class="metric-value" style="font-size: 1.5rem; color: var(--color-warning);">0</span>
                             </div>
                         </div>
@@ -595,55 +613,6 @@
                 <div id="sub-sec-watchlist-review" class="sub-tab-content hidden">
                     <div class="grid-layout" style="grid-template-columns: 1fr;">
 
-                        <!-- Admin settings: homologation toggles -->
-                        <div class="card form-card hidden" id="review-settings-card">
-                            <h2>Réglages d'Homologation (Admin)</h2>
-                            <p class="section-desc">Environnement de validation avant production : lorsque le mode est actif, tout snapshot watchlist entrant (upload manuel ou synchronisation) attend un pointage humain avant d'être chargé dans le moteur de criblage. Modifiable à chaud, sans redémarrage.</p>
-                            <div class="form-group" style="margin-bottom: 0.75rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-require-approval" style="width: 18px; height: 18px;">
-                                    Homologation obligatoire avant mise en production
-                                </label>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 0.75rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-exclusion-justification" style="width: 18px; height: 18px;">
-                                    Justification texte obligatoire lors d'une exclusion d'entité
-                                </label>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 0.75rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-exclusion-file" style="width: 18px; height: 18px;">
-                                    Pièce jointe justificative obligatoire lors d'une exclusion d'entité
-                                </label>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 0.75rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-alert-four-eyes" style="width: 18px; height: 18px;">
-                                    Validation 4-yeux obligatoire des décisions d'alertes (validateur ≠ proposeur)
-                                </label>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 0.75rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-whitelist-justification" style="width: 18px; height: 18px;">
-                                    Justification obligatoire pour une mise en liste blanche
-                                </label>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 0.75rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-whitelist-file" style="width: 18px; height: 18px;">
-                                    Pièce jointe obligatoire pour une mise en liste blanche
-                                </label>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 1rem;">
-                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                    <input type="checkbox" id="setting-auto-rescreen" style="width: 18px; height: 18px;">
-                                    Re-criblage automatique du référentiel clients après chaque mise à jour de liste
-                                </label>
-                            </div>
-                            <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
-                        </div>
-
                         <!-- Pending snapshots -->
                         <div class="card result-card">
                             <h2>Snapshots en Attente d'Homologation</h2>
@@ -674,15 +643,15 @@
 
                             <div class="score-metrics" style="flex-direction: row; gap: 2rem; margin-bottom: 1.5rem;">
                                 <div class="metric" style="flex: 1; background: rgba(16, 185, 129, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.15);">
-                                    <span class="metric-label" style="color: var(--color-safe); font-weight: 600;">ADDED (Ajouts)</span>
+                                    <span class="metric-label" style="color: var(--color-safe); font-weight: 600;">Ajouts (ADDED)</span>
                                     <span id="review-delta-added" class="metric-value" style="font-size: 1.5rem; color: var(--color-safe);">0</span>
                                 </div>
                                 <div class="metric" style="flex: 1; background: rgba(239, 68, 68, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.15);">
-                                    <span class="metric-label" style="color: var(--color-alert); font-weight: 600;">REMOVED (Suppressions)</span>
+                                    <span class="metric-label" style="color: var(--color-alert); font-weight: 600;">Suppressions (REMOVED)</span>
                                     <span id="review-delta-removed" class="metric-value" style="font-size: 1.5rem; color: var(--color-alert);">0</span>
                                 </div>
                                 <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.15);">
-                                    <span class="metric-label" style="color: var(--color-warning); font-weight: 600;">MODIFIED (Modifications)</span>
+                                    <span class="metric-label" style="color: var(--color-warning); font-weight: 600;">Modifications (MODIFIED)</span>
                                     <span id="review-delta-modified" class="metric-value" style="font-size: 1.5rem; color: var(--color-warning);">0</span>
                                 </div>
                             </div>
@@ -917,8 +886,20 @@
                                     </div>
                                 </div>
 
+                                <div class="accordion-section" style="margin-top: 1rem;">
+                                    <button type="button" class="accordion-header" onclick="toggleAccordion('screening-lists-panel')">
+                                        🎯 Périmètre des listes criblées <span class="accordion-arrow">▼</span>
+                                    </button>
+                                    <div id="screening-lists-panel" class="accordion-content hidden">
+                                        <p class="section-desc" style="margin: 0.5rem 0;">Par défaut, le criblage porte sur <strong>toutes</strong> les listes en production. Décochez pour restreindre le périmètre (ex. établissement non exposé au UK) — <strong>toute restriction est tracée dans le journal d'audit</strong>.</p>
+                                        <div id="screening-lists-checkboxes" style="display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem;">
+                                            <!-- Cases générées dynamiquement (LIST_TYPE_LABELS) -->
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <button type="submit" id="submit-screen-btn" class="btn btn-primary" style="margin-top: 1.5rem;">
-                                    Launch Screening Engine
+                                    Lancer le criblage
                                 </button>
                             </form>
                         </div>
@@ -937,6 +918,10 @@
                                 <h2>Résultats du Screening</h2>
                                 <div id="badge-compliance-status" class="status-badge alert">ALERT</div>
                             </div>
+
+                            <!-- Continuité criblage -> alerte : lien direct vers l'alerte ouverte -->
+                            <div id="screening-alert-link" class="hidden" style="margin: 0.75rem 0;"></div>
+                            <div id="screening-restriction-note" class="hidden" style="margin: 0.25rem 0 0.75rem;"></div>
 
                             <!-- Main Score display -->
                             <div class="score-display-container">
@@ -1032,6 +1017,12 @@
                                 <label for="batch-json-input">Données Clients (Format JSON Array conforme au Schéma Miroir) :</label>
                                 <textarea id="batch-json-input" rows="8" placeholder="[ ... ]"></textarea>
                             </div>
+                            <div>
+                                <p class="section-desc" style="margin: 0.5rem 0 0.25rem;">Périmètre des listes criblées (défaut : toutes — toute restriction est tracée dans l'audit) :</p>
+                                <div id="batch-lists-checkboxes" style="display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem;">
+                                    <!-- Cases générées dynamiquement (LIST_TYPE_LABELS) -->
+                                </div>
+                            </div>
                             <div class="btn-container">
                                 <button id="run-batch-btn" class="btn btn-primary" onclick="runBatchScreening()">
                                     Lancer le Batch Screening
@@ -1105,60 +1096,80 @@
                 </div>
             </section>
 
-            <!-- SECTION 3: AUDIT -->
-            <!-- SECTION: ALERTES (cycle de vie + 4-yeux) -->
+            <!-- SECTION : ALERTES (cycle de vie + 4-yeux, liste blanche) -->
             <section id="sec-alerts" class="tab-content">
-                <div class="grid-layout" style="grid-template-columns: 1fr;">
-                    <div class="card result-card">
-                        <h2>File de Travail des Alertes</h2>
-                        <p class="section-desc">Chaque décision de criblage en statut ALERT ouvre une alerte à instruire : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. L'historique complet des actions est conservé.</p>
-                        <div id="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
-                            <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('')">Toutes</button>
-                            <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
-                            <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
-                            <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
-                        </div>
-                        <div class="table-container max-height-table" id="alerts-table-container">
-                            <table id="alerts-table">
-                                <thead>
-                                    <tr>
-                                        <th>Date</th>
-                                        <th>Client</th>
-                                        <th>Listé</th>
-                                        <th>Score</th>
-                                        <th>Statut</th>
-                                        <th>Assignée à</th>
-                                        <th>Action</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <!-- Populated dynamically -->
-                                </tbody>
-                            </table>
+                <div class="sub-tabs">
+                    <button id="sub-btn-alerts-queue" class="sub-tab-btn active" onclick="switchSubTab('alerts', 'alerts-queue')">
+                        File de Travail
+                    </button>
+                    <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('alerts', 'alerts-whitelist')">
+                        Liste Blanche
+                    </button>
+                </div>
+
+                <div id="sub-sec-alerts-queue" class="sub-tab-content active">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
+                        <div class="card result-card">
+                            <h2>File de Travail des Alertes</h2>
+                            <p class="section-desc">Chaque décision de criblage en statut ALERT ouvre une alerte à instruire : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. L'historique complet des actions est conservé.</p>
+                            <div id="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+                                <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('')">Toutes</button>
+                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
+                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
+                                <select id="alerts-list-filter" onchange="fetchAlerts()" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                            </div>
+                            <div class="table-container max-height-table" id="alerts-table-container">
+                                <table id="alerts-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Client</th>
+                                            <th>Listé</th>
+                                            <th>Liste</th>
+                                            <th>Score</th>
+                                            <th>Statut</th>
+                                            <th>Assignée à</th>
+                                            <th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- Populated dynamically -->
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
+                </div>
 
-                    <!-- Liste blanche client x listé (Good Guys) -->
-                    <div class="card result-card">
-                        <h2>Liste Blanche (paires client × listé)</h2>
-                        <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
-                        <div class="table-container max-height-table">
-                            <table id="whitelist-table">
-                                <thead>
-                                    <tr>
-                                        <th>Client</th>
-                                        <th>Listé</th>
-                                        <th>Justification</th>
-                                        <th>Créée par</th>
-                                        <th>Expiration</th>
-                                        <th>État</th>
-                                        <th>Action</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <!-- Populated dynamically -->
-                                </tbody>
-                            </table>
+                <div id="sub-sec-alerts-whitelist" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
+                        <!-- Liste blanche client x listé (« Good Guys », guidance Wolfsberg) -->
+                        <div class="card result-card">
+                            <h2>Liste Blanche (paires client × listé)</h2>
+                            <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
+                            <div class="form-group" style="max-width: 260px;">
+                                <select id="whitelist-list-filter" onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
+                            </div>
+                            <div class="table-container max-height-table">
+                                <table id="whitelist-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Client</th>
+                                            <th>Listé</th>
+                                            <th>Liste</th>
+                                            <th>Justification</th>
+                                            <th>Créée par</th>
+                                            <th>Expiration</th>
+                                            <th>État</th>
+                                            <th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- Populated dynamically -->
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1202,6 +1213,16 @@
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
                     <p class="section-desc">Historique immuable de toutes les décisions de criblage émises par le moteur. Conforme aux standards ACPR/AMF.</p>
 
+                    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+                        <select id="audit-list-filter" onchange="fetchAuditHistory(1)" title="Filtrer par type de liste"></select>
+                        <select id="audit-status-filter" onchange="fetchAuditHistory(1)" title="Filtrer par décision">
+                            <option value="">Toutes les décisions</option>
+                            <option value="ALERT">ALERT</option>
+                            <option value="NO_MATCH">NO_MATCH</option>
+                            <option value="WHITELISTED">WHITELISTED</option>
+                        </select>
+                    </div>
+
                     <div class="table-container">
                         <table id="audit-table">
                             <thead>
@@ -1209,6 +1230,7 @@
                                     <th>Horodatage</th>
                                     <th>Client</th>
                                     <th>Fiche Matchée</th>
+                                    <th>Liste</th>
                                     <th>Score Final</th>
                                     <th>Statut</th>
                                     <th>Détail</th>
@@ -1219,10 +1241,65 @@
                             </tbody>
                         </table>
                     </div>
+                    <div id="audit-pagination" class="pagination-container" style="display: flex; gap: 0.75rem; align-items: center; justify-content: flex-end; margin-top: 0.75rem;"></div>
                 </div>
             </section>
 
-            <!-- SECTION 4: GESTION DES UTILISATEURS (ADMIN) -->
+            <!-- SECTION : PARAMÈTRES (ADMIN) -->
+            <section id="sec-settings" class="tab-content">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <!-- Réglages transverses à chaud (gouvernent homologation, alertes, liste blanche, re-criblage) -->
+                    <div class="card form-card hidden" id="review-settings-card">
+                        <h2>Réglages de Gouvernance (Admin)</h2>
+                        <p class="section-desc">Réglages transverses du dispositif, modifiables à chaud sans redémarrage (stockés en base, <code>config.yaml</code> ne fournit que les défauts). Ils gouvernent l'homologation des listes, les exclusions, la validation 4-yeux des alertes, la liste blanche et le re-criblage automatique.</p>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-require-approval" style="width: 18px; height: 18px;">
+                                Homologation obligatoire avant mise en production
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-exclusion-justification" style="width: 18px; height: 18px;">
+                                Justification texte obligatoire lors d'une exclusion d'entité
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-exclusion-file" style="width: 18px; height: 18px;">
+                                Pièce jointe justificative obligatoire lors d'une exclusion d'entité
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-alert-four-eyes" style="width: 18px; height: 18px;">
+                                Validation 4-yeux obligatoire des décisions d'alertes (validateur ≠ proposeur)
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-whitelist-justification" style="width: 18px; height: 18px;">
+                                Justification obligatoire pour une mise en liste blanche
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-whitelist-file" style="width: 18px; height: 18px;">
+                                Pièce jointe obligatoire pour une mise en liste blanche
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-auto-rescreen" style="width: 18px; height: 18px;">
+                                Re-criblage automatique du référentiel clients après chaque mise à jour de liste
+                            </label>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SECTION : GESTION DES UTILISATEURS (ADMIN) -->
             <section id="sec-users" class="tab-content">
 
                 <div class="card result-card">
@@ -1263,7 +1340,7 @@
 
         <div class="modal-content">
             <span class="close-modal" onclick="closeAuditModal()">&times;</span>
-            <h2>Détail Linear Audit Trail & Décision</h2>
+            <h2>Détail de la Décision (Piste d'Audit)</h2>
             <div id="modal-audit-details" class="modal-body-content">
                 <!-- Populated dynamically -->
             </div>
@@ -1417,7 +1494,23 @@
     </div>
 
     <!-- Script -->
-    <script src="/static/app.js?v=4.2"></script>
+    <!-- Notifications intégrées (remplacent les popups natifs du navigateur) -->
+    <div id="toast-container" aria-live="polite"></div>
+
+    <div id="app-dialog" class="modal hidden" style="z-index: 1200;">
+        <div class="modal-content" style="max-width: 480px;">
+            <h2 id="app-dialog-title" style="margin-bottom: 0.75rem;">Confirmation</h2>
+            <p id="app-dialog-message" class="section-desc" style="white-space: pre-line;"></p>
+            <div id="app-dialog-field" class="form-group" style="margin: 0.75rem 0;"></div>
+            <small id="app-dialog-error" class="hidden" style="color: var(--color-alert); display: block; margin-bottom: 0.5rem;"></small>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem;">
+                <button id="app-dialog-cancel" class="btn btn-secondary">Annuler</button>
+                <button id="app-dialog-confirm" class="btn btn-primary">Confirmer</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=5.0"></script>
 
 
 
