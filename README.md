@@ -1,6 +1,8 @@
 # Fiskr - Moteur de Criblage LBA-CFT & Personnes Politiquement Exposées (PEP)
 
 [![CI](https://github.com/fongkhan/Fiskr/actions/workflows/ci.yml/badge.svg)](https://github.com/fongkhan/Fiskr/actions/workflows/ci.yml)
+[![Licence: Sustainable Use](https://img.shields.io/badge/licence-Sustainable%20Use%20(fair--code)-blue)](LICENSE.md)
+[![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsoriser-ff69b4)](https://github.com/sponsors/fongkhan)
 
 Fiskr est un moteur de criblage (Screening Engine) de nouvelle génération destiné aux institutions financières. Il permet de confronter le référentiel tiers (clients, mandataires, bénéficiaires effectifs) aux listes de sanctions et de Personnes Politiquement Exposées (PEP) fournies par les éditeurs officiels (OFAC, UE, ONU, Dow Jones, World-Check) conformément aux exigences réglementaires ACPR/AMF.
 
@@ -281,6 +283,18 @@ python -m pytest
 ```
 
 
+
+---
+
+## 📜 Licence & Offre Commerciale
+
+Fiskr est distribué sous la **[Sustainable Use License](LICENSE.md)** (modèle **[fair-code](https://faircode.io)**), copyright © 2026 **Alexis Vuadelle** :
+
+* ✅ **Libre pour l'usage interne et personnel** : toute organisation peut déployer, utiliser et modifier Fiskr **gratuitement** pour ses propres besoins (y compris en production bancaire). Le code source est public, auditable et ouvert aux contributions.
+* 💼 **Commercialisation réservée** : la revente du logiciel, son hébergement pour des tiers contre rémunération et les prestations associées sont réservés au titulaire. **Déploiement on-premise accompagné, support et licences commerciales : sur demande payante** — contactez [@fongkhan](https://github.com/fongkhan) sur GitHub.
+* ❤️ **Soutenir le projet** : le sponsoring est bienvenu via [GitHub Sponsors](https://github.com/sponsors/fongkhan).
+
+> Note de transparence : la Sustainable Use License est une licence *fair-code* « source disponible », pas une licence open source au sens de l'OSI (elle restreint l'usage commercial par des tiers).
 
 ---
 
