@@ -750,6 +750,14 @@ async function handleIngestion(event) {
         fetchWatchlist();
         fetchWatchlistHash();
         fetchPendingReviews();
+        // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
+        if (data.status === "PENDING_REVIEW") {
+            const go = await confirmDialog(
+                "Le snapshot est en attente d'homologation. Ouvrir le parcours de production de liste (delta, exclusions, cahier de tests, décision) maintenant ?",
+                { confirmLabel: "Ouvrir l'homologation", cancelLabel: "Plus tard" }
+            );
+            if (go) openPendingReview(data.snapshot_id);
+        }
     } catch (e) {
         console.error("Error ingesting snapshot:", e);
         showToast("Erreur réseau de communication.", "error");
@@ -798,6 +806,14 @@ async function handleSourceSync(source) {
         fetchWatchlistHash();
         fetchPendingReviews();
         refreshSidebarCounters();
+        // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
+        if (data.status === "PENDING_REVIEW" && data.snapshot_id) {
+            const go = await confirmDialog(
+                `La synchronisation ${srcLabel} attend une homologation. Ouvrir le parcours de production de liste maintenant ?`,
+                { confirmLabel: "Ouvrir l'homologation", cancelLabel: "Plus tard" }
+            );
+            if (go) openPendingReview(data.snapshot_id);
+        }
     } catch (e) {
         console.error("Error running source sync:", e);
         showToast("Erreur réseau pendant la synchronisation.", "error");
@@ -2346,6 +2362,8 @@ async function fetchIngestionSettings() {
         const wlJustifEl = document.getElementById("setting-whitelist-justification");
         const wlFileEl = document.getElementById("setting-whitelist-file");
         const rescreenEl = document.getElementById("setting-auto-rescreen");
+        const btRequiredEl = document.getElementById("setting-backtest-required");
+        const btGapEl = document.getElementById("setting-backtest-gap");
         if (approvalEl) approvalEl.checked = ingestionSettings.require_approval;
         if (justifEl) justifEl.checked = ingestionSettings.exclusion_justification_required;
         if (fileEl) fileEl.checked = ingestionSettings.exclusion_file_required;
@@ -2353,6 +2371,11 @@ async function fetchIngestionSettings() {
         if (wlJustifEl) wlJustifEl.checked = ingestionSettings.whitelist_justification_required;
         if (wlFileEl) wlFileEl.checked = ingestionSettings.whitelist_file_required;
         if (rescreenEl) rescreenEl.checked = ingestionSettings.auto_rescreen;
+        if (btRequiredEl) btRequiredEl.checked = ingestionSettings.backtest_required;
+        if (btGapEl) btGapEl.value = ingestionSettings.backtest_max_gap_pct ?? 20;
+        // Encart de l'onglet Homologation : parcours actif seulement si le mode l'est
+        const modeHint = document.getElementById("review-mode-hint");
+        if (modeHint) modeHint.classList.toggle("hidden", !!ingestionSettings.require_approval);
         // Asterisques "obligatoire" de la modale d'exclusion
         const justifMark = document.getElementById("exclusion-justification-required-mark");
         const fileMark = document.getElementById("exclusion-file-required-mark");
@@ -2371,7 +2394,9 @@ async function saveIngestionSettings() {
         alert_four_eyes_required: document.getElementById("setting-alert-four-eyes").checked,
         whitelist_justification_required: document.getElementById("setting-whitelist-justification").checked,
         whitelist_file_required: document.getElementById("setting-whitelist-file").checked,
-        auto_rescreen: document.getElementById("setting-auto-rescreen").checked
+        auto_rescreen: document.getElementById("setting-auto-rescreen").checked,
+        backtest_required: document.getElementById("setting-backtest-required").checked,
+        backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20
     };
     try {
         const response = await fetch("/api/settings/ingestion", {
@@ -2431,6 +2456,25 @@ function renderPendingTable(pending) {
     }).join("");
 }
 
+// ------------------ PARCOURS GUIDÉ DE PRODUCTION DE LISTE ------------------
+
+// Ouvre directement le parcours d'homologation d'un snapshot (depuis un import ou une synchro)
+function openPendingReview(snapshotId) {
+    switchTab("watchlist-mgmt");
+    switchSubTab("watchlist-mgmt", "watchlist-review");
+    if (snapshotId) openReviewDetail(snapshotId);
+}
+
+// Étape affichée du parcours (1 Delta, 2 Exclusions, 3 Cahier de tests, 4 Décision)
+function showReviewStep(step) {
+    for (let i = 1; i <= 4; i++) {
+        const panel = document.getElementById(`review-step-${i}`);
+        const btn = document.getElementById(`step-btn-${i}`);
+        if (panel) panel.classList.toggle("hidden", i !== step);
+        if (btn) btn.classList.toggle("active", i === step);
+    }
+}
+
 async function openReviewDetail(snapshotId) {
     reviewCurrentSnapshotId = snapshotId;
     reviewExcludedSelection = new Set();
@@ -2456,10 +2500,263 @@ async function openReviewDetail(snapshotId) {
         document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
         document.getElementById("review-delta-removed").textContent = summary.removed_count ?? 0;
         document.getElementById("review-delta-modified").textContent = summary.modified_count ?? 0;
+        renderReviewDeltaDetails(data.delta_details);
+        // Cahier de tests : panels disponibles + dernier rapport archivé
+        showReviewStep(1);
+        fetchTestPanels();
+        renderBacktestReport(data.backtest_report);
         await loadReviewEntitiesPage(1);
         document.getElementById("review-detail-card").scrollIntoView({ behavior: "smooth" });
     } catch (e) {
         console.error("Error opening review detail:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+// Delta détaillé (étape 1) : listes des ajouts / modifications / suppressions
+function renderReviewDeltaDetails(deltaDetails) {
+    const container = document.getElementById("review-delta-details");
+    if (!container) return;
+    const details = (deltaDetails && deltaDetails.details) || deltaDetails || {};
+    const added = details.added || [];
+    const removed = details.removed || [];
+    const modified = details.modified || [];
+    if (!added.length && !removed.length && !modified.length) {
+        container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>';
+        return;
+    }
+
+    const rows3 = (items, cls) => items.map(e => `
+        <tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td>
+        <td><span class="status-badge ${cls}">${escapeHtml(e.primary_name || "")}</span></td></tr>`).join("");
+
+    const modifiedRows = modified.map(e => {
+        const changes = (e.changes_detected || []).map(field => {
+            const before = e.before ? e.before[field] : undefined;
+            const after = e.after ? e.after[field] : undefined;
+            const fmt = v => (v === null || v === undefined) ? "∅" : (typeof v === "object" ? JSON.stringify(v) : String(v));
+            return `<small><strong>${escapeHtml(field)}</strong> : <span style="color:var(--text-muted)">${escapeHtml(fmt(before))}</span> → ${escapeHtml(fmt(after))}</small>`;
+        }).join("<br>");
+        return `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td><strong>${escapeHtml(e.primary_name || "")}</strong></td><td>${changes || "-"}</td></tr>`;
+    }).join("");
+
+    const section = (title, count, inner) => count ? `
+        <details style="margin-bottom: 0.6rem;">
+            <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${count})</summary>
+            <div class="table-container" style="max-height: 260px; overflow-y: auto;"><table>${inner}</table></div>
+        </details>` : "";
+
+    container.innerHTML =
+        section("🟢 Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
+        section("🟠 Modifications (avant → après)", modified.length, `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>${modifiedRows}</tbody>`) +
+        section("🔴 Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
+}
+
+// ------------------ ÉTAPE 3 : CAHIER DE TESTS (BACKTEST) ------------------
+
+async function fetchTestPanels(selectSnapshotId = null) {
+    const select = document.getElementById("backtest-panel-select");
+    if (!select) return;
+    try {
+        const response = await fetch("/api/testpanels");
+        if (!response.ok) return;
+        const data = await response.json();
+        const panels = data.panels || [];
+        if (!panels.length) {
+            select.innerHTML = '<option value="">Aucun panel — générez-en un ou importez une base clients</option>';
+            return;
+        }
+        select.innerHTML = panels.map(p => {
+            const label = `${p.generated ? "🧪 " : "👥 "}${p.file_name} (${p.record_count} clients)`;
+            return `<option value="${escapeHtml(p.snapshot_id)}">${escapeHtml(label)}</option>`;
+        }).join("");
+        if (selectSnapshotId) select.value = selectSnapshotId;
+    } catch (e) {
+        console.error("Error fetching test panels:", e);
+    }
+}
+
+async function generateTestPanel() {
+    const btn = document.getElementById("generate-panel-btn");
+    const size = parseInt(document.getElementById("backtest-panel-size").value, 10) || 500;
+    btn.disabled = true;
+    btn.textContent = "Génération...";
+    try {
+        const response = await fetch("/api/testpanels/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ snapshot_id: reviewCurrentSnapshotId, size }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Échec de la génération."), "error");
+            return;
+        }
+        showToast(data.message, "success");
+        await fetchTestPanels(data.snapshot_id);
+    } catch (e) {
+        console.error("Error generating test panel:", e);
+        showToast("Erreur réseau de communication.", "error");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "⚙️ Générer un panel";
+    }
+}
+
+async function runReviewBacktest() {
+    if (!reviewCurrentSnapshotId) return;
+    const panelId = document.getElementById("backtest-panel-select").value;
+    if (!panelId) {
+        showToast("Choisissez ou générez d'abord un panel de pseudo-clients.", "warning");
+        return;
+    }
+    const btn = document.getElementById("run-backtest-btn");
+    btn.disabled = true;
+    btn.textContent = "Criblage à blanc en cours...";
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/backtest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ panel_snapshot_id: panelId }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Échec du cahier de tests."), "error");
+            return;
+        }
+        renderBacktestReport(data);
+        showToast(data.verdict === "OK"
+            ? "Cahier de tests terminé : écart dans le seuil toléré."
+            : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes.", data.verdict === "OK" ? "success" : "warning", 7000);
+    } catch (e) {
+        console.error("Error running backtest:", e);
+        showToast("Erreur réseau de communication.", "error");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "▶ Lancer le cahier de tests";
+    }
+}
+
+function backtestVerdictBadge(report) {
+    if (!report) return "";
+    return report.verdict === "OK"
+        ? '<span class="status-badge no_match">ÉCART OK</span>'
+        : '<span class="status-badge warning">ÉCART ÉLEVÉ</span>';
+}
+
+function renderBacktestReport(report) {
+    const container = document.getElementById("backtest-results");
+    const reminder = document.getElementById("review-backtest-reminder");
+    if (!container) return;
+    if (!report) {
+        container.classList.add("hidden");
+        container.innerHTML = "";
+        if (reminder) reminder.innerHTML = `
+            <p class="section-desc" style="color: var(--color-warning);">⚠️ Aucun cahier de tests n'a été exécuté sur ce snapshot. Recommandé avant toute mise en production (étape 3).</p>`;
+        return;
+    }
+
+    const rateCard = (title, side, accent) => `
+        <div class="metric" style="flex: 1; background: rgba(255,255,255,0.03); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
+            <span class="metric-label" style="font-weight: 600; color: ${accent};">${title}</span>
+            <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} alerte(s)</span>
+            <small style="color: var(--text-muted);">taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
+        </div>`;
+
+    const pairRow = (p, withCheckbox) => `
+        <tr>
+            ${withCheckbox ? `<td><input type="checkbox" class="goodguy-cb" data-client-id="${escapeHtml(p.client_id)}" data-entity-id="${escapeHtml(p.entity_id)}" data-client-name="${escapeHtml(p.client_name || "")}" data-entity-name="${escapeHtml(p.entity_name || "")}" data-list-type="${escapeHtml(p.list_type || "")}"></td>` : ""}
+            <td><code>${escapeHtml(p.client_id)}</code><br><small>${escapeHtml(p.client_name || "")}</small></td>
+            <td><code>${escapeHtml(p.entity_id)}</code><br><small><strong>${escapeHtml(p.entity_name || "")}</strong></small></td>
+            <td>${listTypeBadge(p.list_type)}</td>
+            <td><span class="status-badge alert">${p.score}</span></td>
+        </tr>`;
+
+    const newPairs = report.new_pairs || [];
+    const resolvedPairs = report.resolved_pairs || [];
+    const executedStr = report.executed_at ? new Date(report.executed_at).toLocaleString("fr-FR") : "";
+
+    container.classList.remove("hidden");
+    container.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
+            <h3 style="margin: 0;">Résultats du cahier de tests</h3>
+            ${backtestVerdictBadge(report)}
+            <small style="color: var(--text-muted);">panel de ${report.panel_size} pseudo-clients · exécuté par @${escapeHtml(report.executed_by || "")} le ${escapeHtml(executedStr)}</small>
+        </div>
+        <div class="score-metrics" style="flex-direction: row; gap: 1.5rem; margin-bottom: 1rem;">
+            ${rateCard("Liste actuelle (production)", report.current, "var(--text-secondary)")}
+            ${rateCard("Liste candidate", report.candidate, "var(--color-accent)")}
+            <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+                <span class="metric-label" style="font-weight: 600; color: var(--color-warning);">Écart</span>
+                <span class="metric-value" style="font-size: 1.4rem;">${report.gap_pct} %</span>
+                <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
+            </div>
+        </div>
+        ${newPairs.length ? `
+            <h4 style="margin: 0.75rem 0 0.4rem;">Nouvelles alertes avec la liste candidate (${report.new_pairs_count})</h4>
+            <p class="section-desc">Vérifiez chaque paire : s'il s'agit d'un homonyme avéré (« Good Guy »), mettez-la en liste blanche puis relancez le cahier de tests.</p>
+            <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem; align-items: center;">
+                <label style="font-size: 0.85rem; cursor: pointer;"><input type="checkbox" onchange="document.querySelectorAll('.goodguy-cb').forEach(cb => cb.checked = this.checked)"> Tout sélectionner</label>
+                <button class="btn btn-sm btn-secondary" onclick="bulkGoodGuys()">🕊️ Good Guy (liste blanche) sur la sélection</button>
+            </div>
+            <div class="table-container" style="max-height: 300px; overflow-y: auto;">
+                <table>
+                    <thead><tr><th style="width:32px;"></th><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th></tr></thead>
+                    <tbody>${newPairs.map(p => pairRow(p, true)).join("")}</tbody>
+                </table>
+            </div>` : '<p class="section-desc">✅ Aucune nouvelle alerte par rapport à la liste actuelle.</p>'}
+        ${resolvedPairs.length ? `
+            <details style="margin-top: 0.75rem;">
+                <summary style="cursor: pointer; font-weight: 600;">Alertes résolues par la liste candidate (${report.resolved_pairs_count})</summary>
+                <div class="table-container" style="max-height: 240px; overflow-y: auto;">
+                    <table>
+                        <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th></tr></thead>
+                        <tbody>${resolvedPairs.map(p => pairRow(p, false)).join("")}</tbody>
+                    </table>
+                </div>
+            </details>` : ""}
+    `;
+
+    if (reminder) {
+        reminder.innerHTML = report.verdict === "OK"
+            ? `<p class="section-desc" style="color: var(--color-safe);">✅ Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).</p>`
+            : `<p class="section-desc" style="color: var(--color-warning);">⚠️ Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+    }
+}
+
+async function bulkGoodGuys() {
+    const checked = Array.from(document.querySelectorAll(".goodguy-cb:checked"));
+    if (!checked.length) {
+        showToast("Sélectionnez au moins une paire à mettre en liste blanche.", "warning");
+        return;
+    }
+    const justification = await promptDialog(
+        `Justification commune pour ${checked.length} paire(s) « Good Guy »`,
+        { placeholder: "Ex. : homonymes avérés lors du cahier de tests d'homologation du " + new Date().toLocaleDateString("fr-FR"), textarea: true }
+    );
+    if (justification === null) return;
+    const pairs = checked.map(cb => ({
+        client_id: cb.dataset.clientId,
+        watchlist_entity_id: cb.dataset.entityId,
+        client_name: cb.dataset.clientName || null,
+        watchlist_name: cb.dataset.entityName || null,
+        list_type: cb.dataset.listType || null,
+    }));
+    try {
+        const response = await fetch("/api/whitelist/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pairs, justification }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Échec de la mise en liste blanche."), "error");
+            return;
+        }
+        showToast(`${data.message} Relancez le cahier de tests pour mesurer l'amélioration.`, "success", 8000);
+        fetchWhitelist();
+    } catch (e) {
+        console.error("Error bulk whitelisting:", e);
         showToast("Erreur réseau de communication.", "error");
     }
 }

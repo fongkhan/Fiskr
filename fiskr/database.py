@@ -25,6 +25,11 @@ class Snapshot(Base):
     reviewed_by = Column(String(100), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     review_comment = Column(Text, nullable=True)
+    # Dernier cahier de tests (backtest) execute sur ce snapshot candidat :
+    # rapport archive avec le snapshot, auditable apres promotion
+    backtest_report = Column(JSON, nullable=True)
+    backtest_at = Column(DateTime, nullable=True)
+    backtest_by = Column(String(100), nullable=True)
 
 class WatchlistEntity(Base):
     __tablename__ = "watchlist_entities"
@@ -362,6 +367,9 @@ def init_db():
                 ("reviewed_by", "VARCHAR(100)"),
                 ("reviewed_at", "TIMESTAMP"),
                 ("review_comment", "TEXT"),
+                ("backtest_report", "JSON"),
+                ("backtest_at", "TIMESTAMP"),
+                ("backtest_by", "VARCHAR(100)"),
             ],
             "watchlist_entities": [
                 ("excluded", "BOOLEAN"),

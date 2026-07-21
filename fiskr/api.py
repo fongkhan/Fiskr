@@ -35,6 +35,9 @@ from fiskr.database import (
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
+from fiskr.backtest import (
+    run_backtest, generate_test_panel, TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
+)
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     run_pep_sync, run_ofsi_sync,
@@ -53,11 +56,12 @@ from fiskr.auth import (
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
     whitelist_requirements, auto_rescreen_enabled,
+    backtest_max_gap_pct, backtest_required,
     get_setting_with_source, set_setting,
     SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
     SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
-    SETTING_AUTO_RESCREEN
+    SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT
 )
 
 
@@ -1259,6 +1263,7 @@ async def compare_snapshots(
         "new_snapshot_id": snap_new.snapshot_id,
         "execution_timestamp": datetime.utcnow().isoformat() + "Z"
     }
+    return report
 
 class WatchlistEntityCreate(BaseModel):
     entity_type: str
@@ -1928,6 +1933,8 @@ class IngestionSettingsUpdate(BaseModel):
     whitelist_justification_required: Optional[bool] = None
     whitelist_file_required: Optional[bool] = None
     auto_rescreen: Optional[bool] = None
+    backtest_required: Optional[bool] = None
+    backtest_max_gap_pct: Optional[float] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -1943,6 +1950,12 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
     wl_justif = get_setting_with_source(db, SETTING_WHITELIST_JUSTIFICATION_REQUIRED, True)
     wl_file = get_setting_with_source(db, SETTING_WHITELIST_FILE_REQUIRED, False)
     rescreen = get_setting_with_source(db, SETTING_AUTO_RESCREEN, True)
+    bt_required = get_setting_with_source(db, SETTING_BACKTEST_REQUIRED, False)
+    bt_gap = get_setting_with_source(db, SETTING_BACKTEST_MAX_GAP_PCT, 20.0)
+    try:
+        bt_gap_value = float(bt_gap["value"])
+    except (TypeError, ValueError):
+        bt_gap_value = 20.0
     return {
         "require_approval": bool(approval["value"]),
         "exclusion_justification_required": bool(justif["value"]),
@@ -1951,6 +1964,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "whitelist_justification_required": bool(wl_justif["value"]),
         "whitelist_file_required": bool(wl_file["value"]),
         "auto_rescreen": bool(rescreen["value"]),
+        "backtest_required": bool(bt_required["value"]),
+        "backtest_max_gap_pct": bt_gap_value,
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -1959,6 +1974,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
             "whitelist_justification_required": wl_justif["source"],
             "whitelist_file_required": wl_file["source"],
             "auto_rescreen": rescreen["source"],
+            "backtest_required": bt_required["source"],
+            "backtest_max_gap_pct": bt_gap["source"],
         },
     }
 
@@ -1985,12 +2002,18 @@ async def update_ingestion_settings(
         SETTING_WHITELIST_JUSTIFICATION_REQUIRED: payload.whitelist_justification_required,
         SETTING_WHITELIST_FILE_REQUIRED: payload.whitelist_file_required,
         SETTING_AUTO_RESCREEN: payload.auto_rescreen,
+        SETTING_BACKTEST_REQUIRED: payload.backtest_required,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
-    if not changed:
+    if not changed and payload.backtest_max_gap_pct is None:
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     for key, value in changed.items():
         set_setting(db, key, bool(value), updated_by=admin_user["username"])
+    if payload.backtest_max_gap_pct is not None:
+        if not (0 <= payload.backtest_max_gap_pct <= 1000):
+            raise HTTPException(status_code=400, detail="backtest_max_gap_pct doit être entre 0 et 1000.")
+        set_setting(db, SETTING_BACKTEST_MAX_GAP_PCT, float(payload.backtest_max_gap_pct),
+                    updated_by=admin_user["username"])
     return {"message": "Réglages d'homologation mis à jour.", **_settings_payload(db)}
 
 def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
@@ -2057,6 +2080,119 @@ async def get_review_detail(
         "production_snapshot_id": production.snapshot_id if production else None,
         "delta_summary": delta["summary"],
         "delta_details": _truncate_delta_details(delta),
+        "backtest_report": snap.backtest_report,
+        "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
+        "backtest_by": snap.backtest_by,
+    }
+
+class BacktestRequest(BaseModel):
+    panel_snapshot_id: str
+
+@app.post("/api/review/snapshots/{snapshot_id}/backtest")
+async def run_review_backtest(
+    snapshot_id: str,
+    payload: BacktestRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Cahier de tests d'homologation : criblage A/B A BLANC du panel choisi
+    contre la production actuelle et contre l'univers candidat (le snapshot en
+    attente remplacant les listes du meme type). Mesure l'ecart de taux
+    d'interception, liste les nouvelles alertes et les alertes resolues.
+    Aucune alerte ni ligne d'audit n'est creee. Le rapport est archive avec le
+    snapshot (auditable apres promotion).
+    """
+    snap = _get_pending_snapshot(db, snapshot_id)
+    panel = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.panel_snapshot_id).first()
+    if not panel or panel.file_type not in PANEL_FILE_TYPES or panel.status != "READY":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Panel introuvable : choisissez une base clients (CLIENT_BASE) ou un panel de test généré."
+        )
+    if not (panel.record_count or 0):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le panel choisi est vide.")
+
+    report = run_backtest(db, snap, panel.snapshot_id,
+                          threshold_pct=backtest_max_gap_pct(db),
+                          executed_by=reviewer["username"])
+    snap.backtest_report = report
+    snap.backtest_at = datetime.utcnow()
+    snap.backtest_by = reviewer["username"]
+    db.commit()
+    return report
+
+@app.get("/api/testpanels")
+async def list_test_panels(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Panels utilisables par le cahier de tests : bases clients reelles
+    (CLIENT_BASE) et panels de pseudo-clients generes (CLIENT_TEST_PANEL).
+    """
+    snaps = db.query(Snapshot).filter(
+        Snapshot.file_type.in_(PANEL_FILE_TYPES),
+        Snapshot.status == "READY"
+    ).order_by(Snapshot.uploaded_at.desc()).all()
+    return {
+        "panels": [
+            {
+                "snapshot_id": s.snapshot_id,
+                "file_type": s.file_type,
+                "file_name": s.file_name,
+                "record_count": s.record_count,
+                "uploaded_at": s.uploaded_at.isoformat() if s.uploaded_at else None,
+                "generated": s.file_type == TEST_PANEL_FILE_TYPE,
+            }
+            for s in snaps
+        ]
+    }
+
+class TestPanelGenerateRequest(BaseModel):
+    # Snapshot candidat dont les entites servent de base aux hits attendus
+    snapshot_id: Optional[str] = None
+    size: int = 500
+    seed: Optional[int] = None
+
+@app.post("/api/testpanels/generate")
+async def generate_test_panel_endpoint(
+    payload: TestPanelGenerateRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Genere un panel de pseudo-clients (copies exactes, variantes typo/inversion,
+    quasi-collisions, clients neutres) derive du snapshot candidat et de la
+    production. Stocke en CLIENT_TEST_PANEL : jamais repris par le re-criblage
+    du referentiel clients reel.
+    """
+    if not (50 <= payload.size <= 5000):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="La taille du panel doit être entre 50 et 5000.")
+    source_ids = []
+    if payload.snapshot_id:
+        source = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.snapshot_id).first()
+        if not source or source.file_type not in WATCHLIST_FILE_TYPES:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Snapshot source introuvable ou non-watchlist.")
+        source_ids.append(source.snapshot_id)
+    source_ids.extend(
+        s.snapshot_id for s in db.query(Snapshot).filter(
+            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+            Snapshot.status == "READY"
+        ).all()
+    )
+    try:
+        snap = generate_test_panel(db, source_ids, size=payload.size,
+                                   seed=payload.seed, created_by=reviewer["username"])
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return {
+        "message": f"Panel de {snap.record_count} pseudo-clients généré.",
+        "snapshot_id": snap.snapshot_id,
+        "file_name": snap.file_name,
+        "record_count": snap.record_count,
     }
 
 @app.get("/api/review/snapshots/{snapshot_id}/entities")
@@ -2239,6 +2375,19 @@ async def approve_pending_snapshot(
             status_code=400,
             detail="Des exclusions n'ont pas de pièce jointe alors que le réglage l'exige. Complétez-les avant d'approuver."
         )
+
+    # Cahier de tests obligatoire (reglage) : un rapport au verdict OK est exige
+    if backtest_required(db):
+        if not snap.backtest_report:
+            raise HTTPException(
+                status_code=400,
+                detail="Le cahier de tests est obligatoire avant la mise en production (réglage actif). Exécutez-le depuis l'étape « Cahier de tests »."
+            )
+        if snap.backtest_report.get("verdict") != "OK":
+            raise HTTPException(
+                status_code=400,
+                detail="Le dernier cahier de tests signale un écart de taux d'interception au-delà du seuil toléré. Posez des Good Guys (liste blanche) ou des exclusions, puis relancez le cahier de tests."
+            )
 
     # Snapshot de production remplace (pour cibler le re-criblage post-delta)
     previous_prod = _latest_ready_snapshot(db, snap.file_type)
@@ -2699,6 +2848,74 @@ async def create_whitelist_pair(
     db.commit()
     db.refresh(pair)
     return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+
+class WhitelistBulkPair(BaseModel):
+    client_id: str
+    watchlist_entity_id: str
+    client_name: Optional[str] = None
+    watchlist_name: Optional[str] = None
+    list_type: Optional[str] = None
+
+class WhitelistBulkRequest(BaseModel):
+    pairs: List[WhitelistBulkPair]
+    justification: Optional[str] = None
+
+@app.post("/api/whitelist/bulk")
+async def create_whitelist_pairs_bulk(
+    payload: WhitelistBulkRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    « Good Guys » en masse (cahier de tests d'homologation) : met plusieurs
+    paires client x liste en liste blanche avec une justification commune.
+    Les paires deja actives sont sautees (pas d'echec global). La piece jointe
+    eventuelle reste du ressort de la pose unitaire.
+    """
+    if not payload.pairs:
+        raise HTTPException(status_code=400, detail="Aucune paire fournie.")
+    if len(payload.pairs) > 500:
+        raise HTTPException(status_code=400, detail="Maximum 500 paires par appel.")
+
+    requirements = whitelist_requirements(db)
+    justification = (payload.justification or "").strip()
+    if requirements["justification_required"] and not justification:
+        raise HTTPException(
+            status_code=400,
+            detail="Une justification commune est obligatoire pour une mise en liste blanche (réglage actif)."
+        )
+
+    created, skipped = [], []
+    for p in payload.pairs:
+        client_id = p.client_id.strip()
+        entity_id = p.watchlist_entity_id.strip()
+        if not client_id or not entity_id:
+            skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "identifiants vides"})
+            continue
+        if is_whitelisted(db, client_id, entity_id):
+            skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "paire déjà active"})
+            continue
+        # Type de liste : fourni par le rapport de backtest, sinon derive du cache
+        list_type = (p.list_type or "").strip() or next(
+            (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == entity_id), None
+        )
+        pair = WhitelistPair(
+            client_id=client_id,
+            watchlist_entity_id=entity_id,
+            client_name=(p.client_name or "").strip() or None,
+            watchlist_name=(p.watchlist_name or "").strip() or None,
+            list_type=list_type,
+            justification=justification or None,
+            created_by=reviewer["username"],
+        )
+        db.add(pair)
+        created.append({"client_id": client_id, "watchlist_entity_id": entity_id})
+    db.commit()
+    return {
+        "message": f"{len(created)} paire(s) mise(s) en liste blanche, {len(skipped)} sautée(s).",
+        "created": created,
+        "skipped": skipped,
+    }
 
 @app.get("/api/whitelist")
 async def list_whitelist_pairs(
