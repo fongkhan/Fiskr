@@ -1,12 +1,11 @@
 // Fiskr - Dashboard Controller v3.1
 
 let currentUser = null;
-let activeWatchlist = [];
 let auditHistory = [];
 let activeSnapshots = [];
 let wlCurrentPage = 1;
 const wlItemsPerPage = 100;
-let wlFilteredItems = [];
+let wlSearchDebounce = null;
 
 // ------------------ LIBELLÉS PARTAGÉS (types de listes & sources) ------------------
 
@@ -202,6 +201,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initListTypeControls();
     // Initial data loading
     fetchWatchlist();
+    fetchWatchlistHash();
     fetchAuditHistory();
     fetchSnapshots();
     fetchConfig();
@@ -569,6 +569,7 @@ async function handleManualEntity(event) {
         
         // Switch back to Active Watchlist and refresh
         fetchWatchlist();
+        fetchWatchlistHash();
         switchSubTab('watchlist-mgmt', 'watchlist-active');
         
     } catch (e) {
@@ -747,6 +748,7 @@ async function handleIngestion(event) {
         fileInput.value = "";
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
         fetchPendingReviews();
     } catch (e) {
         console.error("Error ingesting snapshot:", e);
@@ -793,6 +795,7 @@ async function handleSourceSync(source) {
         fetchSyncReports();
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
         fetchPendingReviews();
         refreshSidebarCounters();
     } catch (e) {
@@ -1002,45 +1005,61 @@ async function handleCompareSnapshots(event) {
     }
 }
 
-// Fetch Watchlist
-async function fetchWatchlist() {
+// Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
+async function fetchWatchlistHash() {
     try {
         const response = await fetch("/api/watchlist");
         const data = await response.json();
-        
-        activeWatchlist = data.items || [];
-
         const hashEl = document.getElementById("sidebar-wl-hash");
         if (hashEl) {
             hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "NONE";
             hashEl.title = data.hash;
         }
-
-        // Réapplique les filtres courants (texte + type de liste)
-        filterWatchlist();
     } catch (e) {
-        console.error("Error loading watchlist:", e);
+        console.error("Error loading watchlist hash:", e);
+    }
+}
+
+// Vue « Listés — Base de Données » : lecture en direct, paginée côté serveur
+async function fetchWatchlist(page = 1) {
+    wlCurrentPage = page;
+    const searchEl = document.getElementById("wl-search-input");
+    const listFilterEl = document.getElementById("wl-list-filter");
+    const scopeFilterEl = document.getElementById("wl-scope-filter");
+
+    const params = new URLSearchParams({ page: String(page), page_size: String(wlItemsPerPage) });
+    const search = searchEl ? searchEl.value.trim() : "";
+    if (search) params.set("search", search);
+    if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+    params.set("scope", scopeFilterEl && scopeFilterEl.value ? scopeFilterEl.value : "production");
+
+    try {
+        const response = await fetch(`/api/watchlist/db?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok) {
+            showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
+            return;
+        }
+        renderWatchlistTable(data.items || [], data.page, data.total);
+    } catch (e) {
+        console.error("Error loading watchlist from database:", e);
     }
 }
 
 // Render Watchlist Table
-function renderWatchlistTable(items, page = 1) {
+function renderWatchlistTable(items, page = 1, total = 0) {
     const tbody = document.querySelector("#watchlist-table tbody");
     tbody.innerHTML = "";
-    
+
     if (items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucune entité de sanctions active chargée</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted)">Aucune entité en base pour ce périmètre</td></tr>';
         updatePaginationControls(0, 0);
         return;
     }
-    
-    const startIndex = (page - 1) * wlItemsPerPage;
-    const endIndex = Math.min(startIndex + wlItemsPerPage, items.length);
-    const paginatedItems = items.slice(startIndex, endIndex);
-    
+
     const fragment = document.createDocumentFragment();
-    
-    paginatedItems.forEach(item => {
+
+    items.forEach(item => {
         const tr = document.createElement("tr");
         tr.style.cursor = "pointer";
         tr.title = "Cliquez pour voir les détails de cette fiche";
@@ -1063,9 +1082,12 @@ function renderWatchlistTable(items, page = 1) {
         else if (item.entity_type === "V") typeBadge = '<span class="status-badge warning">V (Navire)</span>';
         else typeBadge = '<span class="status-badge">O (Autre)</span>';
 
+        const excludedBadge = item.excluded ? ' <span class="status-badge alert" title="Entité exclue de la production lors de l\'homologation">EXCLUE</span>' : "";
+
         tr.innerHTML = `
             <td><code>${escapeHtml(item.entity_id)}</code></td>
             <td>${listTypeBadge(item._list_type)}</td>
+            <td>${snapshotStatusBadge(item.snapshot_status)}${excludedBadge}</td>
             <td>${typeBadge}</td>
             <td>
                 <strong>${escapeHtml(item.primary_name)}</strong>
@@ -1082,27 +1104,13 @@ function renderWatchlistTable(items, page = 1) {
     });
     
     tbody.appendChild(fragment);
-    updatePaginationControls(items.length, page);
+    updatePaginationControls(total, page);
 }
 
-// Filter Watchlist active items (texte + type de liste combinés)
+// Filtres de la vue base de données : relance une requête serveur (debounce 300 ms)
 function filterWatchlist() {
-    const query = document.getElementById("wl-search-input").value.toLowerCase().trim();
-    const listFilterEl = document.getElementById("wl-list-filter");
-    const listFilter = listFilterEl ? listFilterEl.value : "";
-
-    wlFilteredItems = activeWatchlist.filter(item => {
-        if (listFilter && item._list_type !== listFilter) return false;
-        if (!query) return true;
-        const id = (item.entity_id || "").toLowerCase();
-        const name = (item.primary_name || "").toLowerCase();
-        const lei = (item.lei_number || "").toLowerCase();
-        const imo = (item.imo_number || "").toLowerCase();
-        return id.includes(query) || name.includes(query) || lei.includes(query) || imo.includes(query);
-    });
-
-    wlCurrentPage = 1;
-    renderWatchlistTable(wlFilteredItems, wlCurrentPage);
+    clearTimeout(wlSearchDebounce);
+    wlSearchDebounce = setTimeout(() => fetchWatchlist(1), 300);
 }
 
 // Update Watchlist Pagination UI Controls
@@ -1136,8 +1144,7 @@ function updatePaginationControls(totalItems, page) {
 
 // Switch Watchlist Page
 function changeWatchlistPage(newPage) {
-    wlCurrentPage = newPage;
-    renderWatchlistTable(wlFilteredItems, wlCurrentPage);
+    fetchWatchlist(newPage);
 }
 
 // Handle Real-Time Sandbox Screening
@@ -1728,6 +1735,7 @@ async function purgeFailedSnapshots() {
         showToast(`Purge terminée : ${data.message}`, "success");
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
     } catch (e) {
         console.error("Purge failed:", e);
         showToast("Erreur réseau lors de l'appel à la purge.", "error");
@@ -2379,6 +2387,7 @@ async function approvePendingSnapshot() {
         fetchPendingReviews();
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
     } catch (e) {
         console.error("Error approving snapshot:", e);
         showToast("Erreur réseau de communication.", "error");

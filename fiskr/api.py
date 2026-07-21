@@ -1425,6 +1425,74 @@ async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)
         "items": watchlist_store
     }
 
+WATCHLIST_DB_SCOPES = ("production", "all", "PENDING_REVIEW", "SUPERSEDED", "REJECTED", "EXCLUDED")
+
+@app.get("/api/watchlist/db")
+async def browse_watchlist_db(
+    scope: str = Query("production"),
+    list_type: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Consultation EN DIRECT de la base de donnees des listes (pagination et
+    recherche SQL), independante du cache memoire du moteur. Le scope par
+    defaut « production » reflete exactement l'univers crible (snapshots
+    READY, entites non exclues) ; les autres scopes exposent les entites en
+    attente d'homologation, remplacees, rejetees ou exclues.
+    """
+    scope = (scope or "production").strip()
+    if scope not in WATCHLIST_DB_SCOPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scope inconnu ({', '.join(WATCHLIST_DB_SCOPES)})."
+        )
+
+    query = db.query(WatchlistEntity, Snapshot).join(
+        Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id
+    ).filter(Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+
+    if scope == "production":
+        query = query.filter(Snapshot.status == "READY", WatchlistEntity.excluded.isnot(True))
+    elif scope == "EXCLUDED":
+        query = query.filter(WatchlistEntity.excluded.is_(True))
+    elif scope != "all":
+        query = query.filter(Snapshot.status == scope)
+
+    if list_type:
+        values = [v.strip().upper() for v in list_type.split(",") if v.strip()]
+        if values:
+            query = query.filter(Snapshot.file_type.in_(values))
+
+    if search and search.strip():
+        needle = f"%{search.strip()}%"
+        query = query.filter(
+            (WatchlistEntity.primary_name.ilike(needle))
+            | (WatchlistEntity.entity_id.ilike(needle))
+            | (WatchlistEntity.lei_number.ilike(needle))
+            | (WatchlistEntity.imo_number.ilike(needle))
+        )
+
+    total = query.count()
+    rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+
+    items = []
+    for entity, snap in rows:
+        # Memes cles que le cache moteur : la modale de details du dashboard
+        # fonctionne a l'identique sur les deux sources
+        d = {c.name: getattr(entity, c.name) for c in entity.__table__.columns}
+        d["_list_type"] = snap.file_type
+        d["snapshot_status"] = snap.status
+        d["snapshot_uploaded_at"] = snap.uploaded_at.isoformat() if snap.uploaded_at else None
+        d["snapshot_file_name"] = snap.file_name
+        items.append(d)
+
+    return {"total": total, "page": page, "page_size": page_size, "scope": scope, "items": items}
+
 @app.get("/api/history")
 async def get_audit_history(
     list_type: Optional[str] = Query(None),

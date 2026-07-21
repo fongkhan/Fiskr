@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Live database view of listed parties** (`GET /api/watchlist/db`): the "Watchlist Active" sub-tab becomes **"Listés — Base de Données (en direct)"** and now reads the relational database on every display instead of dumping the engine's in-memory cache to the browser. Server-side pagination (100/page, max 500), debounced search (name, entity ID, LEI, IMO), list-type filter, and a new **scope filter**: `production` (default — READY snapshots, excluded entities out, mirroring what the engine screens), `all`, `PENDING_REVIEW`, `SUPERSEDED`, `REJECTED` and `EXCLUDED`. Each row carries a snapshot-status badge (plus an "EXCLUE" badge) and the existing 26-attribute detail modal works unchanged. The engine cache and its sidebar hash are untouched (`GET /api/watchlist` unchanged) — divergence between cache and database becomes visible, which is the point of a live view. 8 new tests in `tests/test_watchlist_db.py`.
 - **License — Sustainable Use License (fair-code)**, copyright © 2026 Alexis Vuadelle (`LICENSE.md`): free internal-business and personal use, public source; commercialization (resale, paid hosting for third parties, paid on-premise deployment services and commercial licenses) reserved to the copyright holder, available on paid request via GitHub.
 - **Sponsoring**: `.github/FUNDING.yml` pointing to GitHub Sponsors (`fongkhan`), plus license and sponsor badges and a "Licence & Offre Commerciale" section in the README.
 

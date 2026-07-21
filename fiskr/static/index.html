@@ -117,12 +117,20 @@
                     <div class="grid-layout" style="grid-template-columns: 1fr;">
                         <!-- Watchlist list -->
                         <div class="card result-card">
-                            <h2>Fiches Indexées dans la Cache du Moteur Actif</h2>
-                            <p class="section-desc">Liste complète des fiches chargées depuis la base de données relationnelle et indexées par blocage.</p>
-                            
+                            <h2>Listés — Base de Données (en direct)</h2>
+                            <p class="section-desc">Consultation en direct de la base relationnelle : chaque affichage interroge la base (recherche, filtres et pagination côté serveur). Le périmètre « En production » reflète les instantanés homologués criblés par le moteur ; les autres statuts (en attente, remplacées, rejetées, exclues) sont consultables via le filtre Statut.</p>
+
                             <div class="search-box" style="display: flex; gap: 0.5rem;">
-                                <input type="text" id="wl-search-input" placeholder="Filtrer par nom ou ID..." onkeyup="filterWatchlist()" style="flex: 1;">
+                                <input type="text" id="wl-search-input" placeholder="Filtrer par nom, ID, LEI ou IMO..." onkeyup="filterWatchlist()" style="flex: 1;">
                                 <select id="wl-list-filter" onchange="filterWatchlist()" title="Filtrer par type de liste"></select>
+                                <select id="wl-scope-filter" onchange="filterWatchlist()" title="Filtrer par statut en base">
+                                    <option value="production">En production</option>
+                                    <option value="all">Tous les statuts</option>
+                                    <option value="PENDING_REVIEW">En attente d'homologation</option>
+                                    <option value="SUPERSEDED">Remplacées</option>
+                                    <option value="REJECTED">Rejetées</option>
+                                    <option value="EXCLUDED">Exclues</option>
+                                </select>
                             </div>
 
                             <div class="table-container max-height-table">
@@ -131,6 +139,7 @@
                                         <tr>
                                             <th>ID</th>
                                             <th>Liste</th>
+                                            <th>Statut</th>
                                             <th>Type d'entité</th>
                                             <th>Nom Principal / Raison Sociale</th>
                                             <th>Pays Rattachés</th>
@@ -1510,7 +1519,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=5.0"></script>
+    <script src="/static/app.js?v=5.1"></script>
 
 
 
