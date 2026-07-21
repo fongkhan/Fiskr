@@ -1748,17 +1748,32 @@ async function purgeFailedSnapshots() {
 }
 
 // Watchlist details Modal trigger
+// Fiche affichée dans la modale de détails (support du mode édition)
+let wlDetailsItem = null;
+
+// Même détection de date que le back : ISO (YYYY-MM-DD) ou JJ/MM/AAAA
+const OFFICIAL_REF_DATE_RE = /(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})/;
+
+// L'édition est réservée aux reviewers/admins, sur les fiches en production
+// (la vue Base de Données fournit id + snapshot_status ; le cache moteur non)
+function canEditWatchlistEntity(item) {
+    const roles = userRoles(currentUser);
+    if (!roles.includes("admin") && !roles.includes("reviewer")) return false;
+    return Boolean(item && item.id && item.snapshot_status === "READY" && !item.excluded);
+}
+
 function showWatchlistDetails(item) {
+    wlDetailsItem = item;
     const modal = document.getElementById("details-modal");
     const title = document.getElementById("modal-title");
     const body = document.getElementById("modal-body");
-    
+
     title.textContent = `Détails de l'Entité : ${item.entity_id}`;
-    
+
     const altAddrs = Array.isArray(item.alternative_addresses) ? item.alternative_addresses.join("; ") : (item.alternative_addresses || "-");
     const citizenship = item.countries?.citizenship?.join(", ") || "-";
     const residence = item.countries?.residence?.join(", ") || "-";
-    
+
     let highAliases = [];
     let lowAliases = [];
     if (item.aliases) {
@@ -1770,8 +1785,18 @@ function showWatchlistDetails(item) {
         }
     }
     const aliasesStr = [...highAliases, ...lowAliases].join(", ") || "-";
-    
+
+    const modifiedStr = item.modified_by
+        ? `@${item.modified_by} — ${item.modified_at ? new Date(item.modified_at + (item.modified_at.endsWith("Z") ? "" : "Z")).toLocaleString("fr-FR") : ""}`
+        : "-";
+    const editBar = canEditWatchlistEntity(item)
+        ? `<div style="display:flex; justify-content:flex-end; margin-bottom: 0.75rem;">
+               <button class="btn-secondary" onclick="showWatchlistEntityEditForm()">✏️ Modifier la fiche</button>
+           </div>`
+        : "";
+
     body.innerHTML = `
+        ${editBar}
         <div class="details-grid">
             <div class="details-item"><strong>Nom Principal / Label</strong><span>${escapeHtml(item.primary_name || "-")}</span></div>
             <div class="details-item"><strong>Type d'Entité</strong><span>${escapeHtml(item.entity_type || "-")}</span></div>
@@ -1791,16 +1816,240 @@ function showWatchlistDetails(item) {
             <div class="details-item"><strong>Origine / Source</strong><span>${escapeHtml(item.origin || "-")}</span></div>
             <div class="details-item"><strong>Fonction / Désignation</strong><span>${escapeHtml(item.designation || "-")}</span></div>
             <div class="details-item"><strong>Informations Additionnelles</strong><span>${escapeHtml(item.additional_informations || "-")}</span></div>
+            <div class="details-item" style="grid-column: span 2;"><strong>Référence Officielle</strong><span>${escapeHtml(item.official_reference || "-")}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Motifs de la Désignation</strong><span>${escapeHtml(item.designation_reasons || "-")}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Adresses Alternatives</strong><span>${escapeHtml(altAddrs)}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Alias</strong><span>${escapeHtml(aliasesStr)}</span></div>
             <div class="details-item"><strong>LEI (Legal Entity Identifier)</strong><span>${escapeHtml(item.lei_number || "-")}</span></div>
             <div class="details-item"><strong>IMO Code (Navire)</strong><span>${escapeHtml(item.imo_number || "-")}</span></div>
             <div class="details-item"><strong>Tail Number (Immatriculation Aéronef)</strong><span>${escapeHtml(item.aircraft_tail_number || "-")}</span></div>
+            <div class="details-item"><strong>Dernière Modification Manuelle</strong><span>${escapeHtml(modifiedStr)}</span></div>
+        </div>
+        <div id="entity-changes-section"></div>
+    `;
+
+    modal.classList.remove("hidden");
+    if (item.id) loadEntityChanges(item.id);
+}
+
+// Libellés français des champs pour le journal des modifications
+const ENTITY_FIELD_LABELS = {
+    primary_name: "Nom principal", entity_type: "Type d'entité", gender: "Genre",
+    individual_name_parsed: "Prénom / Nom / Nom de jeune fille", dates_of_birth: "Dates de naissance",
+    countries: "Pays rattachés", aliases: "Alias", place_of_birth: "Lieu de naissance",
+    address: "Adresse", city: "Ville", state: "État / Région", country: "Pays",
+    date_of_death: "Date de décès", is_deceased: "Décédé", origin: "Origine / Source",
+    designation: "Fonction / Désignation", designation_reasons: "Motifs de la désignation",
+    additional_informations: "Informations additionnelles", official_reference: "Référence officielle",
+    alternative_addresses: "Adresses alternatives", lei_number: "LEI", imo_number: "IMO",
+    aircraft_tail_number: "Tail Number",
+};
+
+// Historique des modifications manuelles de la fiche (journal immuable)
+async function loadEntityChanges(entityPk) {
+    const container = document.getElementById("entity-changes-section");
+    if (!container) return;
+    try {
+        const response = await fetch(`/api/watchlist/entity/${entityPk}/changes`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = data.items || [];
+        if (!items.length) return;
+        container.innerHTML = `
+            <h3 style="margin-top: 1.25rem;">Historique des modifications (${items.length})</h3>
+            <div class="table-container" style="max-height: 220px; overflow-y: auto;">
+                <table>
+                    <thead><tr><th>Quand</th><th>Par</th><th>Champ</th><th>Avant</th><th>Après</th></tr></thead>
+                    <tbody>
+                        ${items.map(c => `
+                            <tr>
+                                <td><small>${c.changed_at ? new Date(c.changed_at + "Z").toLocaleString("fr-FR") : "-"}</small></td>
+                                <td><small>@${escapeHtml(c.changed_by || "")}</small></td>
+                                <td><small>${escapeHtml(ENTITY_FIELD_LABELS[c.field] || c.field)}</small></td>
+                                <td><small style="color:var(--text-muted)">${escapeHtml(c.old_value ?? "∅")}</small></td>
+                                <td><small>${escapeHtml(c.new_value ?? "∅")}</small></td>
+                            </tr>`).join("")}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } catch (e) {
+        console.error("Error loading entity changes:", e);
+    }
+}
+
+// ------------------ ÉDITION D'UNE FICHE LISTÉE (PATCH) ------------------
+
+function _editInput(id, label, value, span2 = false) {
+    return `
+        <div class="details-item"${span2 ? ' style="grid-column: span 2;"' : ""}>
+            <strong>${label}</strong>
+            <input type="text" id="edit-ent-${id}" value="${escapeHtml(value ?? "")}">
+        </div>`;
+}
+
+function showWatchlistEntityEditForm() {
+    const item = wlDetailsItem;
+    if (!item || !canEditWatchlistEntity(item)) return;
+    const body = document.getElementById("modal-body");
+    const parsed = item.individual_name_parsed || {};
+    const countries = item.countries || {};
+    const aliases = (item.aliases && !Array.isArray(item.aliases)) ? item.aliases : { high_priority: [], low_priority: [] };
+
+    const syncWarning = item.snapshot_id !== "manual-watchlist"
+        ? `<p class="section-desc" style="color: var(--color-warning, #b8860b);">⚠️ Fiche issue d'une source synchronisée : la prochaine synchronisation de la liste remplacera ce snapshot et écrasera ces modifications. Le journal des modifications, lui, est conservé.</p>`
+        : "";
+
+    body.innerHTML = `
+        <p class="section-desc">Modification de la fiche <code>${escapeHtml(item.entity_id)}</code> — chaque champ modifié est tracé (qui, quand, avant → après).</p>
+        ${syncWarning}
+        <div class="details-grid">
+            ${_editInput("primary_name", "Nom Principal / Label", item.primary_name, true)}
+            <div class="details-item"><strong>Type d'Entité</strong>
+                <select id="edit-ent-entity_type">
+                    ${["I", "E", "V", "O"].map(t => `<option value="${t}" ${item.entity_type === t ? "selected" : ""}>${t}</option>`).join("")}
+                </select>
+            </div>
+            <div class="details-item"><strong>Genre</strong>
+                <select id="edit-ent-gender">
+                    ${["M", "F", "U"].map(g => `<option value="${g}" ${(item.gender || "U") === g ? "selected" : ""}>${g}</option>`).join("")}
+                </select>
+            </div>
+            ${_editInput("first_name", "Prénom", parsed.first_name)}
+            ${_editInput("last_name", "Nom", parsed.last_name)}
+            ${_editInput("maiden_name", "Nom de Jeune Fille", parsed.maiden_name)}
+            ${_editInput("citizenship", "Nationalités (codes, virgules)", (countries.citizenship || []).join(", "))}
+            ${_editInput("residence", "Résidences (codes, virgules)", (countries.residence || []).join(", "))}
+            ${_editInput("place_of_birth", "Lieu de Naissance", item.place_of_birth)}
+            ${_editInput("dates_of_birth", "Dates de Naissance (AAAA-MM-JJ, virgules)", (item.dates_of_birth || []).join(", "))}
+            ${_editInput("address", "Adresse", item.address, true)}
+            ${_editInput("city", "Ville", item.city)}
+            ${_editInput("state", "État / Région", item.state)}
+            ${_editInput("country", "Pays", item.country)}
+            ${_editInput("date_of_death", "Date de Décès", item.date_of_death)}
+            ${_editInput("origin", "Origine / Source", item.origin)}
+            ${_editInput("designation", "Fonction / Désignation", item.designation)}
+            ${_editInput("additional_informations", "Informations Additionnelles", item.additional_informations, true)}
+            ${_editInput("official_reference", "Référence Officielle", item.official_reference, true)}
+            <div class="details-item" style="grid-column: span 2;" id="edit-touch-ref-wrapper" ${OFFICIAL_REF_DATE_RE.test(item.official_reference || "") ? "" : 'hidden'}>
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer;">
+                    <input type="checkbox" id="edit-touch-ref-date" checked>
+                    Mettre à jour la date contenue dans la référence officielle à la date du jour
+                </label>
+            </div>
+            ${_editInput("designation_reasons", "Motifs de la Désignation", item.designation_reasons, true)}
+            ${_editInput("alternative_addresses", "Adresses Alternatives (point-virgules)", (item.alternative_addresses || []).join("; "), true)}
+            ${_editInput("aliases_high", "Alias forts (virgules)", (aliases.high_priority || []).join(", "), true)}
+            ${_editInput("aliases_low", "Alias faibles (virgules)", (aliases.low_priority || []).join(", "), true)}
+            ${_editInput("lei_number", "LEI", item.lei_number)}
+            ${_editInput("imo_number", "IMO", item.imo_number)}
+            ${_editInput("aircraft_tail_number", "Tail Number", item.aircraft_tail_number)}
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+            <button class="btn-secondary" onclick="showWatchlistDetails(wlDetailsItem)">Annuler</button>
+            <button class="btn-primary" id="edit-ent-save-btn" onclick="saveWatchlistEntityEdits()">💾 Enregistrer les modifications</button>
         </div>
     `;
-    
-    modal.classList.remove("hidden");
+
+    // La case « date du jour » n'a de sens que si la référence contient une date
+    const refInput = document.getElementById("edit-ent-official_reference");
+    refInput.addEventListener("input", () => {
+        document.getElementById("edit-touch-ref-wrapper").hidden = !OFFICIAL_REF_DATE_RE.test(refInput.value);
+    });
+}
+
+function _editValue(id) {
+    const el = document.getElementById(`edit-ent-${id}`);
+    return el ? el.value.trim() : "";
+}
+
+function _splitList(raw, separator) {
+    return raw.split(separator).map(v => v.trim()).filter(Boolean);
+}
+
+async function saveWatchlistEntityEdits() {
+    const item = wlDetailsItem;
+    if (!item) return;
+    const patch = {};
+
+    const scalarFields = [
+        "primary_name", "entity_type", "gender", "place_of_birth", "address", "city",
+        "state", "country", "date_of_death", "origin", "designation",
+        "designation_reasons", "additional_informations", "official_reference",
+        "lei_number", "imo_number", "aircraft_tail_number",
+    ];
+    for (const field of scalarFields) {
+        const newValue = _editValue(field) || null;
+        if (newValue !== (item[field] || null)) patch[field] = newValue;
+    }
+
+    const parsed = item.individual_name_parsed || {};
+    const newParsed = {
+        first_name: _editValue("first_name"),
+        last_name: _editValue("last_name"),
+        maiden_name: _editValue("maiden_name"),
+    };
+    if (newParsed.first_name !== (parsed.first_name || "") || newParsed.last_name !== (parsed.last_name || "") || newParsed.maiden_name !== (parsed.maiden_name || "")) {
+        patch.individual_name_parsed = newParsed;
+    }
+
+    const newDobs = _splitList(_editValue("dates_of_birth"), ",");
+    if (JSON.stringify(newDobs) !== JSON.stringify(item.dates_of_birth || [])) patch.dates_of_birth = newDobs;
+
+    const countries = item.countries || {};
+    const newCountries = {
+        ...countries,
+        citizenship: _splitList(_editValue("citizenship"), ",").map(c => c.toUpperCase()),
+        residence: _splitList(_editValue("residence"), ",").map(c => c.toUpperCase()),
+    };
+    if (JSON.stringify(newCountries) !== JSON.stringify(countries)) patch.countries = newCountries;
+
+    const aliases = (item.aliases && !Array.isArray(item.aliases)) ? item.aliases : { high_priority: [], low_priority: [] };
+    const newAliases = {
+        high_priority: _splitList(_editValue("aliases_high"), ","),
+        low_priority: _splitList(_editValue("aliases_low"), ","),
+    };
+    if (JSON.stringify(newAliases) !== JSON.stringify({ high_priority: aliases.high_priority || [], low_priority: aliases.low_priority || [] })) {
+        patch.aliases = newAliases;
+    }
+
+    const newAltAddrs = _splitList(_editValue("alternative_addresses"), ";");
+    if (JSON.stringify(newAltAddrs) !== JSON.stringify(item.alternative_addresses || [])) patch.alternative_addresses = newAltAddrs;
+
+    const touchWrapper = document.getElementById("edit-touch-ref-wrapper");
+    const touchBox = document.getElementById("edit-touch-ref-date");
+    const touchDate = Boolean(touchWrapper && !touchWrapper.hidden && touchBox && touchBox.checked);
+
+    if (!Object.keys(patch).length && !touchDate) {
+        showToast("Aucune modification à enregistrer.", "info");
+        return;
+    }
+    patch.touch_official_reference_date = touchDate;
+
+    const btn = document.getElementById("edit-ent-save-btn");
+    btn.disabled = true;
+    try {
+        const response = await fetch(`/api/watchlist/entity/${item.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast(`Erreur : ${data.detail || JSON.stringify(data)}`, "error");
+            return;
+        }
+        showToast(data.message + (data.official_reference_date_touched ? " Référence officielle datée du jour." : ""), "success");
+        // Ré-affiche la fiche à jour et rafraîchit la vue + le hash du cache recriblé
+        showWatchlistDetails(data.entity);
+        fetchWatchlist(wlCurrentPage);
+        fetchWatchlistHash();
+    } catch (e) {
+        console.error("Error patching entity:", e);
+        showToast("Erreur réseau de communication.", "error");
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 function closeDetailsModal() {

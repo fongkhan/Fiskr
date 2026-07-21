@@ -1,6 +1,7 @@
 import os
 import uuid
 import json
+import re
 import asyncio
 import hashlib
 import logging
@@ -29,7 +30,8 @@ from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORM
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
-    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair
+    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
+    WatchlistEntityChange
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
@@ -982,6 +984,7 @@ async def ingest_snapshot(
                     designation=item.get("designation"),
                     designation_reasons=item.get("designation_reasons"),
                     additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                    official_reference=item.get("official_reference"),
                     alternative_addresses=alt_addrs_ofac,
                     imo_number=item.get("imo_number"),
                     aircraft_tail_number=item.get("aircraft_tail_number"),
@@ -1030,6 +1033,7 @@ async def ingest_snapshot(
                         designation=item.get("designation"),
                         designation_reasons=item.get("designation_reasons"),
                         additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                        official_reference=item.get("official_reference"),
                         alternative_addresses=alt_addrs_pdf,
                         imo_number=item.get("imo_number"),
                         entity_checksum=ent_checksum
@@ -1090,6 +1094,7 @@ async def ingest_snapshot(
                         designation=item.get("designation"),
                         designation_reasons=item.get("designation_reasons"),
                         additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                        official_reference=item.get("official_reference"),
                         alternative_addresses=alt_addrs_csv,
                         lei_number=item.get("lei_number"),
                         entity_checksum=ent_checksum
@@ -1282,6 +1287,7 @@ class WatchlistEntityCreate(BaseModel):
     designation: Optional[str] = None
     designation_reasons: Optional[str] = None
     additional_informations: Optional[str] = None
+    official_reference: Optional[str] = None
     alternative_addresses: Optional[str] = None
     date_of_death: Optional[str] = None
 
@@ -1355,6 +1361,7 @@ async def create_watchlist_entity(
         "designation": payload.designation or None,
         "designation_reasons": payload.designation_reasons or None,
         "additional_informations": payload.additional_informations or None,
+        "official_reference": payload.official_reference or None,
         "alternative_addresses": alt_addrs
     }
 
@@ -1398,6 +1405,7 @@ async def create_watchlist_entity(
         designation=ent_dict["designation"],
         designation_reasons=ent_dict["designation_reasons"],
         additional_informations=ent_dict["additional_informations"],
+        official_reference=ent_dict["official_reference"],
         alternative_addresses=ent_dict["alternative_addresses"],
         entity_checksum=ent_checksum
     )
@@ -1414,6 +1422,199 @@ async def create_watchlist_entity(
         "message": "Entité ajoutée avec succès.",
         "entity_id": ent_dict["entity_id"],
         "primary_name": report["cleansed_name"]
+    }
+
+# ------------------ PATCH DE VALEURS D'UNE FICHE LISTEE ------------------
+
+def _serialize_watchlist_entity(entity: WatchlistEntity, snap: Snapshot) -> Dict[str, Any]:
+    """Memes cles que le cache moteur (+ metadonnees snapshot) : la modale de
+    details du dashboard fonctionne a l'identique sur les deux sources."""
+    d = {c.name: getattr(entity, c.name) for c in entity.__table__.columns}
+    d["_list_type"] = snap.file_type
+    d["snapshot_status"] = snap.status
+    d["snapshot_uploaded_at"] = snap.uploaded_at.isoformat() if snap.uploaded_at else None
+    d["snapshot_file_name"] = snap.file_name
+    return d
+
+
+# Dates reconnues dans la reference officielle : ISO (YYYY-MM-DD) ou JJ/MM/AAAA
+OFFICIAL_REF_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})")
+
+
+def _touch_official_reference_date(reference: Optional[str]):
+    """
+    Remplace la date de mise a jour contenue dans la reference officielle par
+    la date du jour, en conservant son format d'origine. La date de mise a
+    jour est la DERNIERE date du texte (les references de reglement peuvent
+    contenir d'autres dates en amont). Retourne (nouvelle_valeur, date_trouvee).
+    """
+    if not reference:
+        return reference, False
+    matches = list(OFFICIAL_REF_DATE_RE.finditer(reference))
+    if not matches:
+        return reference, False
+    match = matches[-1]
+    today = datetime.utcnow().date()
+    new_date = today.strftime("%d/%m/%Y") if "/" in match.group(1) else today.isoformat()
+    return reference[:match.start(1)] + new_date + reference[match.end(1):], True
+
+
+# Colonnes exclues du recalcul de checksum (traces de gouvernance, pas des
+# donnees de la fiche) — s'ajoutent aux cles deja filtrees par compute_checksum
+_CHECKSUM_EXCLUDED_COLS = {
+    "modified_by", "modified_at", "excluded", "exclusion_justification",
+    "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
+}
+
+
+class WatchlistEntityPatch(BaseModel):
+    """Patch partiel d'une fiche listee : seuls les champs fournis sont modifies
+    (un champ fourni a null est efface)."""
+    primary_name: Optional[str] = None
+    entity_type: Optional[str] = None
+    gender: Optional[str] = None
+    place_of_birth: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    date_of_death: Optional[str] = None
+    is_deceased: Optional[bool] = None
+    origin: Optional[str] = None
+    designation: Optional[str] = None
+    designation_reasons: Optional[str] = None
+    additional_informations: Optional[str] = None
+    official_reference: Optional[str] = None
+    lei_number: Optional[str] = None
+    imo_number: Optional[str] = None
+    aircraft_tail_number: Optional[str] = None
+    individual_name_parsed: Optional[Dict[str, Any]] = None
+    dates_of_birth: Optional[List[str]] = None
+    countries: Optional[Dict[str, Any]] = None
+    aliases: Optional[Dict[str, Any]] = None
+    alternative_addresses: Optional[List[str]] = None
+    # Si vrai, la date contenue dans la reference officielle (s'il y en a une)
+    # est remplacee par la date du jour, dans son format d'origine
+    touch_official_reference_date: bool = False
+
+
+@app.patch("/api/watchlist/entity/{entity_pk}")
+async def patch_watchlist_entity(
+    entity_pk: int,
+    payload: WatchlistEntityPatch,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Modifie les valeurs d'une fiche listee en production (snapshot READY, non
+    exclue). Chaque champ modifie est journalise dans watchlist_entity_changes
+    (qui, quand, ancienne -> nouvelle valeur), le checksum de version est
+    recalcule et le cache de criblage est recharge immediatement.
+    """
+    row = db.query(WatchlistEntity).filter(WatchlistEntity.id == entity_pk).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fiche introuvable.")
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == row.snapshot_id).first()
+    if not snap or snap.file_type not in WATCHLIST_FILE_TYPES or snap.status != "READY" or row.excluded is True:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Seules les fiches en production (snapshot homologué, non exclues) sont modifiables."
+        )
+
+    fields = payload.model_dump(exclude_unset=True)
+    touch_date = fields.pop("touch_official_reference_date", False)
+
+    if "primary_name" in fields and not (fields["primary_name"] or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le nom principal ne peut pas être vide.")
+    if "entity_type" in fields and fields["entity_type"] not in ("I", "E", "V", "O"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="entity_type doit être I, E, V ou O.")
+
+    def _journal_value(value):
+        if value is None or isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    changed_fields = []
+
+    def _apply_change(field, new_value):
+        old_value = getattr(row, field)
+        if old_value == new_value:
+            return
+        db.add(WatchlistEntityChange(
+            entity_pk=row.id,
+            entity_id=row.entity_id,
+            snapshot_id=row.snapshot_id,
+            field=field,
+            old_value=_journal_value(old_value),
+            new_value=_journal_value(new_value),
+            changed_by=reviewer["username"],
+        ))
+        setattr(row, field, new_value)
+        changed_fields.append(field)
+
+    for field, new_value in fields.items():
+        if isinstance(new_value, str):
+            new_value = new_value.strip() or None
+        _apply_change(field, new_value)
+
+    # Reference officielle : ramener sa date de mise a jour a la date du jour
+    date_touched = False
+    if touch_date:
+        new_ref, date_touched = _touch_official_reference_date(row.official_reference)
+        if date_touched:
+            _apply_change("official_reference", new_ref)
+
+    if not changed_fields:
+        return {
+            "message": "Aucune modification (valeurs identiques).",
+            "changed_fields": [],
+            "official_reference_date_touched": date_touched,
+            "entity": _serialize_watchlist_entity(row, snap),
+        }
+
+    # Recalcul du checksum de version (donnees de la fiche uniquement)
+    ent_dict = {
+        c.name: getattr(row, c.name)
+        for c in row.__table__.columns if c.name not in _CHECKSUM_EXCLUDED_COLS
+    }
+    row.entity_checksum = compute_checksum(ent_dict)
+    row.modified_by = reviewer["username"]
+    row.modified_at = datetime.utcnow()
+    db.commit()
+
+    # Les nouvelles valeurs criblent immediatement
+    load_watchlist_cache(db)
+    db.refresh(row)
+
+    return {
+        "message": f"{len(changed_fields)} champ(s) modifié(s).",
+        "changed_fields": changed_fields,
+        "official_reference_date_touched": date_touched,
+        "entity": _serialize_watchlist_entity(row, snap),
+    }
+
+
+@app.get("/api/watchlist/entity/{entity_pk}/changes")
+async def get_watchlist_entity_changes(
+    entity_pk: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Journal des modifications manuelles d'une fiche listee (antichronologique)."""
+    rows = db.query(WatchlistEntityChange).filter(
+        WatchlistEntityChange.entity_pk == entity_pk
+    ).order_by(WatchlistEntityChange.changed_at.desc(), WatchlistEntityChange.id.desc()).all()
+    return {
+        "items": [
+            {
+                "field": r.field,
+                "old_value": r.old_value,
+                "new_value": r.new_value,
+                "changed_by": r.changed_by,
+                "changed_at": r.changed_at.isoformat() if r.changed_at else None,
+            }
+            for r in rows
+        ]
     }
 
 @app.get("/api/watchlist")
@@ -1480,16 +1681,7 @@ async def browse_watchlist_db(
     rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
 
-    items = []
-    for entity, snap in rows:
-        # Memes cles que le cache moteur : la modale de details du dashboard
-        # fonctionne a l'identique sur les deux sources
-        d = {c.name: getattr(entity, c.name) for c in entity.__table__.columns}
-        d["_list_type"] = snap.file_type
-        d["snapshot_status"] = snap.status
-        d["snapshot_uploaded_at"] = snap.uploaded_at.isoformat() if snap.uploaded_at else None
-        d["snapshot_file_name"] = snap.file_name
-        items.append(d)
+    items = [_serialize_watchlist_entity(entity, snap) for entity, snap in rows]
 
     return {"total": total, "page": page, "page_size": page_size, "scope": scope, "items": items}
 

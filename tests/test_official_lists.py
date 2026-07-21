@@ -116,6 +116,8 @@ def test_parse_eu_fsf_mapping(tmp_path):
     assert person["designation_reasons"] == "UKR"  # programme du reglement
     assert "269/2014" in person["additional_informations"]
     assert "QDi.430" in person["additional_informations"]  # reference ONU croisee
+    # Reference officielle : reglement + date de publication de l'acte
+    assert person["official_reference"] == "Regulation 269/2014 (OJ L78) (maj 2022-02-23)"
     assert person["passport_documents"][0] == {"number": "750123456", "issuing_country": "RU", "expiration_date": None}
     # Alias non-strong -> priorite basse
     assert "Sergueï Ivanov" in person["aliases"]["low_priority"]
@@ -124,6 +126,8 @@ def test_parse_eu_fsf_mapping(tmp_path):
     assert enterprise["entity_type"] == "E"
     assert enterprise["countries"]["jurisdiction_country"] == ["BY"]
     assert enterprise["designation_reasons"] == "BLR"
+    # Pas de publicationDate sur ce reglement -> reference sans date
+    assert enterprise["official_reference"] == "Regulation 765/2006 (OJ L134)"
 
 
 # ------------------ PARSEUR ONU ------------------
@@ -149,11 +153,14 @@ def test_parse_un_consolidated_mapping(tmp_path):
     assert "Igor Petrovitch" in person["aliases"]["high_priority"]
     assert "IP" in person["aliases"]["low_priority"]
     assert person["passport_documents"][0]["issuing_country"] == "RU"
+    # Reference officielle : reference ONU + date d'inscription (pas de LAST_DAY_UPDATED)
+    assert person["official_reference"] == "QDi.430 (maj 2016-08-14)"
 
     entity = entities["UN-QDe.001"]
     assert entity["entity_type"] == "E"
     assert entity["countries"]["jurisdiction_country"] == ["RU"]
     assert "Zarya Corp" in entity["aliases"]["high_priority"]
+    assert entity["official_reference"] == "QDe.001"  # pas de date d'inscription sur la fiche
 
 
 # ------------------ SYNCS ------------------

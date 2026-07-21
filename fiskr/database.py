@@ -68,8 +68,16 @@ class WatchlistEntity(Base):
     national_id_documents = Column(JSON, nullable=True) # number, issuing_country
     other_id_documents = Column(JSON, nullable=True) # doc_type, number, issuing_country
     
+    # Reference officielle de l'emetteur (reglement UE, reference ONU/DGT...),
+    # incluant la date de publication/mise a jour quand la source la fournit
+    official_reference = Column(String(500), nullable=True)
+
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
+
+    # Derniere modification manuelle (patch de valeurs par un reviseur)
+    modified_by = Column(String(100), nullable=True)
+    modified_at = Column(DateTime, nullable=True)
 
     # Exclusion par un reviseur lors de l'homologation (NULL = non exclu, lignes legacy)
     excluded = Column(Boolean, default=False, nullable=True)
@@ -78,6 +86,25 @@ class WatchlistEntity(Base):
     exclusion_file_path = Column(String(500), nullable=True)
     excluded_by = Column(String(100), nullable=True)
     excluded_at = Column(DateTime, nullable=True)
+
+class WatchlistEntityChange(Base):
+    """
+    Journal des modifications manuelles des fiches listees : qui, quand,
+    quel champ, ancienne -> nouvelle valeur (JSON-serialisees pour les
+    champs structurees). Table independante : l'historique survit meme si
+    la fiche est remplacee par une synchronisation ulterieure.
+    """
+    __tablename__ = "watchlist_entity_changes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_pk = Column(Integer, nullable=False, index=True)  # watchlist_entities.id
+    entity_id = Column(String(100), nullable=False)
+    snapshot_id = Column(String(50), nullable=True)
+    field = Column(String(60), nullable=False)
+    old_value = Column(Text, nullable=True)
+    new_value = Column(Text, nullable=True)
+    changed_by = Column(String(100), nullable=False)
+    changed_at = Column(DateTime, default=datetime.utcnow)
 
 class ClientEntity(Base):
     __tablename__ = "client_entities"
@@ -343,6 +370,9 @@ def init_db():
                 ("exclusion_file_path", "VARCHAR(500)"),
                 ("excluded_by", "VARCHAR(100)"),
                 ("excluded_at", "TIMESTAMP"),
+                ("official_reference", "VARCHAR(500)"),
+                ("modified_by", "VARCHAR(100)"),
+                ("modified_at", "TIMESTAMP"),
             ],
             "alerts": [
                 ("list_type", "VARCHAR(30)"),
