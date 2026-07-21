@@ -24,6 +24,10 @@ SETTING_WHITELIST_JUSTIFICATION_REQUIRED = "review.whitelist_justification_requi
 SETTING_WHITELIST_FILE_REQUIRED = "review.whitelist_file_required"
 # Re-criblage automatique du referentiel clients apres chaque mise a jour de liste
 SETTING_AUTO_RESCREEN = "ingestion.auto_rescreen"
+# Cahier de tests (backtest) avant promotion : seuil d'ecart tolere du taux
+# d'interception (%) et exigence d'un backtest au verdict OK pour approuver
+SETTING_BACKTEST_MAX_GAP_PCT = "review.backtest_max_gap_pct"
+SETTING_BACKTEST_REQUIRED = "review.backtest_required"
 
 
 def _config_default(key: str, default: Any = None) -> Any:
@@ -83,6 +87,19 @@ def whitelist_requirements(db) -> Dict[str, bool]:
 def auto_rescreen_enabled(db) -> bool:
     """True si le re-criblage automatique post-delta est actif (defaut : oui)."""
     return bool(get_setting_with_source(db, SETTING_AUTO_RESCREEN, True)["value"])
+
+
+def backtest_max_gap_pct(db) -> float:
+    """Seuil d'ecart tolere (%) entre taux d'interception actuel et candidat (defaut : 20)."""
+    try:
+        return float(get_setting_with_source(db, SETTING_BACKTEST_MAX_GAP_PCT, 20.0)["value"])
+    except (TypeError, ValueError):
+        return 20.0
+
+
+def backtest_required(db) -> bool:
+    """True si un cahier de tests au verdict OK est exige avant toute promotion (defaut : non)."""
+    return bool(get_setting_with_source(db, SETTING_BACKTEST_REQUIRED, False)["value"])
 
 
 def exclusion_requirements(db) -> Dict[str, bool]:

@@ -1112,6 +1112,8 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
     if isinstance(publications, list):
         publications = publications[0] if publications else {}
     records = dict_get_insensitive(publications, "PublicationDetail") or []
+    # Date de publication du registre (commune a tous les enregistrements)
+    publication_date = _extract_iso_date(str(dict_get_insensitive(publications, "DatePublication") or ""))
 
     for record in records:
         id_registre = record.get("IdRegistre")
@@ -1211,6 +1213,7 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
                 motifs.append(motif)
 
         extra_info = []
+        official_ref = None
         for type_champ, keys in (
             ("FONDEMENT_JURIDIQUE", ("FondementJuridiqueLabel", "FondementJuridique")),
             ("REFERENCE_UE", ("ReferenceUe",)),
@@ -1220,6 +1223,8 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
                 text = _dgt_value_text(v, *keys)
                 if text:
                     extra_info.append(f"{type_champ.replace('_', ' ').title()}: {text}")
+                    if official_ref is None and type_champ in ("REFERENCE_UE", "REFERENCE_ONU"):
+                        official_ref = text
 
         yield {
             "entity_id": f"DGT-{id_registre}",
@@ -1248,6 +1253,7 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
             "designation": designation,
             "designation_reasons": "; ".join(motifs) or None,
             "additional_informations": "; ".join(extra_info) or None,
+            "official_reference": build_official_reference(official_ref, publication_date),
             "origin": "DGT Registre national des gels",
             "imo_number": None,
             "aircraft_tail_number": None,
@@ -1279,6 +1285,33 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
 def _child_local(elem: ET.Element, local: str) -> List[ET.Element]:
     """Enfants directs dont le nom local (sans namespace) correspond."""
     return [c for c in elem if c.tag.split('}')[-1] == local]
+
+
+def _extract_iso_date(raw: Optional[str]) -> Optional[str]:
+    """Premiere date trouvee dans un texte libre, normalisee en YYYY-MM-DD (accepte JJ/MM/AAAA)."""
+    raw = (raw or "").strip()
+    match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+    if match:
+        y, m, d = match.groups()
+        return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+    match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", raw)
+    if match:
+        d, m, y = match.groups()
+        return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+    return None
+
+
+def build_official_reference(reference: Optional[str], updated: Optional[str]) -> Optional[str]:
+    """
+    Reference officielle de l'emetteur (reglement, reference de liste),
+    suffixee de la date de publication/mise a jour quand la source la fournit.
+    C'est cette date que le patch de fiche peut ramener a la date du jour.
+    """
+    reference = (reference or "").strip()
+    updated = (updated or "").strip()
+    if not reference:
+        return None
+    return f"{reference} (maj {updated})" if updated else reference
 
 
 def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
@@ -1391,6 +1424,8 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
 
         programme = None
         extra_info = []
+        official_ref = None
+        official_ref_date = None
         for reg in _child_local(entity, "regulation"):
             prog = (get_attrib_insensitive(reg, "programme") or "").strip()
             if prog and not programme:
@@ -1398,6 +1433,9 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
             number_title = (get_attrib_insensitive(reg, "numberTitle") or "").strip()
             if number_title:
                 extra_info.append(f"Regulation: {number_title}")
+                if official_ref is None:
+                    official_ref = f"Regulation {number_title}"
+                    official_ref_date = _extract_iso_date(get_attrib_insensitive(reg, "publicationDate"))
         for remark in _child_local(entity, "remark"):
             if remark.text and remark.text.strip():
                 extra_info.append(remark.text.strip())
@@ -1434,6 +1472,7 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
             "designation": designation,
             "designation_reasons": programme,
             "additional_informations": "; ".join(extra_info) or None,
+            "official_reference": build_official_reference(official_ref, official_ref_date),
             "origin": "EU FSF Consolidated",
             "imo_number": None,
             "aircraft_tail_number": None,
@@ -1562,6 +1601,11 @@ def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None,
         if comments:
             extra_info.append(comments)
 
+        # Date de mise a jour de la fiche : derniere valeur LAST_DAY_UPDATED,
+        # a defaut la date d'inscription LISTED_ON
+        updated_values = _un_values(record, "LAST_DAY_UPDATED")
+        un_updated = _extract_iso_date(updated_values[-1] if updated_values else _un_text(record, "LISTED_ON"))
+
         primary_addr = addresses[0] if addresses else {}
         yield {
             "entity_id": f"UN-{entity_key}",
@@ -1587,6 +1631,7 @@ def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None,
             "designation": designation,
             "designation_reasons": un_list_type or None,
             "additional_informations": "; ".join(extra_info) or None,
+            "official_reference": build_official_reference(reference, un_updated),
             "origin": "UN Consolidated List",
             "imo_number": None,
             "aircraft_tail_number": None,
@@ -1772,6 +1817,8 @@ def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, No
             entity_type = "E"
 
         dob = _ofsi_date(_ofsi_get(row, "DOB"))
+        uk_ref = _ofsi_get(row, "UK Sanctions List Ref", "UK Sanctions Ref", "UK Statement of Reasons Ref")
+        last_updated = _ofsi_date(_ofsi_get(row, "Last Updated", "LastUpdated"))
         town_birth = _ofsi_get(row, "Town of Birth")
         country_birth = _ofsi_get(row, "Country of Birth")
         nationality = _ofsi_get(row, "Nationality")
@@ -1812,6 +1859,7 @@ def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, No
             "designation": position or None,
             "designation_reasons": regime or None,
             "additional_informations": other_info or None,
+            "official_reference": build_official_reference(uk_ref or f"OFSI Group {group_id}", last_updated) if (uk_ref or last_updated) else None,
             "origin": "UK OFSI Consolidated",
             "imo_number": None,
             "aircraft_tail_number": None,

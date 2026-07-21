@@ -105,10 +105,13 @@ def test_parse_dgt_registry_mapping(tmp_path):
     assert pp["passport_documents"][0]["number"] == "750123456"
     assert pp["address"].startswith("12 rue Tverskaya")
     assert pp["origin"] == "DGT Registre national des gels"
+    # Reference officielle : reference UE + date de publication du registre
+    assert pp["official_reference"] == "UE.4721.83 (maj 2026-07-11)"
 
     # Personne morale -> E, identification en autres registres
     pm = entities["DGT-5100"]
     assert pm["entity_type"] == "E"
+    assert pm["official_reference"] is None  # aucune reference UE/ONU sur cette fiche
     assert pm["other_registration_ids"] == [{"id_type": "Identification", "number": "INN 7712345678"}]
     assert pm["countries"]["jurisdiction_country"] == ["RU"]
 

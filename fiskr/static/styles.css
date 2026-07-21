@@ -1039,3 +1039,36 @@ tr:hover td {
     width: 100%;
     resize: vertical;
 }
+
+/* Parcours guidé de production de liste (homologation) */
+.review-stepper {
+    display: flex;
+    gap: 0.5rem;
+    margin: 1rem 0 1.25rem;
+    flex-wrap: wrap;
+}
+
+.review-stepper .step-btn {
+    flex: 1;
+    min-width: 140px;
+    padding: 0.6rem 0.9rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.88rem;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.review-stepper .step-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.review-stepper .step-btn.active {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.5);
+    color: var(--text-primary);
+}

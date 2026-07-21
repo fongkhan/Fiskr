@@ -1,6 +1,7 @@
 import os
 import uuid
 import json
+import re
 import asyncio
 import hashlib
 import logging
@@ -29,10 +30,14 @@ from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORM
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
-    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair
+    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
+    WatchlistEntityChange
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
+from fiskr.backtest import (
+    run_backtest, generate_test_panel, TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
+)
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     run_pep_sync, run_ofsi_sync,
@@ -51,11 +56,12 @@ from fiskr.auth import (
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
     whitelist_requirements, auto_rescreen_enabled,
+    backtest_max_gap_pct, backtest_required,
     get_setting_with_source, set_setting,
     SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
     SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
-    SETTING_AUTO_RESCREEN
+    SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT
 )
 
 
@@ -982,6 +988,7 @@ async def ingest_snapshot(
                     designation=item.get("designation"),
                     designation_reasons=item.get("designation_reasons"),
                     additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                    official_reference=item.get("official_reference"),
                     alternative_addresses=alt_addrs_ofac,
                     imo_number=item.get("imo_number"),
                     aircraft_tail_number=item.get("aircraft_tail_number"),
@@ -1030,6 +1037,7 @@ async def ingest_snapshot(
                         designation=item.get("designation"),
                         designation_reasons=item.get("designation_reasons"),
                         additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                        official_reference=item.get("official_reference"),
                         alternative_addresses=alt_addrs_pdf,
                         imo_number=item.get("imo_number"),
                         entity_checksum=ent_checksum
@@ -1090,6 +1098,7 @@ async def ingest_snapshot(
                         designation=item.get("designation"),
                         designation_reasons=item.get("designation_reasons"),
                         additional_informations=item.get("additional_informations") or item.get("additional_info"),
+                        official_reference=item.get("official_reference"),
                         alternative_addresses=alt_addrs_csv,
                         lei_number=item.get("lei_number"),
                         entity_checksum=ent_checksum
@@ -1254,6 +1263,7 @@ async def compare_snapshots(
         "new_snapshot_id": snap_new.snapshot_id,
         "execution_timestamp": datetime.utcnow().isoformat() + "Z"
     }
+    return report
 
 class WatchlistEntityCreate(BaseModel):
     entity_type: str
@@ -1282,6 +1292,7 @@ class WatchlistEntityCreate(BaseModel):
     designation: Optional[str] = None
     designation_reasons: Optional[str] = None
     additional_informations: Optional[str] = None
+    official_reference: Optional[str] = None
     alternative_addresses: Optional[str] = None
     date_of_death: Optional[str] = None
 
@@ -1355,6 +1366,7 @@ async def create_watchlist_entity(
         "designation": payload.designation or None,
         "designation_reasons": payload.designation_reasons or None,
         "additional_informations": payload.additional_informations or None,
+        "official_reference": payload.official_reference or None,
         "alternative_addresses": alt_addrs
     }
 
@@ -1398,6 +1410,7 @@ async def create_watchlist_entity(
         designation=ent_dict["designation"],
         designation_reasons=ent_dict["designation_reasons"],
         additional_informations=ent_dict["additional_informations"],
+        official_reference=ent_dict["official_reference"],
         alternative_addresses=ent_dict["alternative_addresses"],
         entity_checksum=ent_checksum
     )
@@ -1416,6 +1429,199 @@ async def create_watchlist_entity(
         "primary_name": report["cleansed_name"]
     }
 
+# ------------------ PATCH DE VALEURS D'UNE FICHE LISTEE ------------------
+
+def _serialize_watchlist_entity(entity: WatchlistEntity, snap: Snapshot) -> Dict[str, Any]:
+    """Memes cles que le cache moteur (+ metadonnees snapshot) : la modale de
+    details du dashboard fonctionne a l'identique sur les deux sources."""
+    d = {c.name: getattr(entity, c.name) for c in entity.__table__.columns}
+    d["_list_type"] = snap.file_type
+    d["snapshot_status"] = snap.status
+    d["snapshot_uploaded_at"] = snap.uploaded_at.isoformat() if snap.uploaded_at else None
+    d["snapshot_file_name"] = snap.file_name
+    return d
+
+
+# Dates reconnues dans la reference officielle : ISO (YYYY-MM-DD) ou JJ/MM/AAAA
+OFFICIAL_REF_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})")
+
+
+def _touch_official_reference_date(reference: Optional[str]):
+    """
+    Remplace la date de mise a jour contenue dans la reference officielle par
+    la date du jour, en conservant son format d'origine. La date de mise a
+    jour est la DERNIERE date du texte (les references de reglement peuvent
+    contenir d'autres dates en amont). Retourne (nouvelle_valeur, date_trouvee).
+    """
+    if not reference:
+        return reference, False
+    matches = list(OFFICIAL_REF_DATE_RE.finditer(reference))
+    if not matches:
+        return reference, False
+    match = matches[-1]
+    today = datetime.utcnow().date()
+    new_date = today.strftime("%d/%m/%Y") if "/" in match.group(1) else today.isoformat()
+    return reference[:match.start(1)] + new_date + reference[match.end(1):], True
+
+
+# Colonnes exclues du recalcul de checksum (traces de gouvernance, pas des
+# donnees de la fiche) — s'ajoutent aux cles deja filtrees par compute_checksum
+_CHECKSUM_EXCLUDED_COLS = {
+    "modified_by", "modified_at", "excluded", "exclusion_justification",
+    "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
+}
+
+
+class WatchlistEntityPatch(BaseModel):
+    """Patch partiel d'une fiche listee : seuls les champs fournis sont modifies
+    (un champ fourni a null est efface)."""
+    primary_name: Optional[str] = None
+    entity_type: Optional[str] = None
+    gender: Optional[str] = None
+    place_of_birth: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    date_of_death: Optional[str] = None
+    is_deceased: Optional[bool] = None
+    origin: Optional[str] = None
+    designation: Optional[str] = None
+    designation_reasons: Optional[str] = None
+    additional_informations: Optional[str] = None
+    official_reference: Optional[str] = None
+    lei_number: Optional[str] = None
+    imo_number: Optional[str] = None
+    aircraft_tail_number: Optional[str] = None
+    individual_name_parsed: Optional[Dict[str, Any]] = None
+    dates_of_birth: Optional[List[str]] = None
+    countries: Optional[Dict[str, Any]] = None
+    aliases: Optional[Dict[str, Any]] = None
+    alternative_addresses: Optional[List[str]] = None
+    # Si vrai, la date contenue dans la reference officielle (s'il y en a une)
+    # est remplacee par la date du jour, dans son format d'origine
+    touch_official_reference_date: bool = False
+
+
+@app.patch("/api/watchlist/entity/{entity_pk}")
+async def patch_watchlist_entity(
+    entity_pk: int,
+    payload: WatchlistEntityPatch,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Modifie les valeurs d'une fiche listee en production (snapshot READY, non
+    exclue). Chaque champ modifie est journalise dans watchlist_entity_changes
+    (qui, quand, ancienne -> nouvelle valeur), le checksum de version est
+    recalcule et le cache de criblage est recharge immediatement.
+    """
+    row = db.query(WatchlistEntity).filter(WatchlistEntity.id == entity_pk).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fiche introuvable.")
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == row.snapshot_id).first()
+    if not snap or snap.file_type not in WATCHLIST_FILE_TYPES or snap.status != "READY" or row.excluded is True:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Seules les fiches en production (snapshot homologué, non exclues) sont modifiables."
+        )
+
+    fields = payload.model_dump(exclude_unset=True)
+    touch_date = fields.pop("touch_official_reference_date", False)
+
+    if "primary_name" in fields and not (fields["primary_name"] or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le nom principal ne peut pas être vide.")
+    if "entity_type" in fields and fields["entity_type"] not in ("I", "E", "V", "O"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="entity_type doit être I, E, V ou O.")
+
+    def _journal_value(value):
+        if value is None or isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    changed_fields = []
+
+    def _apply_change(field, new_value):
+        old_value = getattr(row, field)
+        if old_value == new_value:
+            return
+        db.add(WatchlistEntityChange(
+            entity_pk=row.id,
+            entity_id=row.entity_id,
+            snapshot_id=row.snapshot_id,
+            field=field,
+            old_value=_journal_value(old_value),
+            new_value=_journal_value(new_value),
+            changed_by=reviewer["username"],
+        ))
+        setattr(row, field, new_value)
+        changed_fields.append(field)
+
+    for field, new_value in fields.items():
+        if isinstance(new_value, str):
+            new_value = new_value.strip() or None
+        _apply_change(field, new_value)
+
+    # Reference officielle : ramener sa date de mise a jour a la date du jour
+    date_touched = False
+    if touch_date:
+        new_ref, date_touched = _touch_official_reference_date(row.official_reference)
+        if date_touched:
+            _apply_change("official_reference", new_ref)
+
+    if not changed_fields:
+        return {
+            "message": "Aucune modification (valeurs identiques).",
+            "changed_fields": [],
+            "official_reference_date_touched": date_touched,
+            "entity": _serialize_watchlist_entity(row, snap),
+        }
+
+    # Recalcul du checksum de version (donnees de la fiche uniquement)
+    ent_dict = {
+        c.name: getattr(row, c.name)
+        for c in row.__table__.columns if c.name not in _CHECKSUM_EXCLUDED_COLS
+    }
+    row.entity_checksum = compute_checksum(ent_dict)
+    row.modified_by = reviewer["username"]
+    row.modified_at = datetime.utcnow()
+    db.commit()
+
+    # Les nouvelles valeurs criblent immediatement
+    load_watchlist_cache(db)
+    db.refresh(row)
+
+    return {
+        "message": f"{len(changed_fields)} champ(s) modifié(s).",
+        "changed_fields": changed_fields,
+        "official_reference_date_touched": date_touched,
+        "entity": _serialize_watchlist_entity(row, snap),
+    }
+
+
+@app.get("/api/watchlist/entity/{entity_pk}/changes")
+async def get_watchlist_entity_changes(
+    entity_pk: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Journal des modifications manuelles d'une fiche listee (antichronologique)."""
+    rows = db.query(WatchlistEntityChange).filter(
+        WatchlistEntityChange.entity_pk == entity_pk
+    ).order_by(WatchlistEntityChange.changed_at.desc(), WatchlistEntityChange.id.desc()).all()
+    return {
+        "items": [
+            {
+                "field": r.field,
+                "old_value": r.old_value,
+                "new_value": r.new_value,
+                "changed_by": r.changed_by,
+                "changed_at": r.changed_at.isoformat() if r.changed_at else None,
+            }
+            for r in rows
+        ]
+    }
+
 @app.get("/api/watchlist")
 async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Returns the active loaded in-memory watchlist."""
@@ -1424,6 +1630,65 @@ async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)
         "hash": watchlist_hash,
         "items": watchlist_store
     }
+
+WATCHLIST_DB_SCOPES = ("production", "all", "PENDING_REVIEW", "SUPERSEDED", "REJECTED", "EXCLUDED")
+
+@app.get("/api/watchlist/db")
+async def browse_watchlist_db(
+    scope: str = Query("production"),
+    list_type: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Consultation EN DIRECT de la base de donnees des listes (pagination et
+    recherche SQL), independante du cache memoire du moteur. Le scope par
+    defaut « production » reflete exactement l'univers crible (snapshots
+    READY, entites non exclues) ; les autres scopes exposent les entites en
+    attente d'homologation, remplacees, rejetees ou exclues.
+    """
+    scope = (scope or "production").strip()
+    if scope not in WATCHLIST_DB_SCOPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scope inconnu ({', '.join(WATCHLIST_DB_SCOPES)})."
+        )
+
+    query = db.query(WatchlistEntity, Snapshot).join(
+        Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id
+    ).filter(Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+
+    if scope == "production":
+        query = query.filter(Snapshot.status == "READY", WatchlistEntity.excluded.isnot(True))
+    elif scope == "EXCLUDED":
+        query = query.filter(WatchlistEntity.excluded.is_(True))
+    elif scope != "all":
+        query = query.filter(Snapshot.status == scope)
+
+    if list_type:
+        values = [v.strip().upper() for v in list_type.split(",") if v.strip()]
+        if values:
+            query = query.filter(Snapshot.file_type.in_(values))
+
+    if search and search.strip():
+        needle = f"%{search.strip()}%"
+        query = query.filter(
+            (WatchlistEntity.primary_name.ilike(needle))
+            | (WatchlistEntity.entity_id.ilike(needle))
+            | (WatchlistEntity.lei_number.ilike(needle))
+            | (WatchlistEntity.imo_number.ilike(needle))
+        )
+
+    total = query.count()
+    rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+
+    items = [_serialize_watchlist_entity(entity, snap) for entity, snap in rows]
+
+    return {"total": total, "page": page, "page_size": page_size, "scope": scope, "items": items}
 
 @app.get("/api/history")
 async def get_audit_history(
@@ -1668,6 +1933,8 @@ class IngestionSettingsUpdate(BaseModel):
     whitelist_justification_required: Optional[bool] = None
     whitelist_file_required: Optional[bool] = None
     auto_rescreen: Optional[bool] = None
+    backtest_required: Optional[bool] = None
+    backtest_max_gap_pct: Optional[float] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -1683,6 +1950,12 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
     wl_justif = get_setting_with_source(db, SETTING_WHITELIST_JUSTIFICATION_REQUIRED, True)
     wl_file = get_setting_with_source(db, SETTING_WHITELIST_FILE_REQUIRED, False)
     rescreen = get_setting_with_source(db, SETTING_AUTO_RESCREEN, True)
+    bt_required = get_setting_with_source(db, SETTING_BACKTEST_REQUIRED, False)
+    bt_gap = get_setting_with_source(db, SETTING_BACKTEST_MAX_GAP_PCT, 20.0)
+    try:
+        bt_gap_value = float(bt_gap["value"])
+    except (TypeError, ValueError):
+        bt_gap_value = 20.0
     return {
         "require_approval": bool(approval["value"]),
         "exclusion_justification_required": bool(justif["value"]),
@@ -1691,6 +1964,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "whitelist_justification_required": bool(wl_justif["value"]),
         "whitelist_file_required": bool(wl_file["value"]),
         "auto_rescreen": bool(rescreen["value"]),
+        "backtest_required": bool(bt_required["value"]),
+        "backtest_max_gap_pct": bt_gap_value,
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -1699,6 +1974,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
             "whitelist_justification_required": wl_justif["source"],
             "whitelist_file_required": wl_file["source"],
             "auto_rescreen": rescreen["source"],
+            "backtest_required": bt_required["source"],
+            "backtest_max_gap_pct": bt_gap["source"],
         },
     }
 
@@ -1725,12 +2002,18 @@ async def update_ingestion_settings(
         SETTING_WHITELIST_JUSTIFICATION_REQUIRED: payload.whitelist_justification_required,
         SETTING_WHITELIST_FILE_REQUIRED: payload.whitelist_file_required,
         SETTING_AUTO_RESCREEN: payload.auto_rescreen,
+        SETTING_BACKTEST_REQUIRED: payload.backtest_required,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
-    if not changed:
+    if not changed and payload.backtest_max_gap_pct is None:
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     for key, value in changed.items():
         set_setting(db, key, bool(value), updated_by=admin_user["username"])
+    if payload.backtest_max_gap_pct is not None:
+        if not (0 <= payload.backtest_max_gap_pct <= 1000):
+            raise HTTPException(status_code=400, detail="backtest_max_gap_pct doit être entre 0 et 1000.")
+        set_setting(db, SETTING_BACKTEST_MAX_GAP_PCT, float(payload.backtest_max_gap_pct),
+                    updated_by=admin_user["username"])
     return {"message": "Réglages d'homologation mis à jour.", **_settings_payload(db)}
 
 def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
@@ -1797,6 +2080,119 @@ async def get_review_detail(
         "production_snapshot_id": production.snapshot_id if production else None,
         "delta_summary": delta["summary"],
         "delta_details": _truncate_delta_details(delta),
+        "backtest_report": snap.backtest_report,
+        "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
+        "backtest_by": snap.backtest_by,
+    }
+
+class BacktestRequest(BaseModel):
+    panel_snapshot_id: str
+
+@app.post("/api/review/snapshots/{snapshot_id}/backtest")
+async def run_review_backtest(
+    snapshot_id: str,
+    payload: BacktestRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Cahier de tests d'homologation : criblage A/B A BLANC du panel choisi
+    contre la production actuelle et contre l'univers candidat (le snapshot en
+    attente remplacant les listes du meme type). Mesure l'ecart de taux
+    d'interception, liste les nouvelles alertes et les alertes resolues.
+    Aucune alerte ni ligne d'audit n'est creee. Le rapport est archive avec le
+    snapshot (auditable apres promotion).
+    """
+    snap = _get_pending_snapshot(db, snapshot_id)
+    panel = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.panel_snapshot_id).first()
+    if not panel or panel.file_type not in PANEL_FILE_TYPES or panel.status != "READY":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Panel introuvable : choisissez une base clients (CLIENT_BASE) ou un panel de test généré."
+        )
+    if not (panel.record_count or 0):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le panel choisi est vide.")
+
+    report = run_backtest(db, snap, panel.snapshot_id,
+                          threshold_pct=backtest_max_gap_pct(db),
+                          executed_by=reviewer["username"])
+    snap.backtest_report = report
+    snap.backtest_at = datetime.utcnow()
+    snap.backtest_by = reviewer["username"]
+    db.commit()
+    return report
+
+@app.get("/api/testpanels")
+async def list_test_panels(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Panels utilisables par le cahier de tests : bases clients reelles
+    (CLIENT_BASE) et panels de pseudo-clients generes (CLIENT_TEST_PANEL).
+    """
+    snaps = db.query(Snapshot).filter(
+        Snapshot.file_type.in_(PANEL_FILE_TYPES),
+        Snapshot.status == "READY"
+    ).order_by(Snapshot.uploaded_at.desc()).all()
+    return {
+        "panels": [
+            {
+                "snapshot_id": s.snapshot_id,
+                "file_type": s.file_type,
+                "file_name": s.file_name,
+                "record_count": s.record_count,
+                "uploaded_at": s.uploaded_at.isoformat() if s.uploaded_at else None,
+                "generated": s.file_type == TEST_PANEL_FILE_TYPE,
+            }
+            for s in snaps
+        ]
+    }
+
+class TestPanelGenerateRequest(BaseModel):
+    # Snapshot candidat dont les entites servent de base aux hits attendus
+    snapshot_id: Optional[str] = None
+    size: int = 500
+    seed: Optional[int] = None
+
+@app.post("/api/testpanels/generate")
+async def generate_test_panel_endpoint(
+    payload: TestPanelGenerateRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Genere un panel de pseudo-clients (copies exactes, variantes typo/inversion,
+    quasi-collisions, clients neutres) derive du snapshot candidat et de la
+    production. Stocke en CLIENT_TEST_PANEL : jamais repris par le re-criblage
+    du referentiel clients reel.
+    """
+    if not (50 <= payload.size <= 5000):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="La taille du panel doit être entre 50 et 5000.")
+    source_ids = []
+    if payload.snapshot_id:
+        source = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.snapshot_id).first()
+        if not source or source.file_type not in WATCHLIST_FILE_TYPES:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Snapshot source introuvable ou non-watchlist.")
+        source_ids.append(source.snapshot_id)
+    source_ids.extend(
+        s.snapshot_id for s in db.query(Snapshot).filter(
+            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+            Snapshot.status == "READY"
+        ).all()
+    )
+    try:
+        snap = generate_test_panel(db, source_ids, size=payload.size,
+                                   seed=payload.seed, created_by=reviewer["username"])
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return {
+        "message": f"Panel de {snap.record_count} pseudo-clients généré.",
+        "snapshot_id": snap.snapshot_id,
+        "file_name": snap.file_name,
+        "record_count": snap.record_count,
     }
 
 @app.get("/api/review/snapshots/{snapshot_id}/entities")
@@ -1979,6 +2375,19 @@ async def approve_pending_snapshot(
             status_code=400,
             detail="Des exclusions n'ont pas de pièce jointe alors que le réglage l'exige. Complétez-les avant d'approuver."
         )
+
+    # Cahier de tests obligatoire (reglage) : un rapport au verdict OK est exige
+    if backtest_required(db):
+        if not snap.backtest_report:
+            raise HTTPException(
+                status_code=400,
+                detail="Le cahier de tests est obligatoire avant la mise en production (réglage actif). Exécutez-le depuis l'étape « Cahier de tests »."
+            )
+        if snap.backtest_report.get("verdict") != "OK":
+            raise HTTPException(
+                status_code=400,
+                detail="Le dernier cahier de tests signale un écart de taux d'interception au-delà du seuil toléré. Posez des Good Guys (liste blanche) ou des exclusions, puis relancez le cahier de tests."
+            )
 
     # Snapshot de production remplace (pour cibler le re-criblage post-delta)
     previous_prod = _latest_ready_snapshot(db, snap.file_type)
@@ -2439,6 +2848,74 @@ async def create_whitelist_pair(
     db.commit()
     db.refresh(pair)
     return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+
+class WhitelistBulkPair(BaseModel):
+    client_id: str
+    watchlist_entity_id: str
+    client_name: Optional[str] = None
+    watchlist_name: Optional[str] = None
+    list_type: Optional[str] = None
+
+class WhitelistBulkRequest(BaseModel):
+    pairs: List[WhitelistBulkPair]
+    justification: Optional[str] = None
+
+@app.post("/api/whitelist/bulk")
+async def create_whitelist_pairs_bulk(
+    payload: WhitelistBulkRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    « Good Guys » en masse (cahier de tests d'homologation) : met plusieurs
+    paires client x liste en liste blanche avec une justification commune.
+    Les paires deja actives sont sautees (pas d'echec global). La piece jointe
+    eventuelle reste du ressort de la pose unitaire.
+    """
+    if not payload.pairs:
+        raise HTTPException(status_code=400, detail="Aucune paire fournie.")
+    if len(payload.pairs) > 500:
+        raise HTTPException(status_code=400, detail="Maximum 500 paires par appel.")
+
+    requirements = whitelist_requirements(db)
+    justification = (payload.justification or "").strip()
+    if requirements["justification_required"] and not justification:
+        raise HTTPException(
+            status_code=400,
+            detail="Une justification commune est obligatoire pour une mise en liste blanche (réglage actif)."
+        )
+
+    created, skipped = [], []
+    for p in payload.pairs:
+        client_id = p.client_id.strip()
+        entity_id = p.watchlist_entity_id.strip()
+        if not client_id or not entity_id:
+            skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "identifiants vides"})
+            continue
+        if is_whitelisted(db, client_id, entity_id):
+            skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "paire déjà active"})
+            continue
+        # Type de liste : fourni par le rapport de backtest, sinon derive du cache
+        list_type = (p.list_type or "").strip() or next(
+            (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == entity_id), None
+        )
+        pair = WhitelistPair(
+            client_id=client_id,
+            watchlist_entity_id=entity_id,
+            client_name=(p.client_name or "").strip() or None,
+            watchlist_name=(p.watchlist_name or "").strip() or None,
+            list_type=list_type,
+            justification=justification or None,
+            created_by=reviewer["username"],
+        )
+        db.add(pair)
+        created.append({"client_id": client_id, "watchlist_entity_id": entity_id})
+    db.commit()
+    return {
+        "message": f"{len(created)} paire(s) mise(s) en liste blanche, {len(skipped)} sautée(s).",
+        "created": created,
+        "skipped": skipped,
+    }
 
 @app.get("/api/whitelist")
 async def list_whitelist_pairs(

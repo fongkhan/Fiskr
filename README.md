@@ -169,6 +169,15 @@ Cycle de vie des snapshots : `PROCESSING → PENDING_REVIEW → READY | REJECTED
 
 Endpoints associés : `GET/PUT /api/settings/ingestion`, `GET /api/review/pending`, `GET /api/review/snapshots/{id}` (+ `/entities`), `POST /api/review/snapshots/{id}/exclusions` (+ `/remove`), `GET /api/review/exclusion-evidence/{id}`, `POST /api/review/snapshots/{id}/approve|reject`.
 
+### 🧭 Parcours guidé de production de listes (delta → tests → Good Guys → production)
+
+L'homologation est présentée comme un **parcours en 4 étapes numérotées** (guide complet : **[Documentation/PRODUCTION_DES_LISTES.md](Documentation/PRODUCTION_DES_LISTES.md)**) ; après un import ou une synchro en attente, l'application propose d'ouvrir directement le parcours :
+
+1. **Delta** : compteurs ET détail complet des ajouts / suppressions / modifications (champs modifiés avec valeurs avant → après), calculé en direct contre la production.
+2. **Exclusions** : mise à l'écart justifiée des fiches non pertinentes (existant).
+3. **Cahier de tests** (`POST /api/review/snapshots/{id}/backtest`) : **criblage à blanc** d'un panel de pseudo-clients contre la liste actuelle ET la liste candidate — mêmes seuils par liste et même liste blanche que la production, mais **aucune alerte réelle créée**. Restitue les **taux d'interception** des deux univers, l'**écart (%)** comparé au seuil toléré (réglage, défaut 20 %), le verdict `OK`/`WARN`, les **nouvelles alertes** et les alertes résolues ; le rapport est **archivé avec le snapshot** (auditable après promotion). Le panel provient d'une **base clients importée** ou d'un **panel généré** (`POST /api/testpanels/generate`, 50–5000 pseudo-clients : copies exactes, typos, inversions, quasi-collisions, clients neutres — stocké en `CLIENT_TEST_PANEL`, **jamais** repris par le re-criblage réel).
+4. **Décision** : approbation/rejet avec rappel du verdict. Si un écart élevé révèle des homonymes (« **Good Guys** »), la sélection multiple des nouvelles alertes alimente `POST /api/whitelist/bulk` (justification commune) avant de relancer le test. Deux réglages à chaud : `review.backtest_max_gap_pct` (seuil d'écart) et `review.backtest_required` (blocage dur : aucun passage en production sans cahier de tests au verdict `OK`).
+
 ---
 
 ## 🚨 Traitement des Alertes & Surveillance Continue
@@ -264,7 +273,7 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
 Le dashboard interactif se compose de 7 onglets principaux :
-* **Gestion des Watchlists** : Consultation de la watchlist active (colonne et **filtre par type de liste**, fenêtre de détails des 26 attributs AML), **import de fichiers** (sous-onglet dédié), **Snapshots & Comparateur** (Delta Engine, filtre par liste), sources automatiques, **mode homologation** et ajouts manuels via formulaire adaptatif.
+* **Gestion des Watchlists** : **Consultation en direct de la base de données des listés** (`GET /api/watchlist/db` — recherche, filtres par liste et par statut, pagination côté serveur ; y compris hors production : snapshots en attente d'homologation, remplacés, rejetés et entités exclues), fenêtre de détails des 26 attributs AML, **édition contrôlée des fiches en production** (`PATCH /api/watchlist/entity/{id}`, réservée aux rôles reviewer/admin) avec **journal des modifications** immuable (qui, quand, avant → après, consultable dans la fiche) et **référence officielle datée** (extraite des sources UE/ONU/DGT/OFSI ; sa date de mise à jour peut être ramenée à la date du jour lors d'un patch), **import de fichiers** (sous-onglet dédié), **Snapshots & Comparateur** (Delta Engine, filtre par liste), sources automatiques, **mode homologation** et ajouts manuels via formulaire adaptatif.
 * **Criblage** : Crible temps réel unitaire (Sandbox avec champs s'adaptant au type de tiers), crible de masse (simulateur batch) et **filtrage transactionnel ISO 20022** (messages `pain.001` / `pacs.008`). Les trois acceptent un **périmètre de listes restreint** (`screening_lists`, défaut toutes — toute restriction est tracée dans l'audit) ; un criblage en alerte affiche un **lien direct « Instruire l'alerte »**.
 * **Alertes** : Deux sous-onglets — **File de Travail** (cycle de vie complet, validation 4-yeux, filtre par liste, projet de narratif et adverse media dans la modale) et **Liste Blanche** client×listé.
 * **Pilotage** : Page de KPI conformité (taux de faux positifs, délais de décision, volumétrie des listes, dernières synchronisations).
@@ -301,5 +310,6 @@ Fiskr est distribué sous la **[Sustainable Use License](LICENSE.md)** (modèle 
 ## 📚 Documentation Complémentaire
 
 * **[Document d'Architecture Technique](Documentation/Document%20Architecture%20Technique.md)** — conception détaillée des modules.
+* **[Production des Listes — Parcours Guidé](Documentation/PRODUCTION_DES_LISTES.md)** — processus métier de mise en production d'une liste : import, delta détaillé, cahier de tests sur pseudo-clients (taux d'interception), Good Guys en masse, promotion, réglages de gouvernance et bonnes pratiques.
 * **[Traitement des Alertes & Surveillance Continue](Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md)** — guide fonctionnel du flux post-criblage : cycle de vie des alertes et 4-yeux, liste blanche, re-criblage automatique et lookback, narratifs, adverse media, filtrage transactionnel ISO 20022, KPI et récapitulatif des réglages à chaud.
 * **[Benchmark Concurrentiel & Feuille de Route](Documentation/BENCHMARK_CONCURRENTS.md)** — analyse du marché du criblage sanctions/PEP (World-Check, ComplyAdvantage, yente, Watchman...), cadre réglementaire (Wolfsberg, ACPR/DGT) et feuille de route d'amélioration priorisée — **intégralement livrée (P0 → P3)**.

@@ -1,12 +1,11 @@
 // Fiskr - Dashboard Controller v3.1
 
 let currentUser = null;
-let activeWatchlist = [];
 let auditHistory = [];
 let activeSnapshots = [];
 let wlCurrentPage = 1;
 const wlItemsPerPage = 100;
-let wlFilteredItems = [];
+let wlSearchDebounce = null;
 
 // ------------------ LIBELLÉS PARTAGÉS (types de listes & sources) ------------------
 
@@ -202,6 +201,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initListTypeControls();
     // Initial data loading
     fetchWatchlist();
+    fetchWatchlistHash();
     fetchAuditHistory();
     fetchSnapshots();
     fetchConfig();
@@ -569,6 +569,7 @@ async function handleManualEntity(event) {
         
         // Switch back to Active Watchlist and refresh
         fetchWatchlist();
+        fetchWatchlistHash();
         switchSubTab('watchlist-mgmt', 'watchlist-active');
         
     } catch (e) {
@@ -747,7 +748,16 @@ async function handleIngestion(event) {
         fileInput.value = "";
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
         fetchPendingReviews();
+        // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
+        if (data.status === "PENDING_REVIEW") {
+            const go = await confirmDialog(
+                "Le snapshot est en attente d'homologation. Ouvrir le parcours de production de liste (delta, exclusions, cahier de tests, décision) maintenant ?",
+                { confirmLabel: "Ouvrir l'homologation", cancelLabel: "Plus tard" }
+            );
+            if (go) openPendingReview(data.snapshot_id);
+        }
     } catch (e) {
         console.error("Error ingesting snapshot:", e);
         showToast("Erreur réseau de communication.", "error");
@@ -793,8 +803,17 @@ async function handleSourceSync(source) {
         fetchSyncReports();
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
         fetchPendingReviews();
         refreshSidebarCounters();
+        // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
+        if (data.status === "PENDING_REVIEW" && data.snapshot_id) {
+            const go = await confirmDialog(
+                `La synchronisation ${srcLabel} attend une homologation. Ouvrir le parcours de production de liste maintenant ?`,
+                { confirmLabel: "Ouvrir l'homologation", cancelLabel: "Plus tard" }
+            );
+            if (go) openPendingReview(data.snapshot_id);
+        }
     } catch (e) {
         console.error("Error running source sync:", e);
         showToast("Erreur réseau pendant la synchronisation.", "error");
@@ -1002,45 +1021,61 @@ async function handleCompareSnapshots(event) {
     }
 }
 
-// Fetch Watchlist
-async function fetchWatchlist() {
+// Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
+async function fetchWatchlistHash() {
     try {
         const response = await fetch("/api/watchlist");
         const data = await response.json();
-        
-        activeWatchlist = data.items || [];
-
         const hashEl = document.getElementById("sidebar-wl-hash");
         if (hashEl) {
             hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "NONE";
             hashEl.title = data.hash;
         }
-
-        // Réapplique les filtres courants (texte + type de liste)
-        filterWatchlist();
     } catch (e) {
-        console.error("Error loading watchlist:", e);
+        console.error("Error loading watchlist hash:", e);
+    }
+}
+
+// Vue « Listés — Base de Données » : lecture en direct, paginée côté serveur
+async function fetchWatchlist(page = 1) {
+    wlCurrentPage = page;
+    const searchEl = document.getElementById("wl-search-input");
+    const listFilterEl = document.getElementById("wl-list-filter");
+    const scopeFilterEl = document.getElementById("wl-scope-filter");
+
+    const params = new URLSearchParams({ page: String(page), page_size: String(wlItemsPerPage) });
+    const search = searchEl ? searchEl.value.trim() : "";
+    if (search) params.set("search", search);
+    if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+    params.set("scope", scopeFilterEl && scopeFilterEl.value ? scopeFilterEl.value : "production");
+
+    try {
+        const response = await fetch(`/api/watchlist/db?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok) {
+            showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
+            return;
+        }
+        renderWatchlistTable(data.items || [], data.page, data.total);
+    } catch (e) {
+        console.error("Error loading watchlist from database:", e);
     }
 }
 
 // Render Watchlist Table
-function renderWatchlistTable(items, page = 1) {
+function renderWatchlistTable(items, page = 1, total = 0) {
     const tbody = document.querySelector("#watchlist-table tbody");
     tbody.innerHTML = "";
-    
+
     if (items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted)">Aucune entité de sanctions active chargée</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted)">Aucune entité en base pour ce périmètre</td></tr>';
         updatePaginationControls(0, 0);
         return;
     }
-    
-    const startIndex = (page - 1) * wlItemsPerPage;
-    const endIndex = Math.min(startIndex + wlItemsPerPage, items.length);
-    const paginatedItems = items.slice(startIndex, endIndex);
-    
+
     const fragment = document.createDocumentFragment();
-    
-    paginatedItems.forEach(item => {
+
+    items.forEach(item => {
         const tr = document.createElement("tr");
         tr.style.cursor = "pointer";
         tr.title = "Cliquez pour voir les détails de cette fiche";
@@ -1063,9 +1098,12 @@ function renderWatchlistTable(items, page = 1) {
         else if (item.entity_type === "V") typeBadge = '<span class="status-badge warning">V (Navire)</span>';
         else typeBadge = '<span class="status-badge">O (Autre)</span>';
 
+        const excludedBadge = item.excluded ? ' <span class="status-badge alert" title="Entité exclue de la production lors de l\'homologation">EXCLUE</span>' : "";
+
         tr.innerHTML = `
             <td><code>${escapeHtml(item.entity_id)}</code></td>
             <td>${listTypeBadge(item._list_type)}</td>
+            <td>${snapshotStatusBadge(item.snapshot_status)}${excludedBadge}</td>
             <td>${typeBadge}</td>
             <td>
                 <strong>${escapeHtml(item.primary_name)}</strong>
@@ -1082,27 +1120,13 @@ function renderWatchlistTable(items, page = 1) {
     });
     
     tbody.appendChild(fragment);
-    updatePaginationControls(items.length, page);
+    updatePaginationControls(total, page);
 }
 
-// Filter Watchlist active items (texte + type de liste combinés)
+// Filtres de la vue base de données : relance une requête serveur (debounce 300 ms)
 function filterWatchlist() {
-    const query = document.getElementById("wl-search-input").value.toLowerCase().trim();
-    const listFilterEl = document.getElementById("wl-list-filter");
-    const listFilter = listFilterEl ? listFilterEl.value : "";
-
-    wlFilteredItems = activeWatchlist.filter(item => {
-        if (listFilter && item._list_type !== listFilter) return false;
-        if (!query) return true;
-        const id = (item.entity_id || "").toLowerCase();
-        const name = (item.primary_name || "").toLowerCase();
-        const lei = (item.lei_number || "").toLowerCase();
-        const imo = (item.imo_number || "").toLowerCase();
-        return id.includes(query) || name.includes(query) || lei.includes(query) || imo.includes(query);
-    });
-
-    wlCurrentPage = 1;
-    renderWatchlistTable(wlFilteredItems, wlCurrentPage);
+    clearTimeout(wlSearchDebounce);
+    wlSearchDebounce = setTimeout(() => fetchWatchlist(1), 300);
 }
 
 // Update Watchlist Pagination UI Controls
@@ -1136,8 +1160,7 @@ function updatePaginationControls(totalItems, page) {
 
 // Switch Watchlist Page
 function changeWatchlistPage(newPage) {
-    wlCurrentPage = newPage;
-    renderWatchlistTable(wlFilteredItems, wlCurrentPage);
+    fetchWatchlist(newPage);
 }
 
 // Handle Real-Time Sandbox Screening
@@ -1728,6 +1751,7 @@ async function purgeFailedSnapshots() {
         showToast(`Purge terminée : ${data.message}`, "success");
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
     } catch (e) {
         console.error("Purge failed:", e);
         showToast("Erreur réseau lors de l'appel à la purge.", "error");
@@ -1740,17 +1764,32 @@ async function purgeFailedSnapshots() {
 }
 
 // Watchlist details Modal trigger
+// Fiche affichée dans la modale de détails (support du mode édition)
+let wlDetailsItem = null;
+
+// Même détection de date que le back : ISO (YYYY-MM-DD) ou JJ/MM/AAAA
+const OFFICIAL_REF_DATE_RE = /(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})/;
+
+// L'édition est réservée aux reviewers/admins, sur les fiches en production
+// (la vue Base de Données fournit id + snapshot_status ; le cache moteur non)
+function canEditWatchlistEntity(item) {
+    const roles = userRoles(currentUser);
+    if (!roles.includes("admin") && !roles.includes("reviewer")) return false;
+    return Boolean(item && item.id && item.snapshot_status === "READY" && !item.excluded);
+}
+
 function showWatchlistDetails(item) {
+    wlDetailsItem = item;
     const modal = document.getElementById("details-modal");
     const title = document.getElementById("modal-title");
     const body = document.getElementById("modal-body");
-    
+
     title.textContent = `Détails de l'Entité : ${item.entity_id}`;
-    
+
     const altAddrs = Array.isArray(item.alternative_addresses) ? item.alternative_addresses.join("; ") : (item.alternative_addresses || "-");
     const citizenship = item.countries?.citizenship?.join(", ") || "-";
     const residence = item.countries?.residence?.join(", ") || "-";
-    
+
     let highAliases = [];
     let lowAliases = [];
     if (item.aliases) {
@@ -1762,8 +1801,18 @@ function showWatchlistDetails(item) {
         }
     }
     const aliasesStr = [...highAliases, ...lowAliases].join(", ") || "-";
-    
+
+    const modifiedStr = item.modified_by
+        ? `@${item.modified_by} — ${item.modified_at ? new Date(item.modified_at + (item.modified_at.endsWith("Z") ? "" : "Z")).toLocaleString("fr-FR") : ""}`
+        : "-";
+    const editBar = canEditWatchlistEntity(item)
+        ? `<div style="display:flex; justify-content:flex-end; margin-bottom: 0.75rem;">
+               <button class="btn-secondary" onclick="showWatchlistEntityEditForm()">✏️ Modifier la fiche</button>
+           </div>`
+        : "";
+
     body.innerHTML = `
+        ${editBar}
         <div class="details-grid">
             <div class="details-item"><strong>Nom Principal / Label</strong><span>${escapeHtml(item.primary_name || "-")}</span></div>
             <div class="details-item"><strong>Type d'Entité</strong><span>${escapeHtml(item.entity_type || "-")}</span></div>
@@ -1783,16 +1832,240 @@ function showWatchlistDetails(item) {
             <div class="details-item"><strong>Origine / Source</strong><span>${escapeHtml(item.origin || "-")}</span></div>
             <div class="details-item"><strong>Fonction / Désignation</strong><span>${escapeHtml(item.designation || "-")}</span></div>
             <div class="details-item"><strong>Informations Additionnelles</strong><span>${escapeHtml(item.additional_informations || "-")}</span></div>
+            <div class="details-item" style="grid-column: span 2;"><strong>Référence Officielle</strong><span>${escapeHtml(item.official_reference || "-")}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Motifs de la Désignation</strong><span>${escapeHtml(item.designation_reasons || "-")}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Adresses Alternatives</strong><span>${escapeHtml(altAddrs)}</span></div>
             <div class="details-item" style="grid-column: span 2;"><strong>Alias</strong><span>${escapeHtml(aliasesStr)}</span></div>
             <div class="details-item"><strong>LEI (Legal Entity Identifier)</strong><span>${escapeHtml(item.lei_number || "-")}</span></div>
             <div class="details-item"><strong>IMO Code (Navire)</strong><span>${escapeHtml(item.imo_number || "-")}</span></div>
             <div class="details-item"><strong>Tail Number (Immatriculation Aéronef)</strong><span>${escapeHtml(item.aircraft_tail_number || "-")}</span></div>
+            <div class="details-item"><strong>Dernière Modification Manuelle</strong><span>${escapeHtml(modifiedStr)}</span></div>
+        </div>
+        <div id="entity-changes-section"></div>
+    `;
+
+    modal.classList.remove("hidden");
+    if (item.id) loadEntityChanges(item.id);
+}
+
+// Libellés français des champs pour le journal des modifications
+const ENTITY_FIELD_LABELS = {
+    primary_name: "Nom principal", entity_type: "Type d'entité", gender: "Genre",
+    individual_name_parsed: "Prénom / Nom / Nom de jeune fille", dates_of_birth: "Dates de naissance",
+    countries: "Pays rattachés", aliases: "Alias", place_of_birth: "Lieu de naissance",
+    address: "Adresse", city: "Ville", state: "État / Région", country: "Pays",
+    date_of_death: "Date de décès", is_deceased: "Décédé", origin: "Origine / Source",
+    designation: "Fonction / Désignation", designation_reasons: "Motifs de la désignation",
+    additional_informations: "Informations additionnelles", official_reference: "Référence officielle",
+    alternative_addresses: "Adresses alternatives", lei_number: "LEI", imo_number: "IMO",
+    aircraft_tail_number: "Tail Number",
+};
+
+// Historique des modifications manuelles de la fiche (journal immuable)
+async function loadEntityChanges(entityPk) {
+    const container = document.getElementById("entity-changes-section");
+    if (!container) return;
+    try {
+        const response = await fetch(`/api/watchlist/entity/${entityPk}/changes`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = data.items || [];
+        if (!items.length) return;
+        container.innerHTML = `
+            <h3 style="margin-top: 1.25rem;">Historique des modifications (${items.length})</h3>
+            <div class="table-container" style="max-height: 220px; overflow-y: auto;">
+                <table>
+                    <thead><tr><th>Quand</th><th>Par</th><th>Champ</th><th>Avant</th><th>Après</th></tr></thead>
+                    <tbody>
+                        ${items.map(c => `
+                            <tr>
+                                <td><small>${c.changed_at ? new Date(c.changed_at + "Z").toLocaleString("fr-FR") : "-"}</small></td>
+                                <td><small>@${escapeHtml(c.changed_by || "")}</small></td>
+                                <td><small>${escapeHtml(ENTITY_FIELD_LABELS[c.field] || c.field)}</small></td>
+                                <td><small style="color:var(--text-muted)">${escapeHtml(c.old_value ?? "∅")}</small></td>
+                                <td><small>${escapeHtml(c.new_value ?? "∅")}</small></td>
+                            </tr>`).join("")}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } catch (e) {
+        console.error("Error loading entity changes:", e);
+    }
+}
+
+// ------------------ ÉDITION D'UNE FICHE LISTÉE (PATCH) ------------------
+
+function _editInput(id, label, value, span2 = false) {
+    return `
+        <div class="details-item"${span2 ? ' style="grid-column: span 2;"' : ""}>
+            <strong>${label}</strong>
+            <input type="text" id="edit-ent-${id}" value="${escapeHtml(value ?? "")}">
+        </div>`;
+}
+
+function showWatchlistEntityEditForm() {
+    const item = wlDetailsItem;
+    if (!item || !canEditWatchlistEntity(item)) return;
+    const body = document.getElementById("modal-body");
+    const parsed = item.individual_name_parsed || {};
+    const countries = item.countries || {};
+    const aliases = (item.aliases && !Array.isArray(item.aliases)) ? item.aliases : { high_priority: [], low_priority: [] };
+
+    const syncWarning = item.snapshot_id !== "manual-watchlist"
+        ? `<p class="section-desc" style="color: var(--color-warning, #b8860b);">⚠️ Fiche issue d'une source synchronisée : la prochaine synchronisation de la liste remplacera ce snapshot et écrasera ces modifications. Le journal des modifications, lui, est conservé.</p>`
+        : "";
+
+    body.innerHTML = `
+        <p class="section-desc">Modification de la fiche <code>${escapeHtml(item.entity_id)}</code> — chaque champ modifié est tracé (qui, quand, avant → après).</p>
+        ${syncWarning}
+        <div class="details-grid">
+            ${_editInput("primary_name", "Nom Principal / Label", item.primary_name, true)}
+            <div class="details-item"><strong>Type d'Entité</strong>
+                <select id="edit-ent-entity_type">
+                    ${["I", "E", "V", "O"].map(t => `<option value="${t}" ${item.entity_type === t ? "selected" : ""}>${t}</option>`).join("")}
+                </select>
+            </div>
+            <div class="details-item"><strong>Genre</strong>
+                <select id="edit-ent-gender">
+                    ${["M", "F", "U"].map(g => `<option value="${g}" ${(item.gender || "U") === g ? "selected" : ""}>${g}</option>`).join("")}
+                </select>
+            </div>
+            ${_editInput("first_name", "Prénom", parsed.first_name)}
+            ${_editInput("last_name", "Nom", parsed.last_name)}
+            ${_editInput("maiden_name", "Nom de Jeune Fille", parsed.maiden_name)}
+            ${_editInput("citizenship", "Nationalités (codes, virgules)", (countries.citizenship || []).join(", "))}
+            ${_editInput("residence", "Résidences (codes, virgules)", (countries.residence || []).join(", "))}
+            ${_editInput("place_of_birth", "Lieu de Naissance", item.place_of_birth)}
+            ${_editInput("dates_of_birth", "Dates de Naissance (AAAA-MM-JJ, virgules)", (item.dates_of_birth || []).join(", "))}
+            ${_editInput("address", "Adresse", item.address, true)}
+            ${_editInput("city", "Ville", item.city)}
+            ${_editInput("state", "État / Région", item.state)}
+            ${_editInput("country", "Pays", item.country)}
+            ${_editInput("date_of_death", "Date de Décès", item.date_of_death)}
+            ${_editInput("origin", "Origine / Source", item.origin)}
+            ${_editInput("designation", "Fonction / Désignation", item.designation)}
+            ${_editInput("additional_informations", "Informations Additionnelles", item.additional_informations, true)}
+            ${_editInput("official_reference", "Référence Officielle", item.official_reference, true)}
+            <div class="details-item" style="grid-column: span 2;" id="edit-touch-ref-wrapper" ${OFFICIAL_REF_DATE_RE.test(item.official_reference || "") ? "" : 'hidden'}>
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer;">
+                    <input type="checkbox" id="edit-touch-ref-date" checked>
+                    Mettre à jour la date contenue dans la référence officielle à la date du jour
+                </label>
+            </div>
+            ${_editInput("designation_reasons", "Motifs de la Désignation", item.designation_reasons, true)}
+            ${_editInput("alternative_addresses", "Adresses Alternatives (point-virgules)", (item.alternative_addresses || []).join("; "), true)}
+            ${_editInput("aliases_high", "Alias forts (virgules)", (aliases.high_priority || []).join(", "), true)}
+            ${_editInput("aliases_low", "Alias faibles (virgules)", (aliases.low_priority || []).join(", "), true)}
+            ${_editInput("lei_number", "LEI", item.lei_number)}
+            ${_editInput("imo_number", "IMO", item.imo_number)}
+            ${_editInput("aircraft_tail_number", "Tail Number", item.aircraft_tail_number)}
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+            <button class="btn-secondary" onclick="showWatchlistDetails(wlDetailsItem)">Annuler</button>
+            <button class="btn-primary" id="edit-ent-save-btn" onclick="saveWatchlistEntityEdits()">💾 Enregistrer les modifications</button>
         </div>
     `;
-    
-    modal.classList.remove("hidden");
+
+    // La case « date du jour » n'a de sens que si la référence contient une date
+    const refInput = document.getElementById("edit-ent-official_reference");
+    refInput.addEventListener("input", () => {
+        document.getElementById("edit-touch-ref-wrapper").hidden = !OFFICIAL_REF_DATE_RE.test(refInput.value);
+    });
+}
+
+function _editValue(id) {
+    const el = document.getElementById(`edit-ent-${id}`);
+    return el ? el.value.trim() : "";
+}
+
+function _splitList(raw, separator) {
+    return raw.split(separator).map(v => v.trim()).filter(Boolean);
+}
+
+async function saveWatchlistEntityEdits() {
+    const item = wlDetailsItem;
+    if (!item) return;
+    const patch = {};
+
+    const scalarFields = [
+        "primary_name", "entity_type", "gender", "place_of_birth", "address", "city",
+        "state", "country", "date_of_death", "origin", "designation",
+        "designation_reasons", "additional_informations", "official_reference",
+        "lei_number", "imo_number", "aircraft_tail_number",
+    ];
+    for (const field of scalarFields) {
+        const newValue = _editValue(field) || null;
+        if (newValue !== (item[field] || null)) patch[field] = newValue;
+    }
+
+    const parsed = item.individual_name_parsed || {};
+    const newParsed = {
+        first_name: _editValue("first_name"),
+        last_name: _editValue("last_name"),
+        maiden_name: _editValue("maiden_name"),
+    };
+    if (newParsed.first_name !== (parsed.first_name || "") || newParsed.last_name !== (parsed.last_name || "") || newParsed.maiden_name !== (parsed.maiden_name || "")) {
+        patch.individual_name_parsed = newParsed;
+    }
+
+    const newDobs = _splitList(_editValue("dates_of_birth"), ",");
+    if (JSON.stringify(newDobs) !== JSON.stringify(item.dates_of_birth || [])) patch.dates_of_birth = newDobs;
+
+    const countries = item.countries || {};
+    const newCountries = {
+        ...countries,
+        citizenship: _splitList(_editValue("citizenship"), ",").map(c => c.toUpperCase()),
+        residence: _splitList(_editValue("residence"), ",").map(c => c.toUpperCase()),
+    };
+    if (JSON.stringify(newCountries) !== JSON.stringify(countries)) patch.countries = newCountries;
+
+    const aliases = (item.aliases && !Array.isArray(item.aliases)) ? item.aliases : { high_priority: [], low_priority: [] };
+    const newAliases = {
+        high_priority: _splitList(_editValue("aliases_high"), ","),
+        low_priority: _splitList(_editValue("aliases_low"), ","),
+    };
+    if (JSON.stringify(newAliases) !== JSON.stringify({ high_priority: aliases.high_priority || [], low_priority: aliases.low_priority || [] })) {
+        patch.aliases = newAliases;
+    }
+
+    const newAltAddrs = _splitList(_editValue("alternative_addresses"), ";");
+    if (JSON.stringify(newAltAddrs) !== JSON.stringify(item.alternative_addresses || [])) patch.alternative_addresses = newAltAddrs;
+
+    const touchWrapper = document.getElementById("edit-touch-ref-wrapper");
+    const touchBox = document.getElementById("edit-touch-ref-date");
+    const touchDate = Boolean(touchWrapper && !touchWrapper.hidden && touchBox && touchBox.checked);
+
+    if (!Object.keys(patch).length && !touchDate) {
+        showToast("Aucune modification à enregistrer.", "info");
+        return;
+    }
+    patch.touch_official_reference_date = touchDate;
+
+    const btn = document.getElementById("edit-ent-save-btn");
+    btn.disabled = true;
+    try {
+        const response = await fetch(`/api/watchlist/entity/${item.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast(`Erreur : ${data.detail || JSON.stringify(data)}`, "error");
+            return;
+        }
+        showToast(data.message + (data.official_reference_date_touched ? " Référence officielle datée du jour." : ""), "success");
+        // Ré-affiche la fiche à jour et rafraîchit la vue + le hash du cache recriblé
+        showWatchlistDetails(data.entity);
+        fetchWatchlist(wlCurrentPage);
+        fetchWatchlistHash();
+    } catch (e) {
+        console.error("Error patching entity:", e);
+        showToast("Erreur réseau de communication.", "error");
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 function closeDetailsModal() {
@@ -2089,6 +2362,8 @@ async function fetchIngestionSettings() {
         const wlJustifEl = document.getElementById("setting-whitelist-justification");
         const wlFileEl = document.getElementById("setting-whitelist-file");
         const rescreenEl = document.getElementById("setting-auto-rescreen");
+        const btRequiredEl = document.getElementById("setting-backtest-required");
+        const btGapEl = document.getElementById("setting-backtest-gap");
         if (approvalEl) approvalEl.checked = ingestionSettings.require_approval;
         if (justifEl) justifEl.checked = ingestionSettings.exclusion_justification_required;
         if (fileEl) fileEl.checked = ingestionSettings.exclusion_file_required;
@@ -2096,6 +2371,11 @@ async function fetchIngestionSettings() {
         if (wlJustifEl) wlJustifEl.checked = ingestionSettings.whitelist_justification_required;
         if (wlFileEl) wlFileEl.checked = ingestionSettings.whitelist_file_required;
         if (rescreenEl) rescreenEl.checked = ingestionSettings.auto_rescreen;
+        if (btRequiredEl) btRequiredEl.checked = ingestionSettings.backtest_required;
+        if (btGapEl) btGapEl.value = ingestionSettings.backtest_max_gap_pct ?? 20;
+        // Encart de l'onglet Homologation : parcours actif seulement si le mode l'est
+        const modeHint = document.getElementById("review-mode-hint");
+        if (modeHint) modeHint.classList.toggle("hidden", !!ingestionSettings.require_approval);
         // Asterisques "obligatoire" de la modale d'exclusion
         const justifMark = document.getElementById("exclusion-justification-required-mark");
         const fileMark = document.getElementById("exclusion-file-required-mark");
@@ -2114,7 +2394,9 @@ async function saveIngestionSettings() {
         alert_four_eyes_required: document.getElementById("setting-alert-four-eyes").checked,
         whitelist_justification_required: document.getElementById("setting-whitelist-justification").checked,
         whitelist_file_required: document.getElementById("setting-whitelist-file").checked,
-        auto_rescreen: document.getElementById("setting-auto-rescreen").checked
+        auto_rescreen: document.getElementById("setting-auto-rescreen").checked,
+        backtest_required: document.getElementById("setting-backtest-required").checked,
+        backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20
     };
     try {
         const response = await fetch("/api/settings/ingestion", {
@@ -2174,6 +2456,25 @@ function renderPendingTable(pending) {
     }).join("");
 }
 
+// ------------------ PARCOURS GUIDÉ DE PRODUCTION DE LISTE ------------------
+
+// Ouvre directement le parcours d'homologation d'un snapshot (depuis un import ou une synchro)
+function openPendingReview(snapshotId) {
+    switchTab("watchlist-mgmt");
+    switchSubTab("watchlist-mgmt", "watchlist-review");
+    if (snapshotId) openReviewDetail(snapshotId);
+}
+
+// Étape affichée du parcours (1 Delta, 2 Exclusions, 3 Cahier de tests, 4 Décision)
+function showReviewStep(step) {
+    for (let i = 1; i <= 4; i++) {
+        const panel = document.getElementById(`review-step-${i}`);
+        const btn = document.getElementById(`step-btn-${i}`);
+        if (panel) panel.classList.toggle("hidden", i !== step);
+        if (btn) btn.classList.toggle("active", i === step);
+    }
+}
+
 async function openReviewDetail(snapshotId) {
     reviewCurrentSnapshotId = snapshotId;
     reviewExcludedSelection = new Set();
@@ -2199,10 +2500,263 @@ async function openReviewDetail(snapshotId) {
         document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
         document.getElementById("review-delta-removed").textContent = summary.removed_count ?? 0;
         document.getElementById("review-delta-modified").textContent = summary.modified_count ?? 0;
+        renderReviewDeltaDetails(data.delta_details);
+        // Cahier de tests : panels disponibles + dernier rapport archivé
+        showReviewStep(1);
+        fetchTestPanels();
+        renderBacktestReport(data.backtest_report);
         await loadReviewEntitiesPage(1);
         document.getElementById("review-detail-card").scrollIntoView({ behavior: "smooth" });
     } catch (e) {
         console.error("Error opening review detail:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+// Delta détaillé (étape 1) : listes des ajouts / modifications / suppressions
+function renderReviewDeltaDetails(deltaDetails) {
+    const container = document.getElementById("review-delta-details");
+    if (!container) return;
+    const details = (deltaDetails && deltaDetails.details) || deltaDetails || {};
+    const added = details.added || [];
+    const removed = details.removed || [];
+    const modified = details.modified || [];
+    if (!added.length && !removed.length && !modified.length) {
+        container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>';
+        return;
+    }
+
+    const rows3 = (items, cls) => items.map(e => `
+        <tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td>
+        <td><span class="status-badge ${cls}">${escapeHtml(e.primary_name || "")}</span></td></tr>`).join("");
+
+    const modifiedRows = modified.map(e => {
+        const changes = (e.changes_detected || []).map(field => {
+            const before = e.before ? e.before[field] : undefined;
+            const after = e.after ? e.after[field] : undefined;
+            const fmt = v => (v === null || v === undefined) ? "∅" : (typeof v === "object" ? JSON.stringify(v) : String(v));
+            return `<small><strong>${escapeHtml(field)}</strong> : <span style="color:var(--text-muted)">${escapeHtml(fmt(before))}</span> → ${escapeHtml(fmt(after))}</small>`;
+        }).join("<br>");
+        return `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td><strong>${escapeHtml(e.primary_name || "")}</strong></td><td>${changes || "-"}</td></tr>`;
+    }).join("");
+
+    const section = (title, count, inner) => count ? `
+        <details style="margin-bottom: 0.6rem;">
+            <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${count})</summary>
+            <div class="table-container" style="max-height: 260px; overflow-y: auto;"><table>${inner}</table></div>
+        </details>` : "";
+
+    container.innerHTML =
+        section("🟢 Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
+        section("🟠 Modifications (avant → après)", modified.length, `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>${modifiedRows}</tbody>`) +
+        section("🔴 Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
+}
+
+// ------------------ ÉTAPE 3 : CAHIER DE TESTS (BACKTEST) ------------------
+
+async function fetchTestPanels(selectSnapshotId = null) {
+    const select = document.getElementById("backtest-panel-select");
+    if (!select) return;
+    try {
+        const response = await fetch("/api/testpanels");
+        if (!response.ok) return;
+        const data = await response.json();
+        const panels = data.panels || [];
+        if (!panels.length) {
+            select.innerHTML = '<option value="">Aucun panel — générez-en un ou importez une base clients</option>';
+            return;
+        }
+        select.innerHTML = panels.map(p => {
+            const label = `${p.generated ? "🧪 " : "👥 "}${p.file_name} (${p.record_count} clients)`;
+            return `<option value="${escapeHtml(p.snapshot_id)}">${escapeHtml(label)}</option>`;
+        }).join("");
+        if (selectSnapshotId) select.value = selectSnapshotId;
+    } catch (e) {
+        console.error("Error fetching test panels:", e);
+    }
+}
+
+async function generateTestPanel() {
+    const btn = document.getElementById("generate-panel-btn");
+    const size = parseInt(document.getElementById("backtest-panel-size").value, 10) || 500;
+    btn.disabled = true;
+    btn.textContent = "Génération...";
+    try {
+        const response = await fetch("/api/testpanels/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ snapshot_id: reviewCurrentSnapshotId, size }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Échec de la génération."), "error");
+            return;
+        }
+        showToast(data.message, "success");
+        await fetchTestPanels(data.snapshot_id);
+    } catch (e) {
+        console.error("Error generating test panel:", e);
+        showToast("Erreur réseau de communication.", "error");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "⚙️ Générer un panel";
+    }
+}
+
+async function runReviewBacktest() {
+    if (!reviewCurrentSnapshotId) return;
+    const panelId = document.getElementById("backtest-panel-select").value;
+    if (!panelId) {
+        showToast("Choisissez ou générez d'abord un panel de pseudo-clients.", "warning");
+        return;
+    }
+    const btn = document.getElementById("run-backtest-btn");
+    btn.disabled = true;
+    btn.textContent = "Criblage à blanc en cours...";
+    try {
+        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/backtest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ panel_snapshot_id: panelId }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Échec du cahier de tests."), "error");
+            return;
+        }
+        renderBacktestReport(data);
+        showToast(data.verdict === "OK"
+            ? "Cahier de tests terminé : écart dans le seuil toléré."
+            : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes.", data.verdict === "OK" ? "success" : "warning", 7000);
+    } catch (e) {
+        console.error("Error running backtest:", e);
+        showToast("Erreur réseau de communication.", "error");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "▶ Lancer le cahier de tests";
+    }
+}
+
+function backtestVerdictBadge(report) {
+    if (!report) return "";
+    return report.verdict === "OK"
+        ? '<span class="status-badge no_match">ÉCART OK</span>'
+        : '<span class="status-badge warning">ÉCART ÉLEVÉ</span>';
+}
+
+function renderBacktestReport(report) {
+    const container = document.getElementById("backtest-results");
+    const reminder = document.getElementById("review-backtest-reminder");
+    if (!container) return;
+    if (!report) {
+        container.classList.add("hidden");
+        container.innerHTML = "";
+        if (reminder) reminder.innerHTML = `
+            <p class="section-desc" style="color: var(--color-warning);">⚠️ Aucun cahier de tests n'a été exécuté sur ce snapshot. Recommandé avant toute mise en production (étape 3).</p>`;
+        return;
+    }
+
+    const rateCard = (title, side, accent) => `
+        <div class="metric" style="flex: 1; background: rgba(255,255,255,0.03); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
+            <span class="metric-label" style="font-weight: 600; color: ${accent};">${title}</span>
+            <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} alerte(s)</span>
+            <small style="color: var(--text-muted);">taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
+        </div>`;
+
+    const pairRow = (p, withCheckbox) => `
+        <tr>
+            ${withCheckbox ? `<td><input type="checkbox" class="goodguy-cb" data-client-id="${escapeHtml(p.client_id)}" data-entity-id="${escapeHtml(p.entity_id)}" data-client-name="${escapeHtml(p.client_name || "")}" data-entity-name="${escapeHtml(p.entity_name || "")}" data-list-type="${escapeHtml(p.list_type || "")}"></td>` : ""}
+            <td><code>${escapeHtml(p.client_id)}</code><br><small>${escapeHtml(p.client_name || "")}</small></td>
+            <td><code>${escapeHtml(p.entity_id)}</code><br><small><strong>${escapeHtml(p.entity_name || "")}</strong></small></td>
+            <td>${listTypeBadge(p.list_type)}</td>
+            <td><span class="status-badge alert">${p.score}</span></td>
+        </tr>`;
+
+    const newPairs = report.new_pairs || [];
+    const resolvedPairs = report.resolved_pairs || [];
+    const executedStr = report.executed_at ? new Date(report.executed_at).toLocaleString("fr-FR") : "";
+
+    container.classList.remove("hidden");
+    container.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
+            <h3 style="margin: 0;">Résultats du cahier de tests</h3>
+            ${backtestVerdictBadge(report)}
+            <small style="color: var(--text-muted);">panel de ${report.panel_size} pseudo-clients · exécuté par @${escapeHtml(report.executed_by || "")} le ${escapeHtml(executedStr)}</small>
+        </div>
+        <div class="score-metrics" style="flex-direction: row; gap: 1.5rem; margin-bottom: 1rem;">
+            ${rateCard("Liste actuelle (production)", report.current, "var(--text-secondary)")}
+            ${rateCard("Liste candidate", report.candidate, "var(--color-accent)")}
+            <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+                <span class="metric-label" style="font-weight: 600; color: var(--color-warning);">Écart</span>
+                <span class="metric-value" style="font-size: 1.4rem;">${report.gap_pct} %</span>
+                <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
+            </div>
+        </div>
+        ${newPairs.length ? `
+            <h4 style="margin: 0.75rem 0 0.4rem;">Nouvelles alertes avec la liste candidate (${report.new_pairs_count})</h4>
+            <p class="section-desc">Vérifiez chaque paire : s'il s'agit d'un homonyme avéré (« Good Guy »), mettez-la en liste blanche puis relancez le cahier de tests.</p>
+            <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem; align-items: center;">
+                <label style="font-size: 0.85rem; cursor: pointer;"><input type="checkbox" onchange="document.querySelectorAll('.goodguy-cb').forEach(cb => cb.checked = this.checked)"> Tout sélectionner</label>
+                <button class="btn btn-sm btn-secondary" onclick="bulkGoodGuys()">🕊️ Good Guy (liste blanche) sur la sélection</button>
+            </div>
+            <div class="table-container" style="max-height: 300px; overflow-y: auto;">
+                <table>
+                    <thead><tr><th style="width:32px;"></th><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th></tr></thead>
+                    <tbody>${newPairs.map(p => pairRow(p, true)).join("")}</tbody>
+                </table>
+            </div>` : '<p class="section-desc">✅ Aucune nouvelle alerte par rapport à la liste actuelle.</p>'}
+        ${resolvedPairs.length ? `
+            <details style="margin-top: 0.75rem;">
+                <summary style="cursor: pointer; font-weight: 600;">Alertes résolues par la liste candidate (${report.resolved_pairs_count})</summary>
+                <div class="table-container" style="max-height: 240px; overflow-y: auto;">
+                    <table>
+                        <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th></tr></thead>
+                        <tbody>${resolvedPairs.map(p => pairRow(p, false)).join("")}</tbody>
+                    </table>
+                </div>
+            </details>` : ""}
+    `;
+
+    if (reminder) {
+        reminder.innerHTML = report.verdict === "OK"
+            ? `<p class="section-desc" style="color: var(--color-safe);">✅ Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).</p>`
+            : `<p class="section-desc" style="color: var(--color-warning);">⚠️ Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+    }
+}
+
+async function bulkGoodGuys() {
+    const checked = Array.from(document.querySelectorAll(".goodguy-cb:checked"));
+    if (!checked.length) {
+        showToast("Sélectionnez au moins une paire à mettre en liste blanche.", "warning");
+        return;
+    }
+    const justification = await promptDialog(
+        `Justification commune pour ${checked.length} paire(s) « Good Guy »`,
+        { placeholder: "Ex. : homonymes avérés lors du cahier de tests d'homologation du " + new Date().toLocaleDateString("fr-FR"), textarea: true }
+    );
+    if (justification === null) return;
+    const pairs = checked.map(cb => ({
+        client_id: cb.dataset.clientId,
+        watchlist_entity_id: cb.dataset.entityId,
+        client_name: cb.dataset.clientName || null,
+        watchlist_name: cb.dataset.entityName || null,
+        list_type: cb.dataset.listType || null,
+    }));
+    try {
+        const response = await fetch("/api/whitelist/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pairs, justification }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Échec de la mise en liste blanche."), "error");
+            return;
+        }
+        showToast(`${data.message} Relancez le cahier de tests pour mesurer l'amélioration.`, "success", 8000);
+        fetchWhitelist();
+    } catch (e) {
+        console.error("Error bulk whitelisting:", e);
         showToast("Erreur réseau de communication.", "error");
     }
 }
@@ -2379,6 +2933,7 @@ async function approvePendingSnapshot() {
         fetchPendingReviews();
         fetchSnapshots();
         fetchWatchlist();
+        fetchWatchlistHash();
     } catch (e) {
         console.error("Error approving snapshot:", e);
         showToast("Erreur réseau de communication.", "error");
