@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=2.7">
+    <link rel="stylesheet" href="/static/styles.css?v=2.8">
 </head>
 <body>
     <div class="app-container">
@@ -120,8 +120,9 @@
                             <h2>Listés — Base de Données (en direct)</h2>
                             <p class="section-desc">Consultation en direct de la base relationnelle : chaque affichage interroge la base (recherche, filtres et pagination côté serveur). Le périmètre « En production » reflète les instantanés homologués criblés par le moteur ; les autres statuts (en attente, remplacées, rejetées, exclues) sont consultables via le filtre Statut.</p>
 
-                            <div class="search-box" style="display: flex; gap: 0.5rem;">
-                                <input type="text" id="wl-search-input" placeholder="Filtrer par nom, ID, LEI ou IMO..." onkeyup="filterWatchlist()" style="flex: 1;">
+                            <div class="search-box filter-bar">
+                                <select id="wl-field-filter" onchange="onWatchlistFieldChange()" title="Champ dans lequel rechercher"></select>
+                                <input type="text" id="wl-search-input" placeholder="🔍 Rechercher (nom, ID, LEI, IMO)..." onkeyup="filterWatchlist()">
                                 <select id="wl-list-filter" onchange="filterWatchlist()" title="Filtrer par type de liste"></select>
                                 <select id="wl-scope-filter" onchange="filterWatchlist()" title="Filtrer par statut en base">
                                     <option value="production">En production</option>
@@ -132,6 +133,8 @@
                                     <option value="EXCLUDED">Exclues</option>
                                 </select>
                             </div>
+
+                            <div id="wl-match-hint" class="hidden" style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 0.75rem; font-size: 0.85rem;"></div>
 
                             <div class="table-container max-height-table">
                                 <table id="watchlist-table">
@@ -1263,7 +1266,7 @@
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
                     <p class="section-desc">Historique immuable de toutes les décisions de criblage émises par le moteur. Conforme aux standards ACPR/AMF.</p>
 
-                    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+                    <div class="filter-bar" style="margin-bottom: 1rem;">
                         <select id="audit-list-filter" onchange="fetchAuditHistory(1)" title="Filtrer par type de liste"></select>
                         <select id="audit-status-filter" onchange="fetchAuditHistory(1)" title="Filtrer par décision">
                             <option value="">Toutes les décisions</option>
@@ -1570,7 +1573,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=5.3"></script>
+    <script src="/static/app.js?v=5.5"></script>
 
 
 

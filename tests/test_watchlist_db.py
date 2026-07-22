@@ -216,6 +216,113 @@ def test_unknown_scope_rejected(client):
     assert response.status_code == 400
 
 
+# ------------------ RECHERCHE PAR CHAMP (search_field) ------------------
+
+def _upload_rich_entity(client, name, aliases, address):
+    file_name = f"test_dbview_{uuid.uuid4().hex[:8]}.csv"
+    csv_content = (
+        "entity_id,entity_type,primary_name,nationality,aliases,address\n"
+        f"EU-{uuid.uuid4().hex[:10]},I,{name},RU,{aliases},{address}\n"
+    )
+    response = client.post(
+        "/api/ingest",
+        data={"file_type": "WATCHLIST_EU"},
+        files={"file": (file_name, csv_content, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_search_field_targets_specific_column(client):
+    _set_approval(client, False)
+    tag = uuid.uuid4().hex[:6]
+    _upload_rich_entity(client, f"Champov {tag}", f"Fantome{tag}", f"12 rue Perdue {tag}")
+
+    # Alias : trouvable via search_field=aliases (JSON), pas via la recherche indexee par defaut
+    assert _browse(client, search=f"Fantome{tag}", search_field="aliases")["total"] == 1
+    assert _browse(client, search=f"Fantome{tag}")["total"] == 0
+
+    # Adresse : colonne texte ciblee
+    found = _browse(client, search=f"rue Perdue {tag}", search_field="address")
+    assert found["total"] == 1
+    assert found["items"][0]["primary_name"] == f"CHAMPOV {tag}".upper()
+
+    # Un champ cible ne matche pas les autres colonnes
+    assert _browse(client, search=f"Fantome{tag}", search_field="address")["total"] == 0
+
+
+def test_search_field_any_covers_everything(client):
+    _set_approval(client, False)
+    tag = uuid.uuid4().hex[:6]
+    _upload_rich_entity(client, f"Partoutov {tag}", f"Ombre{tag}", f"7 avenue Cachee {tag}")
+
+    # « Tout champ » retrouve aussi bien l'alias que l'adresse que le nom
+    assert _browse(client, search=f"Ombre{tag}", search_field="any")["total"] == 1
+    assert _browse(client, search=f"avenue Cachee {tag}", search_field="any")["total"] == 1
+    assert _browse(client, search=f"Partoutov {tag}", search_field="any")["total"] == 1
+
+
+def test_unknown_search_field_rejected(client):
+    response = client.get("/api/watchlist/db", params={"search": "x", "search_field": "NOPE"})
+    assert response.status_code == 400
+    assert "search" in response.json()["detail"].lower() or "champ" in response.json()["detail"].lower()
+
+
+# ------------------ REPLI FUZZY (tolerance aux fautes de frappe) ------------------
+
+def test_fuzzy_fallback_on_typo(client):
+    _set_approval(client, False)
+    tag = uuid.uuid4().hex[:6]
+    marker = f"Typotestov{tag}"
+    _upload_watchlist(client, [("I", f"Boris {marker}")])
+
+    # Recherche exacte : match_mode=exact, pas de score fuzzy
+    exact = _browse(client, search=marker)
+    assert exact["match_mode"] == "exact"
+    assert exact["total"] == 1
+    assert "_fuzzy_score" not in exact["items"][0]
+
+    # Faute de frappe (transposition) : repli fuzzy, classement par similarite
+    typo = f"Typotestvo{tag}"
+    fuzzy = _browse(client, search=typo)
+    assert fuzzy["match_mode"] == "fuzzy"
+    assert fuzzy["total"] >= 1
+    top = fuzzy["items"][0]
+    assert top["primary_name"] == f"BORIS {marker}".upper()
+    assert top["_fuzzy_score"] >= 80
+
+
+def test_exact_results_hide_fuzzy_neighbours(client):
+    # Deux fiches proches : la recherche exacte de l'une ne remonte QUE elle,
+    # jamais sa voisine pourtant tres similaire
+    _set_approval(client, False)
+    tag = uuid.uuid4().hex[:6]
+    _upload_watchlist(client, [("I", f"Jean Dupont{tag}"), ("I", f"Jean Dupond{tag}")])
+
+    result = _browse(client, search=f"Dupont{tag}")
+    assert result["match_mode"] == "exact"
+    assert result["total"] == 1
+    assert result["items"][0]["primary_name"] == f"JEAN DUPONT{tag}".upper()
+
+
+def test_fuzzy_respects_search_field(client):
+    _set_approval(client, False)
+    tag = uuid.uuid4().hex[:6]
+    _upload_rich_entity(client, f"Aliastypov {tag}", f"Spectre{tag}", f"3 rue Neutre {tag}")
+
+    # Typo sur l'alias : trouve via search_field=aliases...
+    typo_alias = f"Specrte{tag}"
+    found = _browse(client, search=typo_alias, search_field="aliases")
+    assert found["match_mode"] == "fuzzy"
+    assert found["total"] >= 1
+    # ...mais pas via la recherche par defaut (nom/ID/LEI/IMO uniquement)
+    assert _browse(client, search=typo_alias)["total"] == 0
+
+
+def test_no_search_has_no_match_mode(client):
+    data = _browse(client)
+    assert data["match_mode"] is None
+
+
 def test_cache_endpoint_unchanged(client):
     # La vue base n'altere pas l'endpoint cache : enveloppe {hash, items} intacte
     data = client.get("/api/watchlist").json()

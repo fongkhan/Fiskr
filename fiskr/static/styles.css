@@ -1072,3 +1072,25 @@ tr:hover td {
     border-color: rgba(99, 102, 241, 0.5);
     color: var(--text-primary);
 }
+
+/* Barres de filtres (recherche + selects) : l'input reste lisible, les
+   selects gardent une largeur naturelle malgré le width:100% global */
+.filter-bar {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.filter-bar input[type="text"] {
+    flex: 2 1 240px;
+    min-width: 220px;
+    width: auto;
+}
+
+.filter-bar select {
+    flex: 0 1 auto;
+    width: auto;
+    min-width: 150px;
+    max-width: 280px;
+}
