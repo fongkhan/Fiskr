@@ -246,39 +246,61 @@ def _phonetic_keys(name: str) -> set:
     return keys
 
 
-def _phonetic_entity_map(watchlist_index: Dict[str, List[Dict[str, Any]]],
-                         allowed_lists: Optional[List[str]] = None
-                         ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def _filtering_index(entities: List[Dict[str, Any]], filtering_cfg: Dict[str, Any],
+                     allowed_lists: Optional[List[str]] = None
+                     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
-    Inverse l'index de blocking UNE SEULE FOIS par message : les cles de
-    blocking sont de la forme PAYS_TYPE_PHONETIQUE ; le pays et le type sont
-    ignores (donnees de paiement trop pauvres pour filtrer dessus), seule la
-    composante phonetique sert de cle de recherche. `allowed_lists` restreint
-    l'univers aux types de listes demandes (None = toutes).
+    Index de blocking local du filtrage, construit UNE SEULE FOIS par message
+    avec le layout du canal FILTERING (parametrable a chaud, defaut phonetique
+    seule — les donnees de paiement sont trop pauvres pour filtrer sur le pays
+    ou le type). `allowed_lists` restreint l'univers aux types de listes.
     """
-    phon_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for key, items in watchlist_index.items():
-        parts = key.split("_")
-        if len(parts) != 3:
+    from fiskr.blocking import generate_blocking_keys
+    index: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for entity in entities:
+        if allowed_lists and entity.get("_list_type") not in allowed_lists:
             continue
-        bucket = phon_map.setdefault(parts[2], {})
-        for item in items:
-            if allowed_lists and item.get("_list_type") not in allowed_lists:
-                continue
-            bucket[item["entity_id"]] = item
-    return phon_map
+        for key in generate_blocking_keys(entity, filtering_cfg):
+            index.setdefault(key, {})[entity["entity_id"]] = entity
+    return index
+
+
+def party_blocking_keys(party: Dict[str, Any], filtering_cfg: Dict[str, Any]) -> set:
+    """
+    Cles de blocking d'une partie de paiement, pour le layout du canal
+    FILTERING. Composantes adaptees a la pauvrete des donnees de paiement :
+    - PHONETIC_FIRST : phonetique de TOUS les mots du nom (l'ordre des mots
+      d'un champ libre de paiement n'est pas fiable) ;
+    - ENTITY_TYPE : les deux variantes PP et PM (nature inconnue) ;
+    - COUNTRY_ISO : pays / pays de naissance de la partie (sinon XX).
+    """
+    layout = (filtering_cfg.get("blocking", {}) or {}).get("custom_key_layout", ["PHONETIC_FIRST"])
+    components: Dict[str, List[str]] = {}
+    for item in layout:
+        if item == "PHONETIC_FIRST":
+            phonetics = _phonetic_keys(party.get("name", ""))
+            components[item] = sorted(phonetics) if phonetics else ["XX"]
+        elif item == "ENTITY_TYPE":
+            components[item] = ["PP", "PM"]
+        elif item == "COUNTRY_ISO":
+            countries = [c for c in (party.get("country"), party.get("birth_country")) if c]
+            components[item] = sorted(set(countries)) if countries else ["XX"]
+        else:
+            components[item] = ["XX"]
+
+    keys = {""}
+    for item in layout:
+        keys = {f"{k}_{v}" if k else v for v in components[item] for k in keys}
+    return keys
 
 
 def _party_candidates(party: Dict[str, Any],
-                      phon_map: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
-    """
-    Candidats de la watchlist pour une partie de paiement : la phonetique est
-    comparee a TOUS les mots du nom de la partie, l'ordre des mots d'un champ
-    libre de paiement n'etant pas fiable.
-    """
+                      index: Dict[str, Dict[str, Dict[str, Any]]],
+                      filtering_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Candidats de la watchlist pour une partie de paiement (index du filtrage)."""
     candidates: Dict[str, Dict[str, Any]] = {}
-    for phon in _phonetic_keys(party["name"]):
-        candidates.update(phon_map.get(phon, {}))
+    for key in party_blocking_keys(party, filtering_cfg):
+        candidates.update(index.get(key, {}))
     return candidates
 
 
@@ -324,11 +346,19 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     party_results: List[Dict[str, Any]] = []
     verdict = "PASS"
     restriction = screening_lists or "ALL"
-    phon_map = _phonetic_entity_map(watchlist_index, screening_lists)
+    # Layout de blocking du canal FILTERING (parametrable a chaud, defaut
+    # phonetique seule) + index local construit une seule fois par message
+    from fiskr.settings import blocking_layout, blocking_config_for
+    from fiskr.fprules import evaluate_fp_rules, build_filtering_ctx, annotate_suppression
+    filtering_cfg = blocking_config_for(blocking_layout(db, "FILTERING"))
+    all_entities = [item for items in watchlist_index.values() for item in items]
+    # Dedup par entity_id (une entite apparait sous plusieurs cles de l'index criblage)
+    unique_entities = {e["entity_id"]: e for e in all_entities}.values()
+    index = _filtering_index(list(unique_entities), filtering_cfg, screening_lists)
 
     for idx, party in enumerate(_distinct_parties(parsed)):
         client_id = f"TXN:{msg_id}:{idx}"
-        candidates = _party_candidates(party, phon_map)
+        candidates = _party_candidates(party, index, filtering_cfg)
 
         best: Optional[Dict[str, Any]] = None
         best_client: Optional[Dict[str, Any]] = None
@@ -344,14 +374,24 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                 best_client = client
 
         alert_id = None
+        suppressed_by_rule = None
         if best is not None:
             best["screening_lists_restriction"] = restriction
+            # Regles anti-faux positifs du canal FILTERING : appliquees avant
+            # de tracer, pour marquer la decision dans le journal immuable
+            if best.get("status") == "ALERT":
+                ctx = build_filtering_ctx(party, best["watchlist_entity"], best, parsed, client_id)
+                suppressed_by_rule = evaluate_fp_rules(db, "FILTERING", ctx)
+                if suppressed_by_rule is not None:
+                    annotate_suppression(best, suppressed_by_rule)
             audit = log_compliance_decision(db, best_client, best["watchlist_entity"],
                                             best, watchlist_version, watchlist_hash)
             if best.get("status") == "ALERT":
                 verdict = "HIT"
                 alert_id = open_or_redetect_alert(
                     db, audit, client_id, best, username,
+                    channel="FILTERING",
+                    suppressed_by_rule=suppressed_by_rule,
                     detail_suffix=(
                         f" [Filtrage transactionnel {parsed['message_type']} {msg_id} — "
                         f"rôle(s) : {', '.join(party['roles'])}]"
