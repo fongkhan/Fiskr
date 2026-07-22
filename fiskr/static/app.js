@@ -42,6 +42,74 @@ function listTypeBadge(t) {
     return `<span class="badge-secondary"${muted} title="${escapeHtml(t || "Type de liste inconnu (enregistrement antérieur)")}">${escapeHtml(label)}</span>`;
 }
 
+// Champs cherchables de la vue « Listés — Base de Données » (groupe → [valeur, libellé])
+// Les valeurs correspondent au paramètre search_field de GET /api/watchlist/db
+const WL_SEARCH_FIELD_GROUPS = [
+    ["Recherche", [
+        ["default", "Champs indexés (nom, ID, LEI, IMO)"],
+        ["any", "🔎 Tout champ"],
+    ]],
+    ["Identité", [
+        ["primary_name", "Nom principal / Raison sociale"],
+        ["individual_name_parsed", "Prénom / Nom / Nom de jeune fille"],
+        ["aliases", "Alias"],
+        ["entity_type", "Type d'entité (I/E/V/O)"],
+        ["gender", "Genre"],
+        ["dates_of_birth", "Dates de naissance"],
+        ["date_of_death", "Date de décès"],
+    ]],
+    ["Localisation", [
+        ["countries", "Pays rattachés"],
+        ["place_of_birth", "Lieu de naissance"],
+        ["address", "Adresse"],
+        ["city", "Ville"],
+        ["state", "État / Région"],
+        ["country", "Pays"],
+        ["alternative_addresses", "Adresses alternatives"],
+    ]],
+    ["Références", [
+        ["official_reference", "Référence officielle"],
+        ["designation", "Fonction / Désignation"],
+        ["designation_reasons", "Motifs de la désignation"],
+        ["additional_informations", "Informations additionnelles"],
+        ["origin", "Origine / Source"],
+    ]],
+    ["Identifiants", [
+        ["entity_id", "ID de fiche"],
+        ["lei_number", "LEI"],
+        ["imo_number", "IMO (navire)"],
+        ["aircraft_tail_number", "Tail Number (aéronef)"],
+        ["passport_documents", "Passeports"],
+        ["national_id_documents", "Cartes d'identité"],
+        ["national_registry_ids", "Registres nationaux"],
+        ["other_registration_ids", "Autres enregistrements"],
+        ["other_id_documents", "Autres documents"],
+    ]],
+];
+
+function initWatchlistFieldFilter() {
+    const select = document.getElementById("wl-field-filter");
+    if (!select) return;
+    select.innerHTML = WL_SEARCH_FIELD_GROUPS.map(([group, fields]) => `
+        <optgroup label="${group}">
+            ${fields.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
+        </optgroup>`).join("");
+}
+
+// Changement du champ de recherche : placeholder adapté + relance de la recherche
+function onWatchlistFieldChange() {
+    const select = document.getElementById("wl-field-filter");
+    const input = document.getElementById("wl-search-input");
+    if (select && input) {
+        const label = select.options[select.selectedIndex]?.textContent || "";
+        input.placeholder = select.value === "default"
+            ? "🔍 Rechercher (nom, ID, LEI, IMO)..."
+            : `🔍 Rechercher dans : ${label.replace("🔎 ", "")}...`;
+        if (input.value.trim()) filterWatchlist();
+        input.focus();
+    }
+}
+
 // Options des selects de filtre « Liste » (valeur UNKNOWN = enregistrements sans type)
 function listTypeFilterOptions(withUnknown) {
     let html = '<option value="">Toutes les listes</option>';
@@ -173,6 +241,7 @@ function initListTypeControls() {
         const el = document.getElementById(id);
         if (el) el.innerHTML = listTypeFilterOptions(withUnknown);
     }
+    initWatchlistFieldFilter();
     for (const containerId of ["screening-lists-checkboxes", "batch-lists-checkboxes"]) {
         const container = document.getElementById(containerId);
         if (!container) continue;
@@ -1046,6 +1115,10 @@ async function fetchWatchlist(page = 1) {
     const params = new URLSearchParams({ page: String(page), page_size: String(wlItemsPerPage) });
     const search = searchEl ? searchEl.value.trim() : "";
     if (search) params.set("search", search);
+    const fieldFilterEl = document.getElementById("wl-field-filter");
+    if (search && fieldFilterEl && fieldFilterEl.value && fieldFilterEl.value !== "default") {
+        params.set("search_field", fieldFilterEl.value);
+    }
     if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
     params.set("scope", scopeFilterEl && scopeFilterEl.value ? scopeFilterEl.value : "production");
 

@@ -1633,11 +1633,71 @@ async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)
 
 WATCHLIST_DB_SCOPES = ("production", "all", "PENDING_REVIEW", "SUPERSEDED", "REJECTED", "EXCLUDED")
 
+# Champs cherchables de la vue base de donnees. Les colonnes JSON (alias,
+# dates, pays, documents...) sont cherchees via CAST(col AS TEXT) — valide en
+# SQLite (JSON stocke en TEXT) comme en PostgreSQL (cast json -> text).
+_WL_TEXT_SEARCH_COLS = {
+    "primary_name": WatchlistEntity.primary_name,
+    "entity_id": WatchlistEntity.entity_id,
+    "entity_type": WatchlistEntity.entity_type,
+    "gender": WatchlistEntity.gender,
+    "place_of_birth": WatchlistEntity.place_of_birth,
+    "address": WatchlistEntity.address,
+    "city": WatchlistEntity.city,
+    "state": WatchlistEntity.state,
+    "country": WatchlistEntity.country,
+    "origin": WatchlistEntity.origin,
+    "designation": WatchlistEntity.designation,
+    "designation_reasons": WatchlistEntity.designation_reasons,
+    "additional_informations": WatchlistEntity.additional_informations,
+    "official_reference": WatchlistEntity.official_reference,
+    "lei_number": WatchlistEntity.lei_number,
+    "imo_number": WatchlistEntity.imo_number,
+    "aircraft_tail_number": WatchlistEntity.aircraft_tail_number,
+    "date_of_death": WatchlistEntity.date_of_death,
+}
+_WL_JSON_SEARCH_COLS = {
+    "aliases": WatchlistEntity.aliases,
+    "dates_of_birth": WatchlistEntity.dates_of_birth,
+    "countries": WatchlistEntity.countries,
+    "individual_name_parsed": WatchlistEntity.individual_name_parsed,
+    "alternative_addresses": WatchlistEntity.alternative_addresses,
+    "national_registry_ids": WatchlistEntity.national_registry_ids,
+    "other_registration_ids": WatchlistEntity.other_registration_ids,
+    "passport_documents": WatchlistEntity.passport_documents,
+    "national_id_documents": WatchlistEntity.national_id_documents,
+    "other_id_documents": WatchlistEntity.other_id_documents,
+}
+WATCHLIST_SEARCH_FIELDS = ("default", "any") + tuple(_WL_TEXT_SEARCH_COLS) + tuple(_WL_JSON_SEARCH_COLS)
+
+
+def _wl_search_clauses(field: str, needle: str):
+    """Clauses ilike pour un champ cherchable (liste a combiner en OR)."""
+    from sqlalchemy import cast, Text
+    if field in _WL_TEXT_SEARCH_COLS:
+        return [_WL_TEXT_SEARCH_COLS[field].ilike(needle)]
+    if field in _WL_JSON_SEARCH_COLS:
+        return [cast(_WL_JSON_SEARCH_COLS[field], Text).ilike(needle)]
+    if field == "any":
+        return (
+            [col.ilike(needle) for col in _WL_TEXT_SEARCH_COLS.values()]
+            + [cast(col, Text).ilike(needle) for col in _WL_JSON_SEARCH_COLS.values()]
+        )
+    # default : champs indexes rapides (comportement historique)
+    return [
+        WatchlistEntity.primary_name.ilike(needle),
+        WatchlistEntity.entity_id.ilike(needle),
+        WatchlistEntity.lei_number.ilike(needle),
+        WatchlistEntity.imo_number.ilike(needle),
+    ]
+
+
 @app.get("/api/watchlist/db")
 async def browse_watchlist_db(
     scope: str = Query("production"),
     list_type: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    search_field: str = Query("default"),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -1655,6 +1715,12 @@ async def browse_watchlist_db(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Scope inconnu ({', '.join(WATCHLIST_DB_SCOPES)})."
+        )
+    search_field = (search_field or "default").strip()
+    if search_field not in WATCHLIST_SEARCH_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Champ de recherche inconnu ({', '.join(WATCHLIST_SEARCH_FIELDS)})."
         )
 
     query = db.query(WatchlistEntity, Snapshot).join(
@@ -1674,13 +1740,9 @@ async def browse_watchlist_db(
             query = query.filter(Snapshot.file_type.in_(values))
 
     if search and search.strip():
+        from sqlalchemy import or_
         needle = f"%{search.strip()}%"
-        query = query.filter(
-            (WatchlistEntity.primary_name.ilike(needle))
-            | (WatchlistEntity.entity_id.ilike(needle))
-            | (WatchlistEntity.lei_number.ilike(needle))
-            | (WatchlistEntity.imo_number.ilike(needle))
-        )
+        query = query.filter(or_(*_wl_search_clauses(search_field, needle)))
 
     total = query.count()
     rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
