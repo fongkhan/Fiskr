@@ -73,17 +73,35 @@ const WL_SEARCH_FIELD_GROUPS = [
         ["designation_reasons", "Motifs de la désignation"],
         ["additional_informations", "Informations additionnelles"],
         ["origin", "Origine / Source"],
+        ["sanction_programs", "Programmes de sanctions"],
+        ["listed_on", "Date d'inscription"],
+        ["pep_role", "Fonction PEP"],
+        ["designating_state", "État désignant"],
+        ["title", "Titre"],
+        ["name_original_script", "Nom (écriture d'origine)"],
+        ["secondary_sanctions_risk", "Sanctions secondaires"],
     ]],
     ["Identifiants", [
         ["entity_id", "ID de fiche"],
         ["lei_number", "LEI"],
+        ["bic_swift", "BIC / SWIFT"],
+        ["tax_id", "Numéro fiscal"],
+        ["duns_number", "D-U-N-S"],
+        ["crypto_wallets", "Adresses crypto"],
         ["imo_number", "IMO (navire)"],
+        ["vessel_mmsi", "MMSI (navire)"],
+        ["vessel_call_sign", "Indicatif radio (navire)"],
         ["aircraft_tail_number", "Tail Number (aéronef)"],
         ["passport_documents", "Passeports"],
         ["national_id_documents", "Cartes d'identité"],
         ["national_registry_ids", "Registres nationaux"],
         ["other_registration_ids", "Autres enregistrements"],
         ["other_id_documents", "Autres documents"],
+    ]],
+    ["Contact", [
+        ["phone_numbers", "Téléphones"],
+        ["email_addresses", "Emails"],
+        ["websites", "Sites web"],
     ]],
 ];
 
@@ -1956,11 +1974,66 @@ function showWatchlistDetails(item) {
             <div class="details-item"><strong>Tail Number (Immatriculation Aéronef)</strong><span>${escapeHtml(item.aircraft_tail_number || "-")}</span></div>
             <div class="details-item"><strong>Dernière Modification Manuelle</strong><span>${escapeHtml(modifiedStr)}</span></div>
         </div>
+        ${extendedFieldsRows(item)}
         <div id="entity-changes-section"></div>
     `;
 
     modal.classList.remove("hidden");
     if (item.id) loadEntityChanges(item.id);
+}
+
+// Champs étendus : [champ, libellé] — affichés dans la modale seulement si non vides,
+// éditables dans le formulaire, journalisés comme les autres
+const WL_EXTENDED_SCALAR_FIELDS = [
+    ["bic_swift", "BIC / SWIFT"],
+    ["tax_id", "Numéro fiscal (Tax ID / INN)"],
+    ["duns_number", "D-U-N-S"],
+    ["title", "Titre"],
+    ["name_original_script", "Nom (écriture d'origine)"],
+    ["listed_on", "Inscrit le"],
+    ["delisted_on", "Radié le"],
+    ["pep_role", "Fonction PEP"],
+    ["designating_state", "État désignant"],
+    ["secondary_sanctions_risk", "Risque de sanctions secondaires"],
+    ["vessel_flag", "Pavillon (navire)"],
+    ["vessel_type", "Type de navire"],
+    ["vessel_call_sign", "Indicatif radio (navire)"],
+    ["vessel_mmsi", "MMSI (navire)"],
+    ["vessel_tonnage", "Tonnage"],
+    ["vessel_owner", "Propriétaire du navire"],
+    ["aircraft_model", "Modèle d'aéronef"],
+    ["aircraft_operator", "Opérateur d'aéronef"],
+    ["aircraft_construction_number", "N° de construction (aéronef)"],
+    ["organization_established_date", "Date de création (PM)"],
+    ["organization_type", "Type d'organisation"],
+];
+const WL_EXTENDED_LIST_FIELDS = [
+    ["sanction_programs", "Programmes de sanctions"],
+    ["phone_numbers", "Téléphones"],
+    ["email_addresses", "Emails"],
+    ["websites", "Sites web"],
+];
+
+function cryptoWalletsText(wallets) {
+    if (!Array.isArray(wallets) || !wallets.length) return "";
+    return wallets.map(w => (w.currency ? `${w.currency}: ` : "") + (w.address || "")).join("; ");
+}
+
+// Lignes de la modale pour les champs étendus non vides
+function extendedFieldsRows(item) {
+    const rows = [];
+    for (const [field, label] of WL_EXTENDED_SCALAR_FIELDS) {
+        if (item[field]) rows.push(`<div class="details-item"><strong>${label}</strong><span>${escapeHtml(String(item[field]))}</span></div>`);
+    }
+    for (const [field, label] of WL_EXTENDED_LIST_FIELDS) {
+        const value = Array.isArray(item[field]) ? item[field].join("; ") : "";
+        if (value) rows.push(`<div class="details-item" style="grid-column: span 2;"><strong>${label}</strong><span>${escapeHtml(value)}</span></div>`);
+    }
+    const crypto = cryptoWalletsText(item.crypto_wallets);
+    if (crypto) rows.push(`<div class="details-item" style="grid-column: span 2;"><strong>Adresses crypto</strong><span>${escapeHtml(crypto)}</span></div>`);
+    return rows.length
+        ? `<h3 style="margin: 1rem 0 0.5rem;">Champs étendus</h3><div class="details-grid">${rows.join("")}</div>`
+        : "";
 }
 
 // Libellés français des champs pour le journal des modifications
@@ -2076,6 +2149,12 @@ function showWatchlistEntityEditForm() {
             ${_editInput("imo_number", "IMO", item.imo_number)}
             ${_editInput("aircraft_tail_number", "Tail Number", item.aircraft_tail_number)}
         </div>
+        <h4 style="margin: 1rem 0 0.5rem;">Champs étendus</h4>
+        <div class="details-grid">
+            ${WL_EXTENDED_SCALAR_FIELDS.map(([field, label]) => _editInput(field, label, item[field])).join("")}
+            ${WL_EXTENDED_LIST_FIELDS.map(([field, label]) => _editInput(field, `${label} (point-virgules)`, (item[field] || []).join("; "), true)).join("")}
+            ${_editInput("crypto_wallets", "Adresses crypto (DEVISE: adresse ; …)", cryptoWalletsText(item.crypto_wallets), true)}
+        </div>
         <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
             <button class="btn-secondary" onclick="showWatchlistDetails(wlDetailsItem)">Annuler</button>
             <button class="btn-primary" id="edit-ent-save-btn" onclick="saveWatchlistEntityEdits()">💾 Enregistrer les modifications</button>
@@ -2108,11 +2187,25 @@ async function saveWatchlistEntityEdits() {
         "state", "country", "date_of_death", "origin", "designation",
         "designation_reasons", "additional_informations", "official_reference",
         "lei_number", "imo_number", "aircraft_tail_number",
+        ...WL_EXTENDED_SCALAR_FIELDS.map(([field]) => field),
     ];
     for (const field of scalarFields) {
         const newValue = _editValue(field) || null;
         if (newValue !== (item[field] || null)) patch[field] = newValue;
     }
+
+    // Champs étendus liste (point-virgules) + adresses crypto (DEVISE: adresse)
+    for (const [field] of WL_EXTENDED_LIST_FIELDS) {
+        const newList = _splitList(_editValue(field), ";");
+        if (JSON.stringify(newList) !== JSON.stringify(item[field] || [])) patch[field] = newList;
+    }
+    const newWallets = _splitList(_editValue("crypto_wallets"), ";").map(entry => {
+        const sep = entry.indexOf(":");
+        return sep > 0
+            ? { currency: entry.slice(0, sep).trim(), address: entry.slice(sep + 1).trim() }
+            : { currency: "", address: entry.trim() };
+    });
+    if (JSON.stringify(newWallets) !== JSON.stringify(item.crypto_wallets || [])) patch.crypto_wallets = newWallets;
 
     const parsed = item.individual_name_parsed || {};
     const newParsed = {

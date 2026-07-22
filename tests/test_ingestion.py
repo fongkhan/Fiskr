@@ -395,11 +395,14 @@ def test_real_structure_locations_and_documents(tmp_path):
     # Programme de sanctions (SanctionsEntries apres DistinctParties)
     assert individual["designation_reasons"] == "UKRAINE-EO13662"
 
-    # Registre du commerce de l'entite, call sign du navire conserve
+    # Registre du commerce de l'entite, call sign du navire structure
     assert entities["9002"]["national_registry_ids"] == [
         {"number": "REG-778899", "country": "RU", "registry_name": "CommercialRegistry"}
     ]
-    assert "UBXY7" in (entities["9003"]["additional_informations"] or "")
+    assert entities["9003"]["vessel_call_sign"] == "UBXY7"
+
+    # Programme de sanctions egalement disponible en liste structuree
+    assert individual["sanction_programs"] == ["UKRAINE-EO13662"]
 
 
 HEURISTIC_FALLBACK_XML = """<?xml version="1.0" encoding="utf-8"?>

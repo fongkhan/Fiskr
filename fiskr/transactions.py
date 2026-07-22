@@ -310,6 +310,9 @@ def _party_client_dict(party: Dict[str, Any], as_individual: bool, client_id: st
     client: Dict[str, Any] = {
         "client_id": client_id,
         "client_gender": "U",
+        # BIC de la partie (agents bancaires) : hard match direct contre le
+        # champ bic_swift des institutions financieres sanctionnees
+        "client_bic": party.get("bic") or None,
         "client_countries": {
             "nationality": [], "residence": country,
             "birth_country": [party["birth_country"]] if party["birth_country"] else [],

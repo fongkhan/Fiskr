@@ -21,7 +21,7 @@ EU_FSF_SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
       <publicationUrl>http://eur-lex.europa.eu/some-act</publicationUrl>
     </regulation>
     <subjectType code="person" classificationCode="P"/>
-    <nameAlias firstName="Sergei" middleName="" lastName="IVANOV" wholeName="Sergei IVANOV" nameLanguage="EN" gender="M" title="" function="Minister of Defence" strong="true" logicalId="18"/>
+    <nameAlias firstName="Sergei" middleName="" lastName="IVANOV" wholeName="Sergei IVANOV" nameLanguage="EN" gender="M" title="Gen." function="Minister of Defence" strong="true" logicalId="18"/>
     <nameAlias firstName="" middleName="" lastName="" wholeName="Sergueï Ivanov" nameLanguage="FR" gender="" title="" function="" strong="false" logicalId="19"/>
     <citizenship region="" countryIso2Code="RU" countryDescription="RUSSIAN FEDERATION" logicalId="20"/>
     <birthdate circa="false" calendarType="GREGORIAN" city="Leningrad" zipCode="" birthdate="1965-03-12" day="12" month="3" year="1965" region="" place="" countryIso2Code="RU" countryDescription="RUSSIAN FEDERATION" logicalId="21"/>
@@ -51,6 +51,8 @@ UN_SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
       <UN_LIST_TYPE>Al-Qaida</UN_LIST_TYPE>
       <REFERENCE_NUMBER>QDi.430</REFERENCE_NUMBER>
       <LISTED_ON>2016-08-14</LISTED_ON>
+      <TITLE><VALUE>Sheikh</VALUE></TITLE>
+      <SUBMITTED_BY>France</SUBMITTED_BY>
       <NAME_ORIGINAL_SCRIPT>Игорь Петров</NAME_ORIGINAL_SCRIPT>
       <COMMENTS1>Financier of terrorist operations.</COMMENTS1>
       <DESIGNATION><VALUE>Treasurer</VALUE></DESIGNATION>
@@ -118,6 +120,10 @@ def test_parse_eu_fsf_mapping(tmp_path):
     assert "QDi.430" in person["additional_informations"]  # reference ONU croisee
     # Reference officielle : reglement + date de publication de l'acte
     assert person["official_reference"] == "Regulation 269/2014 (OJ L78) (maj 2022-02-23)"
+    # Champs etendus : titre, date d'inscription, programmes en liste structuree
+    assert person["title"] == "Gen."
+    assert person["listed_on"] == "2022-02-23"
+    assert person["sanction_programs"] == ["UKR"]
     assert person["passport_documents"][0] == {"number": "750123456", "issuing_country": "RU", "expiration_date": None}
     # Alias non-strong -> priorite basse
     assert "Sergueï Ivanov" in person["aliases"]["low_priority"]
@@ -155,6 +161,12 @@ def test_parse_un_consolidated_mapping(tmp_path):
     assert person["passport_documents"][0]["issuing_country"] == "RU"
     # Reference officielle : reference ONU + date d'inscription (pas de LAST_DAY_UPDATED)
     assert person["official_reference"] == "QDi.430 (maj 2016-08-14)"
+    # Champs etendus : titre, date d'inscription, etat designant, programme, script original
+    assert person["title"] == "Sheikh"
+    assert person["listed_on"] == "2016-08-14"
+    assert person["designating_state"] == "France"
+    assert person["sanction_programs"] == ["Al-Qaida"]
+    assert person["name_original_script"] == "Игорь Петров"
 
     entity = entities["UN-QDe.001"]
     assert entity["entity_type"] == "E"

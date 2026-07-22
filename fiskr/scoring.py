@@ -163,6 +163,34 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
     if clei and wlei and len(clei) == 20 and clei.isalnum() and clei == wlei:
         return True, f"Hard Match Priorité 1 : Numéro LEI identique ({clei})"
 
+    # Priority 1bis: BIC/SWIFT (institutions financieres, agents du filtrage)
+    cbic = (client.get("client_bic") or "").strip().upper()
+    wbic = (watchlist.get("bic_swift") or "").strip().upper()
+    if cbic and wbic and len(cbic) in (8, 11) and cbic.isalnum():
+        # Un BIC 8 est le prefixe d'un BIC 11 (agence) : comparaison sur 8
+        if cbic == wbic or cbic[:8] == wbic[:8]:
+            return True, f"Hard Match Priorité 1 : BIC/SWIFT identique ({cbic})"
+
+    # Priority 1ter: Numero fiscal (Tax ID / INN)
+    ctax = clean_doc_num(client.get("client_tax_id") or "")
+    wtax = clean_doc_num(watchlist.get("tax_id") or "")
+    if ctax and wtax and ctax == wtax:
+        return True, f"Hard Match Priorité 1 : Numéro fiscal identique ({ctax})"
+
+    # Priority 1quater: Adresse de monnaie numerique (exacte, sensible a la casse)
+    c_wallets = client.get("client_crypto_wallets") or []
+    if isinstance(c_wallets, str):
+        c_wallets = [c_wallets]
+    w_wallets = watchlist.get("crypto_wallets") or []
+    if not isinstance(w_wallets, list):
+        w_wallets = []
+    w_addresses = {(w.get("address") or "").strip() for w in w_wallets if isinstance(w, dict)}
+    w_addresses.discard("")
+    for cw in c_wallets:
+        cw_addr = str(cw).strip()
+        if cw_addr and cw_addr in w_addresses:
+            return True, f"Hard Match Priorité 1 : Adresse crypto identique ({cw_addr[:16]}…)"
+
     # Priority 2: Passport (Individuals)
     c_passports = client.get("client_passport_documents") or []
     w_passports = watchlist.get("passport_documents") or []
@@ -221,6 +249,16 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
     w_tail = (watchlist.get("aircraft_tail_number") or "").strip().upper()
     if c_tail and w_tail and clean_doc_num(c_tail) == clean_doc_num(w_tail):
         return True, f"Hard Match Priorité 5 : Immatriculation Aéronef identique ({c_tail})"
+
+    c_mmsi = (client.get("transaction_vessel_mmsi") or "").strip()
+    w_mmsi = (watchlist.get("vessel_mmsi") or "").strip()
+    if c_mmsi and w_mmsi and clean_doc_num(c_mmsi) == clean_doc_num(w_mmsi):
+        return True, f"Hard Match Priorité 5 : MMSI Navire identique ({c_mmsi})"
+
+    c_call = (client.get("transaction_vessel_call_sign") or "").strip().upper()
+    w_call = (watchlist.get("vessel_call_sign") or "").strip().upper()
+    if c_call and w_call and clean_doc_num(c_call) == clean_doc_num(w_call):
+        return True, f"Hard Match Priorité 5 : Indicatif radio Navire identique ({c_call})"
 
     # Priority 6: Other IDs / Other Registrations
     c_oid = client.get("client_other_id_documents") or []

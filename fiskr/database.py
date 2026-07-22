@@ -77,6 +77,39 @@ class WatchlistEntity(Base):
     # incluant la date de publication/mise a jour quand la source la fournit
     official_reference = Column(String(500), nullable=True)
 
+    # ---- Champs etendus (extraction structuree des sources) ----
+    # Identifiants a fort pouvoir de matching
+    crypto_wallets = Column(JSON, nullable=True)        # [{"currency", "address"}] (OFAC Digital Currency Address)
+    bic_swift = Column(String(20), nullable=True)       # OFAC BIK/SWIFT — croise avec les BIC du filtrage ISO 20022
+    tax_id = Column(String(100), nullable=True)         # Tax ID / INN
+    duns_number = Column(String(20), nullable=True)     # D-U-N-S
+    # Navires / aeronefs (features OFAC structurees)
+    vessel_call_sign = Column(String(50), nullable=True)
+    vessel_mmsi = Column(String(20), nullable=True)
+    vessel_flag = Column(String(100), nullable=True)
+    vessel_type = Column(String(100), nullable=True)
+    vessel_tonnage = Column(String(50), nullable=True)
+    vessel_owner = Column(String(500), nullable=True)
+    aircraft_model = Column(String(200), nullable=True)
+    aircraft_operator = Column(String(200), nullable=True)
+    aircraft_construction_number = Column(String(100), nullable=True)
+    # Detection, tri, pilotage
+    sanction_programs = Column(JSON, nullable=True)     # ["SDGT", "UKR", ...]
+    listed_on = Column(String(20), nullable=True)       # date d'inscription (ISO)
+    delisted_on = Column(String(20), nullable=True)     # date de radiation/expiration (ISO)
+    name_original_script = Column(String(1000), nullable=True)  # nom en ecriture d'origine
+    title = Column(String(255), nullable=True)          # titre honorifique (distinct de designation)
+    pep_role = Column(String(500), nullable=True)       # fonction PEP (OpenSanctions)
+    secondary_sanctions_risk = Column(Text, nullable=True)  # OFAC CAATSA
+    designating_state = Column(String(200), nullable=True)  # Etat a l'origine de l'inscription (ONU)
+    # Personnes morales
+    organization_established_date = Column(String(20), nullable=True)
+    organization_type = Column(String(200), nullable=True)
+    # Contact & investigation
+    phone_numbers = Column(JSON, nullable=True)
+    email_addresses = Column(JSON, nullable=True)
+    websites = Column(JSON, nullable=True)
+
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
 
@@ -144,14 +177,32 @@ class ClientEntity(Base):
     transaction_vessel_imo = Column(String(20), nullable=True)
     transaction_aircraft_registration = Column(String(50), nullable=True)
     client_lei_number = Column(String(50), nullable=True)
-    
+
     # JSON arrays of objects
     client_national_registry_ids = Column(JSON, nullable=True)
     client_other_registration_ids = Column(JSON, nullable=True)
     client_passport_documents = Column(JSON, nullable=True)
     client_national_id_documents = Column(JSON, nullable=True)
     client_other_id_documents = Column(JSON, nullable=True)
-    
+
+    # ---- Champs etendus KYC ----
+    # Miroirs de matching (croisables avec les champs etendus des listes)
+    client_iban = Column(String(50), nullable=True)
+    client_bic = Column(String(20), nullable=True)
+    client_tax_id = Column(String(100), nullable=True)
+    client_phone = Column(String(100), nullable=True)
+    client_email = Column(String(255), nullable=True)
+    client_website = Column(String(255), nullable=True)
+    client_crypto_wallets = Column(JSON, nullable=True)  # liste d'adresses
+    # Gouvernance & priorisation (exploitables par les regles anti-FP)
+    client_risk_rating = Column(String(20), nullable=True)      # FAIBLE / MOYEN / ELEVE
+    client_pep_flag = Column(Boolean, nullable=True)            # PEP auto-declare
+    client_segment = Column(String(50), nullable=True)          # particulier / PME / corporate...
+    client_activity_sector = Column(String(100), nullable=True) # code NAF / secteur
+    client_activity_countries = Column(JSON, nullable=True)     # pays d'exposition operationnelle
+    client_relationship_start = Column(String(20), nullable=True)
+    client_status = Column(String(20), nullable=True)           # actif / cloture / gele
+
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
 
@@ -455,6 +506,50 @@ def init_db():
                 ("official_reference", "VARCHAR(500)"),
                 ("modified_by", "VARCHAR(100)"),
                 ("modified_at", "TIMESTAMP"),
+                # Champs etendus (extraction structuree des sources)
+                ("crypto_wallets", "JSON"),
+                ("bic_swift", "VARCHAR(20)"),
+                ("tax_id", "VARCHAR(100)"),
+                ("duns_number", "VARCHAR(20)"),
+                ("vessel_call_sign", "VARCHAR(50)"),
+                ("vessel_mmsi", "VARCHAR(20)"),
+                ("vessel_flag", "VARCHAR(100)"),
+                ("vessel_type", "VARCHAR(100)"),
+                ("vessel_tonnage", "VARCHAR(50)"),
+                ("vessel_owner", "VARCHAR(500)"),
+                ("aircraft_model", "VARCHAR(200)"),
+                ("aircraft_operator", "VARCHAR(200)"),
+                ("aircraft_construction_number", "VARCHAR(100)"),
+                ("sanction_programs", "JSON"),
+                ("listed_on", "VARCHAR(20)"),
+                ("delisted_on", "VARCHAR(20)"),
+                ("name_original_script", "VARCHAR(1000)"),
+                ("title", "VARCHAR(255)"),
+                ("pep_role", "VARCHAR(500)"),
+                ("secondary_sanctions_risk", "TEXT"),
+                ("designating_state", "VARCHAR(200)"),
+                ("organization_established_date", "VARCHAR(20)"),
+                ("organization_type", "VARCHAR(200)"),
+                ("phone_numbers", "JSON"),
+                ("email_addresses", "JSON"),
+                ("websites", "JSON"),
+            ],
+            "client_entities": [
+                # Champs etendus KYC
+                ("client_iban", "VARCHAR(50)"),
+                ("client_bic", "VARCHAR(20)"),
+                ("client_tax_id", "VARCHAR(100)"),
+                ("client_phone", "VARCHAR(100)"),
+                ("client_email", "VARCHAR(255)"),
+                ("client_website", "VARCHAR(255)"),
+                ("client_crypto_wallets", "JSON"),
+                ("client_risk_rating", "VARCHAR(20)"),
+                ("client_pep_flag", "BOOLEAN"),
+                ("client_segment", "VARCHAR(50)"),
+                ("client_activity_sector", "VARCHAR(100)"),
+                ("client_activity_countries", "JSON"),
+                ("client_relationship_start", "VARCHAR(20)"),
+                ("client_status", "VARCHAR(20)"),
             ],
             "alerts": [
                 ("list_type", "VARCHAR(30)"),
