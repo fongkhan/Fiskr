@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Typo-tolerant search (fuzzy fallback) in the live database view**: when the exact (substring) search returns results, only those are shown — never fuzzy neighbours; when it returns **nothing**, the view falls back to a fuzzy scan of the selected field (Jaro-Winkler with the engine's accent/case normalization, whole-text and word-by-word, threshold 80), ranked by similarity. The response carries `match_mode: "exact"|"fuzzy"` and a per-item `_fuzzy_score`; the UI shows an amber banner ("Aucun résultat exact — N résultat(s) approché(s)") and a ≈ score badge next to each name. 4 new tests (typo transposition, exact-hides-fuzzy-neighbours, fuzzy honors `search_field`, no-search mode).
 - **Search on any field in the live database view** (`GET /api/watchlist/db?search_field=`): a field selector (grouped in French: Identité, Localisation, Références, Identifiants) targets any of the 28 entity columns — JSON columns (aliases, countries, dates of birth, alternative addresses, identity documents…) are searched via `CAST(col AS TEXT)`, valid on SQLite and PostgreSQL — plus a "🔎 Tout champ" option OR-ing everything; the default remains the fast indexed search (name, ID, LEI, IMO). The input placeholder follows the selected field; unknown field → 400. 3 new tests in `tests/test_watchlist_db.py`.
 
 ### Fixed

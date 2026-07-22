@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import generate_blocking_keys
-from fiskr.scoring import match_entities
+from fiskr.scoring import match_entities, jaro_wink_similarity
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
@@ -1671,6 +1671,67 @@ _WL_JSON_SEARCH_COLS = {
 WATCHLIST_SEARCH_FIELDS = ("default", "any") + tuple(_WL_TEXT_SEARCH_COLS) + tuple(_WL_JSON_SEARCH_COLS)
 
 
+# Seuil de similarite du repli fuzzy de la vue base de donnees (0-100)
+WATCHLIST_FUZZY_MIN_SCORE = 80.0
+
+
+def _flatten_json_strings(value) -> List[str]:
+    """Valeurs textuelles d'une structure JSON (dict/list imbriques)."""
+    out: List[str] = []
+    if isinstance(value, dict):
+        for v in value.values():
+            out.extend(_flatten_json_strings(v))
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            out.extend(_flatten_json_strings(v))
+    elif value not in (None, ""):
+        out.append(str(value))
+    return out
+
+
+def _fuzzy_candidate_texts(entity: WatchlistEntity, field: str) -> List[str]:
+    """Textes de la fiche a comparer en fuzzy, selon le champ de recherche choisi."""
+    if field in _WL_TEXT_SEARCH_COLS:
+        text_cols, json_cols = [field], []
+    elif field in _WL_JSON_SEARCH_COLS:
+        text_cols, json_cols = [], [field]
+    elif field == "any":
+        text_cols, json_cols = list(_WL_TEXT_SEARCH_COLS), list(_WL_JSON_SEARCH_COLS)
+    else:  # default : memes champs que la recherche exacte indexee
+        text_cols, json_cols = ["primary_name", "entity_id", "lei_number", "imo_number"], []
+    texts = [str(v) for c in text_cols if (v := getattr(entity, c, None))]
+    for c in json_cols:
+        texts.extend(_flatten_json_strings(getattr(entity, c, None)))
+    return texts
+
+
+def _fuzzy_best_score(needle_norm: str, texts: List[str]) -> float:
+    """
+    Meilleure similarite Jaro-Winkler (0-100) entre la recherche et les textes
+    de la fiche — texte entier ET mot a mot, pour tolerer une faute de frappe
+    dans un nom au sein d'un champ long.
+    """
+    from fiskr.quality import strip_accents
+    best = 0.0
+    for text in texts:
+        text_norm = strip_accents(str(text).upper().strip())
+        if not text_norm:
+            continue
+        candidates = [text_norm]
+        if " " in text_norm:
+            candidates.extend(text_norm.split())
+        for cand in candidates:
+            # Ecart de longueur trop grand : similarite forcement insuffisante
+            if abs(len(cand) - len(needle_norm)) > max(3, len(needle_norm) // 2):
+                continue
+            score = jaro_wink_similarity(needle_norm, cand)
+            if score > best:
+                best = score
+                if best >= 99.9:
+                    return best
+    return best
+
+
 def _wl_search_clauses(field: str, needle: str):
     """Clauses ilike pour un champ cherchable (liste a combiner en OR)."""
     from sqlalchemy import cast, Text
@@ -1739,10 +1800,39 @@ async def browse_watchlist_db(
         if values:
             query = query.filter(Snapshot.file_type.in_(values))
 
-    if search and search.strip():
+    match_mode = None
+    search_term = (search or "").strip()
+    if search_term:
         from sqlalchemy import or_
-        needle = f"%{search.strip()}%"
-        query = query.filter(or_(*_wl_search_clauses(search_field, needle)))
+        needle = f"%{search_term}%"
+        exact_query = query.filter(or_(*_wl_search_clauses(search_field, needle)))
+        exact_total = exact_query.count()
+
+        if exact_total > 0:
+            # Des resultats exacts existent : on ne montre QU'eux (pas de fuzzy)
+            match_mode = "exact"
+            query = exact_query
+        else:
+            # Repli fuzzy : tolerance aux fautes de frappe, classement par
+            # similarite (Jaro-Winkler, normalisation accents/casse du moteur)
+            from fiskr.quality import strip_accents
+            match_mode = "fuzzy"
+            needle_norm = strip_accents(search_term.upper())
+            scored = []
+            for entity, snap in query.yield_per(500):
+                score_value = _fuzzy_best_score(needle_norm, _fuzzy_candidate_texts(entity, search_field))
+                if score_value >= WATCHLIST_FUZZY_MIN_SCORE:
+                    scored.append((score_value, entity, snap))
+            scored.sort(key=lambda t: (-t[0], t[1].id))
+            total = len(scored)
+            page_rows = scored[(page - 1) * page_size: (page - 1) * page_size + page_size]
+            items = []
+            for score_value, entity, snap in page_rows:
+                d = _serialize_watchlist_entity(entity, snap)
+                d["_fuzzy_score"] = round(score_value, 1)
+                items.append(d)
+            return {"total": total, "page": page, "page_size": page_size, "scope": scope,
+                    "match_mode": match_mode, "items": items}
 
     total = query.count()
     rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
@@ -1750,7 +1840,8 @@ async def browse_watchlist_db(
 
     items = [_serialize_watchlist_entity(entity, snap) for entity, snap in rows]
 
-    return {"total": total, "page": page, "page_size": page_size, "scope": scope, "items": items}
+    return {"total": total, "page": page, "page_size": page_size, "scope": scope,
+            "match_mode": match_mode, "items": items}
 
 @app.get("/api/history")
 async def get_audit_history(

@@ -1129,6 +1129,20 @@ async function fetchWatchlist(page = 1) {
             showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
             return;
         }
+        // Bandeau fuzzy : la recherche exacte n'a rien donné, résultats approchés
+        const hint = document.getElementById("wl-match-hint");
+        if (hint) {
+            if (data.match_mode === "fuzzy" && (data.total || 0) > 0) {
+                hint.innerHTML = `≈ Aucun résultat exact pour « <strong>${escapeHtml(search)}</strong> » — ` +
+                    `<strong>${data.total}</strong> résultat(s) approché(s) (tolérance aux fautes de frappe), classés par similarité.`;
+                hint.classList.remove("hidden");
+            } else if (data.match_mode === "fuzzy") {
+                hint.innerHTML = `Aucun résultat, même en recherche approchée, pour « <strong>${escapeHtml(search)}</strong> ».`;
+                hint.classList.remove("hidden");
+            } else {
+                hint.classList.add("hidden");
+            }
+        }
         renderWatchlistTable(data.items || [], data.page, data.total);
     } catch (e) {
         console.error("Error loading watchlist from database:", e);
@@ -1180,6 +1194,7 @@ function renderWatchlistTable(items, page = 1, total = 0) {
             <td>${typeBadge}</td>
             <td>
                 <strong>${escapeHtml(item.primary_name)}</strong>
+                ${item._fuzzy_score ? ` <span class="badge-secondary" title="Score de similarité avec la recherche (résultat approché)">≈ ${item._fuzzy_score} %</span>` : ''}
                 ${item.lei_number ? `<br><small style="color:var(--color-accent)">LEI: ${item.lei_number}</small>` : ''}
                 ${item.imo_number ? `<br><small style="color:var(--color-accent)">IMO: ${item.imo_number}</small>` : ''}
             </td>
