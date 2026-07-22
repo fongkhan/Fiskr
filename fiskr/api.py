@@ -31,9 +31,13 @@ from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
-    WatchlistEntityChange
+    WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted
+from fiskr.fprules import (
+    evaluate_fp_rules, build_screening_ctx, annotate_suppression, compile_rule,
+    run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE
+)
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.backtest import (
     run_backtest, generate_test_panel, TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
@@ -50,8 +54,8 @@ from fiskr.transactions import parse_iso20022_payment, screen_payment_message
 from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
-    get_current_user, require_admin, require_reviewer, create_access_token,
-    decode_access_token, parse_roles, normalize_roles
+    get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
+    create_access_token, decode_access_token, parse_roles, normalize_roles
 )
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
@@ -61,7 +65,9 @@ from fiskr.settings import (
     SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
     SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
-    SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT
+    SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
+    SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
+    BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for
 )
 
 
@@ -79,10 +85,13 @@ watchlist_store: List[Dict[str, Any]] = []
 watchlist_index: Dict[str, List[Dict[str, Any]]] = {}
 watchlist_version: str = "Database Active Snapshot"
 watchlist_hash: str = "N/A"
+# Layout de blocking utilise pour CONSTRUIRE l'index en memoire : les sondes
+# du criblage doivent utiliser le meme (coherence index/sonde garantie)
+watchlist_index_layout: List[str] = ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
 
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
-    global watchlist_store, watchlist_index, watchlist_hash
+    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout
     
     # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
     snapshots = db.query(Snapshot).filter(
@@ -119,22 +128,28 @@ def load_watchlist_cache(db: Session):
     temp_store = []
     temp_index = {}
 
+    # Layout de blocking du canal criblage (parametrable a chaud) : l'index
+    # est construit avec, et les sondes reutilisent le layout memorise
+    screening_layout = blocking_layout(db, "SCREENING")
+    screening_cfg = blocking_config_for(screening_layout)
+
     for ent in entities:
         # Convert SQLAlchemy object to dictionary for cache
         ent_dict = {c.name: getattr(ent, c.name) for c in ent.__table__.columns}
         # Type de liste d'origine : permet les seuils de cut-off par liste
         ent_dict["_list_type"] = snapshot_types.get(ent.snapshot_id)
         temp_store.append(ent_dict)
-        
+
         # Index by blocking key
-        keys = generate_blocking_keys(ent_dict, config)
+        keys = generate_blocking_keys(ent_dict, screening_cfg)
         for k in keys:
             if k not in temp_index:
                 temp_index[k] = []
             temp_index[k].append(ent_dict)
-            
+
     watchlist_store = temp_store
     watchlist_index = temp_index
+    watchlist_index_layout = screening_layout
     logger.info(f"Loaded {len(watchlist_store)} active database entities into memory across {len(watchlist_index)} blocking blocks.")
 
 def seed_watchlist_json(db: Session):
@@ -672,8 +687,8 @@ async def screen_client(
         
     cleansed_client["client_gender"] = report["resolved_gender"]
     
-    # Generate blocking keys
-    client_keys = generate_blocking_keys(cleansed_client, config)
+    # Generate blocking keys — meme layout que celui de l'index en memoire
+    client_keys = generate_blocking_keys(cleansed_client, blocking_config_for(watchlist_index_layout))
     
     # Retrieve candidates matching blocking keys
     candidates = {}
@@ -716,6 +731,14 @@ async def screen_client(
         # Tracabilite : toute restriction du perimetre de criblage est
         # persistee dans le decision_tree du journal immuable
         best_match["screening_lists_restriction"] = requested_lists or "ALL"
+        # Regles anti-faux positifs du canal SCREENING : appliquees avant de
+        # tracer, pour marquer la decision dans le journal immuable
+        suppressed_by_rule = None
+        if best_match.get("status") == "ALERT":
+            ctx = build_screening_ctx(client_dict, best_match["watchlist_entity"], best_match)
+            suppressed_by_rule = evaluate_fp_rules(db, "SCREENING", ctx)
+            if suppressed_by_rule is not None:
+                annotate_suppression(best_match, suppressed_by_rule)
         audit_record = log_compliance_decision(
             db,
             client_dict,
@@ -729,6 +752,8 @@ async def screen_client(
         if best_match.get("status") == "ALERT":
             alert_id = open_or_redetect_alert(
                 db, audit_record, client_dict.get("client_id"), best_match, current_user["username"],
+                channel="SCREENING",
+                suppressed_by_rule=suppressed_by_rule,
                 detail_suffix=(
                     f" [Criblage restreint aux listes : {', '.join(requested_lists)}]"
                     if requested_lists else ""
@@ -1901,8 +1926,13 @@ async def get_sidebar_counters(
     Compteurs legers pour les badges de la barre laterale (polling) :
     alertes ouvertes et snapshots en attente d'homologation.
     """
+    open_q = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
     return {
-        "open_alerts": db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count(),
+        "open_alerts": open_q.count(),
+        "open_alerts_screening": open_q.filter(
+            (Alert.channel == "SCREENING") | (Alert.channel.is_(None))
+        ).count(),
+        "open_alerts_filtering": open_q.filter(Alert.channel == "FILTERING").count(),
         "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
     }
 
@@ -2168,6 +2198,604 @@ async def update_ingestion_settings(
         set_setting(db, SETTING_BACKTEST_MAX_GAP_PCT, float(payload.backtest_max_gap_pct),
                     updated_by=admin_user["username"])
     return {"message": "Réglages d'homologation mis à jour.", **_settings_payload(db)}
+
+# ------------------ BLOCKING KEYS PAR CANAL ------------------
+
+def _blocking_payload(db: Session) -> Dict[str, Any]:
+    screening = blocking_layout_with_source(db, "SCREENING")
+    filtering = blocking_layout_with_source(db, "FILTERING")
+    return {
+        "components": list(BLOCKING_COMPONENTS),
+        "component_labels": {
+            "COUNTRY_ISO": "Pays (ISO)",
+            "ENTITY_TYPE": "Type d'entité (PP/PM)",
+            "PHONETIC_FIRST": "Phonétique du nom",
+        },
+        "screening": {"layout": screening["layout"], "source": screening["source"]},
+        "filtering": {"layout": filtering["layout"], "source": filtering["source"]},
+        "active_screening_layout": watchlist_index_layout,
+    }
+
+class BlockingSettingsUpdate(BaseModel):
+    screening_layout: Optional[List[str]] = None
+    filtering_layout: Optional[List[str]] = None
+
+@app.get("/api/settings/blocking")
+async def get_blocking_settings(
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_blocking)
+):
+    """Layouts de blocking effectifs par canal (rôle blocking ou admin)."""
+    return _blocking_payload(db)
+
+@app.put("/api/settings/blocking")
+async def update_blocking_settings(
+    payload: BlockingSettingsUpdate,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_blocking)
+):
+    """
+    Modifie a chaud les blocking keys d'un canal. Le changement du canal
+    criblage RECHARGE immediatement le cache de production (cohérence
+    index/sonde garantie).
+    """
+    def _validate(layout, label):
+        if not isinstance(layout, list) or not layout:
+            raise HTTPException(status_code=400, detail=f"{label} : liste de composantes non vide requise.")
+        invalid = [c for c in layout if c not in BLOCKING_COMPONENTS]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} : composante(s) inconnue(s) {', '.join(invalid)} "
+                       f"(valeurs possibles : {', '.join(BLOCKING_COMPONENTS)})."
+            )
+        if len(set(layout)) != len(layout):
+            raise HTTPException(status_code=400, detail=f"{label} : composantes en double.")
+
+    reloaded = False
+    if payload.screening_layout is not None:
+        _validate(payload.screening_layout, "Layout criblage")
+        set_setting(db, SETTING_BLOCKING_SCREENING, list(payload.screening_layout),
+                    updated_by=param_user["username"])
+        load_watchlist_cache(db)  # coherence index/sonde immediate
+        reloaded = True
+    if payload.filtering_layout is not None:
+        _validate(payload.filtering_layout, "Layout filtrage")
+        set_setting(db, SETTING_BLOCKING_FILTERING, list(payload.filtering_layout),
+                    updated_by=param_user["username"])
+    if payload.screening_layout is None and payload.filtering_layout is None:
+        raise HTTPException(status_code=400, detail="Aucun layout fourni.")
+    return {
+        "message": "Blocking keys mises à jour." + (" Cache de criblage rechargé." if reloaded else ""),
+        "cache_reloaded": reloaded,
+        **_blocking_payload(db),
+    }
+
+# ------------------ REGLES ANTI-FAUX POSITIFS (Python, mode DEV) ------------------
+
+def _fp_rule_summary(r: FpRule, with_code: bool = False) -> Dict[str, Any]:
+    data = {
+        "id": r.id,
+        "channel": r.channel,
+        "name": r.name,
+        "description": r.description,
+        "status": r.status,
+        "enabled": bool(r.enabled),
+        "run_order": r.run_order,
+        "hit_count": r.hit_count or 0,
+        "version": r.version,
+        "replaces_rule_id": r.replaces_rule_id,
+        "created_by": r.created_by,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_by": r.updated_by,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        "submitted_by": r.submitted_by,
+        "validated_by": r.validated_by,
+        "validation_comment": r.validation_comment,
+    }
+    if with_code:
+        data["code"] = r.code
+    return data
+
+
+def _log_rule_change(db, rule: FpRule, action: str, username: str,
+                     old_code: Optional[str] = None, comment: Optional[str] = None):
+    db.add(FpRuleChange(
+        rule_id=rule.id, rule_name=rule.name, channel=rule.channel, action=action,
+        old_code=old_code, new_code=rule.code, comment=comment, changed_by=username,
+    ))
+
+
+def _run_rule_tests(db, rule: FpRule) -> Dict[str, Any]:
+    """Rejoue les tests unitaires enregistres d'une regle. Met a jour leur etat."""
+    tests = db.query(FpRuleTest).filter(FpRuleTest.rule_id == rule.id).all()
+    passed = 0
+    results = []
+    now = datetime.utcnow()
+    for t in tests:
+        result, error = run_rule(rule.code, t.ctx or {})
+        ok = (error is None and result == t.expected)
+        t.last_result = result
+        t.last_error = error
+        t.last_run_at = now
+        if ok:
+            passed += 1
+        results.append({
+            "id": t.id, "name": t.name, "expected": t.expected,
+            "result": result, "error": error, "passed": ok,
+        })
+    return {"total": len(tests), "passed": passed,
+            "all_green": len(tests) > 0 and passed == len(tests), "results": results}
+
+
+class FpRuleCreate(BaseModel):
+    channel: str
+    name: str
+    description: Optional[str] = None
+    code: Optional[str] = None
+    run_order: int = 100
+
+class FpRuleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    code: Optional[str] = None
+    run_order: Optional[int] = None
+
+class FpRuleDecision(BaseModel):
+    comment: Optional[str] = None
+
+class FpRuleTestCreate(BaseModel):
+    name: str
+    ctx: Dict[str, Any]
+    expected: bool
+
+class FpRuleBenchRequest(BaseModel):
+    source: str = "history"      # history | panel
+    panel_snapshot_id: Optional[str] = None
+    sample_size: int = 200
+
+
+@app.get("/api/fprules")
+async def list_fp_rules(
+    channel: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Regles anti-faux positifs (rôle rules ou admin)."""
+    query = db.query(FpRule)
+    if channel:
+        query = query.filter(FpRule.channel == channel.strip().upper())
+    if status_filter:
+        query = query.filter(FpRule.status == status_filter.strip().upper())
+    rows = query.order_by(FpRule.channel.asc(), FpRule.run_order.asc(), FpRule.id.asc()).all()
+    return {"items": [_fp_rule_summary(r, with_code=True) for r in rows]}
+
+
+@app.post("/api/fprules")
+async def create_fp_rule(
+    payload: FpRuleCreate,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Cree une regle en BROUILLON (jamais appliquee en production avant validation)."""
+    channel = payload.channel.strip().upper()
+    if channel not in FP_RULE_CHANNELS:
+        raise HTTPException(status_code=400, detail=f"Canal inconnu ({', '.join(FP_RULE_CHANNELS)}).")
+    code = payload.code if (payload.code and payload.code.strip()) else RULE_TEMPLATE
+    try:
+        compile_rule(code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    rule = FpRule(
+        channel=channel, name=payload.name.strip() or "Règle sans nom",
+        description=(payload.description or "").strip() or None,
+        code=code, status="DRAFT", run_order=payload.run_order,
+        created_by=param_user["username"],
+    )
+    db.add(rule)
+    db.flush()
+    _log_rule_change(db, rule, "CREATED", param_user["username"])
+    db.commit()
+    db.refresh(rule)
+    return _fp_rule_summary(rule, with_code=True)
+
+
+@app.put("/api/fprules/{rule_id}")
+async def update_fp_rule(
+    rule_id: int,
+    payload: FpRuleUpdate,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """
+    Modifie une regle BROUILLON. Sur une regle ACTIVE, cree une NOUVELLE
+    version brouillon (branche de la production) sans toucher la version en
+    service — elle prendra effet apres validation 4-yeux.
+    """
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    if payload.code is not None:
+        try:
+            compile_rule(payload.code)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    if rule.status == "ACTIVE":
+        # Branche : nouvelle version DRAFT rattachee a la version active
+        draft = FpRule(
+            channel=rule.channel,
+            name=(payload.name or rule.name).strip(),
+            description=(payload.description if payload.description is not None else rule.description),
+            code=payload.code if payload.code is not None else rule.code,
+            status="DRAFT",
+            run_order=payload.run_order if payload.run_order is not None else rule.run_order,
+            version=(rule.version or 1) + 1,
+            replaces_rule_id=rule.id,
+            created_by=param_user["username"],
+        )
+        db.add(draft)
+        db.flush()
+        _log_rule_change(db, draft, "CREATED", param_user["username"],
+                         comment=f"Nouvelle version (branche de #{rule.id} v{rule.version} en production).")
+        db.commit()
+        db.refresh(draft)
+        return _fp_rule_summary(draft, with_code=True)
+
+    if rule.status != "DRAFT":
+        raise HTTPException(
+            status_code=409,
+            detail="Seules les règles en brouillon sont modifiables (une règle en validation doit être renvoyée en brouillon)."
+        )
+    old_code = rule.code
+    if payload.name is not None:
+        rule.name = payload.name.strip() or rule.name
+    if payload.description is not None:
+        rule.description = payload.description.strip() or None
+    if payload.code is not None:
+        rule.code = payload.code
+    if payload.run_order is not None:
+        rule.run_order = payload.run_order
+    rule.updated_by = param_user["username"]
+    rule.updated_at = datetime.utcnow()
+    _log_rule_change(db, rule, "UPDATED", param_user["username"], old_code=old_code)
+    db.commit()
+    db.refresh(rule)
+    return _fp_rule_summary(rule, with_code=True)
+
+
+@app.delete("/api/fprules/{rule_id}")
+async def delete_fp_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Supprime une regle BROUILLON (les versions en production/validation ne se suppriment pas)."""
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    if rule.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Seules les règles en brouillon peuvent être supprimées.")
+    _log_rule_change(db, rule, "DELETED", param_user["username"])
+    db.query(FpRuleTest).filter(FpRuleTest.rule_id == rule_id).delete(synchronize_session=False)
+    db.delete(rule)
+    db.commit()
+    return {"message": "Règle supprimée."}
+
+
+@app.get("/api/fprules/{rule_id}/changes")
+async def get_fp_rule_changes(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Journal immuable des modifications d'une regle (antichronologique)."""
+    rows = db.query(FpRuleChange).filter(FpRuleChange.rule_id == rule_id) \
+             .order_by(FpRuleChange.changed_at.desc(), FpRuleChange.id.desc()).all()
+    return {"items": [
+        {
+            "action": c.action, "comment": c.comment,
+            "changed_by": c.changed_by,
+            "changed_at": c.changed_at.isoformat() if c.changed_at else None,
+        } for c in rows
+    ]}
+
+
+@app.post("/api/fprules/{rule_id}/submit")
+async def submit_fp_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Soumet une regle BROUILLON en validation. Exige des tests unitaires 100 % verts."""
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    if rule.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Seule une règle en brouillon peut être soumise.")
+    test_report = _run_rule_tests(db, rule)
+    if not test_report["all_green"]:
+        db.commit()  # persiste l'etat des tests rejoues
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Soumission refusée : {test_report['passed']}/{test_report['total']} test(s) unitaire(s) au vert. "
+                    "Au moins un test enregistré et 100 % de tests verts sont exigés.")
+        )
+    rule.status = "PENDING_VALIDATION"
+    rule.submitted_by = param_user["username"]
+    rule.submitted_at = datetime.utcnow()
+    _log_rule_change(db, rule, "SUBMITTED", param_user["username"])
+    db.commit()
+    db.refresh(rule)
+    return {"message": "Règle soumise en validation.", "test_report": test_report,
+            **_fp_rule_summary(rule, with_code=True)}
+
+
+@app.post("/api/fprules/{rule_id}/validate")
+async def validate_fp_rule(
+    rule_id: int,
+    payload: FpRuleDecision,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """
+    Valide (4-yeux) une regle EN VALIDATION : elle devient ACTIVE et remplace
+    (SUPERSEDED) la version qu'elle branche. Le valideur doit differer du
+    soumetteur. Les tests unitaires sont rejoues (garde-fou).
+    """
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    if rule.status != "PENDING_VALIDATION":
+        raise HTTPException(status_code=409, detail="Cette règle n'est pas en attente de validation.")
+    if rule.submitted_by and rule.submitted_by == param_user["username"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Contrôle 4-yeux : le validateur doit être différent du soumetteur."
+        )
+    test_report = _run_rule_tests(db, rule)
+    if not test_report["all_green"]:
+        db.commit()
+        raise HTTPException(status_code=400, detail="Validation refusée : les tests unitaires ne sont plus tous au vert.")
+    # Merge : supersede la version remplacee, le cas echeant
+    if rule.replaces_rule_id:
+        old = db.query(FpRule).filter(FpRule.id == rule.replaces_rule_id).first()
+        if old and old.status == "ACTIVE":
+            old.status = "SUPERSEDED"
+            _log_rule_change(db, old, "SUPERSEDED" if False else "DISABLED", param_user["username"],
+                             comment=f"Remplacée par #{rule.id} v{rule.version}.")
+    rule.status = "ACTIVE"
+    rule.enabled = True
+    rule.validated_by = param_user["username"]
+    rule.validated_at = datetime.utcnow()
+    rule.validation_comment = (payload.comment or "").strip() or None
+    _log_rule_change(db, rule, "VALIDATED", param_user["username"], comment=payload.comment)
+    db.commit()
+    db.refresh(rule)
+    return {"message": "Règle validée et mise en production.", **_fp_rule_summary(rule, with_code=True)}
+
+
+@app.post("/api/fprules/{rule_id}/reject")
+async def reject_fp_rule(
+    rule_id: int,
+    payload: FpRuleDecision,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Renvoie une regle EN VALIDATION vers le brouillon (commentaire obligatoire)."""
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    if rule.status != "PENDING_VALIDATION":
+        raise HTTPException(status_code=409, detail="Cette règle n'est pas en attente de validation.")
+    if not (payload.comment or "").strip():
+        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour renvoyer une règle en brouillon.")
+    rule.status = "DRAFT"
+    rule.submitted_by = None
+    rule.submitted_at = None
+    _log_rule_change(db, rule, "REJECTED", param_user["username"], comment=payload.comment)
+    db.commit()
+    db.refresh(rule)
+    return {"message": "Règle renvoyée en brouillon.", **_fp_rule_summary(rule, with_code=True)}
+
+
+@app.post("/api/fprules/{rule_id}/toggle")
+async def toggle_fp_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Active/desactive une regle ACTIVE (interrupteur en production, journalise)."""
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    if rule.status != "ACTIVE":
+        raise HTTPException(status_code=409, detail="Seule une règle en production peut être activée/désactivée.")
+    rule.enabled = not bool(rule.enabled)
+    _log_rule_change(db, rule, "ENABLED" if rule.enabled else "DISABLED", param_user["username"])
+    db.commit()
+    db.refresh(rule)
+    return {"message": f"Règle {'activée' if rule.enabled else 'désactivée'}.", **_fp_rule_summary(rule, with_code=True)}
+
+
+# ---- Banc d'essai du mode DEV ----
+
+@app.get("/api/fprules/{rule_id}/tests")
+async def list_fp_rule_tests(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    tests = db.query(FpRuleTest).filter(FpRuleTest.rule_id == rule_id) \
+             .order_by(FpRuleTest.id.asc()).all()
+    return {"items": [
+        {
+            "id": t.id, "name": t.name, "ctx": t.ctx, "expected": t.expected,
+            "last_result": t.last_result, "last_error": t.last_error,
+            "last_run_at": t.last_run_at.isoformat() if t.last_run_at else None,
+        } for t in tests
+    ]}
+
+
+@app.post("/api/fprules/{rule_id}/tests")
+async def create_fp_rule_test(
+    rule_id: int,
+    payload: FpRuleTestCreate,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    test = FpRuleTest(
+        rule_id=rule_id, name=payload.name.strip() or "Cas de test",
+        ctx=payload.ctx, expected=bool(payload.expected),
+        created_by=param_user["username"],
+    )
+    db.add(test)
+    db.commit()
+    db.refresh(test)
+    return {"id": test.id, "name": test.name, "ctx": test.ctx, "expected": test.expected}
+
+
+@app.delete("/api/fprules/{rule_id}/tests/{test_id}")
+async def delete_fp_rule_test(
+    rule_id: int,
+    test_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    test = db.query(FpRuleTest).filter(FpRuleTest.id == test_id, FpRuleTest.rule_id == rule_id).first()
+    if not test:
+        raise HTTPException(status_code=404, detail="Cas de test introuvable.")
+    db.delete(test)
+    db.commit()
+    return {"message": "Cas de test supprimé."}
+
+
+@app.post("/api/fprules/{rule_id}/tests/run")
+async def run_fp_rule_tests(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    report = _run_rule_tests(db, rule)
+    db.commit()
+    return report
+
+
+@app.post("/api/fprules/{rule_id}/bench")
+async def bench_fp_rule(
+    rule_id: int,
+    payload: FpRuleBenchRequest,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """
+    Banc d'essai a blanc d'une regle (mode DEV, sans toucher la production) :
+    - source 'history' : rejeu des N dernieres alertes reelles du canal, avec
+      garde-fou VRAIS POSITIFS (alertes CLOSED_CONFIRMED qui seraient supprimees) ;
+    - source 'panel' : criblage a blanc d'un panel de pseudo-clients (canal
+      SCREENING uniquement) — chaque hit devient un contexte de test.
+    """
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Règle introuvable.")
+    try:
+        compile_rule(rule.code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    suppressed, kept, errors = 0, 0, 0
+    true_positive_hits, samples = [], []
+
+    if payload.source == "panel":
+        if rule.channel != "SCREENING":
+            raise HTTPException(status_code=400, detail="Le banc d'essai par panel ne concerne que le canal criblage.")
+        panel = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.panel_snapshot_id).first()
+        if not panel or panel.file_type not in PANEL_FILE_TYPES or panel.status != "READY":
+            raise HTTPException(status_code=400, detail="Panel introuvable (base clients ou panel de test généré).")
+        from fiskr.backtest import _panel_clients, _client_label
+        from fiskr.rescreen import _entity_dicts
+        prod_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
+            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES), Snapshot.status == "READY").all()]
+        entities = _entity_dicts(db, prod_ids) if prod_ids else []
+        screening_cfg = blocking_config_for(watchlist_index_layout)
+        index: Dict[str, List[Dict[str, Any]]] = {}
+        for ent in entities:
+            for key in generate_blocking_keys(ent, screening_cfg):
+                index.setdefault(key, []).append(ent)
+        for client in _panel_clients(db, panel.snapshot_id):
+            cands = {}
+            for key in generate_blocking_keys(client, screening_cfg):
+                for ent in index.get(key, []):
+                    cands[ent["entity_id"]] = ent
+            best, best_ent = None, None
+            for ent in cands.values():
+                sc = match_entities(client, ent, config)
+                if best is None or sc["final_score"] > best["final_score"]:
+                    best, best_ent = sc, ent
+            if not best or best.get("status") != "ALERT":
+                continue
+            ctx = build_screening_ctx(client, best_ent, best)
+            result, error = run_rule(rule.code, ctx)
+            if error:
+                errors += 1
+            elif result:
+                suppressed += 1
+                if len(samples) < 50:
+                    samples.append({"client_name": _client_label(client), "entity_name": best_ent.get("primary_name"),
+                                    "final_score": round(best["final_score"], 1)})
+            else:
+                kept += 1
+    else:
+        # Rejeu de l'historique reel du canal
+        alerts = db.query(Alert).filter(
+            (Alert.channel == rule.channel) |
+            (Alert.channel.is_(None) if rule.channel == "SCREENING" else False)
+        ).order_by(Alert.created_at.desc()).limit(max(1, min(payload.sample_size, 2000))).all()
+        for a in alerts:
+            audit = db.query(AuditTrail).filter(AuditTrail.id == a.audit_id).first()
+            tree = (audit.decision_tree if audit else {}) or {}
+            ctx = {
+                "channel": rule.channel,
+                "client_id": a.client_id, "client_name": a.client_name,
+                "entity_id": a.watchlist_entity_id, "entity_name": a.watchlist_name,
+                "list_type": a.list_type, "final_score": float(a.final_score or 0.0),
+                "base_score": float(tree.get("base_score", 0.0)),
+                "hard_match": bool(tree.get("hard_match_triggered", False)),
+                "adjustments": tree.get("adjustments") or {},
+                "client": None, "entity": (tree.get("watchlist_entity") or {}),
+                "party": None, "message": None,
+            }
+            result, error = run_rule(rule.code, ctx)
+            if error:
+                errors += 1
+            elif result:
+                suppressed += 1
+                if a.status == "CLOSED_CONFIRMED":
+                    true_positive_hits.append({"alert_id": a.id, "client_name": a.client_name,
+                                               "entity_name": a.watchlist_name, "final_score": a.final_score})
+                if len(samples) < 50:
+                    samples.append({"alert_id": a.id, "client_name": a.client_name,
+                                    "entity_name": a.watchlist_name, "final_score": a.final_score,
+                                    "status": a.status})
+            else:
+                kept += 1
+
+    return {
+        "source": payload.source,
+        "suppressed": suppressed,
+        "kept": kept,
+        "errors": errors,
+        "true_positive_hits": true_positive_hits,
+        "samples": samples,
+    }
+
 
 def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
     snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
@@ -2613,6 +3241,7 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
     return {
         "id": alert.id,
         "audit_id": alert.audit_id,
+        "channel": alert.channel or "SCREENING",
         "created_at": alert.created_at.isoformat() if alert.created_at else None,
         "client_id": alert.client_id,
         "client_name": alert.client_name,
@@ -2666,13 +3295,23 @@ async def list_alerts(
     status_filter: Optional[str] = Query(None, alias="status"),
     assigned_to: Optional[str] = Query(None),
     list_type: Optional[str] = Query(None),
+    channel: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """File de travail des alertes, triee par risque (score) puis date."""
+    """File de travail des alertes, triee par risque (score) puis date.
+    Le canal separe le criblage clients (SCREENING) du filtrage transactionnel
+    (FILTERING)."""
     query = db.query(Alert)
+    if channel:
+        ch = channel.strip().upper()
+        if ch == "SCREENING":
+            # Inclut les alertes anterieures a la colonne channel (NULL = criblage)
+            query = query.filter((Alert.channel == "SCREENING") | (Alert.channel.is_(None)))
+        else:
+            query = query.filter(Alert.channel == ch)
     if status_filter:
         statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
         query = query.filter(Alert.status.in_(statuses))
@@ -2680,7 +3319,7 @@ async def list_alerts(
         query = query.filter(Alert.assigned_to == assigned_to)
     query = _apply_list_type_filter(query, Alert.list_type, list_type)
     total = query.count()
-    open_count = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
+    open_count = query.filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
     rows = query.order_by(Alert.final_score.desc(), Alert.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
     return {

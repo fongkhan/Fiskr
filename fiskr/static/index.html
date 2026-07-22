@@ -1152,45 +1152,125 @@
             <!-- SECTION : ALERTES (cycle de vie + 4-yeux, liste blanche) -->
             <section id="sec-alerts" class="tab-content">
                 <div class="sub-tabs">
-                    <button id="sub-btn-alerts-queue" class="sub-tab-btn active" onclick="switchSubTab('alerts', 'alerts-queue')">
-                        File de Travail
+                    <button id="sub-btn-alerts-screening" class="sub-tab-btn active" onclick="switchSubTab('alerts', 'alerts-screening')">
+                        🧍 Criblage Clients <span id="alerts-screening-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
+                    </button>
+                    <button id="sub-btn-alerts-filtering" class="sub-tab-btn" onclick="switchSubTab('alerts', 'alerts-filtering')">
+                        💸 Filtrage Transactionnel <span id="alerts-filtering-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
                     </button>
                     <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('alerts', 'alerts-whitelist')">
                         Liste Blanche
                     </button>
+                    <button id="sub-btn-alerts-blocking" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-blocking')">
+                        🔑 Blocking Keys
+                    </button>
+                    <button id="sub-btn-alerts-rules" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-rules')">
+                        ⚖️ Règles Faux Positifs
+                    </button>
                 </div>
 
-                <div id="sub-sec-alerts-queue" class="sub-tab-content active">
+                <!-- FILE CRIBLAGE CLIENTS -->
+                <div id="sub-sec-alerts-screening" class="sub-tab-content active">
                     <div class="grid-layout" style="grid-template-columns: 1fr;">
                         <div class="card result-card">
-                            <h2>File de Travail des Alertes</h2>
-                            <p class="section-desc">Chaque décision de criblage en statut ALERT ouvre une alerte à instruire : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. L'historique complet des actions est conservé.</p>
-                            <div id="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
-                                <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('')">Toutes</button>
-                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
-                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
-                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
-                                <select id="alerts-list-filter" onchange="fetchAlerts()" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                            <h2>Alertes de Criblage — Données Clients</h2>
+                            <p class="section-desc">Alertes issues du criblage du référentiel clients contre les listes. Chaque alerte s'instruit : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. Les alertes clôturées automatiquement par une règle anti-faux positifs (<code>CLOSED_BY_RULE</code>) restent visibles et auditables.</p>
+                            <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+                                <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('SCREENING','')">Toutes</button>
+                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('SCREENING','OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
+                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: rgba(255,255,255,0.08);">Clôturées par règle</button>
+                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par type de liste" style="margin-left: auto;"></select>
                             </div>
-                            <div class="table-container max-height-table" id="alerts-table-container">
-                                <table id="alerts-table">
+                            <div class="table-container max-height-table">
+                                <table id="screening-alerts-table">
                                     <thead>
                                         <tr>
-                                            <th>Date</th>
-                                            <th>Client</th>
-                                            <th>Listé</th>
-                                            <th>Liste</th>
-                                            <th>Score</th>
-                                            <th>Statut</th>
-                                            <th>Assignée à</th>
-                                            <th>Action</th>
+                                            <th>Date</th><th>Client</th><th>Listé</th><th>Liste</th>
+                                            <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
                                     </thead>
-                                    <tbody>
-                                        <!-- Populated dynamically -->
-                                    </tbody>
+                                    <tbody><!-- Populated dynamically --></tbody>
                                 </table>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- FILE FILTRAGE TRANSACTIONNEL -->
+                <div id="sub-sec-alerts-filtering" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
+                        <div class="card result-card">
+                            <h2>Alertes de Filtrage — Transactions (ISO 20022)</h2>
+                            <p class="section-desc">Alertes issues du filtrage des parties des messages de paiement (<code>pain.001</code> / <code>pacs.008</code>). Même cycle de vie 4-yeux que le criblage, avec des règles anti-faux positifs et un blocking key propres à ce canal.</p>
+                            <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+                                <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('FILTERING','')">Toutes</button>
+                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('FILTERING','OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
+                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: rgba(255,255,255,0.08);">Clôturées par règle</button>
+                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                            </div>
+                            <div class="table-container max-height-table">
+                                <table id="filtering-alerts-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
+                                            <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody><!-- Populated dynamically --></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BLOCKING KEYS (rôle blocking/admin) -->
+                <div id="sub-sec-alerts-blocking" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr 1fr;">
+                        <div class="card form-card">
+                            <h2>🔑 Blocking Key — Criblage Clients</h2>
+                            <p class="section-desc">Composantes ordonnées de la clé de blocking qui sélectionne les candidats du criblage. Toute modification <strong>recharge immédiatement le cache de production</strong>.</p>
+                            <div id="blocking-screening-editor"></div>
+                            <button class="btn btn-primary" onclick="saveBlocking('SCREENING')" style="margin-top: 1rem;">Enregistrer (recharge le cache)</button>
+                        </div>
+                        <div class="card form-card">
+                            <h2>🔑 Blocking Key — Filtrage Transactionnel</h2>
+                            <p class="section-desc">Clé propre au filtrage des paiements. Par défaut réduite à la phonétique (les données de paiement sont pauvres) ; le type PP/PM est testé dans les deux variantes.</p>
+                            <div id="blocking-filtering-editor"></div>
+                            <button class="btn btn-primary" onclick="saveBlocking('FILTERING')" style="margin-top: 1rem;">Enregistrer</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RÈGLES FAUX POSITIFS (rôle rules/admin) -->
+                <div id="sub-sec-alerts-rules" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
+                        <div class="card result-card">
+                            <h2>⚖️ Règles Anti-Faux Positifs (Python — mode DEV)</h2>
+                            <p class="section-desc">Chaque règle est du code Python (<code>def rule(ctx) -&gt; bool</code>) qui, en production, supprime les alertes correspondantes (auto-clôture <code>CLOSED_BY_RULE</code>, toujours tracée à l'audit). Cycle de vie façon branche : <strong>Brouillon → tests unitaires verts → Soumission → validation 4-yeux → Production</strong>. Une règle en production n'est jamais modifiée directement : « Modifier » crée une nouvelle version brouillon.</p>
+                            <div style="display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
+                                <label>Canal :
+                                    <select id="rules-channel-select" onchange="fetchFpRules()">
+                                        <option value="SCREENING">🧍 Criblage Clients</option>
+                                        <option value="FILTERING">💸 Filtrage Transactionnel</option>
+                                    </select>
+                                </label>
+                                <button class="btn btn-secondary" onclick="newFpRule()">+ Nouvelle règle</button>
+                            </div>
+                            <div class="table-container" style="max-height: 300px; overflow-y: auto;">
+                                <table id="fprules-table">
+                                    <thead>
+                                        <tr><th>Ordre</th><th>Nom</th><th>Statut</th><th>Version</th><th>Hits</th><th>Action</th></tr>
+                                    </thead>
+                                    <tbody><!-- Populated dynamically --></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="card" id="fprule-editor-card" style="display: none;">
+                            <div id="fprule-editor"></div>
                         </div>
                     </div>
                 </div>
@@ -1442,6 +1522,9 @@
                         <option value="user">Utilisateur (Criblage & Consultation)</option>
                         <option value="reviewer">Réviseur (Homologation des listes)</option>
                         <option value="reviewer,user">Utilisateur + Réviseur</option>
+                        <option value="blocking,user">Utilisateur + Paramétrage Blocking</option>
+                        <option value="rules,user">Utilisateur + Règles Faux Positifs (équipe criblage)</option>
+                        <option value="blocking,rules,user">Utilisateur + Blocking + Règles</option>
                         <option value="admin">Administrateur (Accès Complet)</option>
                     </select>
                 </div>
@@ -1573,7 +1656,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=5.5"></script>
+    <script src="/static/app.js?v=5.6"></script>
 
 
 

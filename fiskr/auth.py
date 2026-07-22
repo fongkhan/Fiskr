@@ -18,7 +18,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fals
 
 # Roles empilables : la colonne User.role contient une liste separee par des
 # virgules (ex: "user,reviewer"). Les anciennes valeurs mono-role restent valides.
-VALID_ROLES = {"admin", "user", "reviewer"}
+# `param` : equipe criblage (parametrage) — blocking keys et regles anti-faux
+# positifs, criblage comme filtrage. Les admins ont toujours ces droits.
+VALID_ROLES = {"admin", "user", "reviewer", "blocking", "rules"}
 
 def parse_roles(role_str: Optional[str]) -> List[str]:
     """Decoupe la chaine de roles en liste normalisee (minuscules, sans doublons)."""
@@ -139,4 +141,10 @@ async def require_admin(
 
 # Validation humaine des snapshots en homologation (reviewer ou admin)
 require_reviewer = require_roles("reviewer")
+
+# Parametrage des blocking keys (role dedie 'blocking', ou admin)
+require_blocking = require_roles("blocking")
+
+# Gestion des regles anti-faux positifs (equipe criblage via le role 'rules', ou admin)
+require_fprules = require_roles("rules")
 

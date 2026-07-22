@@ -28,6 +28,12 @@ SETTING_AUTO_RESCREEN = "ingestion.auto_rescreen"
 # d'interception (%) et exigence d'un backtest au verdict OK pour approuver
 SETTING_BACKTEST_MAX_GAP_PCT = "review.backtest_max_gap_pct"
 SETTING_BACKTEST_REQUIRED = "review.backtest_required"
+# Blocking keys par canal : layouts ordonnes de composantes de cle
+SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
+SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
+
+BLOCKING_COMPONENTS = ("COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST")
+DEFAULT_FILTERING_LAYOUT = ["PHONETIC_FIRST"]
 
 
 def _config_default(key: str, default: Any = None) -> Any:
@@ -100,6 +106,48 @@ def backtest_max_gap_pct(db) -> float:
 def backtest_required(db) -> bool:
     """True si un cahier de tests au verdict OK est exige avant toute promotion (defaut : non)."""
     return bool(get_setting_with_source(db, SETTING_BACKTEST_REQUIRED, False)["value"])
+
+
+def _valid_layout(value) -> bool:
+    return (
+        isinstance(value, list) and len(value) > 0
+        and all(isinstance(c, str) and c in BLOCKING_COMPONENTS for c in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def blocking_layout_with_source(db, channel: str) -> Dict[str, Any]:
+    """
+    Layout de blocking effectif d'un canal (SCREENING = criblage clients,
+    FILTERING = filtrage transactionnel) : base d'abord, sinon defaut du canal.
+    Defauts = comportement historique : criblage -> layout de config.yaml ;
+    filtrage -> phonetique seule (les donnees de paiement sont trop pauvres
+    pour filtrer sur le pays ou le type).
+    """
+    if channel == "FILTERING":
+        key, default = SETTING_BLOCKING_FILTERING, list(DEFAULT_FILTERING_LAYOUT)
+    else:
+        key = SETTING_BLOCKING_SCREENING
+        default = list((config.get("blocking", {}) or {}).get(
+            "custom_key_layout", ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
+        ))
+    row = db.query(AppSetting).filter(AppSetting.key == key).first()
+    if row is not None and _valid_layout(row.value):
+        return {"layout": list(row.value), "source": "database"}
+    return {"layout": default, "source": "config"}
+
+
+def blocking_layout(db, channel: str) -> list:
+    return blocking_layout_with_source(db, channel)["layout"]
+
+
+def blocking_config_for(layout: list) -> Dict[str, Any]:
+    """Copie de la config globale avec le layout de blocking injecte."""
+    cfg = dict(config)
+    blocking_cfg = dict(config.get("blocking", {}) or {})
+    blocking_cfg["custom_key_layout"] = list(layout)
+    cfg["blocking"] = blocking_cfg
+    return cfg
 
 
 def exclusion_requirements(db) -> Dict[str, bool]:

@@ -206,6 +206,8 @@ class Alert(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     audit_id = Column(Integer, ForeignKey("compliance_audit_trail.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Canal d'origine : SCREENING (criblage clients) ou FILTERING (transactions)
+    channel = Column(String(20), default="SCREENING", index=True)
     # Denormalise pour la file de travail
     client_id = Column(String(100), nullable=True)
     client_name = Column(String(1000), nullable=False)
@@ -228,7 +230,79 @@ class Alert(Base):
     decision_comment = Column(Text, nullable=True)
 
 ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
-ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE")
+ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE", "CLOSED_BY_RULE")
+
+FP_RULE_STATUSES = ("DRAFT", "PENDING_VALIDATION", "ACTIVE", "SUPERSEDED")
+
+class FpRule(Base):
+    """
+    Regle Python anti-faux positifs, par canal (SCREENING = criblage clients,
+    FILTERING = filtrage transactionnel). Le code doit definir rule(ctx) -> bool
+    (True = supprimer l'alerte candidate, qui est alors creee puis auto-cloturee
+    CLOSED_BY_RULE — jamais de suppression silencieuse, exigence ACPR/FED).
+
+    Cycle de vie facon branche/merge : DRAFT (mode DEV, jamais appliquee en
+    production) -> PENDING_VALIDATION (figee, tests unitaires verts exiges)
+    -> ACTIVE (validation 4-yeux par un autre utilisateur habilite) ;
+    la modification d'une regle ACTIVE cree une NOUVELLE version DRAFT
+    (replaces_rule_id) qui, validee, remplace l'ancienne (SUPERSEDED).
+    """
+    __tablename__ = "fp_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    channel = Column(String(20), nullable=False, index=True)  # SCREENING | FILTERING
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    code = Column(Text, nullable=False)
+    status = Column(String(30), default="DRAFT", index=True)
+    enabled = Column(Boolean, default=True)   # interrupteur des regles ACTIVE
+    run_order = Column(Integer, default=100)
+    hit_count = Column(Integer, default=0)
+    version = Column(Integer, default=1)
+    replaces_rule_id = Column(Integer, nullable=True)  # version ACTIVE remplacee
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    submitted_by = Column(String(100), nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    validated_by = Column(String(100), nullable=True)
+    validated_at = Column(DateTime, nullable=True)
+    validation_comment = Column(Text, nullable=True)
+
+class FpRuleChange(Base):
+    """Journal immuable des modifications de regles (qui, quand, quel code)."""
+    __tablename__ = "fp_rule_changes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(Integer, nullable=False, index=True)
+    rule_name = Column(String(200), nullable=False)
+    channel = Column(String(20), nullable=False)
+    # CREATED, UPDATED, SUBMITTED, VALIDATED, REJECTED, ENABLED, DISABLED, DELETED
+    action = Column(String(20), nullable=False)
+    old_code = Column(Text, nullable=True)
+    new_code = Column(Text, nullable=True)
+    comment = Column(Text, nullable=True)
+    changed_by = Column(String(100), nullable=False)
+    changed_at = Column(DateTime, default=datetime.utcnow)
+
+class FpRuleTest(Base):
+    """
+    Test unitaire d'une regle (mode DEV) : contexte d'alerte JSON + resultat
+    attendu. La soumission en validation exige 100 % de tests verts.
+    """
+    __tablename__ = "fp_rule_tests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(Integer, nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    ctx = Column(JSON, nullable=False)
+    expected = Column(Boolean, nullable=False)  # True = la regle doit supprimer
+    last_result = Column(Boolean, nullable=True)
+    last_error = Column(Text, nullable=True)
+    last_run_at = Column(DateTime, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class AlertEvent(Base):
     """Historique append-only des actions sur une alerte (jamais modifie)."""
@@ -384,6 +458,7 @@ def init_db():
             ],
             "alerts": [
                 ("list_type", "VARCHAR(30)"),
+                ("channel", "VARCHAR(20)"),
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),
@@ -402,6 +477,17 @@ def init_db():
                     logger.info(f"Adding missing column {table_name}.{col_name}...")
                     with engine.begin() as conn:
                         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+
+        # Backfill idempotent du canal des alertes existantes : les alertes de
+        # filtrage transactionnel sont reconnaissables a leur client_id TXN:
+        if "alerts" in inspector.get_table_names():
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "UPDATE alerts SET channel = 'FILTERING' WHERE channel IS NULL AND client_id LIKE 'TXN:%'"
+                ))
+                conn.execute(text(
+                    "UPDATE alerts SET channel = 'SCREENING' WHERE channel IS NULL"
+                ))
     except Exception as e:
         logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)

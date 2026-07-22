@@ -69,9 +69,13 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     if not changed_entities:
         return result
 
+    # Layout de blocking du canal criblage (parametrable a chaud)
+    from fiskr.settings import blocking_layout, blocking_config_for
+    screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
+
     index: Dict[str, List[Dict[str, Any]]] = {}
     for ent in changed_entities:
-        for key in generate_blocking_keys(ent, config):
+        for key in generate_blocking_keys(ent, screening_cfg):
             index.setdefault(key, []).append(ent)
 
     from fiskr.api import watchlist_version, watchlist_hash  # valeurs de version du cache actif
@@ -79,7 +83,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     for client in _client_dicts(db):
         result["clients_screened"] += 1
         candidates: Dict[str, Dict[str, Any]] = {}
-        for key in generate_blocking_keys(client, config):
+        for key in generate_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
                 candidates[ent["entity_id"]] = ent
         if not candidates:
@@ -104,13 +108,24 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             result["whitelisted_suppressed"] += 1
             continue
 
+        # Regles anti-faux positifs du canal SCREENING
+        from fiskr.fprules import evaluate_fp_rules, build_screening_ctx, annotate_suppression
+        ctx = build_screening_ctx(client, best["watchlist_entity"], best)
+        suppressed_by_rule = evaluate_fp_rules(db, "SCREENING", ctx)
+        if suppressed_by_rule is not None:
+            annotate_suppression(best, suppressed_by_rule)
+
         audit = log_compliance_decision(db, client, best["watchlist_entity"], best,
                                         watchlist_version, watchlist_hash)
         open_or_redetect_alert(
             db, audit, client.get("client_id"), best, RESCREEN_USERNAME,
+            channel="SCREENING", suppressed_by_rule=suppressed_by_rule,
             detail_suffix=f" {trigger_detail}"
         )
-        result["new_alerts"] += 1
+        if suppressed_by_rule is not None:
+            result["rule_suppressed"] = result.get("rule_suppressed", 0) + 1
+        else:
+            result["new_alerts"] += 1
 
     logger.info(
         f"Re-criblage ({trigger_detail}) : {result['changed_entities']} entités changées, "

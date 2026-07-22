@@ -220,6 +220,17 @@ async function refreshSidebarCounters() {
             alertBadge.textContent = c.open_alerts;
             alertBadge.classList.toggle("hidden", !c.open_alerts);
         }
+        // Badges par canal sur les sous-onglets Criblage / Filtrage
+        const scrBadge = document.getElementById("alerts-screening-badge");
+        if (scrBadge) {
+            scrBadge.textContent = c.open_alerts_screening ?? 0;
+            scrBadge.classList.toggle("hidden", !c.open_alerts_screening);
+        }
+        const filBadge = document.getElementById("alerts-filtering-badge");
+        if (filBadge) {
+            filBadge.textContent = c.open_alerts_filtering ?? 0;
+            filBadge.classList.toggle("hidden", !c.open_alerts_filtering);
+        }
         const reviewBadge = document.getElementById("review-pending-badge");
         if (reviewBadge) {
             reviewBadge.textContent = c.pending_reviews;
@@ -233,7 +244,8 @@ function initListTypeControls() {
     const selects = [
         ["wl-list-filter", false],
         ["snapshots-list-filter", false],
-        ["alerts-list-filter", true],
+        ["screening-list-filter", true],
+        ["filtering-list-filter", true],
         ["audit-list-filter", true],
         ["whitelist-list-filter", true],
     ];
@@ -276,8 +288,9 @@ document.addEventListener("DOMContentLoaded", () => {
     fetchConfig();
     fetchIngestionSettings();
     fetchPendingReviews();
-    fetchAlerts();
+    fetchAlerts("SCREENING");
     fetchWhitelist();
+    refreshSidebarCounters();
     // Badges vivants : compteurs légers rafraîchis toutes les 60 s
     setInterval(refreshSidebarCounters, 60_000);
 });
@@ -305,7 +318,7 @@ async function checkAuthUser() {
                 userEl.title = `Connecté en tant que @${data.user.username}`;
             }
             if (roleEl) {
-                const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité" };
+                const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité", blocking: "Paramétrage Blocking", rules: "Règles Faux Positifs" };
                 roleEl.textContent = roles.map(r => labels[r] || r).join(" / ") || "Analyste Conformité";
             }
             if (navUsersItem) {
@@ -321,6 +334,13 @@ async function checkAuthUser() {
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
             if (exclusionToolbar) exclusionToolbar.classList.toggle("hidden", !isReviewer);
+            // Sous-onglets de paramétrage (rôles dédiés, admin passe toujours)
+            const canBlocking = isAdmin || roles.includes("blocking");
+            const canRules = isAdmin || roles.includes("rules");
+            const blockingBtn = document.getElementById("sub-btn-alerts-blocking");
+            if (blockingBtn) blockingBtn.classList.toggle("hidden", !canBlocking);
+            const rulesBtn = document.getElementById("sub-btn-alerts-rules");
+            if (rulesBtn) rulesBtn.classList.toggle("hidden", !canRules);
         }
     } catch (e) {
         console.error("Auth check failed:", e);
@@ -370,7 +390,8 @@ function switchTab(tabId) {
     
     // Refresh tab-specific data
     if (tabId === "alerts") {
-        fetchAlerts();
+        fetchAlerts("SCREENING");
+        fetchAlerts("FILTERING");
         fetchWhitelist();
     }
     if (tabId === "kpi") {
@@ -436,10 +457,16 @@ function switchSubTab(sectionId, subTabId) {
         // Rupture de flux corrigée : les snapshots en attente d'homologation
         // sont rechargés à chaque ouverture du sous-onglet, plus seulement au load
         fetchPendingReviews();
-    } else if (subTabId === "alerts-queue") {
-        fetchAlerts();
+    } else if (subTabId === "alerts-screening") {
+        fetchAlerts("SCREENING");
+    } else if (subTabId === "alerts-filtering") {
+        fetchAlerts("FILTERING");
     } else if (subTabId === "alerts-whitelist") {
         fetchWhitelist();
+    } else if (subTabId === "alerts-blocking") {
+        fetchBlockingSettings();
+    } else if (subTabId === "alerts-rules") {
+        fetchFpRules();
     } else if (subTabId === "watchlist-sync") {
         fetchSyncReports();
         fetchSyncConfig();
@@ -1387,7 +1414,7 @@ async function handleScreening(event) {
             }
         }
         // Une decision ALERT ouvre une alerte de travail : rafraichir le badge
-        if (data.alert_id) fetchAlerts();
+        if (data.alert_id) { fetchAlerts("SCREENING"); refreshSidebarCounters(); }
     } catch (e) {
         console.error("Error screening:", e);
         showToast("Erreur réseau lors de l'appel au moteur.", "error");
@@ -1649,7 +1676,7 @@ async function runBatchScreening() {
         if (batchRestriction) {
             showToast(`Criblage de masse restreint aux listes : ${batchRestriction.map(listTypeLabel).join(", ")} (tracé dans l'audit).`, "info");
         }
-        if (alertsCount) fetchAlerts();
+        if (alertsCount) { fetchAlerts("SCREENING"); refreshSidebarCounters(); }
     } catch (e) {
         console.error("Batch failure:", e);
         showToast("Erreur lors de l'exécution du criblage de masse.", "error");
@@ -3060,37 +3087,54 @@ async function rejectPendingSnapshot() {
 
 // ------------------ ALERTES (CYCLE DE VIE + 4-YEUX) ------------------
 
-let alertsFilter = "OPEN,IN_PROGRESS,ESCALATED,PENDING_VALIDATION";
+// Filtre de statut courant par canal (deux files distinctes)
+const DEFAULT_ALERT_FILTER = "OPEN,IN_PROGRESS,ESCALATED,PENDING_VALIDATION";
+let alertsFilterByChannel = { SCREENING: DEFAULT_ALERT_FILTER, FILTERING: DEFAULT_ALERT_FILTER };
 let currentAlertId = null;
 
-async function fetchAlerts() {
+const ALERT_CHANNEL_CONF = {
+    SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter", section: "alerts-screening" },
+    FILTERING: { table: "filtering-alerts-table", listFilter: "filtering-list-filter", section: "alerts-filtering" },
+};
+
+// Décompose le client_id d'une alerte de filtrage (TXN:msgid:idx) en message + n° de partie
+function describeFilteringSubject(a) {
+    const parts = (a.client_id || "").split(":");
+    if (parts[0] === "TXN" && parts.length >= 3) {
+        return `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">Message ${escapeHtml(parts.slice(1, -1).join(":"))} · partie #${escapeHtml(parts[parts.length - 1])}</small>`;
+    }
+    return `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+}
+
+async function fetchAlerts(channel = "SCREENING") {
+    const conf = ALERT_CHANNEL_CONF[channel];
+    if (!conf) return;
     try {
-        const params = new URLSearchParams({ page: "1", page_size: "100" });
-        if (alertsFilter) params.set("status", alertsFilter);
-        const listFilterEl = document.getElementById("alerts-list-filter");
+        const params = new URLSearchParams({ page: "1", page_size: "100", channel });
+        const filter = alertsFilterByChannel[channel];
+        if (filter) params.set("status", filter);
+        const listFilterEl = document.getElementById(conf.listFilter);
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const response = await fetch(`/api/alerts?${params}`);
         if (!response.ok) return;
         const data = await response.json();
-        renderAlertsTable(data.items || []);
-        const badge = document.getElementById("alerts-open-badge");
-        if (badge) {
-            badge.textContent = data.open_count;
-            badge.classList.toggle("hidden", !data.open_count);
-        }
+        renderAlertsTable(channel, data.items || []);
     } catch (e) {
         console.error("Error fetching alerts:", e);
     }
 }
 
-function setAlertFilter(filter) {
-    alertsFilter = filter;
-    document.querySelectorAll("#alerts-status-filters button").forEach(btn => {
-        const active = btn.dataset.filter === filter;
-        btn.classList.toggle("btn-secondary", active);
-        btn.style.background = active ? "" : "rgba(255,255,255,0.08)";
-    });
-    fetchAlerts();
+function setAlertFilter(channel, filter) {
+    alertsFilterByChannel[channel] = filter;
+    const section = document.getElementById(`sub-sec-${ALERT_CHANNEL_CONF[channel].section}`);
+    if (section) {
+        section.querySelectorAll(".alerts-status-filters button").forEach(btn => {
+            const active = btn.dataset.filter === filter;
+            btn.classList.toggle("btn-secondary", active);
+            btn.style.background = active ? "" : "rgba(255,255,255,0.08)";
+        });
+    }
+    fetchAlerts(channel);
 }
 
 function alertStatusBadge(status) {
@@ -3101,30 +3145,35 @@ function alertStatusBadge(status) {
         PENDING_VALIDATION: ["#c084fc", "À VALIDER (4-YEUX)"],
         CLOSED_CONFIRMED: ["#f87171", "VRAI POSITIF"],
         CLOSED_FALSE_POSITIVE: ["#4ade80", "FAUX POSITIF"],
+        CLOSED_BY_RULE: ["#94a3b8", "CLÔTURÉE PAR RÈGLE"],
     };
     const [color, label] = styles[status] || ["#9ca3af", status];
     return `<span style="color: ${color}; font-weight: 600; font-size: 0.8rem;">${label}</span>`;
 }
 
-function renderAlertsTable(items) {
-    const tbody = document.querySelector("#alerts-table tbody");
+function renderAlertsTable(channel, items) {
+    const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
     if (!tbody) return;
     if (!items.length) {
         tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Aucune alerte pour ce filtre.</td></tr>';
         return;
     }
-    tbody.innerHTML = items.map(a => `
+    tbody.innerHTML = items.map(a => {
+        const subject = channel === "FILTERING"
+            ? describeFilteringSubject(a)
+            : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+        return `
         <tr>
             <td>${a.created_at ? new Date(a.created_at).toLocaleString("fr-FR") : "-"}</td>
-            <td><strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small></td>
+            <td>${subject}</td>
             <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
             <td>${listTypeBadge(a.list_type)}</td>
             <td><strong style="color: ${a.final_score >= 90 ? '#f87171' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
             <td>${alertStatusBadge(a.status)}</td>
             <td>${escapeHtml(a.assigned_to || "—")}</td>
             <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})">🔎 Instruire</button></td>
-        </tr>
-    `).join("");
+        </tr>`;
+    }).join("");
 }
 
 async function openAlertModal(alertId) {
@@ -3226,14 +3275,14 @@ async function _postAlertAction(path, body) {
 
 async function alertAction(action) {
     const data = await _postAlertAction(action, {});
-    if (data) { openAlertModal(currentAlertId); fetchAlerts(); }
+    if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
 async function alertActionWithComment(action, promptLabel) {
     const comment = await promptDialog(promptLabel, { textarea: true, placeholder: "Votre commentaire..." });
     if (comment === null) return;
     const data = await _postAlertAction(action, { comment });
-    if (data) { openAlertModal(currentAlertId); fetchAlerts(); }
+    if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
 async function proposeAlertDecision(decision) {
@@ -3244,7 +3293,7 @@ async function proposeAlertDecision(decision) {
     });
     if (comment === null) return;
     const data = await _postAlertAction("propose", { decision, comment });
-    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); fetchAlerts(); }
+    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
 async function validateAlertDecision(approve) {
@@ -3255,7 +3304,7 @@ async function validateAlertDecision(approve) {
     });
     if (comment === null) return;
     const data = await _postAlertAction("validate", { approve, comment });
-    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); fetchAlerts(); }
+    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
 // ------------------ LISTE BLANCHE CLIENT x LISTÉ (GOOD GUYS) ------------------
@@ -3544,4 +3593,440 @@ async function fetchAlertAdverseMedia(which) {
         console.error("Adverse media error:", e);
         container.innerHTML = '<small style="color: var(--color-alert);">Le fournisseur presse est injoignable.</small>';
     }
+}
+
+// ============================================================================
+// PARAMÉTRAGE : BLOCKING KEYS PAR CANAL + RÈGLES ANTI-FAUX POSITIFS (mode DEV)
+// ============================================================================
+
+function refreshAlertQueues() {
+    fetchAlerts("SCREENING");
+    fetchAlerts("FILTERING");
+    refreshSidebarCounters();
+}
+
+// ------------------ BLOCKING KEYS ------------------
+
+let blockingComponents = [];
+let blockingLabels = {};
+let blockingDraft = { SCREENING: [], FILTERING: [] };
+
+async function fetchBlockingSettings() {
+    try {
+        const response = await fetch("/api/settings/blocking");
+        if (!response.ok) return;
+        const data = await response.json();
+        blockingComponents = data.components || [];
+        blockingLabels = data.component_labels || {};
+        blockingDraft.SCREENING = [...(data.screening.layout || [])];
+        blockingDraft.FILTERING = [...(data.filtering.layout || [])];
+        renderBlockingEditor("SCREENING", data.screening.source);
+        renderBlockingEditor("FILTERING", data.filtering.source);
+    } catch (e) {
+        console.error("Error fetching blocking settings:", e);
+    }
+}
+
+function renderBlockingEditor(channel, source) {
+    const el = document.getElementById(channel === "SCREENING" ? "blocking-screening-editor" : "blocking-filtering-editor");
+    if (!el) return;
+    const layout = blockingDraft[channel];
+    const selected = layout.map((comp, i) => `
+        <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.3); border-radius: 6px; margin-bottom: 0.4rem;">
+            <span style="color: var(--text-muted); font-size: 0.8rem;">#${i + 1}</span>
+            <strong style="flex: 1;">${escapeHtml(blockingLabels[comp] || comp)}</strong>
+            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08); padding: 0.1rem 0.5rem;" ${i === 0 ? "disabled" : ""} onclick="moveBlockingComponent('${channel}', ${i}, -1)">↑</button>
+            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08); padding: 0.1rem 0.5rem;" ${i === layout.length - 1 ? "disabled" : ""} onclick="moveBlockingComponent('${channel}', ${i}, 1)">↓</button>
+            <button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5; padding: 0.1rem 0.5rem;" onclick="removeBlockingComponent('${channel}', ${i})">✕</button>
+        </div>`).join("") || '<p class="section-desc" style="color: var(--color-warning);">Au moins une composante est requise.</p>';
+    const available = blockingComponents.filter(c => !layout.includes(c));
+    const addOptions = available.map(c => `<option value="${c}">${escapeHtml(blockingLabels[c] || c)}</option>`).join("");
+    el.innerHTML = `
+        <div style="margin-bottom: 0.75rem;">
+            <small style="color: var(--text-muted);">Source : ${source === "database" ? "base (personnalisé)" : "config.yaml (défaut)"}</small>
+        </div>
+        ${selected}
+        ${available.length ? `
+            <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                <select id="blocking-add-${channel}" style="flex: 1;">${addOptions}</select>
+                <button class="btn btn-sm btn-secondary" onclick="addBlockingComponent('${channel}')">+ Ajouter</button>
+            </div>` : ""}
+    `;
+}
+
+function moveBlockingComponent(channel, index, dir) {
+    const layout = blockingDraft[channel];
+    const target = index + dir;
+    if (target < 0 || target >= layout.length) return;
+    [layout[index], layout[target]] = [layout[target], layout[index]];
+    renderBlockingEditor(channel, "database");
+}
+
+function removeBlockingComponent(channel, index) {
+    if (blockingDraft[channel].length <= 1) { showToast("Au moins une composante est requise.", "warning"); return; }
+    blockingDraft[channel].splice(index, 1);
+    renderBlockingEditor(channel, "database");
+}
+
+function addBlockingComponent(channel) {
+    const sel = document.getElementById(`blocking-add-${channel}`);
+    if (sel && sel.value) {
+        blockingDraft[channel].push(sel.value);
+        renderBlockingEditor(channel, "database");
+    }
+}
+
+async function saveBlocking(channel) {
+    const payload = channel === "SCREENING"
+        ? { screening_layout: blockingDraft.SCREENING }
+        : { filtering_layout: blockingDraft.FILTERING };
+    if (channel === "SCREENING") {
+        const ok = await confirmDialog("Modifier la blocking key du criblage recharge immédiatement le cache de production et change la sélection des candidats. Continuer ?", { title: "Blocking Key — Criblage" });
+        if (!ok) return;
+    }
+    try {
+        const response = await fetch("/api/settings/blocking", {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message, "success");
+        fetchBlockingSettings();
+    } catch (e) {
+        console.error("Error saving blocking:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+// ------------------ RÈGLES ANTI-FAUX POSITIFS ------------------
+
+let fpRulesCache = [];
+let currentFpRuleId = null;
+
+function fpRuleChannel() {
+    const sel = document.getElementById("rules-channel-select");
+    return sel ? sel.value : "SCREENING";
+}
+
+function fpRuleStatusBadge(status) {
+    const map = {
+        DRAFT: ["#94a3b8", "BROUILLON"],
+        PENDING_VALIDATION: ["#c084fc", "EN VALIDATION"],
+        ACTIVE: ["#4ade80", "ACTIVE"],
+        SUPERSEDED: ["#6b7280", "REMPLACÉE"],
+    };
+    const [color, label] = map[status] || ["#9ca3af", status];
+    return `<span style="color: ${color}; font-weight: 600; font-size: 0.78rem;">${label}</span>`;
+}
+
+async function fetchFpRules() {
+    try {
+        const response = await fetch(`/api/fprules?channel=${fpRuleChannel()}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        fpRulesCache = data.items || [];
+        renderFpRulesTable();
+    } catch (e) {
+        console.error("Error fetching FP rules:", e);
+    }
+}
+
+function renderFpRulesTable() {
+    const tbody = document.querySelector("#fprules-table tbody");
+    if (!tbody) return;
+    if (!fpRulesCache.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Aucune règle pour ce canal. Créez-en une (mode DEV).</td></tr>';
+        return;
+    }
+    tbody.innerHTML = fpRulesCache.map(r => `
+        <tr>
+            <td>${r.run_order}</td>
+            <td><strong>${escapeHtml(r.name)}</strong>${r.enabled === false && r.status === "ACTIVE" ? ' <small style="color:var(--color-warning)">(désactivée)</small>' : ""}</td>
+            <td>${fpRuleStatusBadge(r.status)}</td>
+            <td>v${r.version}</td>
+            <td>${r.hit_count}</td>
+            <td><button class="btn btn-sm btn-secondary" onclick="openFpRule(${r.id})">Ouvrir</button></td>
+        </tr>`).join("");
+}
+
+function newFpRule() {
+    currentFpRuleId = null;
+    const card = document.getElementById("fprule-editor-card");
+    card.style.display = "block";
+    document.getElementById("fprule-editor").innerHTML = fpRuleEditorHtml(null);
+    card.scrollIntoView({ behavior: "smooth" });
+}
+
+async function openFpRule(ruleId) {
+    const rule = fpRulesCache.find(r => r.id === ruleId);
+    if (!rule) return;
+    currentFpRuleId = ruleId;
+    const card = document.getElementById("fprule-editor-card");
+    card.style.display = "block";
+    document.getElementById("fprule-editor").innerHTML = fpRuleEditorHtml(rule);
+    card.scrollIntoView({ behavior: "smooth" });
+    if (rule.status === "DRAFT") loadFpRuleTests(ruleId);
+}
+
+function fpRuleEditorHtml(rule) {
+    const isNew = !rule;
+    const status = rule ? rule.status : "DRAFT";
+    const editable = isNew || status === "DRAFT";
+    const me = currentUser ? currentUser.username : "";
+    const branchBanner = rule && rule.replaces_rule_id
+        ? `<div style="background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.3); border-radius: 6px; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem;">🌿 Nouvelle version (v${rule.version}) — branche de la règle #${rule.replaces_rule_id} en production.</div>` : "";
+    let actions = "";
+    if (editable) {
+        actions = `
+            <button class="btn btn-primary" onclick="saveFpRule()">💾 Enregistrer le brouillon</button>
+            ${!isNew ? `<button class="btn btn-secondary" onclick="submitFpRule()">📤 Soumettre en validation</button>` : ""}
+            ${!isNew ? `<button class="btn" style="background: rgba(239,68,68,0.2); color:#fca5a5;" onclick="deleteFpRule()">🗑️ Supprimer</button>` : ""}`;
+    } else if (status === "PENDING_VALIDATION") {
+        const isSubmitter = rule.submitted_by === me;
+        actions = `
+            <span style="align-self:center; font-size: 0.85rem; color: var(--text-muted);">Soumise par @${escapeHtml(rule.submitted_by || "")}${isSubmitter ? " (vous — un autre habilité doit valider)" : ""}</span>
+            ${!isSubmitter ? `<button class="btn btn-primary" onclick="validateFpRule()">✔️ Valider & mettre en production (4-yeux)</button>` : ""}
+            <button class="btn" style="background: rgba(239,68,68,0.2); color:#fca5a5;" onclick="rejectFpRule()">↩️ Renvoyer en brouillon</button>`;
+    } else if (status === "ACTIVE") {
+        actions = `
+            <button class="btn btn-secondary" onclick="editFpRuleVersion()">✏️ Modifier (nouvelle version)</button>
+            <button class="btn" style="background: rgba(255,255,255,0.08);" onclick="toggleFpRule()">${rule.enabled ? "⏸️ Désactiver" : "▶️ Activer"}</button>`;
+    }
+    return `
+        ${branchBanner}
+        <div style="display:flex; justify-content: space-between; align-items:center;">
+            <h3 style="margin:0;">${isNew ? "Nouvelle règle" : escapeHtml(rule.name)} ${rule ? fpRuleStatusBadge(rule.status) : ""}</h3>
+            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="closeFpRuleEditor()">Fermer</button>
+        </div>
+        <div class="form-group"><label>Nom</label><input type="text" id="fprule-name" value="${escapeHtml(rule ? rule.name : "")}" ${editable ? "" : "disabled"}></div>
+        <div class="form-group"><label>Description</label><input type="text" id="fprule-desc" value="${escapeHtml(rule ? (rule.description || "") : "")}" ${editable ? "" : "disabled"}></div>
+        <div class="form-group" style="max-width: 160px;"><label>Ordre d'exécution</label><input type="number" id="fprule-order" value="${rule ? rule.run_order : 100}" ${editable ? "" : "disabled"}></div>
+        <div class="form-group">
+            <label>Code Python — <code>def rule(ctx) -&gt; bool</code> (True = supprimer l'alerte)</label>
+            <textarea id="fprule-code" rows="14" style="font-family: monospace; font-size: 0.82rem;" ${editable ? "" : "disabled"}>${escapeHtml(rule ? rule.code : FP_RULE_TEMPLATE)}</textarea>
+        </div>
+        <div style="display:flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">${actions}</div>
+        ${(rule && rule.status === "DRAFT") ? fpRuleDevBenchHtml() : ""}
+        ${rule ? `<div id="fprule-changes" style="margin-top: 1rem;"></div>` : ""}
+    `;
+}
+
+const FP_RULE_TEMPLATE = `def rule(ctx):
+    """True = SUPPRIMER l'alerte (auto-clôture CLOSED_BY_RULE, tracée à l'audit).
+    ctx : channel, client_name, entity_name, list_type, final_score, base_score,
+    hard_match, adjustments, client, entity, party (filtrage), message (filtrage).
+    Modules : re, math, datetime, date, timedelta, unicodedata."""
+    # Exemple : supprimer les scores faibles sans correspondance exacte
+    # return ctx["final_score"] < 80 and not ctx["hard_match"]
+    return False
+`;
+
+function fpRuleDevBenchHtml() {
+    return `
+        <hr style="border-color: var(--border-color); margin: 1.25rem 0;">
+        <h4 style="margin: 0 0 0.5rem;">🧪 Banc d'essai (mode DEV) — la production n'est pas touchée</h4>
+        <div id="fprule-tests-section"></div>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem;">
+            <button class="btn btn-sm btn-secondary" onclick="runFpRuleTests()">▶ Lancer les tests unitaires</button>
+            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="benchFpRule('history')">📜 Rejouer l'historique réel</button>
+        </div>
+        <div id="fprule-bench-result" style="margin-top: 0.75rem;"></div>`;
+}
+
+function closeFpRuleEditor() {
+    document.getElementById("fprule-editor-card").style.display = "none";
+    currentFpRuleId = null;
+}
+
+function _fpRulePayload() {
+    return {
+        name: document.getElementById("fprule-name").value.trim(),
+        description: document.getElementById("fprule-desc").value.trim(),
+        run_order: parseInt(document.getElementById("fprule-order").value, 10) || 100,
+        code: document.getElementById("fprule-code").value,
+    };
+}
+
+async function saveFpRule() {
+    const payload = _fpRulePayload();
+    if (!payload.name) { showToast("Le nom est requis.", "warning"); return; }
+    try {
+        let response;
+        if (currentFpRuleId) {
+            response = await fetch(`/api/fprules/${currentFpRuleId}`, {
+                method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+            });
+        } else {
+            response = await fetch("/api/fprules", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...payload, channel: fpRuleChannel() }),
+            });
+        }
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast("Règle enregistrée (brouillon).", "success");
+        await fetchFpRules();
+        openFpRule(data.id);
+    } catch (e) {
+        console.error("Error saving FP rule:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function _fpRuleAction(path, body, confirmMsg) {
+    if (!currentFpRuleId) return;
+    if (confirmMsg && !await confirmDialog(confirmMsg)) return;
+    try {
+        const response = await fetch(`/api/fprules/${currentFpRuleId}/${path}`, {
+            method: path === "delete" ? "DELETE" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: path === "delete" ? undefined : JSON.stringify(body || {}),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return null; }
+        showToast(data.message || "OK", "success");
+        return data;
+    } catch (e) {
+        console.error("FP rule action error:", e);
+        showToast("Erreur réseau de communication.", "error");
+        return null;
+    }
+}
+
+async function submitFpRule() {
+    // Enregistre d'abord le code courant, puis soumet
+    await saveFpRule();
+    const data = await _fpRuleAction("submit", {});
+    if (data) { await fetchFpRules(); openFpRule(currentFpRuleId); }
+}
+
+async function validateFpRule() {
+    const comment = await promptDialog("Commentaire de validation (facultatif)", { textarea: true, required: false });
+    if (comment === null) return;
+    const data = await _fpRuleAction("validate", { comment });
+    if (data) { await fetchFpRules(); closeFpRuleEditor(); refreshAlertQueues(); }
+}
+
+async function rejectFpRule() {
+    const comment = await promptDialog("Motif du renvoi en brouillon (obligatoire)", { textarea: true });
+    if (!comment) return;
+    const data = await _fpRuleAction("reject", { comment });
+    if (data) { await fetchFpRules(); openFpRule(currentFpRuleId); }
+}
+
+async function toggleFpRule() {
+    const data = await _fpRuleAction("toggle", {});
+    if (data) { await fetchFpRules(); openFpRule(currentFpRuleId); refreshAlertQueues(); }
+}
+
+async function deleteFpRule() {
+    if (!await confirmDialog("Supprimer ce brouillon de règle ?", { danger: true })) return;
+    const response = await fetch(`/api/fprules/${currentFpRuleId}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+    showToast("Règle supprimée.", "success");
+    closeFpRuleEditor();
+    fetchFpRules();
+}
+
+async function editFpRuleVersion() {
+    // Modifier une règle ACTIVE crée une nouvelle version brouillon (branche)
+    const payload = _fpRulePayload();
+    const response = await fetch(`/api/fprules/${currentFpRuleId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+    showToast("Nouvelle version brouillon créée (branche de la production).", "success");
+    await fetchFpRules();
+    openFpRule(data.id);
+}
+
+// ---- Banc d'essai : tests unitaires ----
+
+async function loadFpRuleTests(ruleId) {
+    try {
+        const response = await fetch(`/api/fprules/${ruleId}/tests`);
+        if (!response.ok) return;
+        const data = await response.json();
+        renderFpRuleTests(data.items || []);
+    } catch (e) { console.error("Error loading rule tests:", e); }
+}
+
+function renderFpRuleTests(tests) {
+    const el = document.getElementById("fprule-tests-section");
+    if (!el) return;
+    const rows = tests.map(t => {
+        const state = t.last_run_at
+            ? (t.last_error ? `<span style="color:#f87171;">erreur</span>`
+                : (t.last_result === t.expected ? `<span style="color:#4ade80;">✔ vert</span>` : `<span style="color:#f87171;">✘ échec</span>`))
+            : '<span style="color:var(--text-muted);">non exécuté</span>';
+        return `<tr>
+            <td>${escapeHtml(t.name)}</td>
+            <td>${t.expected ? "supprimer" : "conserver"}</td>
+            <td>${state}</td>
+            <td><button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color:#fca5a5; padding: 0.1rem 0.5rem;" onclick="deleteFpRuleTest(${t.id})">✕</button></td>
+        </tr>`;
+    }).join("");
+    el.innerHTML = `
+        <p class="section-desc" style="margin: 0.25rem 0;">Tests unitaires (soumission bloquée tant qu'ils ne sont pas tous verts) :</p>
+        <div class="table-container" style="max-height: 180px; overflow-y: auto;">
+            <table><thead><tr><th>Nom</th><th>Attendu</th><th>Résultat</th><th></th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="4" style="color:var(--text-muted); text-align:center;">Aucun test. Ajoutez-en au moins un.</td></tr>'}</tbody></table>
+        </div>
+        <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="addFpRuleTest()">+ Ajouter un cas de test</button>`;
+}
+
+async function addFpRuleTest() {
+    const name = await promptDialog("Nom du cas de test");
+    if (!name) return;
+    const ctxRaw = await promptDialog("Contexte ctx (JSON) — ex : {\"final_score\": 72, \"hard_match\": false}", { textarea: true });
+    if (ctxRaw === null) return;
+    let ctx;
+    try { ctx = JSON.parse(ctxRaw); } catch (e) { showToast("JSON invalide.", "error"); return; }
+    const expected = await confirmDialog("La règle doit-elle SUPPRIMER l'alerte pour ce cas ? (Annuler = conserver)", { confirmLabel: "Supprimer", cancelLabel: "Conserver" });
+    try {
+        const response = await fetch(`/api/fprules/${currentFpRuleId}/tests`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, ctx, expected }),
+        });
+        if (!response.ok) { const d = await response.json(); showToast("Erreur : " + (d.detail || ""), "error"); return; }
+        loadFpRuleTests(currentFpRuleId);
+    } catch (e) { showToast("Erreur réseau.", "error"); }
+}
+
+async function deleteFpRuleTest(testId) {
+    await fetch(`/api/fprules/${currentFpRuleId}/tests/${testId}`, { method: "DELETE" });
+    loadFpRuleTests(currentFpRuleId);
+}
+
+async function runFpRuleTests() {
+    // Enregistre le code courant avant de tester
+    await saveFpRule();
+    const response = await fetch(`/api/fprules/${currentFpRuleId}/tests/run`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) { showToast("Erreur : " + (data.detail || ""), "error"); return; }
+    loadFpRuleTests(currentFpRuleId);
+    showToast(`Tests : ${data.passed}/${data.total} vert(s)${data.all_green ? " — prêt à soumettre" : ""}.`, data.all_green ? "success" : "warning");
+}
+
+async function benchFpRule(source) {
+    await saveFpRule();
+    const bench = document.getElementById("fprule-bench-result");
+    if (bench) bench.innerHTML = '<small style="color: var(--text-muted);">Rejeu en cours…</small>';
+    try {
+        const response = await fetch(`/api/fprules/${currentFpRuleId}/bench`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source, sample_size: 200 }),
+        });
+        const data = await response.json();
+        if (!response.ok) { if (bench) bench.innerHTML = `<small style="color:var(--color-alert);">${escapeHtml(data.detail || "échec")}</small>`; return; }
+        const tp = data.true_positive_hits || [];
+        if (bench) bench.innerHTML = `
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.75rem;">
+                <strong>Rejeu (${escapeHtml(source === "history" ? "historique réel" : "panel")})</strong> —
+                supprimées : <strong>${data.suppressed}</strong>, conservées : ${data.kept}, erreurs : ${data.errors}
+                ${tp.length ? `<div style="margin-top: 0.5rem; color: #f87171;">⚠️ ${tp.length} VRAI(S) POSITIF(S) confirmé(s) seraient supprimé(s) : ${tp.slice(0, 5).map(t => escapeHtml(t.client_name + " × " + t.entity_name)).join(", ")}${tp.length > 5 ? "…" : ""}. Corrigez la règle avant de soumettre.</div>` : (data.suppressed ? '<div style="margin-top: 0.5rem; color:#4ade80;">Aucun vrai positif confirmé impacté.</div>' : "")}
+            </div>`;
+    } catch (e) { if (bench) bench.innerHTML = '<small style="color:var(--color-alert);">Erreur réseau.</small>'; }
 }

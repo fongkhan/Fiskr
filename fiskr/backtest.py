@@ -91,12 +91,15 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
                     entities: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Crible le panel contre un univers d'entites via un index de blocking local.
-    Memes seuils par liste et meme liste blanche que la production
-    (match_entities + is_whitelisted), mais AUCUNE ecriture.
+    Memes seuils par liste, meme liste blanche et meme layout de blocking que
+    la production (match_entities + is_whitelisted), mais AUCUNE ecriture.
     """
+    from fiskr.settings import blocking_layout, blocking_config_for
+    screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
+
     index: Dict[str, List[Dict[str, Any]]] = {}
     for ent in entities:
-        for key in generate_blocking_keys(ent, config):
+        for key in generate_blocking_keys(ent, screening_cfg):
             index.setdefault(key, []).append(ent)
 
     pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -104,7 +107,7 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
 
     for client in clients:
         candidates: Dict[str, Dict[str, Any]] = {}
-        for key in generate_blocking_keys(client, config):
+        for key in generate_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
                 candidates[ent["entity_id"]] = ent
         if not candidates:
