@@ -462,6 +462,26 @@ def _feature_version_text(fv) -> str:
     return " ".join(t.strip() for t in out if t and t.strip()).strip()
 
 
+def _feature_dateperiod_iso(fv) -> Optional[str]:
+    """Premiere date (Start/From) d'un DatePeriod de feature, au format ISO.
+    Utilisee pour les features datees non textuelles (ex. Organization
+    Established Date des fichiers OFAC reels)."""
+    date_periods = dict_get_insensitive(fv, 'DatePeriod') or []
+    for dp in date_periods:
+        start = dict_get_insensitive(dp, 'Start') or []
+        if start and 'From' in start[0]:
+            from_date = start[0]['From'][0]
+            y_el = dict_get_insensitive(from_date, 'Year')
+            m_el = dict_get_insensitive(from_date, 'Month')
+            d_el = dict_get_insensitive(from_date, 'Day')
+            y = y_el[0].get('text', '') if (y_el and isinstance(y_el, list)) else ''
+            m = m_el[0].get('text', '') if (m_el and isinstance(m_el, list)) else ''
+            d = d_el[0].get('text', '') if (d_el and isinstance(d_el, list)) else ''
+            if y:
+                return f"{y.strip()}-{(m.strip() if m else '01').zfill(2)}-{(d.strip() if d else '01').zfill(2)}"
+    return None
+
+
 def format_alias_name(alias_dict, identity_dict):
     group_map = {}
     name_part_groups = dict_get_insensitive(identity_dict, 'NamePartGroups') or []
@@ -648,6 +668,27 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
         designation = None
         unmapped_features = []  # features non pivotables -> additional_informations
 
+        # Champs etendus structures (au lieu du fourre-tout texte)
+        crypto_wallets = []
+        bic_swift = None
+        tax_id = None
+        duns_number = None
+        vessel_call_sign = None
+        vessel_mmsi = None
+        vessel_flag = None
+        vessel_type_val = None
+        vessel_tonnage = None
+        vessel_owner = None
+        aircraft_model = None
+        aircraft_operator = None
+        aircraft_construction_number = None
+        websites = []
+        email_addresses = []
+        phone_numbers = []
+        secondary_sanctions_risk = None
+        organization_established_date = None
+        organization_type = None
+
         features = dict_get_insensitive(profile, 'Feature') or []
         for f in features:
             ftype_obj = dict_get_insensitive(f, 'FeatureTypeID')
@@ -661,7 +702,13 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             is_death = "death" in ftype_str_lower or "deceased" in ftype_str_lower or ftype_str_lower == "24"
             # "place of birth" avant la branche generique "birth" (pays de naissance)
             is_pob = "place of birth" in ftype_str_lower
-            is_address = "address" in ftype_str_lower or ftype_str_lower == "location"
+            # "Digital Currency Address" et "Email Address" contiennent le mot
+            # "address" mais ne sont PAS des adresses postales
+            is_address = (
+                "address" in ftype_str_lower
+                and "digital currency" not in ftype_str_lower
+                and "email" not in ftype_str_lower
+            ) or ftype_str_lower == "location"
             is_designation = any(k in ftype_str_lower for k in ("title", "position", "function", "occupation"))
 
             feature_versions = dict_get_insensitive(f, 'FeatureVersion') or []
@@ -738,14 +785,59 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
                         else:
                             jurisdictions.append(country_code)
 
-                # Features non pivotables (call sign, pavillon, tonnage, site web,
-                # email, telephone, modele d'aeronef...) : conservees pour
-                # consultation humaine au lieu d'etre perdues
+                # Features structurees : mapping cible par type de feature
+                # (crypto, BIC, tax ID, navire, aeronef, contacts...) ; le
+                # reste part en additional_informations (consultation humaine)
                 if not (is_gender or is_birth or is_death or is_pob or is_address) and not version_locations:
                     text = _feature_version_text(fv)
+                    if not text and "organization established date" in ftype_str_lower:
+                        # Fichiers OFAC reels : la date de creation est portee
+                        # en DatePeriod, pas en texte de VersionDetail
+                        text = _feature_dateperiod_iso(fv) or ""
                     if text:
                         if is_designation and not designation:
                             designation = text
+                        elif "digital currency address" in ftype_str_lower:
+                            currency = ftype_str.rsplit("-", 1)[-1].strip() if "-" in ftype_str else ""
+                            crypto_wallets.append({"currency": currency, "address": text})
+                        elif "swift" in ftype_str_lower or "bik" in ftype_str_lower:
+                            bic_swift = bic_swift or text
+                        elif "tax id" in ftype_str_lower:
+                            tax_id = tax_id or text
+                        elif "duns" in ftype_str_lower or "d-u-n-s" in ftype_str_lower:
+                            duns_number = duns_number or text
+                        elif "call sign" in ftype_str_lower:
+                            vessel_call_sign = vessel_call_sign or text
+                        elif ftype_str_lower.strip() == "msi" or "mmsi" in ftype_str_lower:
+                            vessel_mmsi = vessel_mmsi or text
+                        elif "flag" in ftype_str_lower:
+                            vessel_flag = vessel_flag or text
+                        elif "vessel type" in ftype_str_lower:
+                            vessel_type_val = vessel_type_val or text
+                        elif "tonnage" in ftype_str_lower:
+                            vessel_tonnage = vessel_tonnage or text
+                        elif "vessel owner" in ftype_str_lower:
+                            vessel_owner = vessel_owner or text
+                        elif "aircraft model" in ftype_str_lower:
+                            aircraft_model = aircraft_model or text
+                        elif "aircraft operator" in ftype_str_lower:
+                            aircraft_operator = aircraft_operator or text
+                        elif "construction number" in ftype_str_lower or "serial number" in ftype_str_lower:
+                            aircraft_construction_number = aircraft_construction_number or text
+                        elif "website" in ftype_str_lower:
+                            websites.append(text)
+                        elif "email" in ftype_str_lower:
+                            email_addresses.append(text)
+                        elif "phone" in ftype_str_lower:
+                            phone_numbers.append(text)
+                        elif "secondary sanctions risk" in ftype_str_lower:
+                            secondary_sanctions_risk = (
+                                f"{secondary_sanctions_risk}; {text}" if secondary_sanctions_risk else text
+                            )
+                        elif "organization established date" in ftype_str_lower:
+                            organization_established_date = organization_established_date or (_extract_iso_date(text) or text)
+                        elif "organization type" in ftype_str_lower:
+                            organization_type = organization_type or text
                         else:
                             unmapped_features.append(f"{ftype_str}: {text}")
 
@@ -914,7 +1006,28 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             "other_registration_ids": other_registrations,
             "passport_documents": passports,
             "national_id_documents": national_ids,
-            "other_id_documents": other_ids
+            "other_id_documents": other_ids,
+            # Champs etendus structures
+            "crypto_wallets": crypto_wallets,
+            "bic_swift": bic_swift,
+            "tax_id": tax_id,
+            "duns_number": duns_number,
+            "vessel_call_sign": vessel_call_sign,
+            "vessel_mmsi": vessel_mmsi,
+            "vessel_flag": vessel_flag,
+            "vessel_type": vessel_type_val,
+            "vessel_tonnage": vessel_tonnage,
+            "vessel_owner": vessel_owner,
+            "aircraft_model": aircraft_model,
+            "aircraft_operator": aircraft_operator,
+            "aircraft_construction_number": aircraft_construction_number,
+            "sanction_programs": parser_ctx.sanctions_programs.get(str(pid)) or [],
+            "secondary_sanctions_risk": secondary_sanctions_risk,
+            "organization_established_date": organization_established_date,
+            "organization_type": organization_type,
+            "phone_numbers": phone_numbers,
+            "email_addresses": email_addresses,
+            "websites": websites,
         }
 
         yield current_party
@@ -1214,6 +1327,7 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
 
         extra_info = []
         official_ref = None
+        fondements = []
         for type_champ, keys in (
             ("FONDEMENT_JURIDIQUE", ("FondementJuridiqueLabel", "FondementJuridique")),
             ("REFERENCE_UE", ("ReferenceUe",)),
@@ -1225,6 +1339,14 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
                     extra_info.append(f"{type_champ.replace('_', ' ').title()}: {text}")
                     if official_ref is None and type_champ in ("REFERENCE_UE", "REFERENCE_ONU"):
                         official_ref = text
+                    if type_champ == "FONDEMENT_JURIDIQUE" and text not in fondements:
+                        fondements.append(text)
+
+        # Contacts (TypeChamps presents sur certaines fiches PM du registre)
+        dgt_phones = [t for v in details.get("TELEPHONE", []) if (t := _dgt_value_text(v, "Telephone"))]
+        dgt_emails = [t for v in details.get("COURRIEL", []) + details.get("EMAIL", [])
+                      if (t := _dgt_value_text(v, "Courriel", "Email"))]
+        dgt_websites = [t for v in details.get("SITE_INTERNET", []) if (t := _dgt_value_text(v, "SiteInternet", "Site"))]
 
         yield {
             "entity_id": f"DGT-{id_registre}",
@@ -1254,6 +1376,10 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
             "designation_reasons": "; ".join(motifs) or None,
             "additional_informations": "; ".join(extra_info) or None,
             "official_reference": build_official_reference(official_ref, publication_date),
+            "sanction_programs": fondements,
+            "phone_numbers": dgt_phones,
+            "email_addresses": dgt_emails,
+            "websites": dgt_websites,
             "origin": "DGT Registre national des gels",
             "imo_number": None,
             "aircraft_tail_number": None,
@@ -1335,6 +1461,7 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
         last_name = ""
         gender = "U"
         designation = None
+        fsf_title = None
         aliases_raw = []
         for alias in _child_local(entity, "nameAlias"):
             whole = (get_attrib_insensitive(alias, "wholeName") or "").strip()
@@ -1349,6 +1476,8 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
                 gender = g
             func = (get_attrib_insensitive(alias, "function") or "").strip()
             title = (get_attrib_insensitive(alias, "title") or "").strip()
+            if title and not fsf_title:
+                fsf_title = title
             if not designation and (func or title):
                 designation = func or title
             if not primary_name:
@@ -1423,6 +1552,7 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
                 address_countries.append(iso2)
 
         programme = None
+        programmes = []
         extra_info = []
         official_ref = None
         official_ref_date = None
@@ -1430,6 +1560,8 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
             prog = (get_attrib_insensitive(reg, "programme") or "").strip()
             if prog and not programme:
                 programme = prog
+            if prog and prog not in programmes:
+                programmes.append(prog)
             number_title = (get_attrib_insensitive(reg, "numberTitle") or "").strip()
             if number_title:
                 extra_info.append(f"Regulation: {number_title}")
@@ -1473,6 +1605,9 @@ def parse_eu_fsf_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
             "designation_reasons": programme,
             "additional_informations": "; ".join(extra_info) or None,
             "official_reference": build_official_reference(official_ref, official_ref_date),
+            "title": fsf_title,
+            "listed_on": official_ref_date,
+            "sanction_programs": programmes,
             "origin": "EU FSF Consolidated",
             "imo_number": None,
             "aircraft_tail_number": None,
@@ -1606,6 +1741,11 @@ def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None,
         updated_values = _un_values(record, "LAST_DAY_UPDATED")
         un_updated = _extract_iso_date(updated_values[-1] if updated_values else _un_text(record, "LISTED_ON"))
 
+        # Champs etendus : titre, date d'inscription, Etat designant
+        un_title = "; ".join(_un_values(record, "TITLE")) or None
+        listed_on = _extract_iso_date(_un_text(record, "LISTED_ON"))
+        designating_state = _un_text(record, "SUBMITTED_BY") or None
+
         primary_addr = addresses[0] if addresses else {}
         yield {
             "entity_id": f"UN-{entity_key}",
@@ -1632,6 +1772,11 @@ def parse_un_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None,
             "designation_reasons": un_list_type or None,
             "additional_informations": "; ".join(extra_info) or None,
             "official_reference": build_official_reference(reference, un_updated),
+            "title": un_title,
+            "listed_on": listed_on,
+            "designating_state": designating_state,
+            "sanction_programs": [un_list_type] if un_list_type else [],
+            "name_original_script": original_script or None,
             "origin": "UN Consolidated List",
             "imo_number": None,
             "aircraft_tail_number": None,
@@ -1697,6 +1842,10 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
             addresses = _csv_multi(row.get("addresses"))
             identifiers = _csv_multi(row.get("identifiers"))
             positions = _csv_multi(row.get("sanctions")) or _csv_multi(row.get("position"))
+            # Champs etendus : contacts + fonction PEP + premiere apparition
+            pep_phones = _csv_multi(row.get("phones"))
+            pep_emails = _csv_multi(row.get("emails"))
+            pep_first_seen = _extract_iso_date(row.get("first_seen", ""))
 
             yield {
                 "entity_id": f"PEP-{os_id}",
@@ -1721,6 +1870,10 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
                 "designation": positions[0] if positions else None,
                 "designation_reasons": "Personne Politiquement Exposée (PEP)",
                 "additional_informations": "; ".join(identifiers) or None,
+                "pep_role": "; ".join(positions) or None,
+                "listed_on": pep_first_seen,
+                "phone_numbers": pep_phones,
+                "email_addresses": pep_emails,
                 "origin": "OpenSanctions PEP",
                 "imo_number": None,
                 "aircraft_tail_number": None,
@@ -1825,6 +1978,17 @@ def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, No
         position = _ofsi_get(row, "Position")
         regime = _ofsi_get(row, "Regime")
         other_info = _ofsi_get(row, "Other Information")
+        # Champs etendus du ConList
+        ofsi_title = _ofsi_get(row, "Title")
+        listed_on = _ofsi_date(_ofsi_get(row, "Listed On", "Date Designated", "UK Sanctions List Date Designated"))
+        non_latin = _ofsi_get(row, "Name Non-Latin Script", "Non-Latin Script")
+        passport_num = _ofsi_get(row, "Passport Number", "Passport Details")
+        ni_number = _ofsi_get(row, "NI Number", "National Identification Number")
+        ofsi_phone = _ofsi_get(row, "Phone number", "Phone Number", "Telephone")
+        ofsi_email = _ofsi_get(row, "Email address", "Email Address", "Email")
+        ofsi_website = _ofsi_get(row, "Website")
+        if non_latin:
+            group["aliases"].append({"name": non_latin, "type": "Strong"})
         addr_parts = [
             _ofsi_get(row, f"Address {i}") for i in (1, 2, 3, 4, 5, 6)
         ] + [_ofsi_get(row, "Post/Zip Code"), _ofsi_get(row, "Country")]
@@ -1860,14 +2024,21 @@ def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, No
             "designation_reasons": regime or None,
             "additional_informations": other_info or None,
             "official_reference": build_official_reference(uk_ref or f"OFSI Group {group_id}", last_updated) if (uk_ref or last_updated) else None,
+            "title": ofsi_title or None,
+            "listed_on": listed_on,
+            "name_original_script": non_latin or None,
+            "sanction_programs": [regime] if regime else [],
+            "phone_numbers": [ofsi_phone] if ofsi_phone else [],
+            "email_addresses": [ofsi_email] if ofsi_email else [],
+            "websites": [ofsi_website] if ofsi_website else [],
             "origin": "UK OFSI Consolidated",
             "imo_number": None,
             "aircraft_tail_number": None,
             "lei_number": None,
             "national_registry_ids": [],
             "other_registration_ids": [],
-            "passport_documents": [],
-            "national_id_documents": [],
+            "passport_documents": [{"number": passport_num, "issuing_country": "XX", "expiration_date": None}] if passport_num else [],
+            "national_id_documents": [{"number": ni_number, "issuing_country": "GB"}] if ni_number else [],
             "other_id_documents": []
         }
 

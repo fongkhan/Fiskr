@@ -73,7 +73,7 @@ def test_per_list_threshold_changes_alert_status():
 # ------------------ PARSEUR PEP (OPENSANCTIONS) ------------------
 
 PEP_CSV = """id,schema,name,aliases,birth_date,countries,addresses,identifiers,sanctions,phones,emails,dataset,first_seen,last_seen,last_change
-Q7747,Person,Vladimir Putin,Wladimir Putin;Poutine,1952-10-07,ru,Moscow Kremlin,passport: 750123456,President of Russia,,,wd_peps,2020-01-01,2026-07-01,2026-06-01
+Q7747,Person,Vladimir Putin,Wladimir Putin;Poutine,1952-10-07,ru,Moscow Kremlin,passport: 750123456,President of Russia,+7 495 606 36 02,press@kremlin.example,wd_peps,2020-01-01,2026-07-01,2026-06-01
 Q123456,Organization,United Russia Party,,,ru,,,,,,wd_peps,2020-01-01,2026-07-01,2026-06-01
 Q999,Person,Jane Politician,,1980,us;fr,,,,,,wd_peps,2020-01-01,2026-07-01,2026-06-01
 """
@@ -93,6 +93,11 @@ def test_parse_pep_targets_csv(tmp_path):
     assert putin["countries"]["citizenship"] == ["RU"]
     assert putin["designation_reasons"] == "Personne Politiquement Exposée (PEP)"
     assert putin["origin"] == "OpenSanctions PEP"
+    # Champs etendus : fonction PEP, premiere apparition, contacts
+    assert putin["pep_role"] == "President of Russia"
+    assert putin["listed_on"] == "2020-01-01"
+    assert putin["phone_numbers"] == ["+7 495 606 36 02"]
+    assert putin["email_addresses"] == ["press@kremlin.example"]
 
     assert entities["PEP-Q123456"]["entity_type"] == "E"
     # Date partielle (annee seule) normalisee
@@ -103,10 +108,10 @@ def test_parse_pep_targets_csv(tmp_path):
 # ------------------ PARSEUR UK OFSI ------------------
 
 OFSI_CSV = """Last Updated:,15/07/2026,,,,,,,,,,,,,,,,,,,
-Name 6,Name 1,Name 2,Name 3,Name 4,Name 5,Title,DOB,Town of Birth,Country of Birth,Nationality,Position,Address 1,Address 2,Address 3,Post/Zip Code,Country,Other Information,Group Type,Alias Type,Regime,Group ID
-PETROV,Igor,,,,,,12/03/1965,Moscow,Russia,Russian,Minister,12 Tverskaya Street,,,125009,Russia,Senior official,Individual,Primary name,Russia,10001
-PETROV,Igor Petrovitch,,,,,,,,,,,,,,,,,Individual,aka,Russia,10001
-VOLGA STAR,,,,,,,,,,,,,,,,,IMO 9876543,Ship,Primary name,Russia,10002
+Name 6,Name 1,Name 2,Name 3,Name 4,Name 5,Title,DOB,Town of Birth,Country of Birth,Nationality,Position,Address 1,Address 2,Address 3,Post/Zip Code,Country,Other Information,Group Type,Alias Type,Regime,Group ID,Name Non-Latin Script,Passport Number,NI Number,Listed On
+PETROV,Igor,,,,,Gen,12/03/1965,Moscow,Russia,Russian,Minister,12 Tverskaya Street,,,125009,Russia,Senior official,Individual,Primary name,Russia,10001,Игорь Петров,750123456,AB123456C,14/08/2016
+PETROV,Igor Petrovitch,,,,,,,,,,,,,,,,,Individual,aka,Russia,10001,,,,
+VOLGA STAR,,,,,,,,,,,,,,,,,IMO 9876543,Ship,Primary name,Russia,10002,,,,
 """
 
 
@@ -127,6 +132,15 @@ def test_parse_ofsi_conlist_csv(tmp_path):
     assert "Igor Petrovitch PETROV" in petrov["aliases"]["high_priority"]
     assert petrov["designation"] == "Minister"
     assert petrov["designation_reasons"] == "Russia"
+    # Champs etendus : titre, date d'inscription (jj/mm/aaaa), regime en programme,
+    # script non latin (colonne + alias de matching), passeport et NI number
+    assert petrov["title"] == "Gen"
+    assert petrov["listed_on"] == "2016-08-14"
+    assert petrov["sanction_programs"] == ["Russia"]
+    assert petrov["name_original_script"] == "Игорь Петров"
+    assert "Игорь Петров" in petrov["aliases"]["high_priority"]
+    assert petrov["passport_documents"][0]["number"] == "750123456"
+    assert petrov["national_id_documents"] == [{"number": "AB123456C", "issuing_country": "GB"}]
 
     assert entities["OFSI-10002"]["entity_type"] == "V"
 

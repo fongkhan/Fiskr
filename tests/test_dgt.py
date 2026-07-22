@@ -45,7 +45,10 @@ DGT_SAMPLE_JSON = """{
         "RegistreDetail": [
           {"TypeChamp": "ADRESSE_PM", "Valeur": [{"Adresse": "1 place Rouge, Moscou", "Pays": "Russie"}]},
           {"TypeChamp": "IDENTIFICATION", "Valeur": [{"Identification": "INN 7712345678", "CommentaireIdentification": "numéro fiscal"}]},
-          {"TypeChamp": "MOTIFS", "Valeur": [{"Motifs": "Financement d'activités sanctionnées."}]}
+          {"TypeChamp": "MOTIFS", "Valeur": [{"Motifs": "Financement d'activités sanctionnées."}]},
+          {"TypeChamp": "TELEPHONE", "Valeur": [{"Telephone": "+7 495 123 45 67"}]},
+          {"TypeChamp": "COURRIEL", "Valeur": [{"Courriel": "contact@zarya.example"}]},
+          {"TypeChamp": "SITE_INTERNET", "Valeur": [{"SiteInternet": "https://zarya.example"}]}
         ]
       },
       {
@@ -107,6 +110,8 @@ def test_parse_dgt_registry_mapping(tmp_path):
     assert pp["origin"] == "DGT Registre national des gels"
     # Reference officielle : reference UE + date de publication du registre
     assert pp["official_reference"] == "UE.4721.83 (maj 2026-07-11)"
+    # Fondements juridiques -> programmes de sanctions structures
+    assert pp["sanction_programs"] == ["Règlement (UE) 269/2014"]
 
     # Personne morale -> E, identification en autres registres
     pm = entities["DGT-5100"]
@@ -114,6 +119,10 @@ def test_parse_dgt_registry_mapping(tmp_path):
     assert pm["official_reference"] is None  # aucune reference UE/ONU sur cette fiche
     assert pm["other_registration_ids"] == [{"id_type": "Identification", "number": "INN 7712345678"}]
     assert pm["countries"]["jurisdiction_country"] == ["RU"]
+    # Contacts extraits des TypeChamps optionnels
+    assert pm["phone_numbers"] == ["+7 495 123 45 67"]
+    assert pm["email_addresses"] == ["contact@zarya.example"]
+    assert pm["websites"] == ["https://zarya.example"]
 
     # Navire -> V
     assert entities["DGT-5200"]["entity_type"] == "V"

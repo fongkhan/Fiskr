@@ -80,6 +80,36 @@ WATCHLIST_FILE_TYPES = [
     "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI"
 ]
 
+# Champs etendus des listes (schema pivot -> colonnes WatchlistEntity).
+# Reutilise par les 3 chemins d'ingestion (parseurs officiels, PDF, CSV).
+EXTENDED_ENTITY_FIELDS = (
+    "crypto_wallets", "bic_swift", "tax_id", "duns_number",
+    "vessel_call_sign", "vessel_mmsi", "vessel_flag", "vessel_type",
+    "vessel_tonnage", "vessel_owner",
+    "aircraft_model", "aircraft_operator", "aircraft_construction_number",
+    "sanction_programs", "listed_on", "delisted_on", "name_original_script",
+    "title", "pep_role", "secondary_sanctions_risk", "designating_state",
+    "organization_established_date", "organization_type",
+    "phone_numbers", "email_addresses", "websites",
+)
+
+_EXTENDED_LIST_FIELDS = ("sanction_programs", "phone_numbers", "email_addresses", "websites")
+
+def _extended_entity_kwargs(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Champs etendus normalises : les colonnes CSV texte des champs liste
+    sont decoupees sur « ; » (parite avec les parseurs officiels)."""
+    out: Dict[str, Any] = {}
+    for field in EXTENDED_ENTITY_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str) and field in _EXTENDED_LIST_FIELDS:
+            value = [v.strip() for v in value.split(";") if v.strip()] or None
+        elif isinstance(value, str) and field == "crypto_wallets":
+            value = [{"currency": "", "address": v.strip()} for v in value.split(";") if v.strip()] or None
+        elif isinstance(value, str):
+            value = value.strip() or None
+        out[field] = value
+    return out
+
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
 watchlist_index: Dict[str, List[Dict[str, Any]]] = {}
@@ -350,8 +380,16 @@ class ScreenClientRequest(BaseModel):
     # Identifiers
     transaction_vessel_imo: Optional[str] = None
     transaction_aircraft_registration: Optional[str] = None
+    transaction_vessel_mmsi: Optional[str] = None
+    transaction_vessel_call_sign: Optional[str] = None
     client_lei_number: Optional[str] = None
-    
+
+    # Champs etendus KYC (miroirs de matching)
+    client_bic: Optional[str] = None
+    client_tax_id: Optional[str] = None
+    client_iban: Optional[str] = None
+    client_crypto_wallets: List[str] = []
+
     client_national_registry_ids: List[Dict[str, Any]] = []
     client_other_registration_ids: List[Dict[str, Any]] = []
     client_passport_documents: List[Dict[str, Any]] = []
@@ -1023,11 +1061,12 @@ async def ingest_snapshot(
                     passport_documents=item.get("passport_documents"),
                     national_id_documents=item.get("national_id_documents"),
                     other_id_documents=item.get("other_id_documents"),
-                    entity_checksum=ent_checksum
+                    entity_checksum=ent_checksum,
+                    **_extended_entity_kwargs(item)
                 )
                 db.add(db_ent)
                 record_count += 1
-                
+
         elif file_type == "WATCHLIST_EU":
             # PDF or CSV
             if file.filename.endswith(".pdf"):
@@ -1065,7 +1104,8 @@ async def ingest_snapshot(
                         official_reference=item.get("official_reference"),
                         alternative_addresses=alt_addrs_pdf,
                         imo_number=item.get("imo_number"),
-                        entity_checksum=ent_checksum
+                        entity_checksum=ent_checksum,
+                        **_extended_entity_kwargs(item)
                     )
                     db.add(db_ent)
                     record_count += 1
@@ -1126,7 +1166,8 @@ async def ingest_snapshot(
                         official_reference=item.get("official_reference"),
                         alternative_addresses=alt_addrs_csv,
                         lei_number=item.get("lei_number"),
-                        entity_checksum=ent_checksum
+                        entity_checksum=ent_checksum,
+                        **_extended_entity_kwargs(item)
                     )
                     db.add(db_ent)
                     record_count += 1
@@ -1178,6 +1219,21 @@ async def ingest_snapshot(
                     client_passport_documents=json.loads(item.get("client_passport_documents", "[]")) if item.get("client_passport_documents") else [],
                     client_national_id_documents=json.loads(item.get("client_national_id_documents", "[]")) if item.get("client_national_id_documents") else [],
                     client_other_id_documents=json.loads(item.get("client_other_id_documents", "[]")) if item.get("client_other_id_documents") else [],
+                    # Champs etendus KYC
+                    client_iban=item.get("client_iban") or item.get("iban") or None,
+                    client_bic=item.get("client_bic") or item.get("bic") or None,
+                    client_tax_id=item.get("client_tax_id") or item.get("tax_id") or None,
+                    client_phone=item.get("client_phone") or item.get("phone") or None,
+                    client_email=item.get("client_email") or item.get("email") or None,
+                    client_website=item.get("client_website") or item.get("website") or None,
+                    client_crypto_wallets=[w.strip() for w in (item.get("client_crypto_wallets") or "").split(";") if w.strip()],
+                    client_risk_rating=(item.get("client_risk_rating") or "").strip().upper() or None,
+                    client_pep_flag=str(item.get("client_pep_flag", "")).strip().lower() in ("true", "1", "oui", "yes"),
+                    client_segment=item.get("client_segment") or None,
+                    client_activity_sector=item.get("client_activity_sector") or None,
+                    client_activity_countries=[c.strip().upper() for c in (item.get("client_activity_countries") or "").split(",") if c.strip()],
+                    client_relationship_start=item.get("client_relationship_start") or None,
+                    client_status=(item.get("client_status") or "").strip().upper() or None,
                     entity_checksum=ent_checksum
                 )
                 db.add(db_ent)
@@ -1320,6 +1376,13 @@ class WatchlistEntityCreate(BaseModel):
     official_reference: Optional[str] = None
     alternative_addresses: Optional[str] = None
     date_of_death: Optional[str] = None
+    # Champs etendus (scalaires principaux, reglables a l'ajout manuel par API)
+    bic_swift: Optional[str] = None
+    tax_id: Optional[str] = None
+    duns_number: Optional[str] = None
+    title: Optional[str] = None
+    listed_on: Optional[str] = None
+    name_original_script: Optional[str] = None
 
 @app.post("/api/watchlist/entity")
 async def create_watchlist_entity(
@@ -1392,7 +1455,14 @@ async def create_watchlist_entity(
         "designation_reasons": payload.designation_reasons or None,
         "additional_informations": payload.additional_informations or None,
         "official_reference": payload.official_reference or None,
-        "alternative_addresses": alt_addrs
+        "alternative_addresses": alt_addrs,
+        # Champs etendus (scalaires principaux)
+        "bic_swift": payload.bic_swift or None,
+        "tax_id": payload.tax_id or None,
+        "duns_number": payload.duns_number or None,
+        "title": payload.title or None,
+        "listed_on": payload.listed_on or None,
+        "name_original_script": payload.name_original_script or None,
     }
 
     # Moteur de detection des noms : decoupe le nom principal si prenom/nom absents
@@ -1437,6 +1507,12 @@ async def create_watchlist_entity(
         additional_informations=ent_dict["additional_informations"],
         official_reference=ent_dict["official_reference"],
         alternative_addresses=ent_dict["alternative_addresses"],
+        bic_swift=ent_dict["bic_swift"],
+        tax_id=ent_dict["tax_id"],
+        duns_number=ent_dict["duns_number"],
+        title=ent_dict["title"],
+        listed_on=ent_dict["listed_on"],
+        name_original_script=ent_dict["name_original_script"],
         entity_checksum=ent_checksum
     )
     db.add(db_ent)
@@ -1523,6 +1599,34 @@ class WatchlistEntityPatch(BaseModel):
     countries: Optional[Dict[str, Any]] = None
     aliases: Optional[Dict[str, Any]] = None
     alternative_addresses: Optional[List[str]] = None
+    # Champs etendus scalaires
+    bic_swift: Optional[str] = None
+    tax_id: Optional[str] = None
+    duns_number: Optional[str] = None
+    title: Optional[str] = None
+    name_original_script: Optional[str] = None
+    listed_on: Optional[str] = None
+    delisted_on: Optional[str] = None
+    pep_role: Optional[str] = None
+    secondary_sanctions_risk: Optional[str] = None
+    designating_state: Optional[str] = None
+    vessel_call_sign: Optional[str] = None
+    vessel_mmsi: Optional[str] = None
+    vessel_flag: Optional[str] = None
+    vessel_type: Optional[str] = None
+    vessel_tonnage: Optional[str] = None
+    vessel_owner: Optional[str] = None
+    aircraft_model: Optional[str] = None
+    aircraft_operator: Optional[str] = None
+    aircraft_construction_number: Optional[str] = None
+    organization_established_date: Optional[str] = None
+    organization_type: Optional[str] = None
+    # Champs etendus JSON
+    crypto_wallets: Optional[List[Dict[str, Any]]] = None
+    sanction_programs: Optional[List[str]] = None
+    phone_numbers: Optional[List[str]] = None
+    email_addresses: Optional[List[str]] = None
+    websites: Optional[List[str]] = None
     # Si vrai, la date contenue dans la reference officielle (s'il y en a une)
     # est remplacee par la date du jour, dans son format d'origine
     touch_official_reference_date: bool = False
@@ -1680,6 +1784,25 @@ _WL_TEXT_SEARCH_COLS = {
     "imo_number": WatchlistEntity.imo_number,
     "aircraft_tail_number": WatchlistEntity.aircraft_tail_number,
     "date_of_death": WatchlistEntity.date_of_death,
+    # Champs etendus scalaires
+    "bic_swift": WatchlistEntity.bic_swift,
+    "tax_id": WatchlistEntity.tax_id,
+    "duns_number": WatchlistEntity.duns_number,
+    "title": WatchlistEntity.title,
+    "name_original_script": WatchlistEntity.name_original_script,
+    "listed_on": WatchlistEntity.listed_on,
+    "delisted_on": WatchlistEntity.delisted_on,
+    "pep_role": WatchlistEntity.pep_role,
+    "secondary_sanctions_risk": WatchlistEntity.secondary_sanctions_risk,
+    "designating_state": WatchlistEntity.designating_state,
+    "vessel_call_sign": WatchlistEntity.vessel_call_sign,
+    "vessel_mmsi": WatchlistEntity.vessel_mmsi,
+    "vessel_flag": WatchlistEntity.vessel_flag,
+    "vessel_type": WatchlistEntity.vessel_type,
+    "vessel_owner": WatchlistEntity.vessel_owner,
+    "aircraft_model": WatchlistEntity.aircraft_model,
+    "aircraft_operator": WatchlistEntity.aircraft_operator,
+    "organization_type": WatchlistEntity.organization_type,
 }
 _WL_JSON_SEARCH_COLS = {
     "aliases": WatchlistEntity.aliases,
@@ -1692,6 +1815,12 @@ _WL_JSON_SEARCH_COLS = {
     "passport_documents": WatchlistEntity.passport_documents,
     "national_id_documents": WatchlistEntity.national_id_documents,
     "other_id_documents": WatchlistEntity.other_id_documents,
+    # Champs etendus JSON
+    "crypto_wallets": WatchlistEntity.crypto_wallets,
+    "sanction_programs": WatchlistEntity.sanction_programs,
+    "phone_numbers": WatchlistEntity.phone_numbers,
+    "email_addresses": WatchlistEntity.email_addresses,
+    "websites": WatchlistEntity.websites,
 }
 WATCHLIST_SEARCH_FIELDS = ("default", "any") + tuple(_WL_TEXT_SEARCH_COLS) + tuple(_WL_JSON_SEARCH_COLS)
 

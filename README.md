@@ -228,6 +228,23 @@ Le moteur intègre 26 champs obligatoires de conformité AML/CFT, tous exploitab
 25. **Legal Entity Identifier** (`lei_number` / `client_lei_number`) : Identifiant d'entité juridique à 20 caractères.
 26. **Designation Reasons** (`designation_reasons`) : Motifs de la désignation / de l'inscription sur liste (extraits de la colonne « Motifs » des annexes EUR-Lex, des libellés SSIE « motif / reason / grounds », ou saisis manuellement).
 
+### Champs étendus (extraction structurée des sources)
+
+Au-delà du référentiel réglementaire, chaque fiche listée porte **26 colonnes étendues** extraites automatiquement des sources officielles (OFAC SDN_ADVANCED, ONU, UE FSF, DGT, UK OFSI, PEP OpenSanctions) — auparavant fondues dans le texte libre `additional_informations` :
+
+| Groupe | Champs | Usage |
+|---|---|---|
+| **Matching (hard match)** | `crypto_wallets` (`[{currency, address}]`), `bic_swift`, `tax_id`, `vessel_mmsi`, `vessel_call_sign` | Nouvelles clés de correspondance exacte (score 100) : adresse crypto, BIC/SWIFT (8/11, comparaison banque sur 8), identifiant fiscal, MMSI et indicatif radio navire |
+| **Identifiants** | `duns_number` | Consultatif (pas de miroir client fiable) |
+| **Navires / Aéronefs** | `vessel_flag`, `vessel_type`, `vessel_tonnage`, `vessel_owner`, `aircraft_model`, `aircraft_operator`, `aircraft_construction_number` | Enrichissement des fiches V / A |
+| **Détection & tri** | `sanction_programs` (liste), `listed_on`, `delisted_on`, `name_original_script`, `title`, `pep_role`, `secondary_sanctions_risk`, `designating_state` | Programmes structurés, dates d'inscription, script d'origine (aussi conservé en alias de matching), fonction PEP |
+| **Personnes morales** | `organization_established_date`, `organization_type` | Date de création et forme juridique |
+| **Contacts** | `phone_numbers`, `email_addresses`, `websites` (listes) | Investigations |
+
+Tous ces champs sont **cherchables** (recherche par champ de l'onglet Watchlist Active, groupes Références / Identifiants / Contact), **éditables** (PATCH journalisé, modale de détails) et acceptés dans les **CSV d'import** (colonnes du même nom ; les champs liste se découpent sur `;`).
+
+Côté **clients**, 14 colonnes KYC miroirs sont acceptées à l'ingestion `CLIENT_BASE` : `client_iban`, `client_bic`, `client_tax_id`, `client_phone`, `client_email`, `client_website`, `client_crypto_wallets` (`;`), `client_risk_rating`, `client_pep_flag`, `client_segment`, `client_activity_sector`, `client_activity_countries` (`,`), `client_relationship_start`, `client_status`. Les miroirs de matching (`client_bic`, `client_tax_id`, `client_crypto_wallets`, `transaction_vessel_mmsi`, `transaction_vessel_call_sign`) sont aussi acceptés par `POST /api/screen`, et le **filtrage ISO 20022** croise désormais le BIC des agents bancaires (`DbtrAgt`/`CdtrAgt`) avec le `bic_swift` des institutions sanctionnées.
+
 ### Configuration de Sécurité & Fichier `.env`
 
 Les secrets de l'application et la chaîne de connexion à la base de données ne sont plus stockés en clair dans `config.yaml`. Ils sont configurables via les variables d'environnement ou le fichier `.env` à la racine du projet (un modèle est fourni dans [`.env.example`](file:///e:/Program%20Files/git/Fiskr/.env.example)) :
