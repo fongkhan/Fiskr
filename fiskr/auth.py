@@ -50,6 +50,59 @@ def validate_password(password: str) -> None:
         raise ValueError("Mot de passe trop faible : il faut " + ", ".join(missing) + ".")
 
 
+# ------------------ MFA TOTP (RFC 6238, stdlib uniquement) ------------------
+
+TOTP_PERIOD = 30
+TOTP_DIGITS = 6
+
+
+def generate_totp_secret() -> str:
+    """Secret base32 de 160 bits (RFC 4226), compatible Google Authenticator & co."""
+    import base64
+    import secrets as _secrets
+    return base64.b32encode(_secrets.token_bytes(20)).decode("ascii")
+
+
+def totp_code(secret: str, at_time: Optional[float] = None) -> str:
+    """Code TOTP a 6 chiffres pour l'instant donne (HMAC-SHA1, pas de 30 s)."""
+    import base64
+    import hmac
+    import struct
+    import time as _time
+    key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
+    counter = int((at_time if at_time is not None else _time.time()) // TOTP_PERIOD)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(value % (10 ** TOTP_DIGITS)).zfill(TOTP_DIGITS)
+
+
+def verify_totp(secret: str, code: str, window: int = 1) -> bool:
+    """
+    Verifie un code en tolerant ±window pas de 30 s (derive d'horloge).
+    Comparaison en temps constant.
+    """
+    import hmac as _hmac
+    import time as _time
+    candidate = (code or "").strip().replace(" ", "")
+    if not secret or not candidate.isdigit() or len(candidate) != TOTP_DIGITS:
+        return False
+    now = _time.time()
+    for step in range(-window, window + 1):
+        expected = totp_code(secret, now + step * TOTP_PERIOD)
+        if _hmac.compare_digest(expected, candidate):
+            return True
+    return False
+
+
+def totp_provisioning_uri(secret: str, username: str) -> str:
+    """URI otpauth:// a saisir/scanner dans l'application d'authentification."""
+    from urllib.parse import quote
+    label = quote(f"Fiskr:{username}")
+    return (f"otpauth://totp/{label}?secret={secret}&issuer=Fiskr"
+            f"&algorithm=SHA1&digits={TOTP_DIGITS}&period={TOTP_PERIOD}")
+
+
 # ------------------ CLES D'API TECHNIQUES (comptes de service) ------------------
 
 API_KEY_PREFIX_LEN = 12  # « fsk_ » + 8 caracteres d'identification
@@ -188,7 +241,8 @@ async def get_current_user(
         "username": user.username,
         "full_name": user.full_name,
         "role": user.role,
-        "roles": parse_roles(user.role)
+        "roles": parse_roles(user.role),
+        "totp_enabled": bool(user.totp_enabled),
     }
 
 def require_roles(*allowed: str):

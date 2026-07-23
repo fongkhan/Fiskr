@@ -195,6 +195,12 @@
                 <input type="password" id="password" required autocomplete="current-password" placeholder="••••••••">
             </div>
 
+            <div class="form-group" id="totp-group" style="display: none;">
+                <label for="totp-code">Code de vérification (MFA)</label>
+                <input type="text" id="totp-code" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+                       autocomplete="one-time-code" placeholder="123456">
+            </div>
+
             <button type="submit" id="submit-btn" class="btn-login">
                 Se Connecter
             </button>
@@ -224,16 +230,31 @@
             submitBtn.textContent = "Connexion en cours...";
 
             try {
+                const totpGroup = document.getElementById("totp-group");
+                const totpInput = document.getElementById("totp-code");
+                const body = { username, password };
+                if (totpGroup.style.display !== "none" && totpInput.value.trim()) {
+                    body.totp_code = totpInput.value.trim();
+                }
                 const response = await fetch("/api/auth/login", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ username, password })
+                    body: JSON.stringify(body)
                 });
 
                 const data = await response.json();
 
                 if (!response.ok) {
-                    errorMessage.textContent = data.detail || "Identifiants incorrects.";
+                    // MFA activée : le serveur redemande le champ code sans compter d'échec
+                    if (data.detail && typeof data.detail === "object" && data.detail.totp_required) {
+                        totpGroup.style.display = "block";
+                        totpInput.required = true;
+                        totpInput.focus();
+                        errorMessage.textContent = data.detail.message || "Code de vérification requis.";
+                    } else {
+                        errorMessage.textContent = (typeof data.detail === "string" && data.detail)
+                            || "Identifiants incorrects.";
+                    }
                     errorBanner.style.display = "flex";
                     submitBtn.disabled = false;
                     submitBtn.textContent = "Se Connecter";

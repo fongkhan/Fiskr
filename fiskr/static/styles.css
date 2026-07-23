@@ -1637,3 +1637,24 @@ th.sortable.sort-desc::after {
     text-transform: uppercase;
     letter-spacing: 0.06em;
 }
+
+/* ===== Lot opérations : actions en masse ===== */
+
+.bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    padding: 0.55rem 0.75rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--color-primary);
+    border-radius: 8px;
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.bulk-count {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-right: 0.25rem;
+}

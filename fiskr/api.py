@@ -60,7 +60,8 @@ from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
     create_access_token, decode_access_token, parse_roles, normalize_roles,
-    validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN
+    validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN,
+    generate_totp_secret, verify_totp, totp_provisioning_uri
 )
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
@@ -75,7 +76,8 @@ from fiskr.settings import (
     BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
-    sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES
+    sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
+    digest_settings, SETTING_DIGEST
 )
 
 
@@ -374,6 +376,72 @@ async def _cron_sync_scheduler():
         except Exception as e:
             logger.error(f"Planificateur cron en echec sur ce tick : {e}")
 
+def build_kpi_digest(db) -> Dict[str, Any]:
+    """
+    Synthese conformite du digest periodique : etat de la file de travail,
+    retards SLA, homologations en attente, volumetrie 24 h et sante des
+    dernieres synchronisations — le tour de table du matin, sans se connecter.
+    """
+    now = datetime.utcnow()
+    day_ago = now - timedelta(hours=24)
+    open_q = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    last_sync_by_source: Dict[str, str] = {}
+    for row in db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(60).all():
+        key = (row.source or "?").upper()
+        if key not in last_sync_by_source:
+            when = row.executed_at.strftime("%d/%m %H:%M") if row.executed_at else "?"
+            last_sync_by_source[key] = f"{row.status} ({when})"
+    return {
+        "Alertes ouvertes — criblage": open_q.filter(
+            (Alert.channel == "SCREENING") | (Alert.channel.is_(None))).count(),
+        "Alertes ouvertes — filtrage": open_q.filter(Alert.channel == "FILTERING").count(),
+        "Alertes en retard SLA": db.query(Alert).filter(
+            Alert.status.in_(ALERT_OPEN_STATUSES), Alert.due_at.isnot(None),
+            Alert.due_at < now).count(),
+        "Décisions en attente 4-yeux": db.query(Alert).filter(
+            Alert.status == "PENDING_VALIDATION").count(),
+        "Snapshots à homologuer": db.query(Snapshot).filter(
+            Snapshot.status == "PENDING_REVIEW").count(),
+        "Alertes créées (24 h)": db.query(Alert).filter(Alert.created_at >= day_ago).count(),
+        "Alertes clôturées (24 h)": db.query(Alert).filter(
+            Alert.decided_at.isnot(None), Alert.decided_at >= day_ago).count(),
+        "Dernières synchronisations": "; ".join(
+            f"{s} : {st}" for s, st in sorted(last_sync_by_source.items())) or "aucune",
+    }
+
+async def _digest_scheduler():
+    """
+    Digest KPI periodique : chaque minute, si le reglage est actif et que son
+    expression cron matche, la synthese part par email/webhooks (notify.py,
+    fire-and-forget). Independant du planificateur de synchronisation : il
+    tourne meme quand les syncs automatiques sont desactivees.
+    """
+    from fiskr.cron import cron_matches, CronError
+
+    while True:
+        now = datetime.now()
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        tick = datetime.now()
+        try:
+            db = next(get_db())
+            try:
+                digest_cfg = digest_settings(db)
+                if not digest_cfg["enabled"]:
+                    continue
+                try:
+                    if not cron_matches(digest_cfg["cron"], tick):
+                        continue
+                except CronError as bad:
+                    logger.error(f"Cron du digest invalide ({digest_cfg['cron']}) : {bad}")
+                    continue
+                payload = build_kpi_digest(db)
+            finally:
+                db.close()
+            logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
+            notify_event("kpi_digest", payload)
+        except Exception as e:
+            logger.error(f"Digest KPI en échec sur ce tick : {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -388,11 +456,14 @@ async def lifespan(app: FastAPI):
         scheduler_task = asyncio.create_task(_cron_sync_scheduler())
     # Inbox CFT surveillee (auto-desactivee si batch.inbox_dir est vide)
     inbox_task = asyncio.create_task(_inbox_poller())
+    # Digest KPI periodique (reglage a chaud notifications.digest)
+    digest_task = asyncio.create_task(_digest_scheduler())
     yield
     # Shutdown
     if scheduler_task:
         scheduler_task.cancel()
     inbox_task.cancel()
+    digest_task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -514,6 +585,7 @@ class DeltaRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    totp_code: Optional[str] = None
 
 
 # ------------------ AUTHENTICATION ENDPOINTS ------------------
@@ -549,7 +621,7 @@ async def login(
             detail=f"Compte temporairement verrouillé après trop d'échecs. Réessayez dans {remaining} minute(s)."
         )
 
-    if not user or not verify_password(request_data.password, user.hashed_password, user.salt):
+    def _register_failure(reason: str):
         if user:
             user.failed_login_count = (user.failed_login_count or 0) + 1
             if user.failed_login_count >= sec["max_login_failures"]:
@@ -559,12 +631,32 @@ async def login(
                                  detail=f"Verrouillé {sec['lockout_minutes']} min après "
                                         f"{sec['max_login_failures']} échecs consécutifs (IP {client_ip}).")
         log_admin_action(db, request_data.username, "LOGIN_FAILED",
-                         target=request_data.username, detail=f"IP {client_ip}")
+                         target=request_data.username, detail=f"{reason} (IP {client_ip})")
         db.commit()
+
+    if not user or not verify_password(request_data.password, user.hashed_password, user.salt):
+        _register_failure("Mot de passe incorrect")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Identifiants incorrects. Veuillez réessayer."
         )
+
+    # MFA TOTP : deuxieme facteur exige quand il est active sur le compte.
+    # Le mot de passe seul ne suffit plus ; un code absent redemande le champ
+    # (totp_required) sans compter d'echec, un code faux compte comme un echec.
+    if user.totp_enabled and user.totp_secret:
+        if not (request_data.totp_code or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"totp_required": True,
+                        "message": "Code de vérification requis (MFA activée sur ce compte)."}
+            )
+        if not verify_totp(user.totp_secret, request_data.totp_code):
+            _register_failure("Code MFA incorrect")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Code de vérification incorrect. Veuillez réessayer."
+            )
 
     # Succes : remise a zero du compteur d'echecs + traçage de la session
     user.failed_login_count = 0
@@ -606,6 +698,105 @@ async def logout(
     db.commit()
     response.delete_cookie("fiskr_access_token")
     return {"message": "Déconnexion réussie."}
+
+# ------------------ MFA TOTP (double authentification) ------------------
+
+class TotpConfirmRequest(BaseModel):
+    code: str
+
+class TotpDisableRequest(BaseModel):
+    password: str
+
+def _current_human_user(db: Session, current_user: Dict[str, Any]) -> User:
+    """Charge l'utilisateur humain courant ; les cles d'API n'ont pas de MFA."""
+    if current_user.get("is_api_key"):
+        raise HTTPException(status_code=400, detail="La MFA ne s'applique pas aux clés d'API.")
+    user = db.query(User).filter(User.username == current_user["username"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    return user
+
+@app.post("/api/auth/totp/setup")
+async def totp_setup(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Demarre l'enrolement MFA : genere un secret TOTP (montre une seule fois,
+    a saisir/scanner dans l'application d'authentification). La MFA ne
+    devient active qu'apres confirmation d'un premier code valide.
+    """
+    user = _current_human_user(db, current_user)
+    if user.totp_enabled:
+        raise HTTPException(status_code=409, detail="La MFA est déjà activée sur ce compte.")
+    secret = generate_totp_secret()
+    user.totp_secret = secret
+    user.totp_enabled = False
+    db.commit()
+    return {
+        "secret": secret,
+        "otpauth_uri": totp_provisioning_uri(secret, user.username),
+        "message": "Saisissez le secret dans votre application d'authentification puis confirmez avec un code.",
+    }
+
+@app.post("/api/auth/totp/confirm")
+async def totp_confirm(
+    payload: TotpConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Active la MFA apres verification d'un premier code (preuve d'enrolement)."""
+    user = _current_human_user(db, current_user)
+    if user.totp_enabled:
+        raise HTTPException(status_code=409, detail="La MFA est déjà activée sur ce compte.")
+    if not user.totp_secret:
+        raise HTTPException(status_code=400, detail="Aucun enrôlement en cours : lancez d'abord la configuration.")
+    if not verify_totp(user.totp_secret, payload.code):
+        raise HTTPException(status_code=400, detail="Code incorrect : vérifiez l'application d'authentification.")
+    user.totp_enabled = True
+    log_admin_action(db, user.username, "MFA_ENABLED", target=user.username)
+    db.commit()
+    return {"message": "MFA activée : un code sera demandé à chaque connexion."}
+
+@app.post("/api/auth/totp/disable")
+async def totp_disable(
+    payload: TotpDisableRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Desactive la MFA (mot de passe exige : un poste laisse ouvert ne suffit pas)."""
+    user = _current_human_user(db, current_user)
+    if not user.totp_enabled and not user.totp_secret:
+        raise HTTPException(status_code=409, detail="La MFA n'est pas activée sur ce compte.")
+    if not verify_password(payload.password, user.hashed_password, user.salt):
+        raise HTTPException(status_code=401, detail="Mot de passe incorrect.")
+    user.totp_enabled = False
+    user.totp_secret = None
+    log_admin_action(db, user.username, "MFA_DISABLED", target=user.username)
+    db.commit()
+    return {"message": "MFA désactivée."}
+
+@app.post("/api/users/{user_id}/totp/reset")
+async def totp_admin_reset(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Reinitialisation MFA par un admin (telephone perdu) : supprime le secret,
+    l'utilisateur se reconnecte au mot de passe seul et peut re-enroler.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    if not user.totp_enabled and not user.totp_secret:
+        raise HTTPException(status_code=409, detail="La MFA n'est pas activée sur ce compte.")
+    user.totp_enabled = False
+    user.totp_secret = None
+    log_admin_action(db, admin["username"], "MFA_RESET", target=user.username,
+                     detail="Réinitialisation MFA par un administrateur.")
+    db.commit()
+    return {"message": f"MFA réinitialisée pour {user.username}."}
 
 class ChangePasswordRequest(BaseModel):
     old_password: str
@@ -705,7 +896,8 @@ async def list_users(
             "full_name": u.full_name,
             "role": u.role,
             "roles": parse_roles(u.role),
-            "created_at": u.created_at.isoformat() if u.created_at else None
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "totp_enabled": bool(u.totp_enabled),
         }
         for u in users
     ]
@@ -3425,6 +3617,8 @@ class IngestionSettingsUpdate(BaseModel):
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
     alert_sla_hours: Optional[Dict[str, int]] = None
     notification_events: Optional[Dict[str, bool]] = None
+    # Digest KPI periodique : {"enabled": bool, "cron": "0 8 * * 1-5"}
+    digest: Optional[Dict[str, Any]] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -3458,6 +3652,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "backtest_max_gap_pct": bt_gap_value,
         "alert_sla_hours": alert_sla_hours(db),
         "notification_events": notification_events(db),
+        "digest": digest_settings(db),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -3498,7 +3693,8 @@ async def update_ingestion_settings(
     }
     changed = {k: v for k, v in updates.items() if v is not None}
     if (not changed and payload.backtest_max_gap_pct is None
-            and payload.alert_sla_hours is None and payload.notification_events is None):
+            and payload.alert_sla_hours is None and payload.notification_events is None
+            and payload.digest is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     before_state = _settings_payload(db)
     before_state.pop("sources", None)
@@ -3529,6 +3725,20 @@ async def update_ingestion_settings(
         merged_events = dict(notification_events(db))
         merged_events.update({e: bool(v) for e, v in payload.notification_events.items()})
         set_setting(db, SETTING_NOTIFICATIONS, merged_events, updated_by=admin_user["username"])
+    if payload.digest is not None:
+        from fiskr.cron import parse_cron, CronError
+        merged_digest = dict(digest_settings(db))
+        if "enabled" in payload.digest:
+            merged_digest["enabled"] = bool(payload.digest["enabled"])
+        if "cron" in payload.digest:
+            cron_expr = str(payload.digest.get("cron") or "").strip()
+            if cron_expr:
+                try:
+                    parse_cron(cron_expr)
+                except CronError as bad:
+                    raise HTTPException(status_code=400, detail=f"Expression cron du digest invalide : {bad}")
+                merged_digest["cron"] = cron_expr
+        set_setting(db, SETTING_DIGEST, merged_digest, updated_by=admin_user["username"])
     after_state = _settings_payload(db)
     after_state.pop("sources", None)
     delta = {k: v for k, v in after_state.items() if before_state.get(k) != v}
@@ -4907,6 +5117,70 @@ async def set_alert_priority(
                      f"Priorité {old_priority} → {new_priority}.")
     db.commit()
     return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
+
+class AlertBulkRequest(BaseModel):
+    ids: List[int]
+    action: str  # "assign" | "priority"
+    assignee: Optional[str] = None
+    priority: Optional[str] = None
+
+_ALERT_BULK_MAX = 200
+
+@app.post("/api/alerts/bulk")
+async def bulk_alert_action(
+    payload: AlertBulkRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Action en masse sur des alertes OUVERTES (≤ 200 a la fois) : assignation
+    ou changement de priorite. Memes regles que les actions unitaires
+    (assigner a un tiers = admin), meme journalisation : un AlertEvent par
+    alerte traitee — jamais d'action silencieuse. Les alertes cloturees ou
+    introuvables sont ignorees et restituees dans `skipped`.
+    """
+    ids = list(dict.fromkeys(payload.ids or []))
+    if not ids:
+        raise HTTPException(status_code=400, detail="Aucune alerte sélectionnée.")
+    if len(ids) > _ALERT_BULK_MAX:
+        raise HTTPException(status_code=400, detail=f"Maximum {_ALERT_BULK_MAX} alertes par action en masse.")
+    action = (payload.action or "").strip().lower()
+    if action not in ("assign", "priority"):
+        raise HTTPException(status_code=400, detail="Action en masse inconnue (assign ou priority).")
+
+    if action == "assign":
+        assignee = (payload.assignee or "").strip() or current_user["username"]
+        if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
+            raise HTTPException(status_code=403,
+                                detail="Seul un administrateur peut assigner des alertes à un autre analyste.")
+    else:
+        new_priority = (payload.priority or "").strip().upper()
+        if new_priority not in ALERT_PRIORITIES:
+            raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
+
+    alerts = {a.id: a for a in db.query(Alert).filter(Alert.id.in_(ids)).all()}
+    updated, skipped = [], []
+    for alert_id in ids:
+        alert = alerts.get(alert_id)
+        if alert is None or alert.status not in ALERT_OPEN_STATUSES:
+            skipped.append(alert_id)
+            continue
+        if action == "assign":
+            alert.assigned_to = assignee
+            if alert.status == "OPEN":
+                alert.status = "IN_PROGRESS"
+            _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED",
+                             f"Assignée à {assignee} (action en masse).")
+        else:
+            old_priority = alert.priority or "—"
+            alert.priority = new_priority
+            alert.due_at = compute_due_at(db, new_priority, alert.created_at)
+            _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
+                             f"Priorité {old_priority} → {new_priority} (action en masse).")
+        updated.append(alert_id)
+    db.commit()
+    return {"updated": updated, "skipped": skipped,
+            "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."}
 
 # Pieces jointes des alertes (justificatifs d'instruction)
 ALERT_EVIDENCE_DIR = PROJECT_ROOT / "alert_evidence"

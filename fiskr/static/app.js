@@ -157,7 +157,7 @@ function showToast(message, type = "info", durationMs = 4500) {
 }
 
 // Modale générique : résout une Promise (bouton, Escape = annulation)
-function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel }) {
+function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password }) {
     return new Promise((resolve) => {
         const overlay = document.getElementById("app-dialog");
         const titleEl = document.getElementById("app-dialog-title");
@@ -179,6 +179,7 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
         if (input || textarea) {
             inputEl = document.createElement(textarea ? "textarea" : "input");
             if (textarea) inputEl.rows = 4;
+            if (!textarea && password) inputEl.type = "password";
             inputEl.placeholder = placeholder || "";
             inputEl.id = "app-dialog-input";
             fieldWrap.appendChild(inputEl);
@@ -222,7 +223,7 @@ function confirmDialog(message, options = {}) {
 function promptDialog(title, options = {}) {
     return _openAppDialog({ title, message: options.message || "", input: !options.textarea,
                             textarea: options.textarea, placeholder: options.placeholder,
-                            required: options.required !== false,
+                            required: options.required !== false, password: options.password,
                             confirmLabel: options.confirmLabel || "Valider" });
 }
 
@@ -618,6 +619,7 @@ function switchTab(tabId) {
     if (tabId === "settings") {
         fetchIngestionSettings();
         fetchApiKeys();
+        refreshMfaCard();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -2690,7 +2692,7 @@ function renderUsersTable(users) {
     if (!tbody) return;
     
     if (!users || users.length === 0) {
-        tableEmpty(tbody, 6, "Aucun utilisateur trouvé.", "👥");
+        tableEmpty(tbody, 7, "Aucun utilisateur trouvé.", "👥");
         return;
     }
 
@@ -2715,6 +2717,10 @@ function renderUsersTable(users) {
                 <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: var(--success-soft-text); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}</td>
                 <td>${escapeHtml(u.full_name || "—")}</td>
                 <td>${roleBadge}</td>
+                <td>${u.totp_enabled
+                    ? `<span title="Double authentification active" style="color: var(--success-soft-text); font-weight: 600; font-size: 0.8rem;">🛡 Active</span>
+                       <button class="btn btn-sm" onclick="resetUserTotp(${u.id}, '${escapeHtml(u.username)}')" title="Réinitialiser la MFA (téléphone perdu)" style="background: var(--surface-3); margin-left: 6px;">↺</button>`
+                    : `<span style="color: var(--text-muted); font-size: 0.8rem;">—</span>`}</td>
                 <td style="font-size: 0.85rem; color: var(--text-muted);">${dateFormatted}</td>
                 <td style="text-align: right;">
                     <button class="btn btn-sm" onclick="openEditUserModal(${u.id})" style="background: var(--surface-3); margin-right: 6px;">✏️ Éditer</button>
@@ -2981,6 +2987,12 @@ async function fetchIngestionSettings() {
             const el = document.getElementById(id);
             if (el) el.checked = !!notif[event];
         }
+        // Digest KPI périodique
+        const digest = ingestionSettings.digest || {};
+        const digestEnabledEl = document.getElementById("setting-digest-enabled");
+        const digestCronEl = document.getElementById("setting-digest-cron");
+        if (digestEnabledEl) digestEnabledEl.checked = !!digest.enabled;
+        if (digestCronEl) digestCronEl.value = digest.cron || "0 8 * * 1-5";
         // Encart de l'onglet Homologation : parcours actif seulement si le mode l'est
         const modeHint = document.getElementById("review-mode-hint");
         if (modeHint) modeHint.classList.toggle("hidden", !!ingestionSettings.require_approval);
@@ -3016,6 +3028,10 @@ async function saveIngestionSettings() {
             alert_pending_validation: !!document.getElementById("setting-notify-pending-validation")?.checked,
             snapshot_pending_review: !!document.getElementById("setting-notify-pending-review")?.checked,
             sync_error: !!document.getElementById("setting-notify-sync-error")?.checked,
+        },
+        digest: {
+            enabled: !!document.getElementById("setting-digest-enabled")?.checked,
+            cron: (document.getElementById("setting-digest-cron")?.value || "").trim(),
         },
     };
     try {
@@ -3676,7 +3692,7 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const prioFilterEl = document.getElementById(conf.priorityFilter);
         if (prioFilterEl && prioFilterEl.value) params.set("priority", prioFilterEl.value);
-        tableLoading(document.querySelector(`#${conf.table} tbody`), 9);
+        tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
         const response = await apiFetch(`/api/alerts?${params}`);
         if (!response.ok) return;
         const data = await response.json();
@@ -3721,16 +3737,20 @@ function alertStatusBadge(status) {
 function renderAlertsTable(channel, items) {
     const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
     if (!tbody) return;
+    // Nouvelle page = nouvelle sélection (les cases ne survivent pas au rendu)
+    clearAlertSelection(channel, false);
     if (!items.length) {
-        tableEmpty(tbody, 9, "Aucune alerte pour ce filtre.", "✅");
+        tableEmpty(tbody, 10, "Aucune alerte pour ce filtre.", "✅");
         return;
     }
     tbody.innerHTML = items.map(a => {
         const subject = channel === "FILTERING"
             ? describeFilteringSubject(a)
             : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+        const selectable = !a.status.startsWith("CLOSED");
         return `
         <tr>
+            <td>${selectable ? `<input type="checkbox" class="alert-select" data-alert-id="${a.id}" onchange="toggleAlertSelection('${channel}', ${a.id}, this.checked)" aria-label="Sélectionner l'alerte ${a.id}">` : ""}</td>
             <td>${alertPriorityBadge(a)}</td>
             <td>${formatDateTime(a.created_at)}</td>
             <td>${subject}</td>
@@ -5532,4 +5552,179 @@ async function openClient360(clientId) {
                     : '<p style="font-size: 0.85rem; color: var(--text-muted);">Aucune paire.</p>'}
             </div>`;
     } catch (e) { console.error("Client 360 error:", e); }
+}
+
+// =========================================================================
+// LOT OPERATIONS : ACTIONS EN MASSE + MFA TOTP
+// =========================================================================
+
+// --- Sélection multiple dans les files d'alertes ---
+const selectedAlertsByChannel = { SCREENING: new Set(), FILTERING: new Set() };
+
+function updateBulkBar(channel) {
+    const prefix = channel === "FILTERING" ? "filtering" : "screening";
+    const bar = document.getElementById(`${prefix}-bulk-bar`);
+    const count = document.getElementById(`${prefix}-bulk-count`);
+    const selected = selectedAlertsByChannel[channel];
+    if (!bar) return;
+    bar.classList.toggle("hidden", selected.size === 0);
+    if (count) count.textContent = `${selected.size} sélectionnée(s)`;
+}
+
+function toggleAlertSelection(channel, alertId, checked) {
+    const selected = selectedAlertsByChannel[channel];
+    if (checked) selected.add(alertId); else selected.delete(alertId);
+    updateBulkBar(channel);
+}
+
+function toggleSelectAllAlerts(channel, checked) {
+    const conf = ALERT_CHANNEL_CONF[channel];
+    const selected = selectedAlertsByChannel[channel];
+    document.querySelectorAll(`#${conf.table} tbody .alert-select`).forEach(box => {
+        box.checked = checked;
+        const id = parseInt(box.dataset.alertId, 10);
+        if (checked) selected.add(id); else selected.delete(id);
+    });
+    updateBulkBar(channel);
+}
+
+function clearAlertSelection(channel, uncheckBoxes = true) {
+    selectedAlertsByChannel[channel].clear();
+    const prefix = channel === "FILTERING" ? "filtering" : "screening";
+    const selectAll = document.getElementById(`${prefix}-select-all`);
+    if (selectAll) selectAll.checked = false;
+    if (uncheckBoxes) {
+        const conf = ALERT_CHANNEL_CONF[channel];
+        document.querySelectorAll(`#${conf.table} tbody .alert-select`).forEach(b => { b.checked = false; });
+    }
+    updateBulkBar(channel);
+}
+
+async function runBulkAlertAction(channel, payload, confirmMsg) {
+    const ids = Array.from(selectedAlertsByChannel[channel]);
+    if (!ids.length) { showToast("Aucune alerte sélectionnée.", "error"); return; }
+    const ok = await confirmDialog(confirmMsg.replace("{n}", ids.length));
+    if (!ok) return;
+    try {
+        const response = await apiFetch("/api/alerts/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids, ...payload }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Action en masse refusée."), "error");
+            return;
+        }
+        showToast(data.message || "Action en masse effectuée.", "success");
+        clearAlertSelection(channel, false);
+        fetchAlerts(channel);
+        refreshSidebarCounters();
+    } catch (e) { console.error("Bulk action error:", e); }
+}
+
+function bulkAssignSelected(channel) {
+    runBulkAlertAction(channel, { action: "assign" },
+        "S'assigner les {n} alerte(s) sélectionnée(s) ?");
+}
+
+function bulkPrioritySelected(channel) {
+    const prefix = channel === "FILTERING" ? "filtering" : "screening";
+    const priority = document.getElementById(`${prefix}-bulk-priority`)?.value;
+    if (!priority) { showToast("Choisissez d'abord une priorité.", "error"); return; }
+    runBulkAlertAction(channel, { action: "priority", priority },
+        `Passer les {n} alerte(s) sélectionnée(s) en priorité ${priority} (échéance SLA recalculée) ?`);
+}
+
+// --- MFA TOTP (carte Paramètres + réinitialisation admin) ---
+async function refreshMfaCard() {
+    const statusEl = document.getElementById("mfa-status");
+    const actionsEl = document.getElementById("mfa-actions");
+    if (!statusEl || !actionsEl) return;
+    try {
+        const response = await apiFetch("/api/auth/me", { silent: true });
+        if (!response.ok) return;
+        const me = (await response.json()).user || {};
+        const enabled = !!me.totp_enabled;
+        statusEl.innerHTML = enabled
+            ? `<span style="color: var(--success-soft-text); font-weight: 700;">🛡 MFA active</span> — un code est demandé à chaque connexion.`
+            : `<span style="color: var(--color-warning); font-weight: 700;">MFA inactive</span> — la connexion repose sur le seul mot de passe.`;
+        actionsEl.innerHTML = enabled
+            ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="disableTotp()">Désactiver la MFA…</button>`
+            : `<button class="btn btn-sm btn-primary" onclick="startTotpSetup()">Activer la MFA…</button>`;
+        const setupZone = document.getElementById("mfa-setup-zone");
+        if (setupZone && enabled) setupZone.classList.add("hidden");
+    } catch (e) { console.error("MFA card error:", e); }
+}
+
+async function startTotpSetup() {
+    try {
+        const response = await apiFetch("/api/auth/totp/setup", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Impossible de démarrer l'enrôlement."), "error");
+            return;
+        }
+        document.getElementById("mfa-secret").textContent = data.secret;
+        document.getElementById("mfa-uri").textContent = data.otpauth_uri;
+        document.getElementById("mfa-confirm-code").value = "";
+        document.getElementById("mfa-setup-zone").classList.remove("hidden");
+        document.getElementById("mfa-confirm-code").focus();
+    } catch (e) { console.error("TOTP setup error:", e); }
+}
+
+async function confirmTotp() {
+    const code = (document.getElementById("mfa-confirm-code")?.value || "").trim();
+    if (!code) { showToast("Saisissez le code affiché par l'application.", "error"); return; }
+    try {
+        const response = await apiFetch("/api/auth/totp/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Code refusé."), "error");
+            return;
+        }
+        showToast(data.message || "MFA activée.", "success");
+        document.getElementById("mfa-setup-zone").classList.add("hidden");
+        refreshMfaCard();
+    } catch (e) { console.error("TOTP confirm error:", e); }
+}
+
+async function disableTotp() {
+    const password = await promptDialog("Mot de passe requis pour désactiver la MFA :",
+                                        { password: true, placeholder: "Mot de passe" });
+    if (!password) return;
+    try {
+        const response = await apiFetch("/api/auth/totp/disable", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Désactivation refusée."), "error");
+            return;
+        }
+        showToast(data.message || "MFA désactivée.", "success");
+        refreshMfaCard();
+    } catch (e) { console.error("TOTP disable error:", e); }
+}
+
+async function resetUserTotp(userId, username) {
+    const ok = await confirmDialog(
+        `Réinitialiser la MFA de @${username} ? Le compte se reconnectera au mot de passe seul et pourra ré-enrôler un téléphone.`);
+    if (!ok) return;
+    try {
+        const response = await apiFetch(`/api/users/${userId}/totp/reset`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Réinitialisation refusée."), "error");
+            return;
+        }
+        showToast(data.message || "MFA réinitialisée.", "success");
+        fetchUsersList();
+    } catch (e) { console.error("TOTP reset error:", e); }
 }
