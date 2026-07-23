@@ -120,3 +120,12 @@ ssie:
 # les webhooks recoivent un POST JSON {event, label, at, data}.
 notifications:
   webhooks: []                  # ex. ["https://hooks.example.com/fiskr"]
+
+# Criblage batch (campagnes persistees) + inbox CFT
+# inbox_dir : repertoire ou le moniteur de transfert (CFT/SFTP) depose les
+# fichiers clients CSV — chaque fichier stable devient une campagne criblee
+# automatiquement puis est archive. Vide = scrutation desactivee.
+batch:
+  inbox_dir: ""
+  inbox_poll_seconds: 60
+  archive_dir: ""               # defaut : <inbox_dir>/archive

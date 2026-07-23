@@ -199,6 +199,8 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Exports CSV** (Excel FR : `;` + BOM) : alertes, journal d'audit et vue base des listes, avec les filtres de l'écran (`/api/export/*.csv`).
 * **Journal des actions d'administration** (`admin_audit_log`, append-only) : comptes, réglages (avant → après), purges, révocations — sous-onglet dédié de l'Audit.
 * **Notifications métier** : email (SMTP) + webhooks génériques (`notifications.webhooks`), par événement (nouvelle alerte, 4-yeux en attente, snapshot à homologuer, échec de sync), fire-and-forget — jamais bloquant.
+* **Graphe de relations & règle des 50 % (OFAC)** : les `ProfileRelationships` du SDN_ADVANCED sont extraits (détenu par, agit pour, associé, famille, dirigeant, soutien) et rafraîchis à chaque sync ; relations manuelles avec % de détention (reviewer/admin). Le **risque hérité par détention majoritaire** (≥ 50 %, transitif, présomption sur les liens OFAC sans %) est affiché dans la fiche et annoté dans le decision tree de chaque criblage.
+* **Campagnes de criblage batch persistées** : un CSV de clients (upload ou **dépôt CFT dans l'inbox surveillée** `batch.inbox_dir`) est criblé côté serveur en tâche de fond avec les mêmes garanties que le temps réel (quality gate, liste blanche, règles, audit immuable, alertes) — progression en direct, résultats filtrables, export CSV, rejets quality gate conservés avec motif.
 
 ### 🖥️ Interface (dashboard)
 

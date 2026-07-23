@@ -89,6 +89,7 @@ class OFACParserContext:
         self.location_countries = {} # location_id -> Country ISO2
         self.id_documents = {}  # identity_id -> [doc_dict, ...]
         self.sanctions_programs = {}  # profile_id -> [program names]
+        self.relationships = []  # [{"from_id", "to_id", "type_id"}] (ProfileRelationships)
 
 
 def _local_ns(elem: ET.Element) -> str:
@@ -203,6 +204,39 @@ def elem_to_dict(elem, references):
             d[tag] = []
         d[tag].append(child_dict)
     return d
+
+def _harvest_profile_relationship(elem: ET.Element, parser_ctx: OFACParserContext) -> None:
+    """
+    Recolte un lien entre profils (ProfileRelationships du SDN_ADVANCED) :
+    From-ProfileID --[RelationTypeID]--> To-ProfileID. Les libelles de types
+    sont resolus apres la passe 1 via le referentiel RelationType.
+    """
+    from_id = get_attrib_insensitive(elem, 'From-ProfileID') or get_attrib_insensitive(elem, 'FromProfileID')
+    to_id = get_attrib_insensitive(elem, 'To-ProfileID') or get_attrib_insensitive(elem, 'ToProfileID')
+    type_id = get_attrib_insensitive(elem, 'RelationTypeID')
+    if from_id and to_id:
+        parser_ctx.relationships.append({
+            "from_id": str(from_id), "to_id": str(to_id), "type_id": str(type_id or ""),
+        })
+
+
+# Correspondance libelle OFAC -> code pivot de relation (RELATION_TYPES)
+def _relation_code_from_label(label: str) -> str:
+    lowered = (label or "").lower()
+    if "owned" in lowered or "controlled" in lowered:
+        return "OWNED_BY"
+    if "acting" in lowered or "on behalf" in lowered:
+        return "ACTING_FOR"
+    if "associate" in lowered:
+        return "ASSOCIATE_OF"
+    if "family" in lowered:
+        return "FAMILY_OF"
+    if "leader" in lowered or "leading role" in lowered:
+        return "LEADER_OF"
+    if "support" in lowered:
+        return "PROVIDING_SUPPORT"
+    return "OTHER"
+
 
 def _harvest_reference_sets(elem: ET.Element, parser_ctx: OFACParserContext) -> None:
     """Charge tous les jeux de valeurs de reference (PartyType, Country, FeatureType...)."""
@@ -523,20 +557,26 @@ def format_alias_name(alias_dict, identity_dict):
     parts_list.sort(key=lambda x: x[0])
     return " ".join([x[1] for x in parts_list])
 
-def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+def parse_ofac_advanced_xml(file_path: str,
+                            relations_out: Optional[List[Dict[str, Any]]] = None
+                            ) -> Generator[Dict[str, Any], None, None]:
     """
     Sequentially parses the OFAC Advanced XML using ElementTree.iterparse
     to prevent memory ballooning. Yields Pivot Schema dicts.
+
+    `relations_out` : liste optionnelle que l'appelant fournit pour recevoir
+    les liens entre profils (ProfileRelationships) resolus en codes pivots —
+    {"from_entity_id", "to_entity_id", "relation_type", "relation_label"}.
     """
     parser_ctx = OFACParserContext()
 
-    # Pass 1: recolte des referentiels, localisations, documents d'identite et
-    # programmes de sanctions (SanctionsEntries suit DistinctParties dans le
-    # fichier officiel, d'ou la necessite de deux passes). Le streaming a suivi
-    # de profondeur garantit que les enfants d'une cible ne sont jamais vides
-    # avant la lecture de la cible.
+    # Pass 1: recolte des referentiels, localisations, documents d'identite,
+    # programmes de sanctions et liens entre profils (SanctionsEntries suit
+    # DistinctParties dans le fichier officiel, d'ou la necessite de deux
+    # passes). Le streaming a suivi de profondeur garantit que les enfants
+    # d'une cible ne sont jamais vides avant la lecture de la cible.
     for local_name, elem in _stream_target_elements(
-        file_path, {'ReferenceValueSets', 'Location', 'IDRegDocument', 'SanctionsEntry'}
+        file_path, {'ReferenceValueSets', 'Location', 'IDRegDocument', 'SanctionsEntry', 'ProfileRelationship'}
     ):
         if local_name == 'ReferenceValueSets':
             _harvest_reference_sets(elem, parser_ctx)
@@ -546,6 +586,20 @@ def parse_ofac_advanced_xml(file_path: str) -> Generator[Dict[str, Any], None, N
             _harvest_id_document(elem, parser_ctx)
         elif local_name == 'SanctionsEntry':
             _harvest_sanctions_entry(elem, parser_ctx)
+        elif local_name == 'ProfileRelationship':
+            _harvest_profile_relationship(elem, parser_ctx)
+
+    # Resolution des liens entre profils (libelles du referentiel RelationType)
+    if relations_out is not None:
+        relation_labels = parser_ctx.references.get('RelationType', {})
+        for rel in parser_ctx.relationships:
+            label = relation_labels.get(rel["type_id"], "")
+            relations_out.append({
+                "from_entity_id": rel["from_id"],
+                "to_entity_id": rel["to_id"],
+                "relation_type": _relation_code_from_label(label),
+                "relation_label": label or None,
+            })
 
     # Pass 2: Parse DistinctParties
     for _, elem in _stream_target_elements(file_path, {'DistinctParty'}):

@@ -317,6 +317,109 @@ class AdminAuditLog(Base):
 ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
 ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE", "CLOSED_BY_RULE")
 
+# Types de relations entre entites listees (schema pivot). Les types OFAC
+# non reconnus sont conserves tels quels (colonne texte libre en plus du code).
+RELATION_TYPES = (
+    "OWNED_BY",          # detenu ou controle par (support de la regle des 50 %)
+    "ACTING_FOR",        # agit pour le compte de
+    "ASSOCIATE_OF",      # associe de
+    "FAMILY_OF",         # membre de la famille de
+    "LEADER_OF",         # dirigeant / role de direction dans
+    "PROVIDING_SUPPORT", # apporte un soutien a
+    "OTHER",
+)
+
+class EntityRelationship(Base):
+    """
+    Lien entre deux entites listees (graphe de relations / ownership) :
+    `from` --[relation]--> `to`, ex. FILIALE --OWNED_BY--> MAISON-MERE.
+    References par entity_id (stable a travers les snapshots). Sources :
+    extraction OFAC (ProfileRelationships du SDN_ADVANCED, rafraichie a chaque
+    ingestion) ou saisie manuelle (avec % de detention pour la regle des 50 %).
+    """
+    __tablename__ = "entity_relationships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    from_entity_id = Column(String(100), nullable=False, index=True)
+    to_entity_id = Column(String(100), nullable=False, index=True)
+    relation_type = Column(String(30), nullable=False)          # code pivot RELATION_TYPES
+    relation_label = Column(String(200), nullable=True)         # libelle source (ex. OFAC)
+    ownership_pct = Column(Float, nullable=True)                # % de detention (manuel)
+    source = Column(String(20), default="MANUAL", index=True)   # OFAC | MANUAL
+    comment = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+def refresh_source_relationships(db, source: str, relations) -> int:
+    """
+    Remplace l'integralite des relations d'une source (ex. OFAC) par le jeu
+    fourni — rafraichissement idempotent a chaque ingestion de la liste.
+    Les relations MANUAL ne sont jamais touchees. Commit par l'appelant.
+    """
+    db.query(EntityRelationship).filter(EntityRelationship.source == source) \
+      .delete(synchronize_session=False)
+    seen = set()
+    count = 0
+    for rel in relations or []:
+        key = (rel.get("from_entity_id"), rel.get("to_entity_id"), rel.get("relation_type"))
+        if not key[0] or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        db.add(EntityRelationship(
+            from_entity_id=rel["from_entity_id"],
+            to_entity_id=rel["to_entity_id"],
+            relation_type=rel.get("relation_type") or "OTHER",
+            relation_label=rel.get("relation_label"),
+            ownership_pct=rel.get("ownership_pct"),
+            source=source,
+        ))
+        count += 1
+    return count
+
+BATCH_CAMPAIGN_STATUSES = ("RUNNING", "DONE", "ERROR")
+
+class BatchCampaign(Base):
+    """
+    Campagne de criblage batch persistee : un fichier de clients ad hoc
+    (upload manuel ou depot CFT dans l'inbox surveillee) crible cote serveur
+    avec les MEMES garanties que le criblage unitaire (journal d'audit,
+    alertes, liste blanche, regles anti-faux positifs).
+    """
+    __tablename__ = "batch_campaigns"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    file_name = Column(String(255), nullable=True)
+    trigger = Column(String(20), default="manual")   # manual | inbox (depot CFT)
+    status = Column(String(20), default="RUNNING", index=True)
+    error_message = Column(Text, nullable=True)
+    screening_lists = Column(JSON, nullable=True)    # restriction eventuelle
+    total_clients = Column(Integer, default=0)
+    processed_clients = Column(Integer, default=0)
+    alert_count = Column(Integer, default=0)
+    no_match_count = Column(Integer, default=0)
+    rejected_count = Column(Integer, default=0)      # lignes refusees par le quality gate
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+class BatchResult(Base):
+    """Resultat unitaire d'une campagne batch (lie au journal d'audit immuable)."""
+    __tablename__ = "batch_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    campaign_id = Column(Integer, ForeignKey("batch_campaigns.id"), nullable=False, index=True)
+    client_id = Column(String(100), nullable=True)
+    client_name = Column(String(1000), nullable=True)
+    status = Column(String(20), nullable=False)      # ALERT | NO_MATCH | WHITELISTED | REJECTED
+    final_score = Column(Float, nullable=True)
+    watchlist_entity_id = Column(String(100), nullable=True)
+    watchlist_name = Column(String(1000), nullable=True)
+    list_type = Column(String(30), nullable=True)
+    audit_id = Column(Integer, nullable=True)
+    alert_id = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)              # motif de rejet quality gate
+
 FP_RULE_STATUSES = ("DRAFT", "PENDING_VALIDATION", "ACTIVE", "SUPERSEDED")
 
 class FpRule(Base):

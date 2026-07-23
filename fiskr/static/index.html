@@ -1119,6 +1119,27 @@
 
                 <div id="sub-sec-screening-batch" class="sub-tab-content hidden">
                     <div class="card">
+                        <h2>Campagnes de Criblage Batch (serveur)</h2>
+                        <p class="section-desc">Un fichier CSV de clients (colonnes <code>CLIENT_BASE</code>) est criblé côté serveur en tâche de fond, avec les <strong>mêmes garanties que le temps réel</strong> : quality gate, liste blanche, règles anti-faux positifs, journal d'audit immuable et alertes. Les fichiers déposés par un moniteur de transfert (CFT/SFTP) dans l'inbox surveillée (<code>batch.inbox_dir</code>) apparaissent ici automatiquement.</p>
+                        <div class="filter-bar">
+                            <input type="file" id="batch-file-input" accept=".csv" style="flex: 1 1 240px; padding: 0.5rem;">
+                            <input type="text" id="batch-campaign-name" placeholder="Nom de la campagne (optionnel)">
+                            <button class="btn btn-sm btn-primary" onclick="launchBatchCampaign()">🚀 Lancer la campagne</button>
+                        </div>
+                        <div class="table-container max-height-table" style="margin-top: 1rem;">
+                            <table id="batch-campaigns-table">
+                                <thead>
+                                    <tr>
+                                        <th>#</th><th>Nom</th><th>Origine</th><th>Statut</th>
+                                        <th>Progression</th><th>Alertes</th><th>Rejets</th><th>Lancée le</th><th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody><!-- Populated dynamically --></tbody>
+                            </table>
+                        </div>
+                        <div id="batch-campaign-detail" class="hidden" style="margin-top: 1.25rem;"></div>
+                    </div>
+                    <div class="card">
                         <h2>Simulateur de Screening de Masse (Batch Engine)</h2>
                         <p class="section-desc">Soumettez une liste de clients pour exécuter le criblage par blocage et extraire les alertes (simule le traitement distribué Spark).</p>
                         
@@ -1820,7 +1841,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.1"></script>
+    <script src="/static/app.js?v=6.2"></script>
 
 
 
