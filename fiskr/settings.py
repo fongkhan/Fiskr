@@ -31,6 +31,9 @@ SETTING_BACKTEST_REQUIRED = "review.backtest_required"
 # Blocking keys par canal : layouts ordonnes de composantes de cle
 SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
 SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
+# Planification cron par source de synchronisation (source -> expression 5 champs)
+SETTING_SYNC_SCHEDULES = "sync.schedules"
+SYNC_SOURCES = ("ofac", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi")
 # SLA de traitement des alertes : delai (heures) par priorite, 0 = pas d'echeance
 SETTING_ALERT_SLA_HOURS = "alerts.sla_hours"
 # Notifications metier : activation par evenement
@@ -160,6 +163,30 @@ def blocking_config_for(layout: list) -> Dict[str, Any]:
     blocking_cfg["custom_key_layout"] = list(layout)
     cfg["blocking"] = blocking_cfg
     return cfg
+
+
+def sync_schedules(db) -> Dict[str, str]:
+    """
+    Expression cron effective par source de synchronisation :
+    reglage a chaud (base) > config.yaml (sync.<source>.schedule) > repli sur
+    l'horaire quotidien global (sync.schedule_time -> « M H * * * »).
+    """
+    sync_cfg = config.get("sync", {}) or {}
+    try:
+        hour, minute = (int(p) for p in str(sync_cfg.get("schedule_time", "06:00")).split(":"))
+    except (TypeError, ValueError):
+        hour, minute = 6, 0
+    default_cron = f"{minute} {hour} * * *"
+    overrides = get_setting(db, SETTING_SYNC_SCHEDULES, {}) or {}
+    out: Dict[str, str] = {}
+    for source in SYNC_SOURCES:
+        expr = ""
+        if isinstance(overrides, dict):
+            expr = str(overrides.get(source) or "").strip()
+        if not expr:
+            expr = str((sync_cfg.get(source) or {}).get("schedule") or "").strip()
+        out[source] = expr or default_cron
+    return out
 
 
 def alert_sla_hours(db) -> Dict[str, int]:

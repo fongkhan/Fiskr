@@ -650,6 +650,19 @@
                             <p id="sync-schedule-info" class="section-desc" style="margin-top: 1rem;"></p>
                         </div>
 
+                        <!-- Planification cron par source -->
+                        <div class="card result-card">
+                            <h2>⏰ Planification par Source (cron)</h2>
+                            <p class="section-desc">Chaque source suit sa propre expression cron 5 champs (<code>minute heure jour mois jour-de-semaine</code>), modifiable à chaud (admin). Vide = retour au défaut (<code>config.yaml</code> ou horaire quotidien global). Exemples : <code>0 6 * * *</code> (tous les jours à 6h), <code>0 */4 * * *</code> (toutes les 4 h), <code>30 7 * * 1-5</code> (7h30 en semaine). Une même source ne se chevauche jamais.</p>
+                            <div class="table-container">
+                                <table id="cron-schedules-table">
+                                    <thead><tr><th>Source</th><th>Expression cron</th><th>Prochaine exécution</th></tr></thead>
+                                    <tbody><!-- Populated dynamically --></tbody>
+                                </table>
+                            </div>
+                            <button id="cron-save-btn" class="btn btn-primary hidden" style="margin-top: 1rem;" onclick="saveCronSchedules()">Enregistrer la planification</button>
+                        </div>
+
                         <!-- Sync Reports History Card -->
                         <div class="card result-card">
                             <h2>Rapports de Synchronisation</h2>
@@ -1833,6 +1846,31 @@
         </div>
     </div>
 
+    <!-- Graphe des relations (ownership) -->
+    <div id="graph-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 920px;">
+            <button class="close-modal" onclick="document.getElementById('graph-modal').classList.add('hidden')" aria-label="Fermer">&times;</button>
+            <h3 id="graph-modal-title" style="font-family: var(--font-heading);">🕸 Graphe des relations</h3>
+            <div class="filter-bar" style="margin: 0.75rem 0;">
+                <label style="margin: 0;" for="graph-depth">Profondeur</label>
+                <select id="graph-depth" style="width: auto; min-width: 90px;" onchange="openRelationGraph(currentGraphCenter)">
+                    <option value="1">1</option>
+                    <option value="2" selected>2</option>
+                    <option value="3">3</option>
+                </select>
+                <span id="graph-truncated-hint" class="hidden" style="color: var(--color-warning); font-size: 0.8rem;">⚠️ Graphe tronqué (60 nœuds max)</span>
+                <span style="margin-left: auto; font-size: 0.78rem; color: var(--text-muted);">Cliquez sur un nœud pour recentrer le graphe</span>
+            </div>
+            <div id="graph-svg-container" style="background: var(--panel-inset); border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden;"></div>
+            <div class="chart-legend" style="margin-top: 0.75rem;">
+                <span class="legend-item"><span class="legend-swatch" style="background: var(--color-alert);"></span>Détention majoritaire (règle des 50 %)</span>
+                <span class="legend-item"><span class="legend-swatch" style="background: var(--color-primary);"></span>Autre relation</span>
+                <span class="legend-item"><span class="legend-swatch" style="background: var(--color-secondary); border-radius: 50%;"></span>Personne physique</span>
+                <span class="legend-item"><span class="legend-swatch" style="background: var(--color-accent); border-radius: 50%;"></span>Personne morale / autre</span>
+            </div>
+        </div>
+    </div>
+
     <!-- Recherche globale (Ctrl+K) -->
     <div id="command-palette" class="hidden" role="dialog" aria-modal="true" aria-label="Recherche globale">
         <div class="palette-panel">
@@ -1841,7 +1879,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.2"></script>
+    <script src="/static/app.js?v=6.3"></script>
 
 
 
