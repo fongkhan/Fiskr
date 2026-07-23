@@ -533,6 +533,8 @@ async function checkAuthUser() {
             // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
             const settingsCard = document.getElementById("review-settings-card");
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
+            const apiKeysCard = document.getElementById("apikeys-card");
+            if (apiKeysCard) apiKeysCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -608,6 +610,7 @@ function switchTab(tabId) {
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
+        fetchApiKeys();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -5242,4 +5245,66 @@ function renderRelationGraph(data) {
             ${edgesSvg}
             ${nodesSvg}
         </svg>`;
+}
+
+// ------------------ CLÉS D'API TECHNIQUES (comptes de service) ------------------
+
+async function fetchApiKeys() {
+    const tbody = document.querySelector("#apikeys-table tbody");
+    if (!tbody) return;
+    try {
+        const response = await apiFetch("/api/apikeys", { silent: true });
+        if (!response.ok) return;
+        const items = (await response.json()).items || [];
+        if (!items.length) {
+            tableEmpty(tbody, 7, "Aucune clé d'API. Créez-en une pour vos intégrations systèmes.", "🔑");
+            return;
+        }
+        tbody.innerHTML = items.map(k => `
+            <tr>
+                <td><strong>${escapeHtml(k.name)}</strong></td>
+                <td><code>${escapeHtml(k.prefix)}…</code></td>
+                <td>${escapeHtml(k.roles)}</td>
+                <td>${formatDate(k.created_at)}<br><small style="color: var(--text-muted);">par @${escapeHtml(k.created_by || "?")}</small></td>
+                <td>${k.last_used_at ? formatDateTime(k.last_used_at) : "jamais"}</td>
+                <td>${k.active
+                    ? '<span style="color: var(--color-safe); font-weight: 700; font-size: 0.78rem;">ACTIVE</span>'
+                    : `<span style="color: var(--text-muted); font-weight: 700; font-size: 0.78rem;">RÉVOQUÉE</span><br><small style="color: var(--text-muted);">${formatDate(k.revoked_at)}</small>`}</td>
+                <td>${k.active ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeApiKey(${k.id}, '${escapeHtml(k.name)}')">Révoquer</button>` : ""}</td>
+            </tr>`).join("");
+    } catch (e) { /* silencieux */ }
+}
+
+async function createApiKey() {
+    const nameEl = document.getElementById("apikey-name");
+    const roleEl = document.getElementById("apikey-role");
+    const name = (nameEl?.value || "").trim();
+    if (!name) { showToast("Donnez un nom à la clé (ex. « CFT production »).", "error"); return; }
+    try {
+        const response = await apiFetch("/api/apikeys", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, role: roleEl?.value || "user" }),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "création refusée."), "error"); return; }
+        if (nameEl) nameEl.value = "";
+        fetchApiKeys();
+        // La clé complète n'est montrée qu'ICI, une seule fois
+        await _openAppDialog({
+            title: "🔑 Clé créée — copiez-la maintenant",
+            message: `Cette clé ne sera PLUS JAMAIS affichée. Transmettez-la au système appelant (en-tête X-API-Key) :\n\n${data.api_key}`,
+            confirmLabel: "J'ai copié la clé", cancelLabel: "Fermer",
+        });
+    } catch (e) { console.error("API key create error:", e); }
+}
+
+async function revokeApiKey(keyId, name) {
+    if (!await confirmDialog(`Révoquer la clé « ${name} » ? Les appels du système porteur échoueront immédiatement.`, { danger: true })) return;
+    try {
+        const response = await apiFetch(`/api/apikeys/${keyId}/revoke`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "révocation refusée."), "error"); return; }
+        showToast(data.message, "success");
+        fetchApiKeys();
+    } catch (e) { console.error("API key revoke error:", e); }
 }

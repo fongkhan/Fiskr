@@ -129,3 +129,12 @@ batch:
   inbox_dir: ""
   inbox_poll_seconds: 60
   archive_dir: ""               # defaut : <inbox_dir>/archive
+
+# Securite des acces
+security:
+  max_login_failures: 5         # echecs consecutifs avant verrouillage
+  lockout_minutes: 15           # duree du verrouillage temporaire
+  min_password_length: 12       # politique de mots de passe (comptes humains)
+  session_hours: 8              # duree de session (JWT + cookie)
+  secure_cookies: false         # true derriere HTTPS (flag Secure)
+  cookie_samesite: "strict"

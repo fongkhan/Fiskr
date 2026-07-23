@@ -322,13 +322,13 @@ def test_stacked_roles_admin_and_user_crud(client):
 
     # Creation d'un compte multi-roles : forme canonique stockee
     username = f"test_review_user_{uuid.uuid4().hex[:6]}"
-    response = client.post("/api/users", json={"username": username, "password": "secret123", "role": "user,reviewer"})
+    response = client.post("/api/users", json={"username": username, "password": "Secret123456ABC", "role": "user,reviewer"})
     assert response.status_code == 200
     created = response.json()["user"]
     assert created["role"] == "reviewer,user"
 
     # Role inconnu -> 400
-    response = client.post("/api/users", json={"username": username + "x", "password": "secret123", "role": "superuser"})
+    response = client.post("/api/users", json={"username": username + "x", "password": "Secret123456ABC", "role": "superuser"})
     assert response.status_code == 400
 
     # Nettoyage du compte cree

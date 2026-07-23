@@ -2,9 +2,8 @@ import json
 import hashlib
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from fiskr.config import config
 
 logger = logging.getLogger("fiskr.database")
@@ -539,7 +538,7 @@ class AppSetting(Base):
 
 class User(Base):
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(100), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
@@ -547,6 +546,29 @@ class User(Base):
     full_name = Column(String(255), nullable=True)
     role = Column(String(50), default="admin")
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Anti-brute-force : compteur d'echecs consecutifs + verrouillage temporaire
+    failed_login_count = Column(Integer, default=0)
+    locked_until = Column(DateTime, nullable=True)
+
+class ApiKey(Base):
+    """
+    Cle d'API technique (compte de service) pour les integrations systemes
+    (CFT, ordonnanceurs, SI amont) : la cle complete « fsk_... » n'est montree
+    QU'A LA CREATION ; seuls le prefixe (identification) et le hash SHA-256
+    (verification) sont stockes. Revocation douce, jamais de suppression.
+    """
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    prefix = Column(String(20), unique=True, nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False)
+    roles = Column(String(50), default="user")
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_by = Column(String(100), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
 
 import secrets
 import os
@@ -699,6 +721,10 @@ def init_db():
             ],
             "whitelist_pairs": [
                 ("list_type", "VARCHAR(30)"),
+            ],
+            "users": [
+                ("failed_login_count", "INTEGER"),
+                ("locked_until", "TIMESTAMP"),
             ],
         }
         inspector = inspect(engine)

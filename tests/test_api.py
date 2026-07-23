@@ -257,7 +257,7 @@ def test_admin_user_management_flow(client):
     # 2. Create new user
     create_payload = {
         "username": "testanalyst",
-        "password": "analystpassword",
+        "password": "Analyste2026Fort",
         "full_name": "Test Analyst",
         "role": "user"
     }

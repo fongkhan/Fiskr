@@ -1629,6 +1629,26 @@
                         </div>
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
                     </div>
+
+                    <!-- Clés d'API techniques (comptes de service) -->
+                    <div class="card form-card hidden" id="apikeys-card">
+                        <h2>🔑 Clés d'API Techniques (Admin)</h2>
+                        <p class="section-desc">Comptes de service pour les intégrations systèmes (CFT, ordonnanceur, SI amont) : authentification par en-tête <code>X-API-Key</code>, rôles restreints (jamais admin), révocation immédiate, usage tracé. <strong>La clé complète n'est affichée qu'à la création.</strong></p>
+                        <div class="filter-bar" style="margin-bottom: 1rem;">
+                            <input type="text" id="apikey-name" placeholder="Nom de la clé (ex. CFT production)">
+                            <select id="apikey-role" style="min-width: 160px;">
+                                <option value="user">user (criblage)</option>
+                                <option value="user,reviewer">user + reviewer</option>
+                            </select>
+                            <button class="btn btn-sm btn-primary" onclick="createApiKey()">➕ Créer la clé</button>
+                        </div>
+                        <div class="table-container max-height-table">
+                            <table id="apikeys-table">
+                                <thead><tr><th>Nom</th><th>Préfixe</th><th>Rôles</th><th>Créée</th><th>Dernier usage</th><th>État</th><th></th></tr></thead>
+                                <tbody><!-- Populated dynamically --></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
 
