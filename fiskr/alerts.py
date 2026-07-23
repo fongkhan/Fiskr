@@ -5,12 +5,39 @@ utilisable a la fois par l'API temps reel (fiskr.api) et par le moteur de
 re-criblage post-delta (fiskr.rescreen) sans import circulaire.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from fiskr.database import Alert, AlertEvent, ALERT_OPEN_STATUSES, AuditTrail, WhitelistPair
+from fiskr.settings import alert_sla_hours, notification_events
+from fiskr.notify import notify_event
 
 logger = logging.getLogger("fiskr.alerts")
+
+
+def compute_alert_priority(best_match: Dict[str, Any]) -> str:
+    """
+    Priorite calculee a la creation (modifiable ensuite par l'analyste) :
+    hard match (identifiant officiel identique) -> CRITICAL ; score tres
+    eleve -> HIGH ; alerte standard -> MEDIUM ; proche du seuil -> LOW.
+    """
+    if best_match.get("hard_match_triggered"):
+        return "CRITICAL"
+    score = float(best_match.get("final_score") or 0.0)
+    cut_off = float(best_match.get("cut_off_applied") or 75.0)
+    if score >= 95.0:
+        return "HIGH"
+    if score >= cut_off + 5.0:
+        return "MEDIUM"
+    return "LOW"
+
+
+def compute_due_at(db, priority: str, created_at: Optional[datetime] = None) -> Optional[datetime]:
+    """Echeance SLA de traitement selon la priorite (reglage a chaud ; 0 = aucune)."""
+    hours = alert_sla_hours(db).get(priority or "MEDIUM", 0)
+    if not hours:
+        return None
+    return (created_at or datetime.utcnow()) + timedelta(hours=hours)
 
 
 def is_whitelisted(db, client_id: Optional[str], entity_id: Optional[str]) -> Optional[WhitelistPair]:
@@ -76,6 +103,7 @@ def open_or_redetect_alert(db, audit_record: AuditTrail, client_id: Optional[str
 
     now = datetime.utcnow()
     suppressed = suppressed_by_rule is not None
+    priority = compute_alert_priority(best_match)
     alert = Alert(
         audit_id=audit_record.id,
         channel=channel,
@@ -86,6 +114,8 @@ def open_or_redetect_alert(db, audit_record: AuditTrail, client_id: Optional[str
         final_score=best_match["final_score"],
         list_type=wl_entity.get("_list_type"),
         status="CLOSED_BY_RULE" if suppressed else "OPEN",
+        priority=priority,
+        due_at=None if suppressed else compute_due_at(db, priority, now),
     )
     if suppressed:
         alert.decided_by = "fp-rule"
@@ -107,4 +137,12 @@ def open_or_redetect_alert(db, audit_record: AuditTrail, client_id: Optional[str
                     f"(#{suppressed_by_rule.id} v{suppressed_by_rule.version}).")
         ))
     db.commit()
+    # Notification metier (fire-and-forget, jamais bloquante) — pas de
+    # notification pour les alertes auto-cloturees par regle
+    if not suppressed and notification_events(db).get("alert_created"):
+        notify_event("alert_created", {
+            "alert_id": alert.id, "canal": channel, "priorite": priority,
+            "client": alert.client_name, "fiche_listee": alert.watchlist_name,
+            "liste": alert.list_type, "score": f"{alert.final_score:.1f}",
+        })
     return alert.id

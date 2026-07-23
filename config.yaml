@@ -114,3 +114,9 @@ ssie:
     mapping_id_attr: "ID"
     mapping_link_attr: "FeatureTypeID"
 
+
+# Notifications metier (email SMTP + webhooks generiques)
+# Les evenements actifs se reglent a chaud (Parametres > notifications.events) ;
+# les webhooks recoivent un POST JSON {event, label, at, data}.
+notifications:
+  webhooks: []                  # ex. ["https://hooks.example.com/fiskr"]

@@ -1426,6 +1426,69 @@ th.sortable.sort-desc::after {
     white-space: nowrap;
 }
 
+/* ------------------ Recherche globale (Ctrl+K) ------------------ */
+#command-palette {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 12vh;
+}
+
+.palette-panel {
+    width: min(640px, 92vw);
+    background: var(--modal-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    box-shadow: var(--shadow-modal);
+    overflow: hidden;
+    animation: zoomIn 0.2s ease-out;
+}
+
+.palette-panel input {
+    border: none;
+    border-bottom: 1px solid var(--border-color);
+    border-radius: 0;
+    padding: 1rem 1.25rem;
+    font-size: 1rem;
+    background: transparent;
+}
+
+.palette-panel input:focus {
+    box-shadow: none;
+    background: transparent;
+}
+
+#palette-results {
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 0.5rem;
+}
+
+.palette-group-title {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding: 0.5rem 0.75rem 0.25rem;
+}
+
+.palette-item {
+    padding: 0.55rem 0.75rem;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    cursor: pointer;
+}
+
+.palette-item.selected {
+    background: rgba(99, 102, 241, 0.15);
+    outline: 1px solid rgba(99, 102, 241, 0.4);
+}
+
 /* ------------------ Responsive ------------------ */
 @media (max-width: 1024px) {
     .sidebar {

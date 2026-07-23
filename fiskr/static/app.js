@@ -475,6 +475,7 @@ document.addEventListener("DOMContentLoaded", () => {
     applyTheme(currentTheme());
     initA11y();
     initSortableTables();
+    initCommandPalette();
     // Check authentication and load user info
     checkAuthUser();
     initListTypeControls();
@@ -526,6 +527,9 @@ async function checkAuthUser() {
             // Onglet Paramètres (réglages transverses) réservé aux admins
             const navSettingsItem = document.getElementById("nav-item-settings");
             if (navSettingsItem) navSettingsItem.classList.toggle("hidden", !isAdmin);
+            // Journal des actions d'administration (sous-onglet Audit, admin)
+            const adminLogBtn = document.getElementById("sub-btn-audit-admin");
+            if (adminLogBtn) adminLogBtn.classList.toggle("hidden", !isAdmin);
             // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
             const settingsCard = document.getElementById("review-settings-card");
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
@@ -676,6 +680,10 @@ function switchSubTab(sectionId, subTabId) {
         fetchBlockingSettings();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
+    } else if (subTabId === "audit-screening") {
+        fetchAuditHistory(1);
+    } else if (subTabId === "audit-admin") {
+        fetchAdminLog();
     } else if (subTabId === "watchlist-sync") {
         fetchSyncReports();
         fetchSyncConfig();
@@ -2798,6 +2806,21 @@ async function fetchIngestionSettings() {
         if (rescreenEl) rescreenEl.checked = ingestionSettings.auto_rescreen;
         if (btRequiredEl) btRequiredEl.checked = ingestionSettings.backtest_required;
         if (btGapEl) btGapEl.value = ingestionSettings.backtest_max_gap_pct ?? 20;
+        // SLA par priorité + notifications métier
+        const sla = ingestionSettings.alert_sla_hours || {};
+        for (const [prio, id] of [["CRITICAL", "setting-sla-critical"], ["HIGH", "setting-sla-high"],
+                                  ["MEDIUM", "setting-sla-medium"], ["LOW", "setting-sla-low"]]) {
+            const el = document.getElementById(id);
+            if (el) el.value = sla[prio] ?? 0;
+        }
+        const notif = ingestionSettings.notification_events || {};
+        for (const [event, id] of [["alert_created", "setting-notify-alert-created"],
+                                   ["alert_pending_validation", "setting-notify-pending-validation"],
+                                   ["snapshot_pending_review", "setting-notify-pending-review"],
+                                   ["sync_error", "setting-notify-sync-error"]]) {
+            const el = document.getElementById(id);
+            if (el) el.checked = !!notif[event];
+        }
         // Encart de l'onglet Homologation : parcours actif seulement si le mode l'est
         const modeHint = document.getElementById("review-mode-hint");
         if (modeHint) modeHint.classList.toggle("hidden", !!ingestionSettings.require_approval);
@@ -2821,7 +2844,19 @@ async function saveIngestionSettings() {
         whitelist_file_required: document.getElementById("setting-whitelist-file").checked,
         auto_rescreen: document.getElementById("setting-auto-rescreen").checked,
         backtest_required: document.getElementById("setting-backtest-required").checked,
-        backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20
+        backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20,
+        alert_sla_hours: {
+            CRITICAL: parseInt(document.getElementById("setting-sla-critical")?.value, 10) || 0,
+            HIGH: parseInt(document.getElementById("setting-sla-high")?.value, 10) || 0,
+            MEDIUM: parseInt(document.getElementById("setting-sla-medium")?.value, 10) || 0,
+            LOW: parseInt(document.getElementById("setting-sla-low")?.value, 10) || 0,
+        },
+        notification_events: {
+            alert_created: !!document.getElementById("setting-notify-alert-created")?.checked,
+            alert_pending_validation: !!document.getElementById("setting-notify-pending-validation")?.checked,
+            snapshot_pending_review: !!document.getElementById("setting-notify-pending-review")?.checked,
+            sync_error: !!document.getElementById("setting-notify-sync-error")?.checked,
+        },
     };
     try {
         const response = await apiFetch("/api/settings/ingestion", {
@@ -3403,9 +3438,40 @@ let alertsFilterByChannel = { SCREENING: DEFAULT_ALERT_FILTER, FILTERING: DEFAUL
 let currentAlertId = null;
 
 const ALERT_CHANNEL_CONF = {
-    SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter", section: "alerts-screening" },
-    FILTERING: { table: "filtering-alerts-table", listFilter: "filtering-list-filter", section: "alerts-filtering" },
+    SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter",
+                 priorityFilter: "screening-priority-filter", section: "alerts-screening" },
+    FILTERING: { table: "filtering-alerts-table", listFilter: "filtering-list-filter",
+                 priorityFilter: "filtering-priority-filter", section: "alerts-filtering" },
 };
+
+// Badge de priorité (case management) + indicateur de retard SLA
+const ALERT_PRIORITY_CONF = {
+    CRITICAL: ["var(--color-alert)", "CRITIQUE"],
+    HIGH: ["var(--color-warning)", "HAUTE"],
+    MEDIUM: ["var(--color-primary)", "MOYENNE"],
+    LOW: ["var(--text-muted)", "BASSE"],
+};
+
+function alertPriorityBadge(a) {
+    const [color, label] = ALERT_PRIORITY_CONF[a.priority] || ["var(--text-muted)", a.priority || "—"];
+    const overdue = a.overdue
+        ? `<br><span title="Échéance SLA dépassée (${formatDateTime(a.due_at)})" style="color: var(--color-alert); font-size: 0.7rem; font-weight: 700;">⏰ EN RETARD</span>`
+        : "";
+    return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>${overdue}`;
+}
+
+// Export CSV de la file d'alertes avec les filtres actifs de l'écran
+function exportAlertsCsv(channel) {
+    const conf = ALERT_CHANNEL_CONF[channel];
+    const params = new URLSearchParams({ channel });
+    const filter = alertsFilterByChannel[channel];
+    if (filter) params.set("status", filter);
+    const listFilterEl = document.getElementById(conf.listFilter);
+    if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+    const prioEl = document.getElementById(conf.priorityFilter);
+    if (prioEl && prioEl.value) params.set("priority", prioEl.value);
+    window.open(`/api/export/alerts.csv?${params.toString()}`, "_blank");
+}
 
 // Décompose le client_id d'une alerte de filtrage (TXN:msgid:idx) en message + n° de partie
 function describeFilteringSubject(a) {
@@ -3425,7 +3491,9 @@ async function fetchAlerts(channel = "SCREENING") {
         if (filter) params.set("status", filter);
         const listFilterEl = document.getElementById(conf.listFilter);
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
-        tableLoading(document.querySelector(`#${conf.table} tbody`), 8);
+        const prioFilterEl = document.getElementById(conf.priorityFilter);
+        if (prioFilterEl && prioFilterEl.value) params.set("priority", prioFilterEl.value);
+        tableLoading(document.querySelector(`#${conf.table} tbody`), 9);
         const response = await apiFetch(`/api/alerts?${params}`);
         if (!response.ok) return;
         const data = await response.json();
@@ -3466,7 +3534,7 @@ function renderAlertsTable(channel, items) {
     const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
     if (!tbody) return;
     if (!items.length) {
-        tableEmpty(tbody, 8, "Aucune alerte pour ce filtre.", "✅");
+        tableEmpty(tbody, 9, "Aucune alerte pour ce filtre.", "✅");
         return;
     }
     tbody.innerHTML = items.map(a => {
@@ -3475,7 +3543,8 @@ function renderAlertsTable(channel, items) {
             : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
         return `
         <tr>
-            <td>${a.created_at ? new Date(a.created_at).toLocaleString("fr-FR") : "-"}</td>
+            <td>${alertPriorityBadge(a)}</td>
+            <td>${formatDateTime(a.created_at)}</td>
             <td>${subject}</td>
             <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
             <td>${listTypeBadge(a.list_type)}</td>
@@ -3541,14 +3610,38 @@ async function openAlertModal(alertId) {
             }
         }
 
+        // Pieces jointes + selection de priorite (case management)
+        const attachmentsHtml = (a.attachments || []).map(att => `
+            <li style="font-size: 0.82rem; margin-bottom: 0.25rem;">
+                <a href="/api/alerts/attachments/${att.id}" target="_blank" style="color: var(--color-accent);">📎 ${escapeHtml(att.file_name)}</a>
+                <small style="color: var(--text-muted);"> — @${escapeHtml(att.uploaded_by)}, ${formatDateTime(att.uploaded_at)}${att.comment ? " · " + escapeHtml(att.comment) : ""}</small>
+            </li>`).join("");
+        const prioritySelector = !isClosed ? `
+            <select id="alert-priority-select" onchange="changeAlertPriority(this.value)" title="Modifier la priorité (l'échéance SLA est recalculée)" style="width: auto; padding: 0.3rem 0.5rem; font-size: 0.8rem;">
+                ${["CRITICAL", "HIGH", "MEDIUM", "LOW"].map(p =>
+                    `<option value="${p}" ${a.priority === p ? "selected" : ""}>${ALERT_PRIORITY_CONF[p][1]}</option>`).join("")}
+            </select>` : alertPriorityBadge(a);
+
         document.getElementById("alert-modal-body").innerHTML = `
-            <p class="section-desc">Score final <strong>${a.final_score.toFixed(1)}%</strong> · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong> · journal d'audit #${a.audit_id} (${escapeHtml(a.watchlist_version || "")})</p>
+            <p class="section-desc" style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                Score final <strong>${a.final_score.toFixed(1)}%</strong> · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong>
+                · journal d'audit #${a.audit_id} (${escapeHtml(a.watchlist_version || "")})
+                · Priorité : ${prioritySelector}
+                ${a.due_at ? `· Échéance SLA : <strong style="${a.overdue ? "color: var(--color-alert);" : ""}">${formatDateTime(a.due_at)}${a.overdue ? " ⏰" : ""}</strong>` : ""}
+                <a class="btn btn-sm btn-secondary" style="margin-left: auto;" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)">🖨 Rapport</a>
+            </p>
             <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score (decision tree)</h3>
             <div class="table-container" style="max-height: 160px;">
                 <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
             </div>
             <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
             <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
+            <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Pièces jointes</h3>
+            <ul style="list-style: none; margin-bottom: 0.5rem;">${attachmentsHtml || '<li style="font-size: 0.82rem; color: var(--text-muted);">Aucune pièce jointe.</li>'}</ul>
+            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+                <input type="file" id="alert-attachment-file" style="flex: 1 1 220px; padding: 0.35rem; font-size: 0.8rem;">
+                <button class="btn btn-sm btn-secondary" onclick="uploadAlertAttachment()">📎 Joindre</button>
+            </div>
             ${actionsHtml}
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
                 <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()">📝 Générer un narratif</button>
@@ -3587,6 +3680,39 @@ async function _postAlertAction(path, body) {
 async function alertAction(action) {
     const data = await _postAlertAction(action, {});
     if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
+}
+
+async function changeAlertPriority(priority) {
+    const data = await _postAlertAction("priority", { priority });
+    if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
+}
+
+async function uploadAlertAttachment() {
+    const input = document.getElementById("alert-attachment-file");
+    if (!input || !input.files || !input.files.length) {
+        showToast("Sélectionnez d'abord un fichier à joindre.", "error");
+        return;
+    }
+    const comment = await promptDialog("Commentaire de la pièce jointe", {
+        message: "Description de la pièce (optionnel).", textarea: true, required: false,
+        placeholder: "Ex. justificatif KYC, échange client..."
+    });
+    if (comment === null) return;
+    const formData = new FormData();
+    formData.append("file", input.files[0]);
+    if (comment) formData.append("comment", comment);
+    try {
+        const response = await apiFetch(`/api/alerts/${currentAlertId}/attachments`, { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "dépôt refusé."), "error");
+            return;
+        }
+        showToast(data.message, "success");
+        openAlertModal(currentAlertId);
+    } catch (e) {
+        console.error("Attachment upload error:", e);
+    }
 }
 
 async function alertActionWithComment(action, promptLabel) {
@@ -4540,4 +4666,212 @@ async function benchFpRule(source) {
                 ${tp.length ? `<div style="margin-top: 0.5rem; color: var(--color-alert);">⚠️ ${tp.length} VRAI(S) POSITIF(S) confirmé(s) seraient supprimé(s) : ${tp.slice(0, 5).map(t => escapeHtml(t.client_name + " × " + t.entity_name)).join(", ")}${tp.length > 5 ? "…" : ""}. Corrigez la règle avant de soumettre.</div>` : (data.suppressed ? '<div style="margin-top: 0.5rem; color:var(--success-soft-text);">Aucun vrai positif confirmé impacté.</div>' : "")}
             </div>`;
     } catch (e) { if (bench) bench.innerHTML = '<small style="color:var(--color-alert);">Erreur réseau.</small>'; }
+}
+
+// ------------------ EXPORTS CSV (vue base des listes & journal d'audit) ------------------
+
+function exportWatchlistCsv() {
+    const params = new URLSearchParams();
+    const scopeEl = document.getElementById("wl-scope-filter");
+    params.set("scope", scopeEl && scopeEl.value ? scopeEl.value : "production");
+    const listEl = document.getElementById("wl-list-filter");
+    if (listEl && listEl.value) params.set("list_type", listEl.value);
+    const searchEl = document.getElementById("wl-search-input");
+    if (searchEl && searchEl.value.trim()) {
+        params.set("search", searchEl.value.trim());
+        const fieldEl = document.getElementById("wl-field-filter");
+        if (fieldEl && fieldEl.value && fieldEl.value !== "default") params.set("search_field", fieldEl.value);
+    }
+    window.open(`/api/export/watchlist.csv?${params.toString()}`, "_blank");
+}
+
+function exportHistoryCsv() {
+    const params = new URLSearchParams();
+    const listEl = document.getElementById("audit-list-filter");
+    if (listEl && listEl.value) params.set("list_type", listEl.value);
+    const statusEl = document.getElementById("audit-status-filter");
+    if (statusEl && statusEl.value) params.set("status", statusEl.value);
+    window.open(`/api/export/history.csv?${params.toString()}`, "_blank");
+}
+
+// ------------------ JOURNAL DES ACTIONS D'ADMINISTRATION ------------------
+
+const ADMIN_ACTION_LABELS = {
+    USER_CREATED: "Compte créé", USER_UPDATED: "Compte modifié", USER_DELETED: "Compte supprimé",
+    SETTINGS_UPDATED: "Réglages modifiés", BLOCKING_UPDATED: "Blocking keys modifiées",
+    SNAPSHOTS_PURGED: "Snapshots purgés", WHITELIST_REVOKED: "Liste blanche révoquée",
+};
+
+function _adminLogDelta(row) {
+    const parts = [];
+    if (row.before && Object.keys(row.before).length) {
+        parts.push(`<div><small style="color: var(--text-muted);">Avant :</small> <code style="font-size: 0.72rem;">${escapeHtml(JSON.stringify(row.before))}</code></div>`);
+    }
+    if (row.after && Object.keys(row.after).length) {
+        parts.push(`<div><small style="color: var(--text-muted);">Après :</small> <code style="font-size: 0.72rem;">${escapeHtml(JSON.stringify(row.after))}</code></div>`);
+    }
+    if (row.detail) parts.push(`<div style="font-size: 0.78rem;">${escapeHtml(row.detail)}</div>`);
+    return parts.join("") || '<small style="color: var(--text-muted);">—</small>';
+}
+
+async function fetchAdminLog() {
+    const tbody = document.querySelector("#admin-log-table tbody");
+    if (!tbody) return;
+    tableLoading(tbody, 5);
+    try {
+        const response = await apiFetch("/api/admin-log?page_size=100");
+        if (!response.ok) {
+            tableEmpty(tbody, 5, "Accès réservé aux administrateurs.", "🔒");
+            return;
+        }
+        const data = await response.json();
+        const items = data.items || [];
+        if (!items.length) {
+            tableEmpty(tbody, 5, "Aucune action d'administration enregistrée.");
+            return;
+        }
+        tbody.innerHTML = items.map(r => `
+            <tr>
+                <td>${formatDateTime(r.at)}</td>
+                <td>@${escapeHtml(r.username)}</td>
+                <td><span class="badge-secondary">${escapeHtml(ADMIN_ACTION_LABELS[r.action] || r.action)}</span></td>
+                <td>${escapeHtml(r.target || "—")}</td>
+                <td>${_adminLogDelta(r)}</td>
+            </tr>`).join("");
+    } catch (e) {
+        console.error("Erreur de chargement du journal d'administration :", e);
+    }
+}
+
+// ------------------ RECHERCHE GLOBALE (Ctrl+K) ------------------
+
+let _paletteDebounce = null;
+let _paletteSelection = 0;
+
+const PALETTE_NAV_ITEMS = [
+    { label: "🏠 Vue d'ensemble", action: () => switchTab("home") },
+    { label: "📋 Gestion des Watchlists", action: () => switchTab("watchlist-mgmt") },
+    { label: "🔍 Criblage temps réel", action: () => switchTab("screening") },
+    { label: "💸 Filtrage transactionnel (ISO 20022)", action: () => { switchTab("screening"); switchSubTab("screening", "screening-transactions"); } },
+    { label: "🚨 Alertes de criblage", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-screening"); } },
+    { label: "🚨 Alertes de filtrage", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-filtering"); } },
+    { label: "🛡️ Liste blanche (Good Guys)", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-whitelist"); } },
+    { label: "📥 Homologation des listes", action: () => { switchTab("watchlist-mgmt"); switchSubTab("watchlist-mgmt", "watchlist-review"); } },
+    { label: "📈 Pilotage (KPI)", action: () => switchTab("kpi") },
+    { label: "📜 Audit réglementaire", action: () => switchTab("audit") },
+];
+
+function openCommandPalette() {
+    const overlay = document.getElementById("command-palette");
+    if (!overlay) return;
+    overlay.classList.remove("hidden");
+    const input = document.getElementById("palette-input");
+    input.value = "";
+    renderPaletteResults([]);
+    input.focus();
+}
+
+function closeCommandPalette() {
+    const overlay = document.getElementById("command-palette");
+    if (overlay) overlay.classList.add("hidden");
+}
+
+function renderPaletteResults(groups) {
+    const container = document.getElementById("palette-results");
+    if (!container) return;
+    _paletteSelection = 0;
+    if (!groups.length) {
+        container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem; padding: 0.5rem 0.75rem;">Tapez pour chercher un listé, une alerte, ou naviguer…</p>';
+        return;
+    }
+    let idx = 0;
+    container.innerHTML = groups.map(group => `
+        <div class="palette-group">
+            <div class="palette-group-title">${escapeHtml(group.title)}</div>
+            ${group.items.map(item => {
+                const html = `<div class="palette-item ${idx === 0 ? "selected" : ""}" data-idx="${idx}"
+                    onmouseenter="paletteHover(${idx})" onclick="paletteActivate(${idx})">${item.html}</div>`;
+                idx += 1;
+                return html;
+            }).join("")}
+        </div>`).join("");
+    container._flatActions = groups.flatMap(g => g.items.map(i => i.action));
+}
+
+function paletteHover(idx) {
+    _paletteSelection = idx;
+    document.querySelectorAll("#palette-results .palette-item").forEach(el => {
+        el.classList.toggle("selected", parseInt(el.dataset.idx, 10) === idx);
+    });
+}
+
+function paletteActivate(idx) {
+    const container = document.getElementById("palette-results");
+    const actions = container && container._flatActions;
+    if (actions && actions[idx]) {
+        closeCommandPalette();
+        actions[idx]();
+    }
+}
+
+async function runPaletteSearch(term) {
+    const groups = [];
+    const needle = term.trim().toLowerCase();
+    // Navigation (filtrée localement)
+    const navMatches = PALETTE_NAV_ITEMS.filter(n => !needle || n.label.toLowerCase().includes(needle)).slice(0, 5);
+    if (navMatches.length) {
+        groups.push({ title: "Navigation", items: navMatches.map(n => ({
+            html: escapeHtml(n.label), action: n.action })) });
+    }
+    if (needle.length >= 2) {
+        try {
+            const [wlResp, alResp] = await Promise.all([
+                apiFetch(`/api/watchlist/db?search=${encodeURIComponent(term)}&page_size=5`, { silent: true }),
+                apiFetch(`/api/alerts?search=${encodeURIComponent(term)}&page_size=5`, { silent: true }),
+            ]);
+            if (wlResp.ok) {
+                const wl = await wlResp.json();
+                if ((wl.items || []).length) {
+                    groups.push({ title: `Listés (${wl.total})`, items: wl.items.map(item => ({
+                        html: `<strong>${escapeHtml(item.primary_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(item.entity_id)} · ${escapeHtml(listTypeLabel(item.list_type))}${wl.match_mode === "fuzzy" ? " · ≈" : ""}</small>`,
+                        action: () => { switchTab("watchlist-mgmt"); switchSubTab("watchlist-mgmt", "watchlist-active"); showWatchlistDetails(item); },
+                    })) });
+                }
+            }
+            if (alResp.ok) {
+                const al = await alResp.json();
+                if ((al.items || []).length) {
+                    groups.push({ title: `Alertes (${al.total})`, items: al.items.map(a => ({
+                        html: `<strong>#${a.id} ${escapeHtml(a.client_name)}</strong> × ${escapeHtml(a.watchlist_name)} <small style="color: var(--text-muted);">${escapeHtml(statusLabel(a.status))}</small>`,
+                        action: () => { switchTab("alerts"); switchSubTab("alerts", a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
+                    })) });
+                }
+            }
+        } catch (e) { /* recherche silencieuse */ }
+    }
+    renderPaletteResults(groups);
+}
+
+function initCommandPalette() {
+    const input = document.getElementById("palette-input");
+    const overlay = document.getElementById("command-palette");
+    if (!input || !overlay) return;
+    document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+            e.preventDefault();
+            openCommandPalette();
+        }
+    });
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeCommandPalette(); });
+    input.addEventListener("input", () => {
+        clearTimeout(_paletteDebounce);
+        _paletteDebounce = setTimeout(() => runPaletteSearch(input.value), 250);
+    });
+    input.addEventListener("keydown", (e) => {
+        const items = document.querySelectorAll("#palette-results .palette-item");
+        if (e.key === "Escape") { closeCommandPalette(); return; }
+        if (e.key === "ArrowDown") { e.preventDefault(); paletteHover(Math.min(_paletteSelection + 1, items.length - 1)); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); paletteHover(Math.max(_paletteSelection - 1, 0)); }
+        else if (e.key === "Enter") { e.preventDefault(); paletteActivate(_paletteSelection); }
+    });
 }

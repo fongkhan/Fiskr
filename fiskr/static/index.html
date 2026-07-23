@@ -105,6 +105,7 @@
                     <h1>Fiskr — Poste de Contrôle Conformité</h1>
                 </div>
                 <div class="header-actions">
+                    <button class="icon-btn" onclick="openCommandPalette()" aria-label="Recherche globale (Ctrl+K)" title="Recherche globale (Ctrl+K)">🔍</button>
                     <button id="theme-toggle-btn" class="icon-btn" onclick="toggleTheme()" aria-label="Basculer le thème clair/sombre" title="Thème clair / sombre">🌙</button>
                     <div class="system-status">
                         <span class="status-indicator online"></span>
@@ -187,6 +188,7 @@
                                     <option value="REJECTED">Rejetées</option>
                                     <option value="EXCLUDED">Exclues</option>
                                 </select>
+                                <button class="btn btn-sm btn-secondary" onclick="exportWatchlistCsv()" title="Exporter la vue filtrée en CSV">⬇ CSV</button>
                             </div>
 
                             <div id="wl-match-hint" class="hidden" style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 0.75rem; font-size: 0.85rem;"></div>
@@ -1236,13 +1238,21 @@
                                 <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
-                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                                <select id="screening-priority-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par priorité" style="margin-left: auto;">
+                                    <option value="">Toutes priorités</option>
+                                    <option value="CRITICAL">Critique</option>
+                                    <option value="HIGH">Haute</option>
+                                    <option value="MEDIUM">Moyenne</option>
+                                    <option value="LOW">Basse</option>
+                                </select>
+                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par type de liste"></select>
+                                <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div class="table-container max-height-table">
                                 <table id="screening-alerts-table">
                                     <thead>
                                         <tr>
-                                            <th>Date</th><th>Client</th><th>Listé</th><th>Liste</th>
+                                            <th>Priorité</th><th>Date</th><th>Client</th><th>Listé</th><th>Liste</th>
                                             <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
                                     </thead>
@@ -1265,13 +1275,21 @@
                                 <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
-                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                                <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par priorité" style="margin-left: auto;">
+                                    <option value="">Toutes priorités</option>
+                                    <option value="CRITICAL">Critique</option>
+                                    <option value="HIGH">Haute</option>
+                                    <option value="MEDIUM">Moyenne</option>
+                                    <option value="LOW">Basse</option>
+                                </select>
+                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par type de liste"></select>
+                                <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div class="table-container max-height-table">
                                 <table id="filtering-alerts-table">
                                     <thead>
                                         <tr>
-                                            <th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
+                                            <th>Priorité</th><th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
                                             <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
                                     </thead>
@@ -1415,6 +1433,16 @@
             </section>
 
             <section id="sec-audit" class="tab-content">
+                <div class="sub-tabs">
+                    <button id="sub-btn-audit-screening" class="sub-tab-btn active" onclick="switchSubTab('audit', 'audit-screening')">
+                        Décisions de Criblage
+                    </button>
+                    <button id="sub-btn-audit-admin" class="sub-tab-btn hidden" onclick="switchSubTab('audit', 'audit-admin')">
+                        Actions d'Administration
+                    </button>
+                </div>
+
+                <div id="sub-sec-audit-screening" class="sub-tab-content active">
                 <div class="card">
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
                     <p class="section-desc">Historique immuable de toutes les décisions de criblage émises par le moteur. Conforme aux standards ACPR/AMF.</p>
@@ -1423,10 +1451,11 @@
                         <select id="audit-list-filter" onchange="fetchAuditHistory(1)" title="Filtrer par type de liste"></select>
                         <select id="audit-status-filter" onchange="fetchAuditHistory(1)" title="Filtrer par décision">
                             <option value="">Toutes les décisions</option>
-                            <option value="ALERT">ALERT</option>
-                            <option value="NO_MATCH">NO_MATCH</option>
-                            <option value="WHITELISTED">WHITELISTED</option>
+                            <option value="ALERT">Alerte</option>
+                            <option value="NO_MATCH">Aucun match</option>
+                            <option value="WHITELISTED">Liste blanche</option>
                         </select>
+                        <button class="btn btn-sm btn-secondary" onclick="exportHistoryCsv()" title="Exporter le journal filtré en CSV">⬇ CSV</button>
                     </div>
 
                     <div class="table-container">
@@ -1448,6 +1477,26 @@
                         </table>
                     </div>
                     <div id="audit-pagination" class="pagination-container" style="display: flex; gap: 0.75rem; align-items: center; justify-content: flex-end; margin-top: 0.75rem;"></div>
+                </div>
+                </div>
+
+                <!-- JOURNAL DES ACTIONS D'ADMINISTRATION (admin) -->
+                <div id="sub-sec-audit-admin" class="sub-tab-content hidden">
+                    <div class="card">
+                        <h2>Journal des Actions d'Administration</h2>
+                        <p class="section-desc">Trace immuable (append-only) des actions d'administration : création/modification/suppression de comptes, changements de réglages (avant → après), purges de snapshots et révocations de liste blanche. Attendu en contrôle ACPR/FED.</p>
+                        <div class="table-container max-height-table">
+                            <table id="admin-log-table">
+                                <thead>
+                                    <tr>
+                                        <th>Horodatage</th><th>Utilisateur</th><th>Action</th>
+                                        <th>Cible</th><th>Détail (avant → après)</th>
+                                    </tr>
+                                </thead>
+                                <tbody><!-- Populated dynamically --></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -1509,6 +1558,40 @@
                         <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
                             <label for="setting-backtest-gap">Seuil d'écart toléré du taux d'interception (%)</label>
                             <input type="number" id="setting-backtest-gap" min="0" max="1000" step="1" value="20">
+                        </div>
+                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">⏱ SLA de traitement des alertes</h3>
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Délai de traitement (heures) par priorité — l'échéance est calculée à la création de l'alerte, le retard est signalé dans la file. 0 = pas d'échéance.</p>
+                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 640px;">
+                            <div class="form-group"><label for="setting-sla-critical">Critique</label><input type="number" id="setting-sla-critical" min="0" step="1"></div>
+                            <div class="form-group"><label for="setting-sla-high">Haute</label><input type="number" id="setting-sla-high" min="0" step="1"></div>
+                            <div class="form-group"><label for="setting-sla-medium">Moyenne</label><input type="number" id="setting-sla-medium" min="0" step="1"></div>
+                            <div class="form-group"><label for="setting-sla-low">Basse</label><input type="number" id="setting-sla-low" min="0" step="1"></div>
+                        </div>
+                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">🔔 Notifications métier (email / webhooks)</h3>
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Envoi par email (variables SMTP) et vers les webhooks de <code>config.yaml notifications.webhooks</code>. Jamais bloquant pour le criblage.</p>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-alert-created" style="width: 18px; height: 18px;">
+                                Nouvelle alerte créée
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-pending-validation" style="width: 18px; height: 18px;">
+                                Décision d'alerte en attente de validation 4-yeux
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-pending-review" style="width: 18px; height: 18px;">
+                                Snapshot en attente d'homologation
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-sync-error" style="width: 18px; height: 18px;">
+                                Échec de synchronisation d'une source
+                            </label>
                         </div>
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
                     </div>
@@ -1729,7 +1812,15 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.0"></script>
+    <!-- Recherche globale (Ctrl+K) -->
+    <div id="command-palette" class="hidden" role="dialog" aria-modal="true" aria-label="Recherche globale">
+        <div class="palette-panel">
+            <input type="text" id="palette-input" placeholder="🔍 Rechercher un listé, une alerte, un écran… (Échap pour fermer)" autocomplete="off">
+            <div id="palette-results"></div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=6.1"></script>
 
 
 

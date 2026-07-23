@@ -195,12 +195,18 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Filtrage transactionnel ISO 20022** : criblage de toutes les parties d'un message `pain.001` / `pacs.008`, verdict `PASS`/`HIT`, audit + alertes.
 * **Pilotage** : KPI conformité (`GET /api/kpi`) — taux de faux positifs, délais de décision, volumétrie, synchronisations, **séries temporelles 30 jours**, ventilation par analyste et par liste, efficacité des règles anti-faux positifs.
 
+* **Case management** : priorité explicite par alerte (CRITIQUE sur hard match, modifiable et journalisée), **échéances SLA** par priorité (réglage à chaud, badge « ⏰ En retard »), pièces jointes justificatives, **rapport d'alerte imprimable** (`GET /api/alerts/{id}/report`, prêt ACPR/FED).
+* **Exports CSV** (Excel FR : `;` + BOM) : alertes, journal d'audit et vue base des listes, avec les filtres de l'écran (`/api/export/*.csv`).
+* **Journal des actions d'administration** (`admin_audit_log`, append-only) : comptes, réglages (avant → après), purges, révocations — sous-onglet dédié de l'Audit.
+* **Notifications métier** : email (SMTP) + webhooks génériques (`notifications.webhooks`), par événement (nouvelle alerte, 4-yeux en attente, snapshot à homologuer, échec de sync), fire-and-forget — jamais bloquant.
+
 ### 🖥️ Interface (dashboard)
 
 * **Vue d'ensemble** (onglet d'accueil) : tuiles cliquables (alertes ouvertes par canal, 4-yeux en attente, homologation, taux de FP, délai moyen), graphiques SVG natifs sans dépendance (courbe 30 jours créées/clôturées, barres fiches par liste, donut des statuts), alertes les plus anciennes à traiter et dernière synchronisation.
 * **Thème clair / sombre** commutable (bouton 🌙/☀️ du header, persisté), design system 100 % piloté par tokens CSS.
 * **Responsive** : sidebar rétractable (hamburger + overlay) sous 1024 px, formulaires en une colonne sur mobile.
 * **Tri des colonnes** sur toutes les tables (tri API validé pour la vue base paginée), squelettes de chargement, états vides homogènes, fermeture des modales à Échap, statuts affichés en français.
+* **Recherche globale Ctrl+K** : palette de commande (listés — y compris fuzzy —, alertes, navigation), entièrement au clavier.
 
 ---
 
