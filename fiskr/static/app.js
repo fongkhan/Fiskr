@@ -1217,6 +1217,12 @@ function showSyncReportDetail(report) {
 }
 
 // Display the active scheduler configuration under the source cards
+// Sources planifiables (clef API -> libellé de SYNC_SOURCE_LABELS)
+const CRON_SOURCE_KEYS = {
+    ofac: "OFAC", eurlex: "EURLEX", dgt: "DGT", eu_fsf: "EUFSF",
+    un: "UN", pep: "PEP", ofsi: "OFSI",
+};
+
 async function fetchSyncConfig() {
     try {
         const response = await apiFetch("/api/sync/config");
@@ -1224,15 +1230,60 @@ async function fetchSyncConfig() {
         const cfg = await response.json();
         const info = document.getElementById("sync-schedule-info");
         const autoTxt = cfg.auto_enabled
-            ? `⏰ Synchronisation automatique activée chaque jour à ${cfg.schedule_time}.`
+            ? "⏰ Planificateur cron actif : chaque source suit sa propre expression ci-dessous."
             : "⏸️ Synchronisation automatique désactivée (sync.auto_enabled dans config.yaml).";
         const mailTxt = cfg.email_configured
             ? "Rapports envoyés par email (SMTP configuré)."
             : "Rapports disponibles dans l'application uniquement (SMTP non configuré).";
-        info.textContent = `${autoTxt} ${mailTxt}`;
+        if (info) info.textContent = `${autoTxt} ${mailTxt}`;
+        renderCronSchedules(cfg);
     } catch (e) {
         console.error("Error fetching sync config:", e);
     }
+}
+
+// ------------------ PLANIFICATION CRON PAR SOURCE ------------------
+
+function renderCronSchedules(cfg) {
+    const tbody = document.querySelector("#cron-schedules-table tbody");
+    if (!tbody) return;
+    const isAdmin = currentUser && userRoles(currentUser).includes("admin");
+    const schedules = cfg.schedules || {};
+    const nextRuns = cfg.next_runs || {};
+    tbody.innerHTML = Object.entries(CRON_SOURCE_KEYS).map(([source, labelKey]) => {
+        const enabled = (cfg[source] || {}).enabled;
+        return `<tr>
+            <td>${escapeHtml(SYNC_SOURCE_LABELS[labelKey] || labelKey)}
+                ${enabled ? "" : '<br><small style="color: var(--text-muted);">source désactivée</small>'}</td>
+            <td><input type="text" id="cron-${source}" value="${escapeHtml(schedules[source] || "")}"
+                       style="font-family: monospace; max-width: 200px;" ${isAdmin ? "" : "disabled"}
+                       title="Expression cron 5 champs : minute heure jour mois jour-de-semaine"></td>
+            <td>${nextRuns[source] ? formatDateTime(nextRuns[source]) : "—"}</td>
+        </tr>`;
+    }).join("");
+    const saveBtn = document.getElementById("cron-save-btn");
+    if (saveBtn) saveBtn.classList.toggle("hidden", !isAdmin);
+}
+
+async function saveCronSchedules() {
+    const schedules = {};
+    for (const source of Object.keys(CRON_SOURCE_KEYS)) {
+        const el = document.getElementById(`cron-${source}`);
+        if (el) schedules[source] = el.value.trim();
+    }
+    try {
+        const response = await apiFetch("/api/settings/sync", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ schedules }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "planification refusée."), "error");
+            return;
+        }
+        showToast(data.message, "success");
+        fetchSyncConfig();
+    } catch (e) { console.error("Cron schedules save error:", e); }
 }
 
 // Handle Delta Snapshot Comparison
@@ -2254,9 +2305,12 @@ async function loadEntityRelations(entityId) {
                 <button class="btn btn-sm btn-secondary" onclick="addEntityRelation('${escapeHtml(entityId)}')">➕ Lier</button>
             </div>` : "";
 
+        const graphBtn = (data.relations || []).length
+            ? `<button class="btn btn-sm btn-secondary" style="float: right; margin-top: -0.35rem;" onclick="openRelationGraph('${escapeHtml(entityId)}')">🕸 Graphe</button>`
+            : "";
         container.innerHTML = `
             <div class="modal-section" style="margin-top: 1.25rem;">
-                <h4>🔗 Relations & liens capitalistiques</h4>
+                <h4>🔗 Relations & liens capitalistiques ${graphBtn}</h4>
                 ${inherited}
                 ${rows ? `<div class="table-container" style="max-height: 220px;">
                     <table><thead><tr><th>Relation</th><th>Entité liée</th><th>Détention</th><th>Source</th><th></th></tr></thead>
@@ -5086,4 +5140,106 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
                 </table>
             </div>`;
     } catch (e) { console.error("Batch campaign detail error:", e); }
+}
+
+// ------------------ GRAPHE DES RELATIONS (rendu SVG radial natif) ------------------
+
+let currentGraphCenter = null;
+
+function _graphNodeColor(entityType) {
+    return entityType === "I" ? "var(--color-secondary)" : "var(--color-accent)";
+}
+
+async function openRelationGraph(entityId) {
+    if (!entityId) return;
+    currentGraphCenter = entityId;
+    const depth = document.getElementById("graph-depth")?.value || "2";
+    try {
+        const response = await apiFetch(`/api/relationships/graph/${encodeURIComponent(entityId)}?depth=${depth}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        renderRelationGraph(data);
+        document.getElementById("graph-modal").classList.remove("hidden");
+    } catch (e) { console.error("Graph load error:", e); }
+}
+
+function renderRelationGraph(data) {
+    const container = document.getElementById("graph-svg-container");
+    const title = document.getElementById("graph-modal-title");
+    const truncatedHint = document.getElementById("graph-truncated-hint");
+    if (!container) return;
+    const centerNode = (data.nodes || []).find(n => n.id === data.center);
+    if (title) title.textContent = `🕸 Graphe des relations — ${centerNode ? centerNode.name : data.center}`;
+    if (truncatedHint) truncatedHint.classList.toggle("hidden", !data.truncated);
+
+    const W = 880, H = 560, CX = W / 2, CY = H / 2;
+    const rings = [0, 150, 250, 330];
+
+    // Positions : centre + anneaux par profondeur (répartition angulaire)
+    const byDepth = {};
+    (data.nodes || []).forEach(n => { (byDepth[n.depth] = byDepth[n.depth] || []).push(n); });
+    const positions = {};
+    Object.entries(byDepth).forEach(([nodeDepth, nodes]) => {
+        const d = parseInt(nodeDepth, 10);
+        if (d === 0) { positions[nodes[0].id] = { x: CX, y: CY }; return; }
+        const radius = rings[Math.min(d, rings.length - 1)];
+        nodes.forEach((node, i) => {
+            const angle = (2 * Math.PI * i) / nodes.length - Math.PI / 2 + (d % 2 ? 0 : Math.PI / nodes.length);
+            positions[node.id] = { x: CX + radius * Math.cos(angle), y: CY + radius * Math.sin(angle) };
+        });
+    });
+
+    // Arêtes (dessinées sous les nœuds) : rouge = détention majoritaire (50 %)
+    const edgesSvg = (data.edges || []).map(edge => {
+        const from = positions[edge.from], to = positions[edge.to];
+        if (!from || !to) return "";
+        const color = edge.majority ? "var(--color-alert)" : "var(--color-primary)";
+        const midX = (from.x + to.x) / 2, midY = (from.y + to.y) / 2;
+        const label = edge.ownership_pct !== null && edge.ownership_pct !== undefined
+            ? `${edge.ownership_pct} %` : (edge.majority ? "≥50 % (présumé)" : edge.label);
+        return `
+            <line x1="${from.x.toFixed(1)}" y1="${from.y.toFixed(1)}" x2="${to.x.toFixed(1)}" y2="${to.y.toFixed(1)}"
+                  stroke="${color}" stroke-width="${edge.majority ? 2.6 : 1.4}" opacity="0.75"
+                  marker-end="url(#graph-arrow${edge.majority ? "-red" : ""})"/>
+            <text x="${midX.toFixed(1)}" y="${(midY - 5).toFixed(1)}" font-size="8.5" text-anchor="middle"
+                  style="fill: ${edge.majority ? "var(--color-alert)" : "var(--text-muted)"};">
+                <title>${escapeHtml(edge.label)}${edge.source ? " · " + escapeHtml(edge.source) : ""}</title>${escapeHtml(label)}
+            </text>`;
+    }).join("");
+
+    // Nœuds : centre plus gros, clic = recentrage
+    const nodesSvg = (data.nodes || []).map(node => {
+        const pos = positions[node.id];
+        if (!pos) return "";
+        const isCenter = node.id === data.center;
+        const radius = isCenter ? 24 : 15;
+        const name = node.name || node.id;
+        const shortName = name.length > 22 ? name.slice(0, 21) + "…" : name;
+        return `
+            <g style="cursor: ${isCenter ? "default" : "pointer"};"
+               ${isCenter ? "" : `onclick="openRelationGraph('${escapeHtml(node.id)}')"`}>
+                <circle cx="${pos.x.toFixed(1)}" cy="${pos.y.toFixed(1)}" r="${radius}"
+                        fill="${_graphNodeColor(node.entity_type)}" opacity="${isCenter ? 1 : 0.85}"
+                        stroke="${isCenter ? "var(--text-primary)" : "transparent"}" stroke-width="2.5"/>
+                <text x="${pos.x.toFixed(1)}" y="${(pos.y + radius + 12).toFixed(1)}" font-size="9.5"
+                      text-anchor="middle" font-weight="${isCenter ? 700 : 500}"
+                      style="fill: var(--text-primary);">
+                    <title>${escapeHtml(name)} (${escapeHtml(node.id)})</title>${escapeHtml(shortName)}
+                </text>
+            </g>`;
+    }).join("");
+
+    container.innerHTML = `
+        <svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Graphe des relations">
+            <defs>
+                <marker id="graph-arrow" viewBox="0 0 8 8" refX="16" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--color-primary)" opacity="0.75"/>
+                </marker>
+                <marker id="graph-arrow-red" viewBox="0 0 8 8" refX="16" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--color-alert)"/>
+                </marker>
+            </defs>
+            ${edgesSvg}
+            ${nodesSvg}
+        </svg>`;
 }

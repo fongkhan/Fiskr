@@ -73,7 +73,8 @@ from fiskr.settings import (
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events,
-    SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS
+    SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
+    sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES
 )
 
 
@@ -306,25 +307,71 @@ def _run_scheduled_syncs():
     finally:
         db.close()
 
-async def _daily_sync_scheduler():
-    """Boucle asynchrone declenchant les synchronisations chaque matin (sync.schedule_time)."""
-    while True:
-        schedule_time = get_sync_config()["schedule_time"]
+# Executeurs de sync par source (planification cron individuelle)
+_SYNC_RUNNERS = {
+    "ofac": run_ofac_sync, "eurlex": run_eurlex_sync, "dgt": run_dgt_sync,
+    "eu_fsf": run_eu_fsf_sync, "un": run_un_sync, "pep": run_pep_sync, "ofsi": run_ofsi_sync,
+}
+# Sources en cours d'execution : une meme source ne se chevauche jamais
+_running_syncs: set = set()
+
+def _run_source_sync(source: str) -> None:
+    """Synchronise UNE source (declenchement cron), avec re-criblage post-delta."""
+    db = next(get_db())
+    try:
+        report = _SYNC_RUNNERS[source](db, trigger="SCHEDULED",
+                                       reload_cache=lambda: load_watchlist_cache(db))
+        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
+            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
+            if snap:
+                rescreen_after_snapshot_change(db, snap.file_type, report.snapshot_id,
+                                               report.previous_snapshot_id)
+    finally:
+        db.close()
+
+async def _cron_sync_scheduler():
+    """
+    Planificateur cron par source : chaque minute, les sources activees dont
+    l'expression cron effective (reglage a chaud > config > horaire global)
+    matche sont synchronisees, chacune dans son thread, sans chevauchement
+    d'une meme source.
+    """
+    from fiskr.cron import cron_matches, CronError
+
+    async def _launch(source: str):
+        _running_syncs.add(source)
         try:
-            hour, minute = (int(p) for p in schedule_time.split(":"))
-        except ValueError:
-            logger.error(f"sync.schedule_time invalide ({schedule_time}), format attendu HH:MM. Planificateur arrete.")
-            return
-        now = datetime.now()
-        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
-        logger.info(f"Prochaine synchronisation automatique des sources: {next_run}")
-        await asyncio.sleep((next_run - now).total_seconds())
-        try:
-            await asyncio.to_thread(_run_scheduled_syncs)
+            await asyncio.to_thread(_run_source_sync, source)
         except Exception as e:
-            logger.error(f"Echec de la synchronisation planifiee: {e}")
+            logger.error(f"Echec de la synchronisation planifiee de {source}: {e}")
+        finally:
+            _running_syncs.discard(source)
+
+    while True:
+        now = datetime.now()
+        # Reveil a la prochaine minute pleine (evaluation une fois par minute)
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        tick = datetime.now()
+        try:
+            sync_cfg = get_sync_config()
+            db = next(get_db())
+            try:
+                schedules = sync_schedules(db)
+            finally:
+                db.close()
+            for source, expr in schedules.items():
+                if not sync_cfg.get(source, {}).get("enabled"):
+                    continue
+                if source in _running_syncs:
+                    continue  # la precedente execution n'est pas terminee
+                try:
+                    if cron_matches(expr, tick):
+                        logger.info(f"Cron {source} ({expr}) : synchronisation declenchee.")
+                        asyncio.create_task(_launch(source))
+                except CronError as bad:
+                    logger.error(f"Cron invalide pour {source} ({expr}) : {bad}")
+        except Exception as e:
+            logger.error(f"Planificateur cron en echec sur ce tick : {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -334,10 +381,10 @@ async def lifespan(app: FastAPI):
     # Populate the cache from database
     db = next(get_db())
     load_watchlist_cache(db)
-    # Start the daily source synchronization scheduler if enabled
+    # Start the per-source cron synchronization scheduler if enabled
     scheduler_task = None
     if get_sync_config()["auto_enabled"]:
-        scheduler_task = asyncio.create_task(_daily_sync_scheduler())
+        scheduler_task = asyncio.create_task(_cron_sync_scheduler())
     # Inbox CFT surveillee (auto-desactivee si batch.inbox_dir est vide)
     inbox_task = asyncio.create_task(_inbox_poller())
     yield
@@ -1961,6 +2008,83 @@ async def get_entity_relationships(
         "inherited_risk": compute_inherited_risk(db, entity_id),
     }
 
+GRAPH_MAX_NODES = 60
+
+@app.get("/api/relationships/graph/{entity_id}")
+async def get_relationship_graph(
+    entity_id: str,
+    depth: int = Query(2, ge=1, le=3),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Sous-graphe de relations autour d'une entite (BFS dans les deux sens,
+    profondeur 1-3, borne a 60 nœuds) pour la visualisation reseau.
+    Chaque arete porte son type, son % de detention et un drapeau
+    « majority » (detention >= 50 % ou presomption OFAC : regle des 50 %).
+    """
+    from sqlalchemy import or_
+    node_depths: Dict[str, int] = {entity_id: 0}
+    edges: Dict[int, EntityRelationship] = {}
+    frontier = [entity_id]
+    truncated = False
+    for level in range(1, depth + 1):
+        if not frontier:
+            break
+        rels = db.query(EntityRelationship).filter(or_(
+            EntityRelationship.from_entity_id.in_(frontier),
+            EntityRelationship.to_entity_id.in_(frontier),
+        )).all()
+        next_frontier: List[str] = []
+        for rel in rels:
+            edges[rel.id] = rel
+            for node in (rel.from_entity_id, rel.to_entity_id):
+                if node not in node_depths:
+                    if len(node_depths) >= GRAPH_MAX_NODES:
+                        truncated = True
+                        continue
+                    node_depths[node] = level
+                    next_frontier.append(node)
+        frontier = next_frontier
+
+    names = _entity_names_map(db, list(node_depths.keys()))
+    # Types d'entites pour l'affichage (I/E/V/A)
+    type_rows = db.query(WatchlistEntity.entity_id, WatchlistEntity.entity_type) \
+                  .filter(WatchlistEntity.entity_id.in_(list(node_depths.keys()))).all()
+    entity_types = {eid: etype for eid, etype in type_rows}
+
+    def _edge_view(rel: EntityRelationship) -> Dict[str, Any]:
+        majority = rel.relation_type == "OWNED_BY" and (
+            (rel.ownership_pct is not None and rel.ownership_pct >= 50.0)
+            or (rel.ownership_pct is None and rel.source == "OFAC")
+        )
+        return {
+            "id": rel.id,
+            "from": rel.from_entity_id, "to": rel.to_entity_id,
+            "relation_type": rel.relation_type,
+            "label": RELATION_TYPE_LABELS.get(rel.relation_type, rel.relation_type),
+            "ownership_pct": rel.ownership_pct,
+            "source": rel.source,
+            "majority": majority,
+        }
+
+    return {
+        "center": entity_id,
+        "depth": depth,
+        "truncated": truncated,
+        "nodes": [
+            {
+                "id": node, "name": names.get(node, node),
+                "entity_type": entity_types.get(node), "depth": node_depth,
+            }
+            for node, node_depth in sorted(node_depths.items(), key=lambda kv: (kv[1], kv[0]))
+        ],
+        "edges": [
+            _edge_view(rel) for rel in edges.values()
+            if rel.from_entity_id in node_depths and rel.to_entity_id in node_depths
+        ],
+    }
+
 @app.post("/api/relationships")
 async def create_relationship(
     payload: RelationshipCreate,
@@ -2949,12 +3073,62 @@ async def get_sync_reports(
 
 @app.get("/api/sync/config")
 async def get_sync_configuration(
+    db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Configuration active de la synchronisation automatique des sources."""
+    """Configuration active de la synchronisation automatique des sources,
+    avec la planification cron effective et la prochaine occurrence par source."""
+    from fiskr.cron import next_run as cron_next_run, CronError
     cfg = get_sync_config()
     cfg["email_configured"] = bool(os.getenv("SMTP_HOST") and os.getenv("SYNC_EMAIL_TO"))
+    schedules = sync_schedules(db)
+    cfg["schedules"] = schedules
+    next_runs = {}
+    for source, expr in schedules.items():
+        try:
+            occurrence = cron_next_run(expr)
+            next_runs[source] = occurrence.isoformat() if occurrence else None
+        except CronError:
+            next_runs[source] = None
+    cfg["next_runs"] = next_runs
     return cfg
+
+class SyncSchedulesUpdate(BaseModel):
+    # source -> expression cron 5 champs ; chaine vide = retour au defaut
+    schedules: Dict[str, str]
+
+@app.put("/api/settings/sync")
+async def update_sync_schedules(
+    payload: SyncSchedulesUpdate,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Planification cron par source, modifiable a chaud (admin). Une valeur
+    vide retire la surcharge (retour au defaut config/horaire global)."""
+    from fiskr.cron import parse_cron, CronError
+    unknown = [s for s in payload.schedules if s not in SYNC_SOURCES]
+    if unknown:
+        raise HTTPException(status_code=400,
+                            detail=f"Source(s) inconnue(s) : {', '.join(unknown)} ({', '.join(SYNC_SOURCES)}).")
+    current = get_setting_with_source(db, SETTING_SYNC_SCHEDULES, {})["value"] or {}
+    merged = dict(current) if isinstance(current, dict) else {}
+    for source, expr in payload.schedules.items():
+        expr = (expr or "").strip()
+        if expr:
+            try:
+                parse_cron(expr)
+            except CronError as bad:
+                raise HTTPException(status_code=400, detail=f"{source} : {bad}")
+            merged[source] = expr
+        else:
+            merged.pop(source, None)
+    before = dict(current) if isinstance(current, dict) else {}
+    set_setting(db, SETTING_SYNC_SCHEDULES, merged, updated_by=admin_user["username"])
+    log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="sync.schedules",
+                     before=before, after=merged)
+    db.commit()
+    schedules = sync_schedules(db)
+    return {"message": "Planification des synchronisations mise à jour.", "schedules": schedules}
 
 @app.get("/api/sync/evidence")
 async def list_sync_evidence(
