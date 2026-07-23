@@ -349,6 +349,21 @@ class EntityRelationship(Base):
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# Index composites/manquants pour les requetes chaudes a volumetrie reelle.
+# Declares hors modeles : crees de facon idempotente dans init_db (create_all
+# ne rajoute pas d'index sur une table existante).
+_PERFORMANCE_INDEXES = (
+    Index("ix_alerts_status_channel", Alert.status, Alert.channel),
+    Index("ix_alerts_client_entity", Alert.client_id, Alert.watchlist_entity_id),
+    Index("ix_audit_trail_timestamp", AuditTrail.timestamp),
+    Index("ix_audit_trail_client_id", AuditTrail.client_id),
+    Index("ix_wl_entities_snapshot_id", WatchlistEntity.snapshot_id),
+    Index("ix_wl_entities_entity_id", WatchlistEntity.entity_id),
+    Index("ix_client_entities_snapshot_id", ClientEntity.snapshot_id),
+    Index("ix_client_entities_client_id", ClientEntity.client_id),
+)
+
+
 def refresh_source_relationships(db, source: str, relations) -> int:
     """
     Remplace l'integralite des relations d'une source (ex. OFAC) par le jeu
@@ -751,6 +766,12 @@ def init_db():
     except Exception as e:
         logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)
+    # Index de performance idempotents (les tables existantes n'en heritent pas)
+    for perf_index in _PERFORMANCE_INDEXES:
+        try:
+            perf_index.create(bind=engine, checkfirst=True)
+        except Exception as e:
+            logger.warning(f"Index {perf_index.name} non créé : {e}")
     
     # Check if we need to alter column lengths (e.g. if we are on postgresql)
     if engine.dialect.name == "postgresql":

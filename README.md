@@ -202,6 +202,10 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Graphe de relations & règle des 50 % (OFAC)** : les `ProfileRelationships` du SDN_ADVANCED sont extraits (détenu par, agit pour, associé, famille, dirigeant, soutien) et rafraîchis à chaque sync ; relations manuelles avec % de détention (reviewer/admin). Le **risque hérité par détention majoritaire** (≥ 50 %, transitif, présomption sur les liens OFAC sans %) est affiché dans la fiche et annoté dans le decision tree de chaque criblage. **Visualisation réseau** : modale « 🕸 Graphe » (SVG natif, rendu radial, flèches rouges = détention majoritaire, clic sur un nœud pour recentrer, profondeur 1-3).
 * **Planification cron par source** (`fiskr/cron.py`, sans dépendance) : chaque source de synchronisation suit sa propre expression cron 5 champs, modifiable à chaud (`PUT /api/settings/sync`, admin) avec repli sur `config.yaml` puis sur l'horaire quotidien global ; prochaine exécution affichée par source, aucun chevauchement d'une même source.
 * **Campagnes de criblage batch persistées** : un CSV de clients (upload ou **dépôt CFT dans l'inbox surveillée** `batch.inbox_dir`) est criblé côté serveur en tâche de fond avec les mêmes garanties que le temps réel (quality gate, liste blanche, règles, audit immuable, alertes) — progression en direct, résultats filtrables, export CSV, rejets quality gate conservés avec motif.
+* **Vue client 360°** (`GET /api/clients/{id}/overview`, bouton 👤 de la modale d'alerte) : fiche KYC du dernier référentiel en production, historique de criblage, alertes et paires de liste blanche du client — tout au même endroit pendant l'instruction.
+* **Sécurité des accès** : verrouillage de compte après échecs répétés (423, durée et seuil dans `config.yaml security`), politique de mots de passe (12+ caractères, minuscule/majuscule/chiffre), sessions tracées au journal admin (`LOGIN`/`LOGIN_FAILED`/`ACCOUNT_LOCKED`/`LOGOUT` avec IP), cookies durcis et en-têtes HTTP de sécurité sur chaque réponse.
+* **Clés d'API techniques** (`fsk_…`, carte admin des Paramètres) : comptes de service pour les intégrations (CFT, supervision) — clé montrée une seule fois, hash SHA-256 stocké, authentification `X-API-Key`, révocation immédiate, rôle admin interdit (moindre privilège).
+* **Healthcheck** `GET /api/health` non authentifié (statut/base/cache, volontairement minimal) pour load-balancers et supervision.
 
 ### 🖥️ Interface (dashboard)
 
@@ -210,6 +214,9 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Responsive** : sidebar rétractable (hamburger + overlay) sous 1024 px, formulaires en une colonne sur mobile.
 * **Tri des colonnes** sur toutes les tables (tri API validé pour la vue base paginée), squelettes de chargement, états vides homogènes, fermeture des modales à Échap, statuts affichés en français.
 * **Recherche globale Ctrl+K** : palette de commande (listés — y compris fuzzy —, alertes, navigation), entièrement au clavier.
+* **Liens profonds** : chaque onglet/sous-onglet est adressable par l'URL (`#alerts/subtab-filtering-queue`, …) — écran restauré au chargement, navigation arrière/avant du navigateur respectée, liens partageables entre analystes.
+* **Cloche de notifications** : badge du nombre d'éléments à traiter et panneau déroulant (alertes ouvertes par canal, 4-yeux en attente, alertes en retard SLA, snapshots à homologuer) avec accès direct en un clic.
+* **Pagination serveur** des files d'alertes et de la liste blanche (100 par page) ; **glisser-déposer** des fichiers sur les zones d'import (listes, batch, transactions).
 
 ---
 

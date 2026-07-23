@@ -2964,6 +2964,70 @@ async def get_audit_history(
     return {"total": total, "page": page, "page_size": page_size,
             "items": [_row(r) for r in rows]}
 
+# ------------------ VUE CLIENT 360° ------------------
+
+@app.get("/api/clients/{client_id}/overview")
+async def get_client_overview(
+    client_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Vue 360° d'un client : fiche KYC (dernier referentiel en production),
+    historique de criblage, alertes (tous statuts) et paires de liste blanche
+    — tout ce qu'un analyste doit voir au meme endroit pendant une instruction.
+    """
+    kyc_row = (
+        db.query(ClientEntity, Snapshot)
+          .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
+          .filter(ClientEntity.client_id == client_id, Snapshot.status == "READY")
+          .order_by(Snapshot.uploaded_at.desc()).first()
+    )
+    kyc = None
+    if kyc_row:
+        entity, snap = kyc_row
+        kyc = {
+            "client_type": entity.client_type,
+            "first_name": entity.client_first_name, "last_name": entity.client_last_name,
+            "company_name": entity.client_company_name, "dob": entity.client_dob,
+            "gender": entity.client_gender, "countries": entity.client_countries,
+            "address": entity.client_address, "city": entity.client_city,
+            "country": entity.client_country,
+            "iban": entity.client_iban, "bic": entity.client_bic, "tax_id": entity.client_tax_id,
+            "phone": entity.client_phone, "email": entity.client_email,
+            "risk_rating": entity.client_risk_rating, "pep_flag": bool(entity.client_pep_flag),
+            "segment": entity.client_segment, "activity_sector": entity.client_activity_sector,
+            "relationship_start": entity.client_relationship_start, "status": entity.client_status,
+            "snapshot_uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
+        }
+
+    audits = db.query(AuditTrail).filter(AuditTrail.client_id == client_id) \
+               .order_by(AuditTrail.timestamp.desc()).limit(50).all()
+    alerts = db.query(Alert).filter(Alert.client_id == client_id) \
+               .order_by(Alert.created_at.desc()).limit(50).all()
+    pairs = db.query(WhitelistPair).filter(WhitelistPair.client_id == client_id) \
+              .order_by(WhitelistPair.created_at.desc()).all()
+
+    return {
+        "client_id": client_id,
+        "kyc": kyc,
+        "screenings": [
+            {
+                "id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "watchlist_id": r.watchlist_id, "watchlist_name": r.watchlist_name,
+                "final_score": r.final_score, "status": r.status, "list_type": r.list_type,
+            }
+            for r in audits
+        ],
+        "alerts": [_alert_summary(a) for a in alerts],
+        "whitelist_pairs": [_whitelist_summary(p) for p in pairs],
+        "counts": {
+            "screenings": db.query(AuditTrail).filter(AuditTrail.client_id == client_id).count(),
+            "alerts": db.query(Alert).filter(Alert.client_id == client_id).count(),
+            "whitelist_pairs": len(pairs),
+        },
+    }
+
 # ------------------ EXPORTS CSV (alertes, journal d'audit, listes) ------------------
 
 def _csv_response(filename: str, header: List[str], rows) -> Response:
@@ -3114,6 +3178,11 @@ async def get_sidebar_counters(
             (Alert.channel == "SCREENING") | (Alert.channel.is_(None))
         ).count(),
         "open_alerts_filtering": open_q.filter(Alert.channel == "FILTERING").count(),
+        "pending_validation": db.query(Alert).filter(Alert.status == "PENDING_VALIDATION").count(),
+        "overdue_alerts": db.query(Alert).filter(
+            Alert.status.in_(ALERT_OPEN_STATUSES), Alert.due_at.isnot(None),
+            Alert.due_at < datetime.utcnow()
+        ).count(),
         "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
     }
 
