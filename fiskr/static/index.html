@@ -105,6 +105,13 @@
                     <h1>Fiskr — Poste de Contrôle Conformité</h1>
                 </div>
                 <div class="header-actions">
+                    <div style="position: relative;">
+                        <button id="bell-btn" class="icon-btn" onclick="toggleNotifCenter()" aria-label="Centre de notifications" title="Notifications">🔔<span id="bell-badge" class="status-badge warning hidden" style="position: absolute; top: -6px; right: -6px; padding: 0.05rem 0.35rem; font-size: 0.65rem;">0</span></button>
+                        <div id="notif-panel" class="hidden" style="position: absolute; right: 0; top: 48px; width: 330px; background: var(--modal-bg); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: var(--shadow-modal); z-index: 1100; padding: 0.75rem;">
+                            <h4 style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.5rem;">À traiter</h4>
+                            <ul id="notif-list" class="home-list"></ul>
+                        </div>
+                    </div>
                     <button class="icon-btn" onclick="openCommandPalette()" aria-label="Recherche globale (Ctrl+K)" title="Recherche globale (Ctrl+K)">🔍</button>
                     <button id="theme-toggle-btn" class="icon-btn" onclick="toggleTheme()" aria-label="Basculer le thème clair/sombre" title="Thème clair / sombre">🌙</button>
                     <div class="system-status">
@@ -1272,14 +1279,14 @@
                                 <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
-                                <select id="screening-priority-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par priorité" style="margin-left: auto;">
+                                <select id="screening-priority-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
                                     <option value="">Toutes priorités</option>
                                     <option value="CRITICAL">Critique</option>
                                     <option value="HIGH">Haute</option>
                                     <option value="MEDIUM">Moyenne</option>
                                     <option value="LOW">Basse</option>
                                 </select>
-                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par type de liste"></select>
+                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par type de liste"></select>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div class="table-container max-height-table">
@@ -1293,6 +1300,7 @@
                                     <tbody><!-- Populated dynamically --></tbody>
                                 </table>
                             </div>
+                            <div id="screening-alerts-pagination" class="pagination-container hidden"></div>
                         </div>
                     </div>
                 </div>
@@ -1309,14 +1317,14 @@
                                 <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
                                 <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
-                                <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par priorité" style="margin-left: auto;">
+                                <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
                                     <option value="">Toutes priorités</option>
                                     <option value="CRITICAL">Critique</option>
                                     <option value="HIGH">Haute</option>
                                     <option value="MEDIUM">Moyenne</option>
                                     <option value="LOW">Basse</option>
                                 </select>
-                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par type de liste"></select>
+                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div class="table-container max-height-table">
@@ -1330,6 +1338,7 @@
                                     <tbody><!-- Populated dynamically --></tbody>
                                 </table>
                             </div>
+                            <div id="filtering-alerts-pagination" class="pagination-container hidden"></div>
                         </div>
                     </div>
                 </div>
@@ -1410,6 +1419,7 @@
                                     </tbody>
                                 </table>
                             </div>
+                            <div id="whitelist-pagination" class="pagination-container hidden"></div>
                         </div>
                     </div>
                 </div>
@@ -1629,6 +1639,26 @@
                         </div>
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
                     </div>
+
+                    <!-- Clés d'API techniques (comptes de service) -->
+                    <div class="card form-card hidden" id="apikeys-card">
+                        <h2>🔑 Clés d'API Techniques (Admin)</h2>
+                        <p class="section-desc">Comptes de service pour les intégrations systèmes (CFT, ordonnanceur, SI amont) : authentification par en-tête <code>X-API-Key</code>, rôles restreints (jamais admin), révocation immédiate, usage tracé. <strong>La clé complète n'est affichée qu'à la création.</strong></p>
+                        <div class="filter-bar" style="margin-bottom: 1rem;">
+                            <input type="text" id="apikey-name" placeholder="Nom de la clé (ex. CFT production)">
+                            <select id="apikey-role" style="min-width: 160px;">
+                                <option value="user">user (criblage)</option>
+                                <option value="user,reviewer">user + reviewer</option>
+                            </select>
+                            <button class="btn btn-sm btn-primary" onclick="createApiKey()">➕ Créer la clé</button>
+                        </div>
+                        <div class="table-container max-height-table">
+                            <table id="apikeys-table">
+                                <thead><tr><th>Nom</th><th>Préfixe</th><th>Rôles</th><th>Créée</th><th>Dernier usage</th><th>État</th><th></th></tr></thead>
+                                <tbody><!-- Populated dynamically --></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -1846,6 +1876,15 @@
         </div>
     </div>
 
+    <!-- Vue client 360° -->
+    <div id="client360-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 880px;">
+            <button class="close-modal" onclick="document.getElementById('client360-modal').classList.add('hidden')" aria-label="Fermer">&times;</button>
+            <h3 id="client360-title" style="font-family: var(--font-heading);">👤 Vue client 360°</h3>
+            <div id="client360-body" class="modal-body-content"></div>
+        </div>
+    </div>
+
     <!-- Graphe des relations (ownership) -->
     <div id="graph-modal" class="modal hidden">
         <div class="modal-content" style="max-width: 920px;">
@@ -1879,7 +1918,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.3"></script>
+    <script src="/static/app.js?v=6.4"></script>
 
 
 

@@ -2,9 +2,8 @@ import json
 import hashlib
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from fiskr.config import config
 
 logger = logging.getLogger("fiskr.database")
@@ -350,6 +349,21 @@ class EntityRelationship(Base):
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# Index composites/manquants pour les requetes chaudes a volumetrie reelle.
+# Declares hors modeles : crees de facon idempotente dans init_db (create_all
+# ne rajoute pas d'index sur une table existante).
+_PERFORMANCE_INDEXES = (
+    Index("ix_alerts_status_channel", Alert.status, Alert.channel),
+    Index("ix_alerts_client_entity", Alert.client_id, Alert.watchlist_entity_id),
+    Index("ix_audit_trail_timestamp", AuditTrail.timestamp),
+    Index("ix_audit_trail_client_id", AuditTrail.client_id),
+    Index("ix_wl_entities_snapshot_id", WatchlistEntity.snapshot_id),
+    Index("ix_wl_entities_entity_id", WatchlistEntity.entity_id),
+    Index("ix_client_entities_snapshot_id", ClientEntity.snapshot_id),
+    Index("ix_client_entities_client_id", ClientEntity.client_id),
+)
+
+
 def refresh_source_relationships(db, source: str, relations) -> int:
     """
     Remplace l'integralite des relations d'une source (ex. OFAC) par le jeu
@@ -539,7 +553,7 @@ class AppSetting(Base):
 
 class User(Base):
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(100), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
@@ -547,6 +561,29 @@ class User(Base):
     full_name = Column(String(255), nullable=True)
     role = Column(String(50), default="admin")
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Anti-brute-force : compteur d'echecs consecutifs + verrouillage temporaire
+    failed_login_count = Column(Integer, default=0)
+    locked_until = Column(DateTime, nullable=True)
+
+class ApiKey(Base):
+    """
+    Cle d'API technique (compte de service) pour les integrations systemes
+    (CFT, ordonnanceurs, SI amont) : la cle complete « fsk_... » n'est montree
+    QU'A LA CREATION ; seuls le prefixe (identification) et le hash SHA-256
+    (verification) sont stockes. Revocation douce, jamais de suppression.
+    """
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    prefix = Column(String(20), unique=True, nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False)
+    roles = Column(String(50), default="user")
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_by = Column(String(100), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
 
 import secrets
 import os
@@ -700,6 +737,10 @@ def init_db():
             "whitelist_pairs": [
                 ("list_type", "VARCHAR(30)"),
             ],
+            "users": [
+                ("failed_login_count", "INTEGER"),
+                ("locked_until", "TIMESTAMP"),
+            ],
         }
         inspector = inspect(engine)
         for table_name, cols in _additive_migrations.items():
@@ -725,6 +766,12 @@ def init_db():
     except Exception as e:
         logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)
+    # Index de performance idempotents (les tables existantes n'en heritent pas)
+    for perf_index in _PERFORMANCE_INDEXES:
+        try:
+            perf_index.create(bind=engine, checkfirst=True)
+        except Exception as e:
+            logger.warning(f"Index {perf_index.name} non créé : {e}")
     
     # Check if we need to alter column lengths (e.g. if we are on postgresql)
     if engine.dialect.name == "postgresql":

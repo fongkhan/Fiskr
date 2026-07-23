@@ -34,7 +34,7 @@ from fiskr.database import (
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
-    BatchCampaign, BatchResult
+    BatchCampaign, BatchResult, ApiKey
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import notify_event
@@ -59,7 +59,8 @@ from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
-    create_access_token, decode_access_token, parse_roles, normalize_roles
+    create_access_token, decode_access_token, parse_roles, normalize_roles,
+    validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN
 )
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
@@ -401,6 +402,55 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# En-tetes de securite HTTP sur toutes les reponses. CSP : le dashboard repose
+# sur des gestionnaires inline et Google Fonts, d'ou 'unsafe-inline' cible ;
+# tout le reste est restreint a l'origine.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "frame-ancestors 'none'"
+    ),
+}
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    return response
+
+@app.get("/api/health")
+async def healthcheck():
+    """
+    Sonde de supervision (SANS authentification, volontairement minimale) :
+    base de donnees joignable et cache de criblage charge. A brancher sur le
+    monitoring d'exploitation (liveness/readiness).
+    """
+    db_ok = True
+    try:
+        db = next(get_db())
+        try:
+            from sqlalchemy import text as _sql_text
+            db.execute(_sql_text("SELECT 1"))
+        finally:
+            db.close()
+    except Exception:
+        db_ok = False
+    cache_ok = len(watchlist_store) > 0
+    return {
+        "status": "ok" if (db_ok and cache_ok) else "degraded",
+        "database": db_ok,
+        "watchlist_cache_loaded": cache_ok,
+    }
+
 # ------------------ PYDANTIC MODELS ------------------
 
 class ScreenCountries(BaseModel):
@@ -470,33 +520,70 @@ class LoginRequest(BaseModel):
 
 @app.post("/api/auth/login")
 async def login(
+    request: Request,
     response: Response,
     request_data: LoginRequest,
     db: Session = Depends(get_db)
 ):
-    """Authenticates user credentials and sets an HttpOnly access cookie."""
+    """
+    Authentifie l'utilisateur et pose le cookie de session HttpOnly.
+    Anti-brute-force : verrouillage temporaire apres N echecs consecutifs ;
+    chaque connexion, echec et verrouillage est trace au journal
+    d'administration (exigence de tracabilite des acces).
+    """
+    sec = security_config()
+    client_ip = request.client.host if request.client else "?"
     if not request_data.username or not request_data.password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Nom d'utilisateur et mot de passe requis."
         )
-        
+
     user = db.query(User).filter(User.username == request_data.username).first()
+
+    # Compte temporairement verrouille (anti-brute-force)
+    if user and user.locked_until and user.locked_until > datetime.utcnow():
+        remaining = int((user.locked_until - datetime.utcnow()).total_seconds() // 60) + 1
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"Compte temporairement verrouillé après trop d'échecs. Réessayez dans {remaining} minute(s)."
+        )
+
     if not user or not verify_password(request_data.password, user.hashed_password, user.salt):
+        if user:
+            user.failed_login_count = (user.failed_login_count or 0) + 1
+            if user.failed_login_count >= sec["max_login_failures"]:
+                user.locked_until = datetime.utcnow() + timedelta(minutes=sec["lockout_minutes"])
+                user.failed_login_count = 0
+                log_admin_action(db, user.username, "ACCOUNT_LOCKED", target=user.username,
+                                 detail=f"Verrouillé {sec['lockout_minutes']} min après "
+                                        f"{sec['max_login_failures']} échecs consécutifs (IP {client_ip}).")
+        log_admin_action(db, request_data.username, "LOGIN_FAILED",
+                         target=request_data.username, detail=f"IP {client_ip}")
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Identifiants incorrects. Veuillez réessayer."
         )
-        
-    token = create_access_token({"sub": user.username, "role": user.role})
+
+    # Succes : remise a zero du compteur d'echecs + traçage de la session
+    user.failed_login_count = 0
+    user.locked_until = None
+    log_admin_action(db, user.username, "LOGIN", target=user.username, detail=f"IP {client_ip}")
+    db.commit()
+
+    session_hours = max(1, sec["session_hours"])
+    token = create_access_token({"sub": user.username, "role": user.role},
+                                expires_delta=timedelta(hours=session_hours))
     response.set_cookie(
         key="fiskr_access_token",
         value=token,
         httponly=True,
-        samesite="lax",
-        max_age=86400
+        secure=sec["secure_cookies"],
+        samesite=sec["cookie_samesite"],
+        max_age=session_hours * 3600,
     )
-    
+
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -509,8 +596,14 @@ async def login(
     }
 
 @app.post("/api/auth/logout")
-async def logout(response: Response):
-    """Logs out the user by clearing the authentication token cookie."""
+async def logout(
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Deconnecte l'utilisateur (cookie efface, session tracee au journal)."""
+    log_admin_action(db, current_user["username"], "LOGOUT", target=current_user["username"])
+    db.commit()
     response.delete_cookie("fiskr_access_token")
     return {"message": "Déconnexion réussie."}
 
@@ -550,8 +643,10 @@ async def change_own_password(
     """Allows any logged-in user to change their own password."""
     if not payload.old_password or not payload.new_password:
         raise HTTPException(status_code=400, detail="L'ancien et le nouveau mot de passe sont requis.")
-    if len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit contenir au moins 6 caractères.")
+    try:
+        validate_password(payload.new_password)
+    except ValueError as weak:
+        raise HTTPException(status_code=400, detail=str(weak))
         
     user = db.query(User).filter(User.id == current_user["id"]).first()
     if not user or not verify_password(payload.old_password, user.hashed_password, user.salt):
@@ -662,7 +757,11 @@ async def create_user(
     username = payload.username.strip()
     if not username or not payload.password:
         raise HTTPException(status_code=400, detail="Nom d'utilisateur et mot de passe requis.")
-        
+    try:
+        validate_password(payload.password)
+    except ValueError as weak:
+        raise HTTPException(status_code=400, detail=str(weak))
+
     try:
         canonical_role = normalize_roles(payload.role)
     except ValueError as role_err:
@@ -727,8 +826,10 @@ async def update_user_admin(
             raise HTTPException(status_code=400, detail=str(role_err))
         
     if payload.password and payload.password.strip():
-        if len(payload.password.strip()) < 6:
-            raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 6 caractères.")
+        try:
+            validate_password(payload.password.strip())
+        except ValueError as weak:
+            raise HTTPException(status_code=400, detail=str(weak))
         h_pass, salt_str = hash_password(payload.password.strip())
         target_user.hashed_password = h_pass
         target_user.salt = salt_str
@@ -774,6 +875,90 @@ async def delete_user(
     db.commit()
     return {"message": f"Utilisateur '{target_user.username}' supprimé avec succès."}
 
+
+# ------------------ CLES D'API TECHNIQUES (comptes de service) ------------------
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str
+    role: str = "user"
+
+def _api_key_summary(key: ApiKey) -> Dict[str, Any]:
+    return {
+        "id": key.id, "name": key.name, "prefix": key.prefix, "roles": key.roles,
+        "created_by": key.created_by,
+        "created_at": key.created_at.isoformat() if key.created_at else None,
+        "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+        "revoked_by": key.revoked_by,
+        "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
+        "active": key.revoked_at is None,
+    }
+
+@app.post("/api/apikeys")
+async def create_api_key(
+    payload: ApiKeyCreateRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Cree une cle d'API technique (integrations systemes : CFT, ordonnanceur,
+    SI amont). La cle complete « fsk_... » n'est retournee QU'ICI, une seule
+    fois — seuls le prefixe et le hash sont conserves. Moindre privilege :
+    le role admin est interdit aux comptes de service.
+    """
+    import secrets as _secrets
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Un nom de clé est requis (ex. « CFT production »).")
+    try:
+        canonical_role = normalize_roles(payload.role)
+    except ValueError as role_err:
+        raise HTTPException(status_code=400, detail=str(role_err))
+    if "admin" in parse_roles(canonical_role):
+        raise HTTPException(status_code=400,
+                            detail="Le rôle admin est interdit pour une clé d'API (moindre privilège).")
+    full_key = "fsk_" + _secrets.token_urlsafe(33)
+    key = ApiKey(
+        name=name, prefix=full_key[:API_KEY_PREFIX_LEN], key_hash=hash_api_key(full_key),
+        roles=canonical_role, created_by=admin_user["username"],
+    )
+    db.add(key)
+    log_admin_action(db, admin_user["username"], "APIKEY_CREATED", target=name,
+                     after={"prefix": full_key[:API_KEY_PREFIX_LEN], "roles": canonical_role})
+    db.commit()
+    db.refresh(key)
+    return {
+        "message": "Clé créée. Copiez-la maintenant : elle ne sera plus jamais affichée.",
+        "api_key": full_key,
+        **_api_key_summary(key),
+    }
+
+@app.get("/api/apikeys")
+async def list_api_keys(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Liste des cles d'API (prefixes seulement, jamais les cles completes)."""
+    rows = db.query(ApiKey).order_by(ApiKey.created_at.desc()).all()
+    return {"items": [_api_key_summary(k) for k in rows]}
+
+@app.post("/api/apikeys/{key_id}/revoke")
+async def revoke_api_key(
+    key_id: int,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Revocation douce d'une cle d'API (effet immediat, jamais supprimee)."""
+    key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="Clé introuvable.")
+    if key.revoked_at:
+        raise HTTPException(status_code=409, detail="Clé déjà révoquée.")
+    key.revoked_at = datetime.utcnow()
+    key.revoked_by = admin_user["username"]
+    log_admin_action(db, admin_user["username"], "APIKEY_REVOKED", target=key.name,
+                     before={"prefix": key.prefix, "roles": key.roles})
+    db.commit()
+    return {"message": f"Clé « {key.name} » révoquée.", **_api_key_summary(key)}
 
 # ------------------ DATA ENDPOINTS ------------------
 
@@ -2779,6 +2964,70 @@ async def get_audit_history(
     return {"total": total, "page": page, "page_size": page_size,
             "items": [_row(r) for r in rows]}
 
+# ------------------ VUE CLIENT 360° ------------------
+
+@app.get("/api/clients/{client_id}/overview")
+async def get_client_overview(
+    client_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Vue 360° d'un client : fiche KYC (dernier referentiel en production),
+    historique de criblage, alertes (tous statuts) et paires de liste blanche
+    — tout ce qu'un analyste doit voir au meme endroit pendant une instruction.
+    """
+    kyc_row = (
+        db.query(ClientEntity, Snapshot)
+          .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
+          .filter(ClientEntity.client_id == client_id, Snapshot.status == "READY")
+          .order_by(Snapshot.uploaded_at.desc()).first()
+    )
+    kyc = None
+    if kyc_row:
+        entity, snap = kyc_row
+        kyc = {
+            "client_type": entity.client_type,
+            "first_name": entity.client_first_name, "last_name": entity.client_last_name,
+            "company_name": entity.client_company_name, "dob": entity.client_dob,
+            "gender": entity.client_gender, "countries": entity.client_countries,
+            "address": entity.client_address, "city": entity.client_city,
+            "country": entity.client_country,
+            "iban": entity.client_iban, "bic": entity.client_bic, "tax_id": entity.client_tax_id,
+            "phone": entity.client_phone, "email": entity.client_email,
+            "risk_rating": entity.client_risk_rating, "pep_flag": bool(entity.client_pep_flag),
+            "segment": entity.client_segment, "activity_sector": entity.client_activity_sector,
+            "relationship_start": entity.client_relationship_start, "status": entity.client_status,
+            "snapshot_uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
+        }
+
+    audits = db.query(AuditTrail).filter(AuditTrail.client_id == client_id) \
+               .order_by(AuditTrail.timestamp.desc()).limit(50).all()
+    alerts = db.query(Alert).filter(Alert.client_id == client_id) \
+               .order_by(Alert.created_at.desc()).limit(50).all()
+    pairs = db.query(WhitelistPair).filter(WhitelistPair.client_id == client_id) \
+              .order_by(WhitelistPair.created_at.desc()).all()
+
+    return {
+        "client_id": client_id,
+        "kyc": kyc,
+        "screenings": [
+            {
+                "id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "watchlist_id": r.watchlist_id, "watchlist_name": r.watchlist_name,
+                "final_score": r.final_score, "status": r.status, "list_type": r.list_type,
+            }
+            for r in audits
+        ],
+        "alerts": [_alert_summary(a) for a in alerts],
+        "whitelist_pairs": [_whitelist_summary(p) for p in pairs],
+        "counts": {
+            "screenings": db.query(AuditTrail).filter(AuditTrail.client_id == client_id).count(),
+            "alerts": db.query(Alert).filter(Alert.client_id == client_id).count(),
+            "whitelist_pairs": len(pairs),
+        },
+    }
+
 # ------------------ EXPORTS CSV (alertes, journal d'audit, listes) ------------------
 
 def _csv_response(filename: str, header: List[str], rows) -> Response:
@@ -2929,6 +3178,11 @@ async def get_sidebar_counters(
             (Alert.channel == "SCREENING") | (Alert.channel.is_(None))
         ).count(),
         "open_alerts_filtering": open_q.filter(Alert.channel == "FILTERING").count(),
+        "pending_validation": db.query(Alert).filter(Alert.status == "PENDING_VALIDATION").count(),
+        "overdue_alerts": db.query(Alert).filter(
+            Alert.status.in_(ALERT_OPEN_STATUSES), Alert.due_at.isnot(None),
+            Alert.due_at < datetime.utcnow()
+        ).count(),
         "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
     }
 

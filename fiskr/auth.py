@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
@@ -6,13 +7,80 @@ from fastapi import Request, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from fiskr.config import SECRET_KEY
-from fiskr.database import get_db, User
+from fiskr.config import SECRET_KEY, config
+from fiskr.database import get_db, User, ApiKey
 
 logger = logging.getLogger("fiskr.auth")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
+
+
+def security_config() -> Dict[str, Any]:
+    """Section security de config.yaml avec defauts durcis."""
+    sec = config.get("security", {}) or {}
+    return {
+        "max_login_failures": int(sec.get("max_login_failures", 5) or 5),
+        "lockout_minutes": int(sec.get("lockout_minutes", 15) or 15),
+        "min_password_length": int(sec.get("min_password_length", 12) or 12),
+        "session_hours": int(sec.get("session_hours", 8) or 8),
+        "secure_cookies": bool(sec.get("secure_cookies", False)),
+        "cookie_samesite": str(sec.get("cookie_samesite", "strict") or "strict"),
+    }
+
+
+def validate_password(password: str) -> None:
+    """
+    Politique de mots de passe (comptes humains) : longueur minimale
+    configurable (defaut 12) + au moins une minuscule, une majuscule et un
+    chiffre. Leve ValueError avec un message destine a l'utilisateur.
+    """
+    pw = password or ""
+    min_len = security_config()["min_password_length"]
+    missing = []
+    if len(pw) < min_len:
+        missing.append(f"au moins {min_len} caractères")
+    if not any(c.islower() for c in pw):
+        missing.append("une minuscule")
+    if not any(c.isupper() for c in pw):
+        missing.append("une majuscule")
+    if not any(c.isdigit() for c in pw):
+        missing.append("un chiffre")
+    if missing:
+        raise ValueError("Mot de passe trop faible : il faut " + ", ".join(missing) + ".")
+
+
+# ------------------ CLES D'API TECHNIQUES (comptes de service) ------------------
+
+API_KEY_PREFIX_LEN = 12  # « fsk_ » + 8 caracteres d'identification
+
+
+def hash_api_key(full_key: str) -> str:
+    return hashlib.sha256(full_key.encode("utf-8")).hexdigest()
+
+
+def authenticate_api_key(db: Session, full_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Authentifie une cle « fsk_... » : lookup par prefixe, verification du hash
+    SHA-256, cle non revoquee. Retourne un profil de compte de service ou None.
+    """
+    if not full_key or not full_key.startswith("fsk_") or len(full_key) < API_KEY_PREFIX_LEN:
+        return None
+    key = db.query(ApiKey).filter(ApiKey.prefix == full_key[:API_KEY_PREFIX_LEN]).first()
+    if key is None or key.revoked_at is not None:
+        return None
+    if key.key_hash != hash_api_key(full_key):
+        return None
+    key.last_used_at = datetime.utcnow()
+    db.commit()
+    return {
+        "id": -key.id,  # negatif : jamais confondu avec un utilisateur humain
+        "username": f"apikey:{key.name}",
+        "full_name": f"Clé d'API « {key.name} »",
+        "role": key.roles or "user",
+        "roles": parse_roles(key.roles or "user"),
+        "is_api_key": True,
+    }
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
@@ -71,11 +139,26 @@ async def get_current_user(
     Returns current user info dictionary or raises HTTP 401 Unauthorized.
     """
     token = bearer_token
-    
+
+    # Comptes de service : cle d'API « fsk_... » via X-API-Key ou Bearer
+    api_key_candidate = None
+    if request is not None:
+        api_key_candidate = request.headers.get("X-API-Key")
+    if not api_key_candidate and token and token.startswith("fsk_"):
+        api_key_candidate = token
+    if api_key_candidate:
+        service_account = authenticate_api_key(db, api_key_candidate)
+        if service_account:
+            return service_account
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Clé d'API invalide ou révoquée.",
+        )
+
     # Fallback to cookie if Bearer token is not in header
     if not token and request:
         token = request.cookies.get("fiskr_access_token")
-        
+
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

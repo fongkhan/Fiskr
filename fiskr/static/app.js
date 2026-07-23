@@ -430,6 +430,9 @@ async function refreshSidebarCounters() {
             reviewBadge.textContent = c.pending_reviews;
             reviewBadge.classList.toggle("hidden", !c.pending_reviews);
         }
+        // Centre de notifications 🔔 (badge + panneau si ouvert)
+        _lastCounters = c;
+        renderNotifCenter();
     } catch (e) { /* silencieux : simple polling de badges */ }
 }
 
@@ -476,6 +479,8 @@ document.addEventListener("DOMContentLoaded", () => {
     initA11y();
     initSortableTables();
     initCommandPalette();
+    initHashRouting();
+    initDropZones();
     // Check authentication and load user info
     checkAuthUser();
     initListTypeControls();
@@ -533,6 +538,8 @@ async function checkAuthUser() {
             // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
             const settingsCard = document.getElementById("review-settings-card");
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
+            const apiKeysCard = document.getElementById("apikeys-card");
+            if (apiKeysCard) apiKeysCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -593,6 +600,8 @@ function switchTab(tabId) {
 
     // Mobile : replier la sidebar après la navigation
     toggleSidebar(false);
+    // Deep link : l'URL suit la navigation (boutons navigateur, partage)
+    updateLocationHash(tabId);
 
     // Refresh tab-specific data
     if (tabId === "home") {
@@ -608,6 +617,7 @@ function switchTab(tabId) {
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
+        fetchApiKeys();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -660,6 +670,7 @@ function switchSubTab(sectionId, subTabId) {
         activeContent.classList.add("active");
         activeContent.classList.remove("hidden");
     }
+    updateLocationHash(sectionId, subTabId);
 
     // Refresh sub-tab specific data if needed
     if (subTabId === "watchlist-active") {
@@ -3631,11 +3642,34 @@ function describeFilteringSubject(a) {
     return `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
 }
 
-async function fetchAlerts(channel = "SCREENING") {
+// Pagination des files d'alertes (etat par canal)
+const ALERTS_PAGE_SIZE = 100;
+let alertsPageByChannel = { SCREENING: 1, FILTERING: 1 };
+
+function renderQueuePagination(containerId, page, total, pageSize, onPageFn) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (total <= pageSize) { container.classList.add("hidden"); return; }
+    container.classList.remove("hidden");
+    container.innerHTML = `
+        <span class="pagination-info">${total} élément(s) — page ${page} / ${totalPages}</span>
+        <div class="pagination-buttons">
+            <button class="pagination-btn" ${page <= 1 ? "disabled" : ""} onclick="${onPageFn}(${page - 1})">← Précédent</button>
+            <button class="pagination-btn" ${page >= totalPages ? "disabled" : ""} onclick="${onPageFn}(${page + 1})">Suivant →</button>
+        </div>`;
+}
+
+function goToAlertsPageScreening(page) { fetchAlerts("SCREENING", page); }
+function goToAlertsPageFiltering(page) { fetchAlerts("FILTERING", page); }
+
+async function fetchAlerts(channel = "SCREENING", page = null) {
     const conf = ALERT_CHANNEL_CONF[channel];
     if (!conf) return;
+    if (page !== null) alertsPageByChannel[channel] = Math.max(1, page);
+    const currentPage = alertsPageByChannel[channel] || 1;
     try {
-        const params = new URLSearchParams({ page: "1", page_size: "100", channel });
+        const params = new URLSearchParams({ page: String(currentPage), page_size: String(ALERTS_PAGE_SIZE), channel });
         const filter = alertsFilterByChannel[channel];
         if (filter) params.set("status", filter);
         const listFilterEl = document.getElementById(conf.listFilter);
@@ -3647,6 +3681,11 @@ async function fetchAlerts(channel = "SCREENING") {
         if (!response.ok) return;
         const data = await response.json();
         renderAlertsTable(channel, data.items || []);
+        renderQueuePagination(
+            channel === "FILTERING" ? "filtering-alerts-pagination" : "screening-alerts-pagination",
+            data.page, data.total, data.page_size,
+            channel === "FILTERING" ? "goToAlertsPageFiltering" : "goToAlertsPageScreening",
+        );
     } catch (e) {
         console.error("Error fetching alerts:", e);
     }
@@ -3662,7 +3701,7 @@ function setAlertFilter(channel, filter) {
             btn.style.background = active ? "" : "var(--surface-3)";
         });
     }
-    fetchAlerts(channel);
+    fetchAlerts(channel, 1);
 }
 
 function alertStatusBadge(status) {
@@ -3777,7 +3816,10 @@ async function openAlertModal(alertId) {
                 · journal d'audit #${a.audit_id} (${escapeHtml(a.watchlist_version || "")})
                 · Priorité : ${prioritySelector}
                 ${a.due_at ? `· Échéance SLA : <strong style="${a.overdue ? "color: var(--color-alert);" : ""}">${formatDateTime(a.due_at)}${a.overdue ? " ⏰" : ""}</strong>` : ""}
-                <a class="btn btn-sm btn-secondary" style="margin-left: auto;" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)">🖨 Rapport</a>
+                <span style="margin-left: auto; display: inline-flex; gap: 0.4rem;">
+                    ${a.client_id && !String(a.client_id).startsWith("TXN:") ? `<button class="btn btn-sm btn-secondary" onclick="openClient360('${escapeHtml(a.client_id)}')" title="Tout l'historique de ce client">👤 Client 360°</button>` : ""}
+                    <a class="btn btn-sm btn-secondary" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)">🖨 Rapport</a>
+                </span>
             </p>
             <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score (decision tree)</h3>
             <div class="table-container" style="max-height: 160px;">
@@ -3895,15 +3937,19 @@ async function validateAlertDecision(approve) {
 
 // ------------------ LISTE BLANCHE CLIENT x LISTÉ (GOOD GUYS) ------------------
 
-async function fetchWhitelist() {
+let whitelistPage = 1;
+
+async function fetchWhitelist(page = null) {
+    if (page !== null) whitelistPage = Math.max(1, page);
     try {
-        const params = new URLSearchParams({ page_size: "100" });
+        const params = new URLSearchParams({ page: String(whitelistPage), page_size: "100" });
         const listFilterEl = document.getElementById("whitelist-list-filter");
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const response = await apiFetch(`/api/whitelist?${params}`);
         if (!response.ok) return;
         const data = await response.json();
         renderWhitelistTable(data.items || []);
+        renderQueuePagination("whitelist-pagination", data.page, data.total, data.page_size, "fetchWhitelist");
     } catch (e) {
         console.error("Error fetching whitelist:", e);
     }
@@ -5242,4 +5288,248 @@ function renderRelationGraph(data) {
             ${edgesSvg}
             ${nodesSvg}
         </svg>`;
+}
+
+// ------------------ CLÉS D'API TECHNIQUES (comptes de service) ------------------
+
+async function fetchApiKeys() {
+    const tbody = document.querySelector("#apikeys-table tbody");
+    if (!tbody) return;
+    try {
+        const response = await apiFetch("/api/apikeys", { silent: true });
+        if (!response.ok) return;
+        const items = (await response.json()).items || [];
+        if (!items.length) {
+            tableEmpty(tbody, 7, "Aucune clé d'API. Créez-en une pour vos intégrations systèmes.", "🔑");
+            return;
+        }
+        tbody.innerHTML = items.map(k => `
+            <tr>
+                <td><strong>${escapeHtml(k.name)}</strong></td>
+                <td><code>${escapeHtml(k.prefix)}…</code></td>
+                <td>${escapeHtml(k.roles)}</td>
+                <td>${formatDate(k.created_at)}<br><small style="color: var(--text-muted);">par @${escapeHtml(k.created_by || "?")}</small></td>
+                <td>${k.last_used_at ? formatDateTime(k.last_used_at) : "jamais"}</td>
+                <td>${k.active
+                    ? '<span style="color: var(--color-safe); font-weight: 700; font-size: 0.78rem;">ACTIVE</span>'
+                    : `<span style="color: var(--text-muted); font-weight: 700; font-size: 0.78rem;">RÉVOQUÉE</span><br><small style="color: var(--text-muted);">${formatDate(k.revoked_at)}</small>`}</td>
+                <td>${k.active ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeApiKey(${k.id}, '${escapeHtml(k.name)}')">Révoquer</button>` : ""}</td>
+            </tr>`).join("");
+    } catch (e) { /* silencieux */ }
+}
+
+async function createApiKey() {
+    const nameEl = document.getElementById("apikey-name");
+    const roleEl = document.getElementById("apikey-role");
+    const name = (nameEl?.value || "").trim();
+    if (!name) { showToast("Donnez un nom à la clé (ex. « CFT production »).", "error"); return; }
+    try {
+        const response = await apiFetch("/api/apikeys", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, role: roleEl?.value || "user" }),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "création refusée."), "error"); return; }
+        if (nameEl) nameEl.value = "";
+        fetchApiKeys();
+        // La clé complète n'est montrée qu'ICI, une seule fois
+        await _openAppDialog({
+            title: "🔑 Clé créée — copiez-la maintenant",
+            message: `Cette clé ne sera PLUS JAMAIS affichée. Transmettez-la au système appelant (en-tête X-API-Key) :\n\n${data.api_key}`,
+            confirmLabel: "J'ai copié la clé", cancelLabel: "Fermer",
+        });
+    } catch (e) { console.error("API key create error:", e); }
+}
+
+async function revokeApiKey(keyId, name) {
+    if (!await confirmDialog(`Révoquer la clé « ${name} » ? Les appels du système porteur échoueront immédiatement.`, { danger: true })) return;
+    try {
+        const response = await apiFetch(`/api/apikeys/${keyId}/revoke`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "révocation refusée."), "error"); return; }
+        showToast(data.message, "success");
+        fetchApiKeys();
+    } catch (e) { console.error("API key revoke error:", e); }
+}
+
+// ------------------ NAVIGATION PAR URL (deep links #onglet/sous-onglet) ------------------
+
+let _applyingHashRoute = false;
+
+function updateLocationHash(tabId, subTabId) {
+    if (_applyingHashRoute) return;
+    const target = subTabId ? `#${tabId}/${subTabId}` : `#${tabId}`;
+    if (location.hash !== target) {
+        history.pushState(null, "", target);
+    }
+}
+
+function applyHashRoute() {
+    const raw = (location.hash || "").replace(/^#/, "");
+    if (!raw) return false;
+    const [tabId, subTabId] = raw.split("/");
+    const section = document.getElementById(`sec-${tabId}`);
+    if (!section) return false;
+    _applyingHashRoute = true;
+    try {
+        switchTab(tabId);
+        if (subTabId && document.getElementById(`sub-sec-${subTabId}`)) {
+            switchSubTab(tabId, subTabId);
+        }
+    } finally {
+        _applyingHashRoute = false;
+    }
+    return true;
+}
+
+function initHashRouting() {
+    window.addEventListener("hashchange", applyHashRoute);
+    window.addEventListener("popstate", applyHashRoute);
+    applyHashRoute(); // route initiale si l'URL porte déjà un ancrage
+}
+
+// ------------------ CENTRE DE NOTIFICATIONS (🔔) ------------------
+
+let _lastCounters = {};
+
+function renderNotifCenter() {
+    const badge = document.getElementById("bell-badge");
+    const list = document.getElementById("notif-list");
+    const c = _lastCounters;
+    const totalTodo = (c.open_alerts || 0) + (c.pending_reviews || 0);
+    if (badge) {
+        badge.textContent = totalTodo > 99 ? "99+" : String(totalTodo);
+        badge.classList.toggle("hidden", !totalTodo);
+    }
+    if (!list) return;
+    const entries = [];
+    if (c.open_alerts_screening) entries.push({ icon: "🚨", label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#alerts/alerts-screening" });
+    if (c.open_alerts_filtering) entries.push({ icon: "💸", label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#alerts/alerts-filtering" });
+    if (c.pending_validation) entries.push({ icon: "👁", label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#alerts/alerts-screening" });
+    if (c.overdue_alerts) entries.push({ icon: "⏰", label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#alerts/alerts-screening" });
+    if (c.pending_reviews) entries.push({ icon: "📥", label: `${c.pending_reviews} snapshot(s) en attente d'homologation`, hash: "#watchlist-mgmt/watchlist-review" });
+    list.innerHTML = entries.length
+        ? entries.map(e => `<li onclick="location.hash='${e.hash}'; toggleNotifCenter(false);">
+                <span class="item-main">${e.icon} ${escapeHtml(e.label)}</span><span class="item-meta">→</span>
+            </li>`).join("")
+        : '<li style="cursor: default;"><span class="item-main" style="color: var(--text-muted);">✅ Rien à traiter.</span></li>';
+}
+
+function toggleNotifCenter(force) {
+    const panel = document.getElementById("notif-panel");
+    if (!panel) return;
+    const open = force !== undefined ? force : panel.classList.contains("hidden");
+    panel.classList.toggle("hidden", !open);
+    if (open) renderNotifCenter();
+}
+
+document.addEventListener("click", (e) => {
+    const panel = document.getElementById("notif-panel");
+    if (panel && !panel.classList.contains("hidden")
+        && !e.target.closest("#notif-panel") && !e.target.closest("#bell-btn")) {
+        panel.classList.add("hidden");
+    }
+});
+
+// ------------------ ZONES DE DÉPÔT (drag & drop des fichiers) ------------------
+
+function makeDropZone(inputId) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    const zone = input.closest(".card") || input.parentElement;
+    if (!zone || zone._dropWired) return;
+    zone._dropWired = true;
+    ["dragenter", "dragover"].forEach(eventName => zone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        zone.classList.add("drop-hover");
+    }));
+    ["dragleave", "drop"].forEach(eventName => zone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        zone.classList.remove("drop-hover");
+    }));
+    zone.addEventListener("drop", (e) => {
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+            input.files = e.dataTransfer.files;
+            showToast(`Fichier « ${e.dataTransfer.files[0].name} » prêt : validez pour lancer.`, "info");
+        }
+    });
+}
+
+function initDropZones() {
+    ["ingest-file", "batch-file-input", "txn-file-input"].forEach(makeDropZone);
+}
+
+// ------------------ VUE CLIENT 360° ------------------
+
+async function openClient360(clientId) {
+    if (!clientId) return;
+    const modal = document.getElementById("client360-modal");
+    const body = document.getElementById("client360-body");
+    const title = document.getElementById("client360-title");
+    if (!modal || !body) return;
+    body.innerHTML = '<p class="section-desc">Chargement…</p>';
+    modal.classList.remove("hidden");
+    try {
+        const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/overview`);
+        if (!response.ok) { body.innerHTML = '<p class="section-desc">Client introuvable.</p>'; return; }
+        const d = await response.json();
+        const k = d.kyc;
+        if (title) title.textContent = `👤 Vue client 360° — ${k ? (k.company_name || `${k.first_name || ""} ${k.last_name || ""}`.trim()) : clientId}`;
+
+        const kycHtml = k ? `
+            <div class="details-grid" style="margin-bottom: 1rem;">
+                <div class="details-item"><strong>Identifiant</strong><span>${escapeHtml(clientId)}</span></div>
+                <div class="details-item"><strong>Type</strong><span>${k.client_type === "PP" ? "Personne physique" : "Personne morale"}</span></div>
+                <div class="details-item"><strong>Naissance</strong><span>${escapeHtml(k.dob || "—")}</span></div>
+                <div class="details-item"><strong>Pays</strong><span>${escapeHtml(((k.countries || {}).nationality || []).join(", ") || k.country || "—")}</span></div>
+                <div class="details-item"><strong>IBAN / BIC</strong><span>${escapeHtml(k.iban || "—")} ${k.bic ? "· " + escapeHtml(k.bic) : ""}</span></div>
+                <div class="details-item"><strong>Notation de risque</strong><span>${escapeHtml(k.risk_rating || "—")}${k.pep_flag ? ' · <strong style="color: var(--color-warning);">PEP</strong>' : ""}</span></div>
+                <div class="details-item"><strong>Segment / Secteur</strong><span>${escapeHtml(k.segment || "—")} ${k.activity_sector ? "· " + escapeHtml(k.activity_sector) : ""}</span></div>
+                <div class="details-item"><strong>Entrée en relation</strong><span>${escapeHtml(k.relationship_start || "—")}${k.status ? " · " + escapeHtml(k.status) : ""}</span></div>
+            </div>`
+            : `<p class="section-desc">Aucune fiche KYC en production pour <strong>${escapeHtml(clientId)}</strong> (client ad hoc ou hors référentiel).</p>`;
+
+        const screeningsHtml = (d.screenings || []).slice(0, 15).map(s => `
+            <tr>
+                <td>${formatDateTime(s.timestamp)}</td>
+                <td>${escapeHtml(s.watchlist_name || "—")}</td>
+                <td>${s.list_type ? listTypeBadge(s.list_type) : "—"}</td>
+                <td>${s.final_score !== null && s.final_score !== undefined ? s.final_score.toFixed(1) + " %" : "—"}</td>
+                <td>${escapeHtml(statusLabel(s.status))}</td>
+            </tr>`).join("");
+
+        const alertsHtml = (d.alerts || []).slice(0, 15).map(a => `
+            <tr>
+                <td>#${a.id}</td><td>${formatDateTime(a.created_at)}</td>
+                <td>${escapeHtml(a.watchlist_name)}</td>
+                <td>${alertPriorityBadge(a)}</td>
+                <td>${escapeHtml(statusLabel(a.status))}</td>
+                <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('alerts'); openAlertModal(${a.id})">🔎</button></td>
+            </tr>`).join("");
+
+        const pairsHtml = (d.whitelist_pairs || []).map(p => `
+            <li style="font-size: 0.83rem;">🛡️ ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
+
+        body.innerHTML = `
+            ${kycHtml}
+            <div class="modal-section">
+                <h4>Criblages (${d.counts.screenings})</h4>
+                ${screeningsHtml ? `<div class="table-container" style="max-height: 190px;"><table>
+                    <thead><tr><th>Date</th><th>Fiche matchée</th><th>Liste</th><th>Score</th><th>Décision</th></tr></thead>
+                    <tbody>${screeningsHtml}</tbody></table></div>`
+                    : '<p style="font-size: 0.85rem; color: var(--text-muted);">Jamais criblé.</p>'}
+            </div>
+            <div class="modal-section">
+                <h4>Alertes (${d.counts.alerts})</h4>
+                ${alertsHtml ? `<div class="table-container" style="max-height: 190px;"><table>
+                    <thead><tr><th>#</th><th>Date</th><th>Listé</th><th>Priorité</th><th>Statut</th><th></th></tr></thead>
+                    <tbody>${alertsHtml}</tbody></table></div>`
+                    : '<p style="font-size: 0.85rem; color: var(--text-muted);">Aucune alerte.</p>'}
+            </div>
+            <div class="modal-section">
+                <h4>Liste blanche (${d.counts.whitelist_pairs})</h4>
+                ${pairsHtml ? `<ul style="list-style: none;">${pairsHtml}</ul>`
+                    : '<p style="font-size: 0.85rem; color: var(--text-muted);">Aucune paire.</p>'}
+            </div>`;
+    } catch (e) { console.error("Client 360 error:", e); }
 }

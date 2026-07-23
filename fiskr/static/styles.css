@@ -1549,3 +1549,91 @@ th.sortable.sort-desc::after {
         grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     }
 }
+
+/* ===== Lot confort : glisser-deposer, cloche, pagination, client 360 ===== */
+
+.drop-hover {
+    outline: 2px dashed var(--color-primary);
+    outline-offset: -6px;
+    background: rgba(99, 102, 241, 0.06);
+}
+
+.queue-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.bell-wrap {
+    position: relative;
+}
+
+#bell-badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 9px;
+    background: var(--color-alert);
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#notif-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: 320px;
+    max-height: 420px;
+    overflow-y: auto;
+    background: var(--modal-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: var(--shadow-modal);
+    z-index: 300;
+    padding: 0.5rem;
+}
+
+.notif-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.6rem;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text-primary);
+    font-size: 0.88rem;
+}
+
+.notif-item:hover {
+    background: var(--surface-hover);
+}
+
+.notif-empty {
+    padding: 1rem;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.c360-section {
+    margin-top: 1rem;
+}
+
+.c360-section h4 {
+    margin-bottom: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}

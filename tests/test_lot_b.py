@@ -205,7 +205,7 @@ def test_admin_actions_are_logged(client):
     _override_user("admin_lotb", "admin")
     username = f"test_lotb_{uuid.uuid4().hex[:6]}"
     response = client.post("/api/users", json={
-        "username": username, "password": "motdepasse", "full_name": "Testeur LotB", "role": "user",
+        "username": username, "password": "MotDePasse2026x", "full_name": "Testeur LotB", "role": "user",
     })
     assert response.status_code == 200, response.text
     user_id = response.json()["user"]["id"]
