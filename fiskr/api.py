@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -31,9 +31,11 @@ from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
-    WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest
+    WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
+    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES
 )
-from fiskr.alerts import open_or_redetect_alert, is_whitelisted
+from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
+from fiskr.notify import notify_event
 from fiskr.fprules import (
     evaluate_fp_rules, build_screening_ctx, annotate_suppression, compile_rule,
     run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE
@@ -67,7 +69,9 @@ from fiskr.settings import (
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
-    BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for
+    BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for,
+    alert_sla_hours, notification_events,
+    SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS
 )
 
 
@@ -559,6 +563,43 @@ async def list_users(
         for u in users
     ]
 
+# ------------------ JOURNAL DES ACTIONS D'ADMINISTRATION ------------------
+
+def log_admin_action(db: Session, username: str, action: str, target: Optional[str] = None,
+                     before: Optional[Dict[str, Any]] = None, after: Optional[Dict[str, Any]] = None,
+                     detail: Optional[str] = None) -> None:
+    """Trace append-only d'une action d'administration (commit par l'appelant)."""
+    db.add(AdminAuditLog(username=username, action=action, target=target,
+                         before=before, after=after, detail=detail))
+
+@app.get("/api/admin-log")
+async def get_admin_log(
+    action: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Journal des actions d'administration (utilisateurs, reglages, purges,
+    revocations) — append-only, admin uniquement."""
+    query = db.query(AdminAuditLog)
+    if action:
+        query = query.filter(AdminAuditLog.action == action.strip().upper())
+    total = query.count()
+    rows = query.order_by(AdminAuditLog.at.desc(), AdminAuditLog.id.desc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [
+            {
+                "id": r.id, "at": r.at.isoformat() if r.at else None, "username": r.username,
+                "action": r.action, "target": r.target, "before": r.before, "after": r.after,
+                "detail": r.detail,
+            }
+            for r in rows
+        ],
+    }
+
 @app.post("/api/users")
 async def create_user(
     payload: CreateUserRequest,
@@ -588,9 +629,11 @@ async def create_user(
         role=canonical_role
     )
     db.add(new_user)
+    log_admin_action(db, admin_user["username"], "USER_CREATED", target=username,
+                     after={"username": username, "full_name": new_user.full_name, "role": canonical_role})
     db.commit()
     db.refresh(new_user)
-    
+
     return {
         "message": f"Utilisateur '{username}' créé avec succès.",
         "user": {
@@ -612,7 +655,9 @@ async def update_user_admin(
     target_user = db.query(User).filter(User.id == user_id).first()
     if not target_user:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-        
+    before_state = {"username": target_user.username, "full_name": target_user.full_name,
+                    "role": target_user.role}
+
     if payload.username and payload.username.strip() != target_user.username:
         new_uname = payload.username.strip()
         existing = db.query(User).filter(User.username == new_uname, User.id != user_id).first()
@@ -635,7 +680,14 @@ async def update_user_admin(
         h_pass, salt_str = hash_password(payload.password.strip())
         target_user.hashed_password = h_pass
         target_user.salt = salt_str
-        
+
+    log_admin_action(
+        db, admin_user["username"], "USER_UPDATED", target=target_user.username,
+        before=before_state,
+        after={"username": target_user.username, "full_name": target_user.full_name,
+               "role": target_user.role},
+        detail="Mot de passe réinitialisé." if (payload.password and payload.password.strip()) else None,
+    )
     db.commit()
     db.refresh(target_user)
     
@@ -664,6 +716,9 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         
     db.delete(target_user)
+    log_admin_action(db, admin_user["username"], "USER_DELETED", target=target_user.username,
+                     before={"username": target_user.username, "full_name": target_user.full_name,
+                             "role": target_user.role})
     db.commit()
     return {"message": f"Utilisateur '{target_user.username}' supprimé avec succès."}
 
@@ -1260,6 +1315,11 @@ async def ingest_snapshot(
                 f"{record_count} fiches importées, snapshot en attente d'homologation "
                 "(pointage humain requis avant mise en production)."
             )
+            if notification_events(db).get("snapshot_pending_review"):
+                notify_event("snapshot_pending_review", {
+                    "snapshot_id": snap_id, "liste": file_type, "fichier": file.filename,
+                    "fiches": record_count,
+                })
         else:
             message = f"Successfully imported {record_count} items."
         return {
@@ -1913,6 +1973,8 @@ async def browse_watchlist_db(
     list_type: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     search_field: str = Query("default"),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: str = Query("asc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -1936,6 +1998,16 @@ async def browse_watchlist_db(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Champ de recherche inconnu ({', '.join(WATCHLIST_SEARCH_FIELDS)})."
+        )
+    # Tri serveur : colonnes texte du referentiel + identifiants, valide strictement
+    sort_by = (sort_by or "").strip() or None
+    sort_dir = "desc" if (sort_dir or "").strip().lower() == "desc" else "asc"
+    _WL_SORTABLE = {"entity_id", "entity_type", "primary_name", "origin", "country",
+                    "listed_on", "official_reference", "bic_swift"}
+    if sort_by is not None and sort_by not in _WL_SORTABLE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Colonne de tri inconnue ({', '.join(sorted(_WL_SORTABLE))})."
         )
 
     query = db.query(WatchlistEntity, Snapshot).join(
@@ -1989,8 +2061,13 @@ async def browse_watchlist_db(
                     "match_mode": match_mode, "items": items}
 
     total = query.count()
-    rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
-                .offset((page - 1) * page_size).limit(page_size).all()
+    if sort_by:
+        col = getattr(WatchlistEntity, sort_by)
+        order_clause = col.desc() if sort_dir == "desc" else col.asc()
+        query = query.order_by(order_clause, WatchlistEntity.id.asc())
+    else:
+        query = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc())
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
 
     items = [_serialize_watchlist_entity(entity, snap) for entity, snap in rows]
 
@@ -2045,6 +2122,140 @@ async def get_audit_history(
 
     return {"total": total, "page": page, "page_size": page_size,
             "items": [_row(r) for r in rows]}
+
+# ------------------ EXPORTS CSV (alertes, journal d'audit, listes) ------------------
+
+def _csv_response(filename: str, header: List[str], rows) -> Response:
+    """CSV « ; » avec BOM UTF-8 : ouverture directe dans Excel FR."""
+    import csv as _csv
+    import io
+    buffer = io.StringIO()
+    writer = _csv.writer(buffer, delimiter=";")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return Response(
+        content="\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+_EXPORT_MAX_ROWS = 50000
+
+@app.get("/api/export/alerts.csv")
+async def export_alerts_csv(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    channel: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    assigned_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV de la file d'alertes (les filtres de l'ecran s'appliquent)."""
+    query = db.query(Alert)
+    if channel:
+        ch = channel.strip().upper()
+        if ch == "SCREENING":
+            query = query.filter((Alert.channel == "SCREENING") | (Alert.channel.is_(None)))
+        else:
+            query = query.filter(Alert.channel == ch)
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        query = query.filter(Alert.status.in_(statuses))
+    if priority:
+        prios = [p.strip().upper() for p in priority.split(",") if p.strip()]
+        query = query.filter(Alert.priority.in_(prios))
+    if assigned_to:
+        query = query.filter(Alert.assigned_to == assigned_to)
+    query = _apply_list_type_filter(query, Alert.list_type, list_type)
+    rows = query.order_by(Alert.created_at.desc()).limit(_EXPORT_MAX_ROWS).all()
+    header = ["id", "cree_le", "canal", "priorite", "echeance_sla", "client_id", "client",
+              "fiche_listee_id", "fiche_listee", "liste", "score", "statut", "assignee_a",
+              "decide_par", "decide_le", "commentaire_decision"]
+    data = [
+        [a.id, a.created_at.isoformat() if a.created_at else "", a.channel or "SCREENING",
+         a.priority or "", a.due_at.isoformat() if a.due_at else "", a.client_id or "",
+         a.client_name, a.watchlist_entity_id, a.watchlist_name, a.list_type or "",
+         f"{a.final_score:.1f}", a.status, a.assigned_to or "", a.decided_by or "",
+         a.decided_at.isoformat() if a.decided_at else "", a.decision_comment or ""]
+        for a in rows
+    ]
+    return _csv_response(f"fiskr_alertes_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
+
+@app.get("/api/export/history.csv")
+async def export_history_csv(
+    list_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV du journal d'audit de criblage (filtres de l'ecran appliques)."""
+    query = db.query(AuditTrail)
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        query = query.filter(AuditTrail.status.in_(statuses))
+    query = _apply_list_type_filter(query, AuditTrail.list_type, list_type)
+    rows = query.order_by(AuditTrail.timestamp.desc()).limit(_EXPORT_MAX_ROWS).all()
+    header = ["id", "horodatage", "client_id", "client", "type_client", "fiche_listee_id",
+              "fiche_listee", "liste", "score_base", "score_final", "statut", "version_watchlist"]
+    data = [
+        [r.id, r.timestamp.isoformat() if r.timestamp else "", r.client_id or "", r.client_name,
+         r.client_type or "", r.watchlist_id or "", r.watchlist_name or "", r.list_type or "",
+         f"{r.base_score:.1f}" if r.base_score is not None else "",
+         f"{r.final_score:.1f}" if r.final_score is not None else "",
+         r.status, r.watchlist_version or ""]
+        for r in rows
+    ]
+    return _csv_response(f"fiskr_audit_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
+
+@app.get("/api/export/watchlist.csv")
+async def export_watchlist_csv(
+    scope: str = Query("production"),
+    list_type: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    search_field: str = Query("default"),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV de la vue base des listes (memes filtres que l'ecran ;
+    recherche exacte uniquement, pas de repli fuzzy sur un export)."""
+    scope = (scope or "production").strip()
+    if scope not in WATCHLIST_DB_SCOPES:
+        raise HTTPException(status_code=400, detail=f"Scope inconnu ({', '.join(WATCHLIST_DB_SCOPES)}).")
+    if search_field not in WATCHLIST_SEARCH_FIELDS:
+        raise HTTPException(status_code=400, detail="Champ de recherche inconnu.")
+    query = db.query(WatchlistEntity, Snapshot).join(
+        Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id
+    ).filter(Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+    if scope == "production":
+        query = query.filter(Snapshot.status == "READY", WatchlistEntity.excluded.isnot(True))
+    elif scope == "EXCLUDED":
+        query = query.filter(WatchlistEntity.excluded.is_(True))
+    elif scope != "all":
+        query = query.filter(Snapshot.status == scope)
+    if list_type:
+        values = [v.strip().upper() for v in list_type.split(",") if v.strip()]
+        if values:
+            query = query.filter(Snapshot.file_type.in_(values))
+    if search and search.strip():
+        from sqlalchemy import or_
+        query = query.filter(or_(*_wl_search_clauses(search_field, f"%{search.strip()}%")))
+    rows = query.order_by(WatchlistEntity.primary_name.asc()).limit(_EXPORT_MAX_ROWS).all()
+    header = ["entity_id", "liste", "statut_snapshot", "type", "nom_principal", "pays",
+              "dates_naissance", "bic_swift", "tax_id", "programmes", "inscrit_le",
+              "reference_officielle"]
+    data = []
+    for entity, snap in rows:
+        countries = entity.countries or {}
+        all_countries = sorted({c for values in countries.values() if isinstance(values, list) for c in values})
+        data.append([
+            entity.entity_id, snap.file_type, snap.status, entity.entity_type,
+            entity.primary_name, ", ".join(all_countries),
+            ", ".join(entity.dates_of_birth or []), entity.bic_swift or "",
+            entity.tax_id or "", ", ".join(entity.sanction_programs or []),
+            entity.listed_on or "", entity.official_reference or "",
+        ])
+    return _csv_response(f"fiskr_listes_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
 
 @app.get("/api/counters")
 async def get_sidebar_counters(
@@ -2107,7 +2318,11 @@ async def purge_failed_snapshots(
         
         # 3. Delete the Snapshots themselves
         deleted_snapshots = db.query(Snapshot).filter(Snapshot.snapshot_id.in_(purged_ids)).delete(synchronize_session=False)
-        
+
+        log_admin_action(db, current_user["username"], "SNAPSHOTS_PURGED",
+                         target=f"{deleted_snapshots} snapshot(s)",
+                         before={"snapshot_ids": purged_ids},
+                         detail=f"{deleted_watchlist} fiches watchlist et {deleted_client} fiches client supprimées.")
         db.commit()
         
         # Reload cache to ensure in-memory items are in sync
@@ -2247,6 +2462,9 @@ class IngestionSettingsUpdate(BaseModel):
     auto_rescreen: Optional[bool] = None
     backtest_required: Optional[bool] = None
     backtest_max_gap_pct: Optional[float] = None
+    # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
+    alert_sla_hours: Optional[Dict[str, int]] = None
+    notification_events: Optional[Dict[str, bool]] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -2278,6 +2496,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_rescreen": bool(rescreen["value"]),
         "backtest_required": bool(bt_required["value"]),
         "backtest_max_gap_pct": bt_gap_value,
+        "alert_sla_hours": alert_sla_hours(db),
+        "notification_events": notification_events(db),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -2317,8 +2537,11 @@ async def update_ingestion_settings(
         SETTING_BACKTEST_REQUIRED: payload.backtest_required,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
-    if not changed and payload.backtest_max_gap_pct is None:
+    if (not changed and payload.backtest_max_gap_pct is None
+            and payload.alert_sla_hours is None and payload.notification_events is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
+    before_state = _settings_payload(db)
+    before_state.pop("sources", None)
     for key, value in changed.items():
         set_setting(db, key, bool(value), updated_by=admin_user["username"])
     if payload.backtest_max_gap_pct is not None:
@@ -2326,6 +2549,32 @@ async def update_ingestion_settings(
             raise HTTPException(status_code=400, detail="backtest_max_gap_pct doit être entre 0 et 1000.")
         set_setting(db, SETTING_BACKTEST_MAX_GAP_PCT, float(payload.backtest_max_gap_pct),
                     updated_by=admin_user["username"])
+    if payload.alert_sla_hours is not None:
+        sla = {}
+        for prio, hours in payload.alert_sla_hours.items():
+            key = str(prio).strip().upper()
+            if key not in ALERT_PRIORITIES:
+                raise HTTPException(status_code=400, detail=f"Priorité SLA inconnue : {prio}.")
+            try:
+                sla[key] = max(0, int(hours))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"Délai SLA invalide pour {key}.")
+        merged = dict(alert_sla_hours(db))
+        merged.update(sla)
+        set_setting(db, SETTING_ALERT_SLA_HOURS, merged, updated_by=admin_user["username"])
+    if payload.notification_events is not None:
+        unknown = [e for e in payload.notification_events if e not in DEFAULT_NOTIFICATION_EVENTS]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Événement de notification inconnu : {', '.join(unknown)}.")
+        merged_events = dict(notification_events(db))
+        merged_events.update({e: bool(v) for e, v in payload.notification_events.items()})
+        set_setting(db, SETTING_NOTIFICATIONS, merged_events, updated_by=admin_user["username"])
+    after_state = _settings_payload(db)
+    after_state.pop("sources", None)
+    delta = {k: v for k, v in after_state.items() if before_state.get(k) != v}
+    log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="ingestion",
+                     before={k: before_state.get(k) for k in delta}, after=delta)
+    db.commit()
     return {"message": "Réglages d'homologation mis à jour.", **_settings_payload(db)}
 
 # ------------------ BLOCKING KEYS PAR CANAL ------------------
@@ -2394,6 +2643,11 @@ async def update_blocking_settings(
                     updated_by=param_user["username"])
     if payload.screening_layout is None and payload.filtering_layout is None:
         raise HTTPException(status_code=400, detail="Aucun layout fourni.")
+    log_admin_action(
+        db, param_user["username"], "BLOCKING_UPDATED", target="blocking",
+        after={"screening_layout": payload.screening_layout, "filtering_layout": payload.filtering_layout},
+    )
+    db.commit()
     return {
         "message": "Blocking keys mises à jour." + (" Cache de criblage rechargé." if reloaded else ""),
         "cache_reloaded": reloaded,
@@ -3387,6 +3641,13 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
         "decided_by": alert.decided_by,
         "decided_at": alert.decided_at.isoformat() if alert.decided_at else None,
         "decision_comment": alert.decision_comment,
+        "priority": alert.priority,
+        "due_at": alert.due_at.isoformat() if alert.due_at else None,
+        # En retard = echeance depassee ET toujours ouverte
+        "overdue": bool(
+            alert.due_at and alert.due_at < datetime.utcnow()
+            and alert.status in ALERT_OPEN_STATUSES
+        ),
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -3425,14 +3686,18 @@ async def list_alerts(
     assigned_to: Optional[str] = Query(None),
     list_type: Optional[str] = Query(None),
     channel: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """File de travail des alertes, triee par risque (score) puis date.
-    Le canal separe le criblage clients (SCREENING) du filtrage transactionnel
-    (FILTERING)."""
+    """File de travail des alertes, triee par priorite puis echeance puis
+    risque (score). Le canal separe le criblage clients (SCREENING) du
+    filtrage transactionnel (FILTERING). `search` cherche sur le client,
+    la fiche listee et leurs identifiants (recherche globale Ctrl+K)."""
+    from sqlalchemy import case, or_
     query = db.query(Alert)
     if channel:
         ch = channel.strip().upper()
@@ -3446,10 +3711,29 @@ async def list_alerts(
         query = query.filter(Alert.status.in_(statuses))
     if assigned_to:
         query = query.filter(Alert.assigned_to == assigned_to)
+    if priority:
+        prios = [p.strip().upper() for p in priority.split(",") if p.strip()]
+        bad = [p for p in prios if p not in ALERT_PRIORITIES]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"Priorité inconnue ({', '.join(ALERT_PRIORITIES)}).")
+        query = query.filter(Alert.priority.in_(prios))
+    if search and search.strip():
+        needle = f"%{search.strip()}%"
+        query = query.filter(or_(
+            Alert.client_name.ilike(needle), Alert.client_id.ilike(needle),
+            Alert.watchlist_name.ilike(needle), Alert.watchlist_entity_id.ilike(needle),
+        ))
     query = _apply_list_type_filter(query, Alert.list_type, list_type)
     total = query.count()
     open_count = query.filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
-    rows = query.order_by(Alert.final_score.desc(), Alert.created_at.desc()) \
+    # CRITICAL d'abord, puis echeance la plus proche, puis score : la file
+    # se lit de haut en bas dans l'ordre de traitement attendu
+    priority_rank = case(
+        {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
+        value=Alert.priority, else_=2
+    )
+    rows = query.order_by(priority_rank.asc(), Alert.due_at.asc().nullslast(),
+                          Alert.final_score.desc(), Alert.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
     return {
         "total": total,
@@ -3472,8 +3756,18 @@ async def get_alert_detail(
     audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
     events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id) \
+                    .order_by(AlertAttachment.uploaded_at.asc()).all()
     return {
         **_alert_summary(alert),
+        "attachments": [
+            {
+                "id": att.id, "file_name": att.file_name, "comment": att.comment,
+                "uploaded_by": att.uploaded_by,
+                "uploaded_at": att.uploaded_at.isoformat() if att.uploaded_at else None,
+            }
+            for att in attachments
+        ],
         "decision_tree": audit.decision_tree if audit else None,
         "watchlist_version": audit.watchlist_version if audit else None,
         "events": [
@@ -3578,6 +3872,11 @@ async def propose_alert_decision(
         alert.status = "PENDING_VALIDATION"
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
         message = "Décision proposée, en attente de validation 4-yeux."
+        if notification_events(db).get("alert_pending_validation"):
+            notify_event("alert_pending_validation", {
+                "alert_id": alert.id, "proposee_par": username, "decision": label,
+                "client": alert.client_name, "fiche_listee": alert.watchlist_name,
+            })
     else:
         _close_alert(alert, decision, username, comment)
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
@@ -3624,6 +3923,180 @@ async def validate_alert_decision(
         message = "Décision refusée, alerte renvoyée en analyse."
     db.commit()
     return {"message": message, **_alert_summary(alert)}
+
+class AlertPriorityRequest(BaseModel):
+    priority: str
+
+@app.post("/api/alerts/{alert_id}/priority")
+async def set_alert_priority(
+    alert_id: int,
+    payload: AlertPriorityRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Modifie la priorite d'une alerte ouverte ; l'echeance SLA est recalculee
+    depuis la date de creation (reglage alerts.sla_hours)."""
+    alert = _get_open_alert(db, alert_id)
+    new_priority = (payload.priority or "").strip().upper()
+    if new_priority not in ALERT_PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
+    old_priority = alert.priority or "—"
+    alert.priority = new_priority
+    alert.due_at = compute_due_at(db, new_priority, alert.created_at)
+    _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
+                     f"Priorité {old_priority} → {new_priority}.")
+    db.commit()
+    return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
+
+# Pieces jointes des alertes (justificatifs d'instruction)
+ALERT_EVIDENCE_DIR = PROJECT_ROOT / "alert_evidence"
+
+@app.post("/api/alerts/{alert_id}/attachments")
+async def add_alert_attachment(
+    alert_id: int,
+    file: UploadFile = File(...),
+    comment: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Attache une piece justificative a une alerte (meme motif de stockage
+    que les preuves de liste blanche)."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    safe_name = re.sub(r"[^\w.\-]", "_", file.filename or "piece_jointe")
+    ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+    with open(target_path, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+    attachment = AlertAttachment(
+        alert_id=alert_id, file_name=safe_name, file_path=str(target_path),
+        comment=(comment or "").strip() or None, uploaded_by=current_user["username"],
+    )
+    db.add(attachment)
+    db.flush()
+    _log_alert_event(db, alert_id, current_user["username"], "ATTACHMENT",
+                     f"Pièce jointe ajoutée : {safe_name}." + (f" {comment.strip()}" if comment and comment.strip() else ""))
+    db.commit()
+    return {"message": "Pièce jointe ajoutée.", "attachment_id": attachment.id, "file_name": safe_name}
+
+@app.get("/api/alerts/attachments/{attachment_id}")
+async def download_alert_attachment(
+    attachment_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Telecharge une piece jointe d'alerte."""
+    attachment = db.query(AlertAttachment).filter(AlertAttachment.id == attachment_id).first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Pièce jointe introuvable.")
+    file_path = Path(attachment.file_path)
+    if not file_path.exists() or ALERT_EVIDENCE_DIR.resolve() not in file_path.resolve().parents:
+        raise HTTPException(status_code=404, detail="Fichier indisponible.")
+    return FileResponse(str(file_path), filename=attachment.file_name)
+
+@app.get("/api/alerts/{alert_id}/report", response_class=HTMLResponse)
+async def alert_report(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Rapport d'alerte autonome et imprimable (impression navigateur -> PDF) :
+    identites, score et arbre de decision, historique complet des actions
+    4-yeux, pieces jointes — pret pour un controle ACPR/FED. Aucune dependance.
+    """
+    from html import escape
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id).all()
+    tree = (audit.decision_tree or {}) if audit else {}
+
+    def dt(value):
+        return value.strftime("%d/%m/%Y %H:%M UTC") if value else "—"
+
+    def field(label, value):
+        return f"<tr><th>{escape(label)}</th><td>{escape(str(value if value not in (None, '') else '—'))}</td></tr>"
+
+    adjustments = tree.get("adjustments") or {}
+    adj_rows = "".join(
+        f"<tr><th>{escape(name)}</th><td>{escape(str((a or {}).get('score', '—')))} — {escape(str((a or {}).get('description', '')))}</td></tr>"
+        for name, a in adjustments.items()
+    )
+    fp_rule = tree.get("fp_rule_applied") or {}
+    event_rows = "".join(
+        f"<tr><td>{dt(e.timestamp)}</td><td>{escape(e.username)}</td>"
+        f"<td>{escape(e.action)}</td><td>{escape(e.detail or '')}</td></tr>"
+        for e in events
+    )
+    attachment_rows = "".join(
+        f"<li>{escape(att.file_name)} — déposée par {escape(att.uploaded_by)} le {dt(att.uploaded_at)}"
+        f"{(' : ' + escape(att.comment)) if att.comment else ''}</li>"
+        for att in attachments
+    ) or "<li>Aucune pièce jointe.</li>"
+
+    html_doc = f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Rapport d'alerte #{alert.id} — Fiskr</title>
+<style>
+  body {{ font-family: Georgia, 'Times New Roman', serif; color: #111; margin: 2.2cm; line-height: 1.45; }}
+  h1 {{ font-size: 1.4rem; border-bottom: 2px solid #111; padding-bottom: 0.3rem; }}
+  h2 {{ font-size: 1.05rem; margin-top: 1.6rem; border-bottom: 1px solid #999; padding-bottom: 0.2rem; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; margin-top: 0.5rem; }}
+  th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.6rem; text-align: left; vertical-align: top; }}
+  th {{ background: #f0f0f0; width: 220px; font-weight: 600; }}
+  .events th {{ width: auto; }}
+  .meta {{ color: #555; font-size: 0.8rem; }}
+  .noprint {{ margin: 1rem 0; }}
+  @media print {{ .noprint {{ display: none; }} body {{ margin: 0.5cm; }} }}
+</style></head><body>
+<div class="noprint"><button onclick="window.print()">🖨 Imprimer / Enregistrer en PDF</button></div>
+<h1>Rapport d'alerte #{alert.id} — Fiskr</h1>
+<p class="meta">Généré le {datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")} par {escape(current_user["username"])} —
+document de travail issu du journal d'audit immuable (audit #{alert.audit_id}).</p>
+
+<h2>1. Synthèse</h2>
+<table>
+{field("Canal", "Filtrage transactionnel" if alert.channel == "FILTERING" else "Criblage clients")}
+{field("Statut", alert.status)}{field("Priorité", alert.priority)}
+{field("Échéance SLA", dt(alert.due_at))}
+{field("Client / partie", f"{alert.client_name} ({alert.client_id or '—'})")}
+{field("Fiche listée", f"{alert.watchlist_name} ({alert.watchlist_entity_id})")}
+{field("Liste", alert.list_type)}{field("Score final", f"{alert.final_score:.1f} %")}
+{field("Créée le", dt(alert.created_at))}{field("Assignée à", alert.assigned_to)}
+</table>
+
+<h2>2. Décision</h2>
+<table>
+{field("Décision proposée", alert.proposed_decision)}{field("Proposée par", alert.proposed_by)}
+{field("Proposée le", dt(alert.proposed_at))}{field("Commentaire de proposition", alert.proposal_comment)}
+{field("Décidée par", alert.decided_by)}{field("Décidée le", dt(alert.decided_at))}
+{field("Commentaire de décision", alert.decision_comment)}
+</table>
+
+<h2>3. Arbre de décision du moteur</h2>
+<table>
+{field("Score de base", tree.get("base_score"))}
+{field("Hard match", "Oui — " + str(tree.get("hard_match_details", "")) if tree.get("hard_match_triggered") else "Non")}
+{field("Seuil appliqué", tree.get("cut_off_applied"))}
+{field("Version de watchlist", audit.watchlist_version if audit else None)}
+{adj_rows}
+{field("Règle anti-FP appliquée", f"{fp_rule.get('name')} (v{fp_rule.get('version')})" if fp_rule else None)}
+</table>
+
+<h2>4. Historique des actions (append-only)</h2>
+<table class="events"><tr><th>Horodatage</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr>
+{event_rows or '<tr><td colspan="4">Aucun événement.</td></tr>'}
+</table>
+
+<h2>5. Pièces jointes</h2>
+<ul>{attachment_rows}</ul>
+</body></html>"""
+    return HTMLResponse(content=html_doc)
 
 @app.post("/api/alerts/{alert_id}/narrative")
 async def generate_narrative(
@@ -3881,6 +4354,9 @@ async def revoke_whitelist_pair(
     pair.revoked_by = reviewer["username"]
     pair.revoked_at = datetime.utcnow()
     pair.revoke_comment = comment
+    log_admin_action(db, reviewer["username"], "WHITELIST_REVOKED",
+                     target=f"{pair.client_id} × {pair.watchlist_entity_id}",
+                     detail=comment)
     db.commit()
     return {"message": "Paire révoquée : les alertes de ce couple reprendront.", **_whitelist_summary(pair)}
 
@@ -3977,15 +4453,97 @@ async def get_compliance_kpis(
     # Dernieres synchronisations
     recent_syncs = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(15).all()
 
+    # ---- Series temporelles 30 jours (accueil / tendances) ----
+    # func.date() est valide sur SQLite ET PostgreSQL
+    since = now - timedelta(days=30)
+    created_rows = (
+        db.query(func.date(Alert.created_at), Alert.channel, func.count(Alert.id))
+          .filter(Alert.created_at >= since)
+          .group_by(func.date(Alert.created_at), Alert.channel).all()
+    )
+    closed_rows_series = (
+        db.query(func.date(Alert.decided_at), func.count(Alert.id))
+          .filter(Alert.decided_at.isnot(None), Alert.decided_at >= since)
+          .group_by(func.date(Alert.decided_at)).all()
+    )
+    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(29, -1, -1)]
+    created_map: Dict[str, Dict[str, int]] = {}
+    for day, channel, count in created_rows:
+        day_key = str(day)[:10]
+        created_map.setdefault(day_key, {})[channel or "SCREENING"] = int(count)
+    closed_map = {str(day)[:10]: int(count) for day, count in closed_rows_series}
+    timeseries = [
+        {
+            "date": d,
+            "created_screening": created_map.get(d, {}).get("SCREENING", 0),
+            "created_filtering": created_map.get(d, {}).get("FILTERING", 0),
+            "closed": closed_map.get(d, 0),
+        }
+        for d in days
+    ]
+
+    # ---- Ventilations : alertes ouvertes par liste, traitement par analyste ----
+    open_by_list = dict(
+        db.query(Alert.list_type, func.count(Alert.id))
+          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+          .group_by(Alert.list_type).all()
+    )
+    analyst_rows = (
+        db.query(Alert.decided_by, func.count(Alert.id))
+          .filter(Alert.status.in_(["CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE"]),
+                  Alert.decided_by.isnot(None))
+          .group_by(Alert.decided_by).all()
+    )
+    by_analyst = []
+    for username, decided_count in sorted(analyst_rows, key=lambda r: -r[1]):
+        pair_rows = db.query(Alert.created_at, Alert.decided_at).filter(
+            Alert.decided_by == username, Alert.decided_at.isnot(None)
+        ).order_by(Alert.decided_at.desc()).limit(200).all()
+        avg_h = (
+            round(sum((dec - cre).total_seconds() for cre, dec in pair_rows) / len(pair_rows) / 3600.0, 1)
+            if pair_rows else None
+        )
+        by_analyst.append({"analyst": username, "decided": int(decided_count), "avg_decision_hours": avg_h})
+
+    # ---- Efficacite des regles anti-faux positifs (hit_count en base) ----
+    fp_rules_stats = [
+        {
+            "id": r.id, "name": r.name, "channel": r.channel, "status": r.status,
+            "version": r.version, "enabled": bool(r.enabled), "hit_count": int(r.hit_count or 0),
+        }
+        for r in db.query(FpRule)
+                   .filter(FpRule.status == "ACTIVE")
+                   .order_by(FpRule.hit_count.desc()).limit(20).all()
+    ]
+
+    # Alertes ouvertes les plus anciennes (liste « à traiter » de l'accueil)
+    oldest_open = (
+        db.query(Alert)
+          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+          .order_by(Alert.created_at.asc()).limit(5).all()
+    )
+
     return {
         "alerts": {
             "by_status": alert_counts,
             "open": open_alerts,
+            "open_by_list_type": {k or "UNKNOWN": int(v) for k, v in open_by_list.items()},
             "closed_false_positive": closed_fp,
             "closed_confirmed": closed_tp,
             "false_positive_rate_pct": fp_rate,
             "avg_decision_hours": avg_decision_hours,
+            "timeseries_30d": timeseries,
+            "by_analyst": by_analyst,
+            "oldest_open": [
+                {
+                    "id": a.id, "client_name": a.client_name, "watchlist_name": a.watchlist_name,
+                    "channel": a.channel, "status": a.status, "final_score": float(a.final_score or 0.0),
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in oldest_open
+            ],
         },
+        "fp_rules": fp_rules_stats,
         "whitelist_active_pairs": active_whitelist,
         "screening": {"decisions_by_status": audit_counts},
         "lists": {

@@ -10,10 +10,22 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=2.8">
+    <link rel="stylesheet" href="/static/styles.css?v=3.1">
+    <!-- Thème appliqué avant le premier rendu (pas de flash) -->
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem("fiskr_theme");
+                if (theme === "light" || theme === "dark") {
+                    document.documentElement.setAttribute("data-theme", theme);
+                }
+            } catch (e) { /* stockage indisponible : thème sombre par défaut */ }
+        })();
+    </script>
 </head>
 <body>
     <div class="app-container">
+        <div class="sidebar-overlay" onclick="toggleSidebar(false)"></div>
         <!-- Sidebar Navigation -->
         <aside class="sidebar">
             <div class="logo-container">
@@ -23,7 +35,12 @@
             <nav class="sidebar-nav">
                 <ul>
                     <li>
-                        <button id="nav-btn-watchlist-mgmt" class="nav-item active" onclick="switchTab('watchlist-mgmt')">
+                        <button id="nav-btn-home" class="nav-item active" onclick="switchTab('home')">
+                            <span class="nav-icon">🏠</span> Vue d'ensemble
+                        </button>
+                    </li>
+                    <li>
+                        <button id="nav-btn-watchlist-mgmt" class="nav-item" onclick="switchTab('watchlist-mgmt')">
                             <span class="nav-icon">📋</span> Gestion des Watchlists
                         </button>
                     </li>
@@ -83,15 +100,54 @@
         <!-- Main Content Area -->
         <main class="main-content">
             <header class="app-header">
-                <h1>Fiskr Compliance Control Room</h1>
-                <div class="system-status">
-                    <span class="status-indicator online"></span>
-                    <span class="status-text">Moteur opérationnel</span>
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <button class="icon-btn hamburger-btn" onclick="toggleSidebar()" aria-label="Ouvrir le menu de navigation">☰</button>
+                    <h1>Fiskr — Poste de Contrôle Conformité</h1>
+                </div>
+                <div class="header-actions">
+                    <button class="icon-btn" onclick="openCommandPalette()" aria-label="Recherche globale (Ctrl+K)" title="Recherche globale (Ctrl+K)">🔍</button>
+                    <button id="theme-toggle-btn" class="icon-btn" onclick="toggleTheme()" aria-label="Basculer le thème clair/sombre" title="Thème clair / sombre">🌙</button>
+                    <div class="system-status">
+                        <span class="status-indicator online"></span>
+                        <span class="status-text">Moteur opérationnel</span>
+                    </div>
                 </div>
             </header>
 
+            <!-- SECTION 0 : VUE D'ENSEMBLE (ACCUEIL) -->
+            <section id="sec-home" class="tab-content active">
+                <div id="home-tiles" class="home-tiles"></div>
+                <div class="home-grid">
+                    <div>
+                        <div class="card chart-card">
+                            <h3>📈 Alertes sur 30 jours</h3>
+                            <div id="home-chart-alerts"></div>
+                        </div>
+                        <div class="card chart-card">
+                            <h3>📊 Fiches en production par liste</h3>
+                            <div id="home-chart-lists"></div>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="card home-list-card">
+                            <h3>🗂 Répartition des alertes</h3>
+                            <div id="home-chart-status" style="display: flex; justify-content: center;"></div>
+                            <div id="home-chart-status-legend"></div>
+                        </div>
+                        <div class="card home-list-card">
+                            <h3>⏳ À traiter en priorité</h3>
+                            <ul id="home-todo-list" class="home-list"></ul>
+                        </div>
+                        <div class="card home-list-card">
+                            <h3>🔄 Dernière synchronisation</h3>
+                            <div id="home-last-sync" style="font-size: 0.85rem; color: var(--text-secondary);">—</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- SECTION 1: GESTION DES WATCHLISTS -->
-            <section id="sec-watchlist-mgmt" class="tab-content active">
+            <section id="sec-watchlist-mgmt" class="tab-content">
                 <div class="sub-tabs">
                     <button id="sub-btn-watchlist-active" class="sub-tab-btn active" onclick="switchSubTab('watchlist-mgmt', 'watchlist-active')">
                         Watchlist Active
@@ -132,19 +188,20 @@
                                     <option value="REJECTED">Rejetées</option>
                                     <option value="EXCLUDED">Exclues</option>
                                 </select>
+                                <button class="btn btn-sm btn-secondary" onclick="exportWatchlistCsv()" title="Exporter la vue filtrée en CSV">⬇ CSV</button>
                             </div>
 
                             <div id="wl-match-hint" class="hidden" style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 0.75rem; font-size: 0.85rem;"></div>
 
                             <div class="table-container max-height-table">
-                                <table id="watchlist-table">
+                                <table id="watchlist-table" data-no-client-sort>
                                     <thead>
                                         <tr>
-                                            <th>ID</th>
+                                            <th class="sortable" data-sort-col="entity_id" onclick="sortWatchlistBy('entity_id')">ID</th>
                                             <th>Liste</th>
                                             <th>Statut</th>
-                                            <th>Type d'entité</th>
-                                            <th>Nom Principal / Raison Sociale</th>
+                                            <th class="sortable" data-sort-col="entity_type" onclick="sortWatchlistBy('entity_type')">Type d'entité</th>
+                                            <th class="sortable" data-sort-col="primary_name" onclick="sortWatchlistBy('primary_name')">Nom Principal / Raison Sociale</th>
                                             <th>Pays Rattachés</th>
                                             <th>État / Genre</th>
                                         </tr>
@@ -688,12 +745,12 @@
                                 <p class="section-desc">Excluez de la production les fiches non pertinentes pour votre établissement (faux positifs connus, périmètre hors activité). Chaque exclusion est justifiée selon les réglages.</p>
                                 <div class="search-box" style="display: flex; gap: 0.75rem; align-items: center;">
                                     <input type="text" id="review-entity-search" placeholder="Filtrer par nom ou ID..." onkeyup="if(event.key==='Enter'){loadReviewEntitiesPage(1);}" style="flex: 1;">
-                                    <button class="btn" onclick="loadReviewEntitiesPage(1)" style="background: rgba(255,255,255,0.08);">Rechercher</button>
+                                    <button class="btn" onclick="loadReviewEntitiesPage(1)" style="background: var(--surface-3);">Rechercher</button>
                                 </div>
 
                                 <div id="review-exclusion-toolbar" class="hidden" style="display: flex; gap: 0.75rem; margin: 0.75rem 0;">
                                     <button class="btn btn-secondary" onclick="openExclusionModal()">Exclure la sélection</button>
-                                    <button class="btn" onclick="removeExclusions()" style="background: rgba(255,255,255,0.08);">Réintégrer la sélection</button>
+                                    <button class="btn" onclick="removeExclusions()" style="background: var(--surface-3);">Réintégrer la sélection</button>
                                     <span id="review-selection-info" style="align-self: center; color: var(--text-muted); font-size: 0.85rem;"></span>
                                 </div>
 
@@ -728,7 +785,7 @@
                                         <label for="backtest-panel-size">Taille (génération)</label>
                                         <input type="number" id="backtest-panel-size" value="500" min="50" max="5000">
                                     </div>
-                                    <button class="btn" id="generate-panel-btn" onclick="generateTestPanel()" style="background: rgba(255,255,255,0.08);">⚙️ Générer un panel</button>
+                                    <button class="btn" id="generate-panel-btn" onclick="generateTestPanel()" style="background: var(--surface-3);">⚙️ Générer un panel</button>
                                     <button class="btn btn-primary" id="run-backtest-btn" onclick="runReviewBacktest()">▶ Lancer le cahier de tests</button>
                                 </div>
                                 <div id="backtest-results" class="hidden" style="margin-top: 1.25rem;"></div>
@@ -1177,17 +1234,25 @@
                             <p class="section-desc">Alertes issues du criblage du référentiel clients contre les listes. Chaque alerte s'instruit : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. Les alertes clôturées automatiquement par une règle anti-faux positifs (<code>CLOSED_BY_RULE</code>) restent visibles et auditables.</p>
                             <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
                                 <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('SCREENING','')">Toutes</button>
-                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('SCREENING','OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
-                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
-                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
-                                <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: rgba(255,255,255,0.08);">Clôturées par règle</button>
-                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('SCREENING','OPEN,IN_PROGRESS,ESCALATED')" style="background: var(--surface-3);">À traiter</button>
+                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
+                                <select id="screening-priority-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par priorité" style="margin-left: auto;">
+                                    <option value="">Toutes priorités</option>
+                                    <option value="CRITICAL">Critique</option>
+                                    <option value="HIGH">Haute</option>
+                                    <option value="MEDIUM">Moyenne</option>
+                                    <option value="LOW">Basse</option>
+                                </select>
+                                <select id="screening-list-filter" onchange="fetchAlerts('SCREENING')" title="Filtrer par type de liste"></select>
+                                <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div class="table-container max-height-table">
                                 <table id="screening-alerts-table">
                                     <thead>
                                         <tr>
-                                            <th>Date</th><th>Client</th><th>Listé</th><th>Liste</th>
+                                            <th>Priorité</th><th>Date</th><th>Client</th><th>Listé</th><th>Liste</th>
                                             <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
                                     </thead>
@@ -1206,17 +1271,25 @@
                             <p class="section-desc">Alertes issues du filtrage des parties des messages de paiement (<code>pain.001</code> / <code>pacs.008</code>). Même cycle de vie 4-yeux que le criblage, avec des règles anti-faux positifs et un blocking key propres à ce canal.</p>
                             <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
                                 <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('FILTERING','')">Toutes</button>
-                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('FILTERING','OPEN,IN_PROGRESS,ESCALATED')" style="background: rgba(255,255,255,0.08);">À traiter</button>
-                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: rgba(255,255,255,0.08);">À valider (4-yeux)</button>
-                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: rgba(255,255,255,0.08);">Closes</button>
-                                <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: rgba(255,255,255,0.08);">Clôturées par règle</button>
-                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par type de liste" style="margin-left: auto;"></select>
+                                <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('FILTERING','OPEN,IN_PROGRESS,ESCALATED')" style="background: var(--surface-3);">À traiter</button>
+                                <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
+                                <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
+                                <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par priorité" style="margin-left: auto;">
+                                    <option value="">Toutes priorités</option>
+                                    <option value="CRITICAL">Critique</option>
+                                    <option value="HIGH">Haute</option>
+                                    <option value="MEDIUM">Moyenne</option>
+                                    <option value="LOW">Basse</option>
+                                </select>
+                                <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING')" title="Filtrer par type de liste"></select>
+                                <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div class="table-container max-height-table">
                                 <table id="filtering-alerts-table">
                                     <thead>
                                         <tr>
-                                            <th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
+                                            <th>Priorité</th><th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
                                             <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
                                     </thead>
@@ -1336,12 +1409,40 @@
                                     </table>
                                 </div>
                             </div>
+                            <div>
+                                <h3 style="font-size: 0.95rem;">Traitement par analyste (alertes décidées)</h3>
+                                <div class="table-container max-height-table">
+                                    <table id="kpi-analysts-table">
+                                        <thead><tr><th>Analyste</th><th>Décisions</th><th>Délai moyen</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <h3 style="font-size: 0.95rem;">Règles anti-faux positifs actives (efficacité)</h3>
+                                <div class="table-container max-height-table">
+                                    <table id="kpi-fprules-table">
+                                        <thead><tr><th>Règle</th><th>Canal</th><th>Alertes closes</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
             </section>
 
             <section id="sec-audit" class="tab-content">
+                <div class="sub-tabs">
+                    <button id="sub-btn-audit-screening" class="sub-tab-btn active" onclick="switchSubTab('audit', 'audit-screening')">
+                        Décisions de Criblage
+                    </button>
+                    <button id="sub-btn-audit-admin" class="sub-tab-btn hidden" onclick="switchSubTab('audit', 'audit-admin')">
+                        Actions d'Administration
+                    </button>
+                </div>
+
+                <div id="sub-sec-audit-screening" class="sub-tab-content active">
                 <div class="card">
                     <h2>Piste d'Audit Réglementaire (Compliance Audit Trail)</h2>
                     <p class="section-desc">Historique immuable de toutes les décisions de criblage émises par le moteur. Conforme aux standards ACPR/AMF.</p>
@@ -1350,14 +1451,15 @@
                         <select id="audit-list-filter" onchange="fetchAuditHistory(1)" title="Filtrer par type de liste"></select>
                         <select id="audit-status-filter" onchange="fetchAuditHistory(1)" title="Filtrer par décision">
                             <option value="">Toutes les décisions</option>
-                            <option value="ALERT">ALERT</option>
-                            <option value="NO_MATCH">NO_MATCH</option>
-                            <option value="WHITELISTED">WHITELISTED</option>
+                            <option value="ALERT">Alerte</option>
+                            <option value="NO_MATCH">Aucun match</option>
+                            <option value="WHITELISTED">Liste blanche</option>
                         </select>
+                        <button class="btn btn-sm btn-secondary" onclick="exportHistoryCsv()" title="Exporter le journal filtré en CSV">⬇ CSV</button>
                     </div>
 
                     <div class="table-container">
-                        <table id="audit-table">
+                        <table id="audit-table" data-no-client-sort>
                             <thead>
                                 <tr>
                                     <th>Horodatage</th>
@@ -1375,6 +1477,26 @@
                         </table>
                     </div>
                     <div id="audit-pagination" class="pagination-container" style="display: flex; gap: 0.75rem; align-items: center; justify-content: flex-end; margin-top: 0.75rem;"></div>
+                </div>
+                </div>
+
+                <!-- JOURNAL DES ACTIONS D'ADMINISTRATION (admin) -->
+                <div id="sub-sec-audit-admin" class="sub-tab-content hidden">
+                    <div class="card">
+                        <h2>Journal des Actions d'Administration</h2>
+                        <p class="section-desc">Trace immuable (append-only) des actions d'administration : création/modification/suppression de comptes, changements de réglages (avant → après), purges de snapshots et révocations de liste blanche. Attendu en contrôle ACPR/FED.</p>
+                        <div class="table-container max-height-table">
+                            <table id="admin-log-table">
+                                <thead>
+                                    <tr>
+                                        <th>Horodatage</th><th>Utilisateur</th><th>Action</th>
+                                        <th>Cible</th><th>Détail (avant → après)</th>
+                                    </tr>
+                                </thead>
+                                <tbody><!-- Populated dynamically --></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -1436,6 +1558,40 @@
                         <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
                             <label for="setting-backtest-gap">Seuil d'écart toléré du taux d'interception (%)</label>
                             <input type="number" id="setting-backtest-gap" min="0" max="1000" step="1" value="20">
+                        </div>
+                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">⏱ SLA de traitement des alertes</h3>
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Délai de traitement (heures) par priorité — l'échéance est calculée à la création de l'alerte, le retard est signalé dans la file. 0 = pas d'échéance.</p>
+                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 640px;">
+                            <div class="form-group"><label for="setting-sla-critical">Critique</label><input type="number" id="setting-sla-critical" min="0" step="1"></div>
+                            <div class="form-group"><label for="setting-sla-high">Haute</label><input type="number" id="setting-sla-high" min="0" step="1"></div>
+                            <div class="form-group"><label for="setting-sla-medium">Moyenne</label><input type="number" id="setting-sla-medium" min="0" step="1"></div>
+                            <div class="form-group"><label for="setting-sla-low">Basse</label><input type="number" id="setting-sla-low" min="0" step="1"></div>
+                        </div>
+                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">🔔 Notifications métier (email / webhooks)</h3>
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Envoi par email (variables SMTP) et vers les webhooks de <code>config.yaml notifications.webhooks</code>. Jamais bloquant pour le criblage.</p>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-alert-created" style="width: 18px; height: 18px;">
+                                Nouvelle alerte créée
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-pending-validation" style="width: 18px; height: 18px;">
+                                Décision d'alerte en attente de validation 4-yeux
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-pending-review" style="width: 18px; height: 18px;">
+                                Snapshot en attente d'homologation
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-notify-sync-error" style="width: 18px; height: 18px;">
+                                Échec de synchronisation d'une source
+                            </label>
                         </div>
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
                     </div>
@@ -1510,15 +1666,15 @@
                 <input type="hidden" id="user-edit-id">
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="user-input-username">Nom d'utilisateur</label>
-                    <input type="text" id="user-input-username" required style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="text" id="user-input-username" required style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                 </div>
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="user-input-fullname">Nom Complet</label>
-                    <input type="text" id="user-input-fullname" placeholder="Ex: Jean Dupont" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="text" id="user-input-fullname" placeholder="Ex: Jean Dupont" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                 </div>
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="user-input-role">Rôle / Privilèges</label>
-                    <select id="user-input-role" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(13,14,21,0.95); border: 1px solid var(--border-color); color: white;">
+                    <select id="user-input-role" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--sidebar-bg); border: 1px solid var(--border-color); color: white;">
                         <option value="user">Utilisateur (Criblage & Consultation)</option>
                         <option value="reviewer">Réviseur (Homologation des listes)</option>
                         <option value="reviewer,user">Utilisateur + Réviseur</option>
@@ -1530,11 +1686,11 @@
                 </div>
                 <div class="form-group" style="margin-bottom: 1.5rem;">
                     <label for="user-input-password">Mot de passe</label>
-                    <input type="password" id="user-input-password" placeholder="••••••••" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="password" id="user-input-password" placeholder="••••••••" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                     <small id="user-password-hint" style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.35rem; display: block;">Laissez vide si vous ne souhaitez pas modifier le mot de passe actuel.</small>
                 </div>
                 <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
-                    <button type="button" class="btn" onclick="closeUserModal()" style="background: rgba(255,255,255,0.1);">Annuler</button>
+                    <button type="button" class="btn" onclick="closeUserModal()" style="background: var(--surface-border);">Annuler</button>
                     <button type="submit" class="btn btn-primary">Enregistrer</button>
                 </div>
             </form>
@@ -1565,7 +1721,7 @@
                     <input type="date" id="whitelist-expires">
                 </div>
                 <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
-                    <button type="button" class="btn" onclick="closeWhitelistModal()" style="background: rgba(255,255,255,0.1);">Annuler</button>
+                    <button type="button" class="btn" onclick="closeWhitelistModal()" style="background: var(--surface-border);">Annuler</button>
                     <button type="submit" class="btn btn-primary">Confirmer la mise en liste blanche</button>
                 </div>
             </form>
@@ -1600,7 +1756,7 @@
                     <small style="color: var(--text-muted); font-size: 0.75rem; display: block;">Document justifiant l'exclusion (archivé, valeur probante en audit).</small>
                 </div>
                 <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
-                    <button type="button" class="btn" onclick="closeExclusionModal()" style="background: rgba(255,255,255,0.1);">Annuler</button>
+                    <button type="button" class="btn" onclick="closeExclusionModal()" style="background: var(--surface-border);">Annuler</button>
                     <button type="submit" class="btn btn-primary">Confirmer l'exclusion</button>
                 </div>
             </form>
@@ -1615,24 +1771,24 @@
             <form id="profile-form" onsubmit="handleUpdateProfile(event)" style="margin-top: 1rem;">
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="profile-input-username">Nom d'utilisateur</label>
-                    <input type="text" id="profile-input-username" required style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="text" id="profile-input-username" required style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                 </div>
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="profile-input-fullname">Nom Complet</label>
-                    <input type="text" id="profile-input-fullname" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="text" id="profile-input-fullname" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                 </div>
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 1.25rem 0;">
                 <h3 style="font-size: 0.95rem; margin-bottom: 0.75rem; color: var(--color-primary);">Changer le Mot de Passe</h3>
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="profile-old-password">Mot de passe actuel</label>
-                    <input type="password" id="profile-old-password" placeholder="••••••••" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="password" id="profile-old-password" placeholder="••••••••" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                 </div>
                 <div class="form-group" style="margin-bottom: 1.5rem;">
                     <label for="profile-new-password">Nouveau mot de passe</label>
-                    <input type="password" id="profile-new-password" placeholder="•••••••• (min 6 car.)" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: white;">
+                    <input type="password" id="profile-new-password" placeholder="•••••••• (min 6 car.)" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
                 </div>
                 <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
-                    <button type="button" class="btn" onclick="closeProfileModal()" style="background: rgba(255,255,255,0.1);">Fermer</button>
+                    <button type="button" class="btn" onclick="closeProfileModal()" style="background: var(--surface-border);">Fermer</button>
                     <button type="submit" class="btn btn-primary">Sauvegarder</button>
                 </div>
             </form>
@@ -1656,7 +1812,15 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=5.7"></script>
+    <!-- Recherche globale (Ctrl+K) -->
+    <div id="command-palette" class="hidden" role="dialog" aria-modal="true" aria-label="Recherche globale">
+        <div class="palette-panel">
+            <input type="text" id="palette-input" placeholder="🔍 Rechercher un listé, une alerte, un écran… (Échap pour fermer)" autocomplete="off">
+            <div id="palette-results"></div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=6.1"></script>
 
 
 

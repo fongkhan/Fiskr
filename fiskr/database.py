@@ -279,6 +279,40 @@ class Alert(Base):
     decided_by = Column(String(100), nullable=True)
     decided_at = Column(DateTime, nullable=True)
     decision_comment = Column(Text, nullable=True)
+    # Case management : priorite explicite (calculee a la creation, modifiable)
+    # et echeance SLA (due_at = created_at + delai du reglage par priorite)
+    priority = Column(String(12), nullable=True, index=True)  # LOW|MEDIUM|HIGH|CRITICAL
+    due_at = Column(DateTime, nullable=True)
+
+ALERT_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+class AlertAttachment(Base):
+    """Piece jointe d'une alerte (justificatif d'instruction) : stockage
+    fichier + reference en base, meme motif que les preuves whitelist."""
+    __tablename__ = "alert_attachments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    file_name = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=False)
+    comment = Column(Text, nullable=True)
+    uploaded_by = Column(String(100), nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+
+class AdminAuditLog(Base):
+    """Journal append-only des actions d'administration (utilisateurs,
+    reglages, purges, revocations) : qui, quand, quoi, avant -> apres.
+    Jamais modifie ni purge — attendu en controle ACPR/FED."""
+    __tablename__ = "admin_audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    at = Column(DateTime, default=datetime.utcnow, index=True)
+    username = Column(String(100), nullable=False)
+    action = Column(String(50), nullable=False, index=True)
+    target = Column(String(255), nullable=True)
+    before = Column(JSON, nullable=True)
+    after = Column(JSON, nullable=True)
+    detail = Column(Text, nullable=True)
 
 ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
 ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE", "CLOSED_BY_RULE")
@@ -554,6 +588,8 @@ def init_db():
             "alerts": [
                 ("list_type", "VARCHAR(30)"),
                 ("channel", "VARCHAR(20)"),
+                ("priority", "VARCHAR(12)"),
+                ("due_at", "TIMESTAMP"),
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),

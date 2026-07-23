@@ -328,3 +328,30 @@ def test_cache_endpoint_unchanged(client):
     data = client.get("/api/watchlist").json()
     assert "hash" in data
     assert isinstance(data["items"], list)
+
+
+# ------------------ TRI SERVEUR (sort_by / sort_dir) ------------------
+
+def test_server_sort_by_primary_name(client):
+    _set_approval(client, False)
+    tag = uuid.uuid4().hex[:6]
+    _upload_watchlist(client, [
+        ("I", f"Ccc Sortov {tag}"),
+        ("I", f"Aaa Sortov {tag}"),
+        ("I", f"Bbb Sortov {tag}"),
+    ])
+
+    asc = _browse(client, search=f"Sortov {tag}", sort_by="primary_name", sort_dir="asc")
+    names_asc = [item["primary_name"] for item in asc["items"]]
+    assert names_asc == sorted(names_asc)
+    assert len(names_asc) == 3
+
+    desc = _browse(client, search=f"Sortov {tag}", sort_by="primary_name", sort_dir="desc")
+    names_desc = [item["primary_name"] for item in desc["items"]]
+    assert names_desc == list(reversed(names_asc))
+
+
+def test_server_sort_rejects_unknown_column(client):
+    response = client.get("/api/watchlist/db", params={"sort_by": "evil_column"})
+    assert response.status_code == 400
+    assert "tri" in response.json()["detail"].lower()

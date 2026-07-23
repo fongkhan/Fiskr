@@ -31,6 +31,18 @@ SETTING_BACKTEST_REQUIRED = "review.backtest_required"
 # Blocking keys par canal : layouts ordonnes de composantes de cle
 SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
 SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
+# SLA de traitement des alertes : delai (heures) par priorite, 0 = pas d'echeance
+SETTING_ALERT_SLA_HOURS = "alerts.sla_hours"
+# Notifications metier : activation par evenement
+SETTING_NOTIFICATIONS = "notifications.events"
+
+DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
+DEFAULT_NOTIFICATION_EVENTS = {
+    "alert_created": False,
+    "alert_pending_validation": False,
+    "snapshot_pending_review": False,
+    "sync_error": True,
+}
 
 BLOCKING_COMPONENTS = ("COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST")
 DEFAULT_FILTERING_LAYOUT = ["PHONETIC_FIRST"]
@@ -148,6 +160,30 @@ def blocking_config_for(layout: list) -> Dict[str, Any]:
     blocking_cfg["custom_key_layout"] = list(layout)
     cfg["blocking"] = blocking_cfg
     return cfg
+
+
+def alert_sla_hours(db) -> Dict[str, int]:
+    """Delais SLA (heures) par priorite d'alerte ; 0 ou absent = pas d'echeance."""
+    value = get_setting_with_source(db, SETTING_ALERT_SLA_HOURS, dict(DEFAULT_ALERT_SLA_HOURS))["value"]
+    out = dict(DEFAULT_ALERT_SLA_HOURS)
+    if isinstance(value, dict):
+        for prio, hours in value.items():
+            try:
+                out[str(prio).upper()] = max(0, int(hours))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def notification_events(db) -> Dict[str, bool]:
+    """Evenements metier declenchant une notification (email/webhook)."""
+    value = get_setting_with_source(db, SETTING_NOTIFICATIONS, dict(DEFAULT_NOTIFICATION_EVENTS))["value"]
+    out = dict(DEFAULT_NOTIFICATION_EVENTS)
+    if isinstance(value, dict):
+        for event, enabled in value.items():
+            if event in out:
+                out[event] = bool(enabled)
+    return out
 
 
 def exclusion_requirements(db) -> Dict[str, bool]:

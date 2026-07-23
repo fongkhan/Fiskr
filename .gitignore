@@ -24,3 +24,7 @@ eurlex_archives/
 # Local audit PDFs and downloads
 *.pdf
 eurlex_archives/
+whitelist_evidence/
+exclusion_evidence/
+alert_evidence/
+eurlex_archive/
