@@ -1913,6 +1913,8 @@ async def browse_watchlist_db(
     list_type: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     search_field: str = Query("default"),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: str = Query("asc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -1936,6 +1938,16 @@ async def browse_watchlist_db(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Champ de recherche inconnu ({', '.join(WATCHLIST_SEARCH_FIELDS)})."
+        )
+    # Tri serveur : colonnes texte du referentiel + identifiants, valide strictement
+    sort_by = (sort_by or "").strip() or None
+    sort_dir = "desc" if (sort_dir or "").strip().lower() == "desc" else "asc"
+    _WL_SORTABLE = {"entity_id", "entity_type", "primary_name", "origin", "country",
+                    "listed_on", "official_reference", "bic_swift"}
+    if sort_by is not None and sort_by not in _WL_SORTABLE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Colonne de tri inconnue ({', '.join(sorted(_WL_SORTABLE))})."
         )
 
     query = db.query(WatchlistEntity, Snapshot).join(
@@ -1989,8 +2001,13 @@ async def browse_watchlist_db(
                     "match_mode": match_mode, "items": items}
 
     total = query.count()
-    rows = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc()) \
-                .offset((page - 1) * page_size).limit(page_size).all()
+    if sort_by:
+        col = getattr(WatchlistEntity, sort_by)
+        order_clause = col.desc() if sort_dir == "desc" else col.asc()
+        query = query.order_by(order_clause, WatchlistEntity.id.asc())
+    else:
+        query = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc())
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
 
     items = [_serialize_watchlist_entity(entity, snap) for entity, snap in rows]
 
@@ -3977,15 +3994,97 @@ async def get_compliance_kpis(
     # Dernieres synchronisations
     recent_syncs = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(15).all()
 
+    # ---- Series temporelles 30 jours (accueil / tendances) ----
+    # func.date() est valide sur SQLite ET PostgreSQL
+    since = now - timedelta(days=30)
+    created_rows = (
+        db.query(func.date(Alert.created_at), Alert.channel, func.count(Alert.id))
+          .filter(Alert.created_at >= since)
+          .group_by(func.date(Alert.created_at), Alert.channel).all()
+    )
+    closed_rows_series = (
+        db.query(func.date(Alert.decided_at), func.count(Alert.id))
+          .filter(Alert.decided_at.isnot(None), Alert.decided_at >= since)
+          .group_by(func.date(Alert.decided_at)).all()
+    )
+    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(29, -1, -1)]
+    created_map: Dict[str, Dict[str, int]] = {}
+    for day, channel, count in created_rows:
+        day_key = str(day)[:10]
+        created_map.setdefault(day_key, {})[channel or "SCREENING"] = int(count)
+    closed_map = {str(day)[:10]: int(count) for day, count in closed_rows_series}
+    timeseries = [
+        {
+            "date": d,
+            "created_screening": created_map.get(d, {}).get("SCREENING", 0),
+            "created_filtering": created_map.get(d, {}).get("FILTERING", 0),
+            "closed": closed_map.get(d, 0),
+        }
+        for d in days
+    ]
+
+    # ---- Ventilations : alertes ouvertes par liste, traitement par analyste ----
+    open_by_list = dict(
+        db.query(Alert.list_type, func.count(Alert.id))
+          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+          .group_by(Alert.list_type).all()
+    )
+    analyst_rows = (
+        db.query(Alert.decided_by, func.count(Alert.id))
+          .filter(Alert.status.in_(["CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE"]),
+                  Alert.decided_by.isnot(None))
+          .group_by(Alert.decided_by).all()
+    )
+    by_analyst = []
+    for username, decided_count in sorted(analyst_rows, key=lambda r: -r[1]):
+        pair_rows = db.query(Alert.created_at, Alert.decided_at).filter(
+            Alert.decided_by == username, Alert.decided_at.isnot(None)
+        ).order_by(Alert.decided_at.desc()).limit(200).all()
+        avg_h = (
+            round(sum((dec - cre).total_seconds() for cre, dec in pair_rows) / len(pair_rows) / 3600.0, 1)
+            if pair_rows else None
+        )
+        by_analyst.append({"analyst": username, "decided": int(decided_count), "avg_decision_hours": avg_h})
+
+    # ---- Efficacite des regles anti-faux positifs (hit_count en base) ----
+    fp_rules_stats = [
+        {
+            "id": r.id, "name": r.name, "channel": r.channel, "status": r.status,
+            "version": r.version, "enabled": bool(r.enabled), "hit_count": int(r.hit_count or 0),
+        }
+        for r in db.query(FpRule)
+                   .filter(FpRule.status == "ACTIVE")
+                   .order_by(FpRule.hit_count.desc()).limit(20).all()
+    ]
+
+    # Alertes ouvertes les plus anciennes (liste « à traiter » de l'accueil)
+    oldest_open = (
+        db.query(Alert)
+          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+          .order_by(Alert.created_at.asc()).limit(5).all()
+    )
+
     return {
         "alerts": {
             "by_status": alert_counts,
             "open": open_alerts,
+            "open_by_list_type": {k or "UNKNOWN": int(v) for k, v in open_by_list.items()},
             "closed_false_positive": closed_fp,
             "closed_confirmed": closed_tp,
             "false_positive_rate_pct": fp_rate,
             "avg_decision_hours": avg_decision_hours,
+            "timeseries_30d": timeseries,
+            "by_analyst": by_analyst,
+            "oldest_open": [
+                {
+                    "id": a.id, "client_name": a.client_name, "watchlist_name": a.watchlist_name,
+                    "channel": a.channel, "status": a.status, "final_score": float(a.final_score or 0.0),
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in oldest_open
+            ],
         },
+        "fp_rules": fp_rules_stats,
         "whitelist_active_pairs": active_whitelist,
         "screening": {"decisions_by_status": audit_counts},
         "lists": {

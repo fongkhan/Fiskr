@@ -193,7 +193,14 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Narratifs d'alertes** : projet de narratif d'investigation composé exclusivement depuis les données tracées (decision_tree, seuil, historique), reformulation Claude optionnelle — la décision reste humaine.
 * **Adverse media** : revue de presse négative par mots-clés LCB-FT (Google News RSS, fournisseur remplaçable), strictement informative.
 * **Filtrage transactionnel ISO 20022** : criblage de toutes les parties d'un message `pain.001` / `pacs.008`, verdict `PASS`/`HIT`, audit + alertes.
-* **Pilotage** : KPI conformité (`GET /api/kpi`) — taux de faux positifs, délais de décision, volumétrie, synchronisations.
+* **Pilotage** : KPI conformité (`GET /api/kpi`) — taux de faux positifs, délais de décision, volumétrie, synchronisations, **séries temporelles 30 jours**, ventilation par analyste et par liste, efficacité des règles anti-faux positifs.
+
+### 🖥️ Interface (dashboard)
+
+* **Vue d'ensemble** (onglet d'accueil) : tuiles cliquables (alertes ouvertes par canal, 4-yeux en attente, homologation, taux de FP, délai moyen), graphiques SVG natifs sans dépendance (courbe 30 jours créées/clôturées, barres fiches par liste, donut des statuts), alertes les plus anciennes à traiter et dernière synchronisation.
+* **Thème clair / sombre** commutable (bouton 🌙/☀️ du header, persisté), design system 100 % piloté par tokens CSS.
+* **Responsive** : sidebar rétractable (hamburger + overlay) sous 1024 px, formulaires en une colonne sur mobile.
+* **Tri des colonnes** sur toutes les tables (tri API validé pour la vue base paginée), squelettes de chargement, états vides homogènes, fermeture des modales à Échap, statuts affichés en français.
 
 ---
 

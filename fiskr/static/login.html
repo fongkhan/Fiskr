@@ -9,7 +9,18 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=3.0">
+    <link rel="stylesheet" href="/static/styles.css?v=3.1">
+    <!-- Thème appliqué avant le premier rendu (pas de flash) -->
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem("fiskr_theme");
+                if (theme === "light" || theme === "dark") {
+                    document.documentElement.setAttribute("data-theme", theme);
+                }
+            } catch (e) { /* thème sombre par défaut */ }
+        })();
+    </script>
     <style>
         body {
             display: flex;
@@ -26,7 +37,7 @@
         .login-card {
             width: 100%;
             max-width: 440px;
-            background: rgba(22, 24, 35, 0.85);
+            background: var(--bg-card);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid var(--border-color);
@@ -90,7 +101,7 @@
         .login-form input[type="password"] {
             width: 100%;
             padding: 0.85rem 1rem;
-            background: rgba(13, 14, 21, 0.7);
+            background: var(--input-bg);
             border: 1px solid var(--border-color);
             border-radius: 8px;
             color: var(--text-primary);
@@ -103,7 +114,7 @@
         .login-form input:focus {
             border-color: var(--color-primary);
             box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-            background: rgba(13, 14, 21, 0.9);
+            background: var(--input-bg-focus);
         }
 
         .alert-banner {
@@ -119,7 +130,7 @@
         .alert-banner.error {
             background: rgba(239, 68, 68, 0.15);
             border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #fca5a5;
+            color: var(--danger-soft-text);
         }
 
         .btn-login {
@@ -154,7 +165,7 @@
             text-align: center;
             font-size: 0.75rem;
             color: var(--text-muted);
-            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            border-top: 1px solid var(--border-color);
             padding-top: 1rem;
         }
     </style>

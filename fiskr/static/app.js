@@ -226,11 +226,187 @@ function promptDialog(title, options = {}) {
                             confirmLabel: options.confirmLabel || "Valider" });
 }
 
+// ------------------ THÈME (clair / sombre) & NAVIGATION RESPONSIVE ------------------
+
+function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+
+function applyTheme(theme) {
+    if (theme === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+    } else {
+        document.documentElement.removeAttribute("data-theme");
+    }
+    try { localStorage.setItem("fiskr_theme", theme); } catch (e) { /* stockage indisponible */ }
+    const btn = document.getElementById("theme-toggle-btn");
+    if (btn) btn.textContent = theme === "light" ? "☀️" : "🌙";
+}
+
+function toggleTheme() {
+    applyTheme(currentTheme() === "light" ? "dark" : "light");
+}
+
+// Sidebar rétractable (mobile / tablette) : classe sur <body>, overlay cliquable
+function toggleSidebar(force) {
+    const open = force !== undefined ? force : !document.body.classList.contains("sidebar-open");
+    document.body.classList.toggle("sidebar-open", open);
+}
+
+// ------------------ APPELS API CENTRALISÉS ------------------
+
+// Wrapper unique : erreurs réseau signalées, session expirée redirigée vers /login.
+// options.silent = pas de toast (polling de badges, rafraîchissements de fond).
+async function apiFetch(url, options = {}) {
+    const { silent, ...fetchOptions } = options;
+    let response;
+    try {
+        response = await fetch(url, fetchOptions);
+    } catch (e) {
+        if (!silent) showToast("Serveur injoignable. Vérifiez votre connexion.", "error");
+        throw e;
+    }
+    if (response.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Session expirée");
+    }
+    return response;
+}
+
+// ------------------ FORMATAGE DES DATES (fr-FR) ------------------
+
+function formatDateTime(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function formatDate(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleDateString("fr-FR");
+}
+
+// ------------------ ÉTATS DE TABLES (chargement / vide) ------------------
+
+function _tbodyOf(target) {
+    return typeof target === "string" ? document.getElementById(target) : target;
+}
+
+// Lignes squelettes pendant un fetch
+function tableLoading(target, cols, rows = 3) {
+    const tbody = _tbodyOf(target);
+    if (!tbody) return;
+    const cells = Array.from({ length: cols }, () => '<td><span class="skeleton-cell"></span></td>').join("");
+    tbody.innerHTML = Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join("");
+}
+
+// État vide homogène
+function tableEmpty(target, cols, message, icon = "📭") {
+    const tbody = _tbodyOf(target);
+    if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
+}
+
+// ------------------ TRI DES COLONNES (côté client) ------------------
+
+// Tri générique de toutes les tables rendues en mémoire : clic sur un <th>.
+// Les tables paginées côté serveur portent data-no-client-sort et gèrent
+// leur tri via l'API (ex. Listés — Base de Données).
+function _sortValue(cellText) {
+    const cleaned = cellText.replace(/[%\s ]/g, "").replace(",", ".");
+    const n = parseFloat(cleaned);
+    return isNaN(n) || !/^[-+]?[\d.,]+$/.test(cleaned) ? null : n;
+}
+
+function sortTableByHeader(th) {
+    const table = th.closest("table");
+    const tbody = table ? table.querySelector("tbody") : null;
+    if (!tbody) return;
+    const idx = Array.from(th.parentNode.children).indexOf(th);
+    const asc = !th.classList.contains("sort-asc");
+    table.querySelectorAll("th").forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+    th.classList.add(asc ? "sort-asc" : "sort-desc");
+    const rows = Array.from(tbody.querySelectorAll(":scope > tr")).filter((r) => !r.querySelector(".empty-state"));
+    const text = (row) => (row.children[idx] ? row.children[idx].textContent.trim() : "");
+    rows.sort((a, b) => {
+        const ta = text(a), tb = text(b);
+        const na = _sortValue(ta), nb = _sortValue(tb);
+        const cmp = (na !== null && nb !== null)
+            ? na - nb
+            : ta.localeCompare(tb, "fr", { numeric: true, sensitivity: "base" });
+        return asc ? cmp : -cmp;
+    });
+    rows.forEach((r) => tbody.appendChild(r));
+}
+
+// Rend cliquables les en-têtes des tables client (affordance visuelle .sortable)
+function initSortableTables() {
+    document.querySelectorAll("table").forEach((table) => {
+        if (table.hasAttribute("data-no-client-sort")) return;
+        table.querySelectorAll("thead th").forEach((th) => {
+            if (!th.textContent.trim() || th.classList.contains("no-sort")) return;
+            th.classList.add("sortable");
+        });
+    });
+    document.addEventListener("click", (e) => {
+        const th = e.target.closest("th.sortable");
+        if (th && !th.closest("table")?.hasAttribute("data-no-client-sort")) sortTableByHeader(th);
+    });
+}
+
+// ------------------ LIBELLÉS FRANÇAIS DES STATUTS ------------------
+
+const STATUS_LABELS = {
+    // Alertes
+    OPEN: "Ouverte", IN_PROGRESS: "En cours", ESCALATED: "Escaladée",
+    PENDING_VALIDATION: "À valider (4 yeux)", CLOSED_CONFIRMED: "Vrai positif",
+    CLOSED_FALSE_POSITIVE: "Faux positif", CLOSED_BY_RULE: "Close par règle",
+    // Snapshots
+    READY: "En production", PENDING_REVIEW: "En homologation", SUPERSEDED: "Remplacé",
+    REJECTED: "Rejeté", PROCESSING: "En traitement", ERROR: "Erreur",
+    // Règles
+    DRAFT: "Brouillon", ACTIVE: "Active",
+    // Divers
+    ADDED: "Ajouté", REMOVED: "Supprimé", MODIFIED: "Modifié",
+    NO_MATCH: "Aucun match", ALERT: "Alerte", WHITELISTED: "Liste blanche",
+    SUCCESS: "Succès", NO_CHANGE: "Sans changement",
+};
+
+function statusLabel(status) {
+    return STATUS_LABELS[status] || status || "—";
+}
+
+// ------------------ ACCESSIBILITÉ (modales, onglets) ------------------
+
+function initA11y() {
+    // Échap ferme la modale visible la plus haute (la modale générique gère déjà le sien)
+    document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        const open = Array.from(document.querySelectorAll(".modal:not(.hidden)"))
+            .filter((m) => m.id !== "app-dialog").pop();
+        if (open) open.classList.add("hidden");
+    });
+    document.querySelectorAll(".modal").forEach((m) => {
+        m.setAttribute("role", "dialog");
+        m.setAttribute("aria-modal", "true");
+        // Clic sur le fond = fermeture (hors modale générique à Promise)
+        if (m.id !== "app-dialog") {
+            m.addEventListener("click", (e) => { if (e.target === m) m.classList.add("hidden"); });
+        }
+    });
+    document.querySelectorAll(".sub-tabs").forEach((bar) => bar.setAttribute("role", "tablist"));
+    document.querySelectorAll(".sub-tab-btn").forEach((b) => {
+        b.setAttribute("role", "tab");
+        b.setAttribute("aria-selected", b.classList.contains("active") ? "true" : "false");
+    });
+}
+
 // ------------------ COMPTEURS DE LA BARRE LATÉRALE (badges) ------------------
 
 async function refreshSidebarCounters() {
     try {
-        const response = await fetch("/api/counters");
+        const response = await apiFetch("/api/counters", { silent: true });
         if (!response.ok) return;
         const c = await response.json();
         const alertBadge = document.getElementById("alerts-open-badge");
@@ -295,10 +471,15 @@ function selectedScreeningLists(containerId) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    // Thème (icône du bouton), accessibilité et tri des tables
+    applyTheme(currentTheme());
+    initA11y();
+    initSortableTables();
     // Check authentication and load user info
     checkAuthUser();
     initListTypeControls();
-    // Initial data loading
+    // Initial data loading — l'accueil d'abord (onglet par défaut)
+    fetchHomeDashboard();
     fetchWatchlist();
     fetchWatchlistHash();
     fetchAuditHistory();
@@ -316,7 +497,7 @@ document.addEventListener("DOMContentLoaded", () => {
 // Check current logged-in user profile
 async function checkAuthUser() {
     try {
-        const response = await fetch("/api/auth/me");
+        const response = await apiFetch("/api/auth/me");
         if (response.status === 401) {
             window.location.href = "/login";
             return;
@@ -369,7 +550,7 @@ async function checkAuthUser() {
 async function handleLogout() {
     if (!await confirmDialog("Voulez-vous vraiment vous déconnecter de Fiskr ?", { title: "Déconnexion" })) return;
     try {
-        await fetch("/api/auth/logout", { method: "POST" });
+        await apiFetch("/api/auth/logout", { method: "POST" });
     } catch (e) {
         console.error("Logout request error:", e);
     } finally {
@@ -380,7 +561,7 @@ async function handleLogout() {
 // Fetch Active System Configuration
 async function fetchConfig() {
     try {
-        const response = await fetch("/api/config");
+        const response = await apiFetch("/api/config");
         if (response.status === 401) return;
         const configData = await response.json();
         console.log("System config active:", configData);
@@ -399,14 +580,20 @@ function switchTab(tabId) {
     });
     const activeBtn = document.getElementById(`nav-btn-${tabId}`);
     if (activeBtn) activeBtn.classList.add("active");
-    
+
     document.querySelectorAll(".tab-content").forEach(sec => {
         sec.classList.remove("active");
     });
     const activeSec = document.getElementById(`sec-${tabId}`);
     if (activeSec) activeSec.classList.add("active");
-    
+
+    // Mobile : replier la sidebar après la navigation
+    toggleSidebar(false);
+
     // Refresh tab-specific data
+    if (tabId === "home") {
+        fetchHomeDashboard();
+    }
     if (tabId === "alerts") {
         fetchAlerts("SCREENING");
         fetchAlerts("FILTERING");
@@ -447,11 +634,15 @@ function switchSubTab(sectionId, subTabId) {
     // Deactivate all sub-tab buttons inside this section
     section.querySelectorAll(".sub-tab-btn").forEach(btn => {
         btn.classList.remove("active");
+        btn.setAttribute("aria-selected", "false");
     });
-    
+
     // Activate clicked sub-tab button
     const activeBtn = document.getElementById(`sub-btn-${subTabId}`);
-    if (activeBtn) activeBtn.classList.add("active");
+    if (activeBtn) {
+        activeBtn.classList.add("active");
+        activeBtn.setAttribute("aria-selected", "true");
+    }
     
     // Hide all sub-tab content panels inside this section
     section.querySelectorAll(".sub-tab-content").forEach(content => {
@@ -661,7 +852,7 @@ async function handleManualEntity(event) {
     btn.textContent = "Ajout en cours...";
     
     try {
-        const response = await fetch("/api/watchlist/entity", {
+        const response = await apiFetch("/api/watchlist/entity", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
@@ -713,7 +904,7 @@ function toggleAccordion(id) {
 // Fetch Snapshots List
 async function fetchSnapshots() {
     try {
-        const response = await fetch("/api/snapshots");
+        const response = await apiFetch("/api/snapshots");
         activeSnapshots = await response.json();
 
         renderSnapshotsFiltered();
@@ -739,7 +930,7 @@ function renderSnapshotsTable(snaps) {
     tbody.innerHTML = "";
 
     if (snaps.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Aucun snapshot importé</td></tr>';
+        tableEmpty(tbody, 5, "Aucun snapshot importé");
         return;
     }
 
@@ -764,7 +955,7 @@ function snapshotStatusBadge(status) {
         return '<span class="status-dot orange"></span> <span style="color: var(--color-warning); font-weight: 600;">EN ATTENTE D\'HOMOLOGATION</span>';
     }
     if (status === "REJECTED") {
-        return '<span class="status-dot" style="background: #f87171;"></span> <span style="color: #f87171; font-weight: 600;">REJETÉ</span>';
+        return '<span class="status-dot" style="background: var(--color-alert);"></span> <span style="color: var(--color-alert); font-weight: 600;">REJETÉ</span>';
     }
     return `<span class="status-dot ${status === 'READY' ? 'green' : 'orange'}"></span> ${status}`;
 }
@@ -846,7 +1037,7 @@ async function handleIngestion(event) {
     btn.textContent = "Importation en cours...";
     
     try {
-        const response = await fetch("/api/ingest", {
+        const response = await apiFetch("/api/ingest", {
             method: "POST",
             body: formData
         });
@@ -898,7 +1089,7 @@ async function handleSourceSync(source) {
     btn.textContent = "Synchronisation en cours...";
 
     try {
-        const response = await fetch("/api/sync/run", {
+        const response = await apiFetch("/api/sync/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
@@ -940,7 +1131,7 @@ async function handleSourceSync(source) {
 // Load and render the synchronization reports history
 async function fetchSyncReports() {
     try {
-        const response = await fetch("/api/sync/reports");
+        const response = await apiFetch("/api/sync/reports");
         if (!response.ok) return;
         const reports = await response.json();
         renderSyncReportsTable(reports);
@@ -1018,7 +1209,7 @@ function showSyncReportDetail(report) {
 // Display the active scheduler configuration under the source cards
 async function fetchSyncConfig() {
     try {
-        const response = await fetch("/api/sync/config");
+        const response = await apiFetch("/api/sync/config");
         if (!response.ok) return;
         const cfg = await response.json();
         const info = document.getElementById("sync-schedule-info");
@@ -1051,7 +1242,7 @@ async function handleCompareSnapshots(event) {
     btn.textContent = "Calcul des écarts...";
     
     try {
-        const response = await fetch("/api/snapshots/compare", {
+        const response = await apiFetch("/api/snapshots/compare", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1138,7 +1329,7 @@ async function handleCompareSnapshots(event) {
 // Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
 async function fetchWatchlistHash() {
     try {
-        const response = await fetch("/api/watchlist");
+        const response = await apiFetch("/api/watchlist");
         const data = await response.json();
         const hashEl = document.getElementById("sidebar-wl-hash");
         if (hashEl) {
@@ -1151,6 +1342,27 @@ async function fetchWatchlistHash() {
 }
 
 // Vue « Listés — Base de Données » : lecture en direct, paginée côté serveur
+// Tri serveur de la table « Listés — Base de Données » (paginée côté API)
+let wlSortBy = null;
+let wlSortDir = "asc";
+
+function sortWatchlistBy(column) {
+    if (wlSortBy === column) {
+        wlSortDir = wlSortDir === "asc" ? "desc" : "asc";
+    } else {
+        wlSortBy = column;
+        wlSortDir = "asc";
+    }
+    // Indicateurs visuels sur les en-têtes de la table serveur
+    document.querySelectorAll("#watchlist-table thead th[data-sort-col]").forEach((th) => {
+        th.classList.remove("sort-asc", "sort-desc");
+        if (th.getAttribute("data-sort-col") === wlSortBy) {
+            th.classList.add(wlSortDir === "asc" ? "sort-asc" : "sort-desc");
+        }
+    });
+    fetchWatchlist(1);
+}
+
 async function fetchWatchlist(page = 1) {
     wlCurrentPage = page;
     const searchEl = document.getElementById("wl-search-input");
@@ -1166,9 +1378,14 @@ async function fetchWatchlist(page = 1) {
     }
     if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
     params.set("scope", scopeFilterEl && scopeFilterEl.value ? scopeFilterEl.value : "production");
+    if (wlSortBy) {
+        params.set("sort_by", wlSortBy);
+        params.set("sort_dir", wlSortDir);
+    }
 
+    tableLoading(document.querySelector("#watchlist-table tbody"), 7);
     try {
-        const response = await fetch(`/api/watchlist/db?${params.toString()}`);
+        const response = await apiFetch(`/api/watchlist/db?${params.toString()}`);
         const data = await response.json();
         if (!response.ok) {
             showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
@@ -1200,7 +1417,7 @@ function renderWatchlistTable(items, page = 1, total = 0) {
     tbody.innerHTML = "";
 
     if (items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted)">Aucune entité en base pour ce périmètre</td></tr>';
+        tableEmpty(tbody, 7, "Aucune entité en base pour ce périmètre");
         updatePaginationControls(0, 0);
         return;
     }
@@ -1389,7 +1606,7 @@ async function handleScreening(event) {
     submitBtn.textContent = "Criblage en cours...";
     
     try {
-        const response = await fetch("/api/screen", {
+        const response = await apiFetch("/api/screen", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
@@ -1641,7 +1858,7 @@ async function runBatchScreening() {
     try {
         for (const client of clients) {
             const payload = batchRestriction ? { ...client, screening_lists: batchRestriction } : client;
-            const response = await fetch("/api/screen", {
+            const response = await apiFetch("/api/screen", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -1717,7 +1934,7 @@ async function fetchAuditHistory(page = null) {
         const statusFilterEl = document.getElementById("audit-status-filter");
         if (statusFilterEl && statusFilterEl.value) params.set("status", statusFilterEl.value);
 
-        const response = await fetch(`/api/history?${params}`);
+        const response = await apiFetch(`/api/history?${params}`);
         const data = await response.json();
         auditHistory = data.items || [];
         renderAuditHistoryTable(auditHistory);
@@ -1743,7 +1960,7 @@ function renderAuditHistoryTable(logs) {
     tbody.innerHTML = "";
 
     if (logs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted)">Aucune décision pour ce filtre</td></tr>';
+        tableEmpty(tbody, 7, "Aucune décision pour ce filtre");
         return;
     }
 
@@ -1870,7 +2087,7 @@ async function purgeFailedSnapshots() {
     }
     
     try {
-        const response = await fetch("/api/snapshots/purge", {
+        const response = await apiFetch("/api/snapshots/purge", {
             method: "POST"
         });
         
@@ -2054,7 +2271,7 @@ async function loadEntityChanges(entityPk) {
     const container = document.getElementById("entity-changes-section");
     if (!container) return;
     try {
-        const response = await fetch(`/api/watchlist/entity/${entityPk}/changes`);
+        const response = await apiFetch(`/api/watchlist/entity/${entityPk}/changes`);
         if (!response.ok) return;
         const data = await response.json();
         const items = data.items || [];
@@ -2253,7 +2470,7 @@ async function saveWatchlistEntityEdits() {
     const btn = document.getElementById("edit-ent-save-btn");
     btn.disabled = true;
     try {
-        const response = await fetch(`/api/watchlist/entity/${item.id}`, {
+        const response = await apiFetch(`/api/watchlist/entity/${item.id}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(patch),
@@ -2288,7 +2505,7 @@ let registeredUsers = [];
 
 async function fetchUsersList() {
     try {
-        const response = await fetch("/api/users");
+        const response = await apiFetch("/api/users");
         if (response.status === 401 || response.status === 403) {
             showToast("Accès refusé. Droits d'administrateur requis.", "error");
             return;
@@ -2305,7 +2522,7 @@ function renderUsersTable(users) {
     if (!tbody) return;
     
     if (!users || users.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Aucun utilisateur trouvé.</td></tr>`;
+        tableEmpty(tbody, 6, "Aucun utilisateur trouvé.", "👥");
         return;
     }
 
@@ -2313,7 +2530,7 @@ function renderUsersTable(users) {
         // Roles empilables : un badge par role ("reviewer,user" -> 2 badges)
         const badgeStyles = {
             admin: 'background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.4); color: #a5b4fc; font-weight: 700;',
-            reviewer: 'background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #fbbf24; font-weight: 600;',
+            reviewer: 'background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--color-warning); font-weight: 600;',
             user: 'background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; font-weight: 600;'
         };
         const badgeLabels = { admin: "ADMINISTRATEUR", reviewer: "RÉVISEUR", user: "ANALYSTE USER" };
@@ -2327,13 +2544,13 @@ function renderUsersTable(users) {
         return `
             <tr>
                 <td style="font-weight: bold; color: var(--text-secondary);">#${u.id}</td>
-                <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}</td>
+                <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: var(--success-soft-text); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}</td>
                 <td>${escapeHtml(u.full_name || "—")}</td>
                 <td>${roleBadge}</td>
                 <td style="font-size: 0.85rem; color: var(--text-muted);">${dateFormatted}</td>
                 <td style="text-align: right;">
-                    <button class="btn btn-sm" onclick="openEditUserModal(${u.id})" style="background: rgba(255, 255, 255, 0.08); margin-right: 6px;">✏️ Éditer</button>
-                    ${!isSelf ? `<button class="btn btn-sm" onclick="deleteUserAccount(${u.id}, '${escapeHtml(u.username)}')" style="background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3);">🗑️ Supprimer</button>` : ''}
+                    <button class="btn btn-sm" onclick="openEditUserModal(${u.id})" style="background: var(--surface-3); margin-right: 6px;">✏️ Éditer</button>
+                    ${!isSelf ? `<button class="btn btn-sm" onclick="deleteUserAccount(${u.id}, '${escapeHtml(u.username)}')" style="background: rgba(239, 68, 68, 0.2); color: var(--danger-soft-text); border: 1px solid rgba(239, 68, 68, 0.3);">🗑️ Supprimer</button>` : ''}
                 </td>
             </tr>
         `;
@@ -2393,7 +2610,7 @@ async function handleSaveUser(event) {
         let response;
         if (editId) {
             // Update existing user
-            response = await fetch(`/api/users/${editId}`, {
+            response = await apiFetch(`/api/users/${editId}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -2405,7 +2622,7 @@ async function handleSaveUser(event) {
             });
         } else {
             // Create new user
-            response = await fetch("/api/users", {
+            response = await apiFetch("/api/users", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -2438,7 +2655,7 @@ async function deleteUserAccount(userId, username) {
     if (!await confirmDialog(`Voulez-vous vraiment supprimer définitivement le compte de @${username} ?`, { title: "Suppression de compte", danger: true, confirmLabel: "Supprimer" })) return;
 
     try {
-        const response = await fetch(`/api/users/${userId}`, {
+        const response = await apiFetch(`/api/users/${userId}`, {
             method: "DELETE"
         });
         const data = await response.json();
@@ -2482,7 +2699,7 @@ async function handleUpdateProfile(event) {
 
     try {
         // 1. Update Profile Info
-        const profileResp = await fetch("/api/users/me/profile", {
+        const profileResp = await apiFetch("/api/users/me/profile", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ username, full_name: fullName })
@@ -2499,7 +2716,7 @@ async function handleUpdateProfile(event) {
                 showToast("Pour modifier votre mot de passe, veuillez saisir l'ancien ET le nouveau mot de passe.", "error");
                 return;
             }
-            const passResp = await fetch("/api/users/me/password", {
+            const passResp = await apiFetch("/api/users/me/password", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
@@ -2560,7 +2777,7 @@ function userRoles(user) {
 
 async function fetchIngestionSettings() {
     try {
-        const response = await fetch("/api/settings/ingestion");
+        const response = await apiFetch("/api/settings/ingestion");
         if (!response.ok) return;
         ingestionSettings = await response.json();
         const approvalEl = document.getElementById("setting-require-approval");
@@ -2607,7 +2824,7 @@ async function saveIngestionSettings() {
         backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20
     };
     try {
-        const response = await fetch("/api/settings/ingestion", {
+        const response = await apiFetch("/api/settings/ingestion", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
@@ -2627,7 +2844,7 @@ async function saveIngestionSettings() {
 
 async function fetchPendingReviews() {
     try {
-        const response = await fetch("/api/review/pending");
+        const response = await apiFetch("/api/review/pending");
         if (!response.ok) return;
         const data = await response.json();
         pendingReviews = data.pending || [];
@@ -2646,7 +2863,7 @@ function renderPendingTable(pending) {
     const tbody = document.querySelector("#review-pending-table tbody");
     if (!tbody) return;
     if (!pending || pending.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Aucun snapshot en attente d\'homologation.</td></tr>';
+        tableEmpty(tbody, 6, "Aucun snapshot en attente d'homologation.", "✅");
         return;
     }
     tbody.innerHTML = pending.map(snap => {
@@ -2692,7 +2909,7 @@ async function openReviewDetail(snapshotId) {
     const commentEl = document.getElementById("review-comment");
     if (commentEl) commentEl.value = "";
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
         const data = await response.json();
         if (!response.ok) {
             showToast("Erreur : " + (data.detail || "Impossible de charger le snapshot."), "error");
@@ -2766,7 +2983,7 @@ async function fetchTestPanels(selectSnapshotId = null) {
     const select = document.getElementById("backtest-panel-select");
     if (!select) return;
     try {
-        const response = await fetch("/api/testpanels");
+        const response = await apiFetch("/api/testpanels");
         if (!response.ok) return;
         const data = await response.json();
         const panels = data.panels || [];
@@ -2790,7 +3007,7 @@ async function generateTestPanel() {
     btn.disabled = true;
     btn.textContent = "Génération...";
     try {
-        const response = await fetch("/api/testpanels/generate", {
+        const response = await apiFetch("/api/testpanels/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ snapshot_id: reviewCurrentSnapshotId, size }),
@@ -2822,7 +3039,7 @@ async function runReviewBacktest() {
     btn.disabled = true;
     btn.textContent = "Criblage à blanc en cours...";
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/backtest`, {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/backtest`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ panel_snapshot_id: panelId }),
@@ -2865,7 +3082,7 @@ function renderBacktestReport(report) {
     }
 
     const rateCard = (title, side, accent) => `
-        <div class="metric" style="flex: 1; background: rgba(255,255,255,0.03); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
+        <div class="metric" style="flex: 1; background: var(--surface-hover); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
             <span class="metric-label" style="font-weight: 600; color: ${accent};">${title}</span>
             <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} alerte(s)</span>
             <small style="color: var(--text-muted);">taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
@@ -2951,7 +3168,7 @@ async function bulkGoodGuys() {
         list_type: cb.dataset.listType || null,
     }));
     try {
-        const response = await fetch("/api/whitelist/bulk", {
+        const response = await apiFetch("/api/whitelist/bulk", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ pairs, justification }),
@@ -2976,7 +3193,7 @@ async function loadReviewEntitiesPage(page) {
     const params = new URLSearchParams({ page: String(page), page_size: "100" });
     if (search) params.set("search", search);
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/entities?${params}`);
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/entities?${params}`);
         const data = await response.json();
         if (!response.ok) {
             showToast("Erreur : " + (data.detail || "Impossible de charger les entités."), "error");
@@ -3020,9 +3237,9 @@ function renderReviewEntitiesTable(data) {
         const totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 100)));
         pagination.classList.toggle("hidden", data.total === 0);
         pagination.innerHTML = `
-            <button class="btn btn-sm" ${data.page <= 1 ? "disabled" : ""} onclick="loadReviewEntitiesPage(${data.page - 1})" style="background: rgba(255,255,255,0.08);">← Précédent</button>
+            <button class="btn btn-sm" ${data.page <= 1 ? "disabled" : ""} onclick="loadReviewEntitiesPage(${data.page - 1})" style="background: var(--surface-3);">← Précédent</button>
             <span style="margin: 0 1rem; color: var(--text-muted); font-size: 0.85rem;">Page ${data.page} / ${totalPages} — ${data.total} entité(s)</span>
-            <button class="btn btn-sm" ${data.page >= totalPages ? "disabled" : ""} onclick="loadReviewEntitiesPage(${data.page + 1})" style="background: rgba(255,255,255,0.08);">Suivant →</button>
+            <button class="btn btn-sm" ${data.page >= totalPages ? "disabled" : ""} onclick="loadReviewEntitiesPage(${data.page + 1})" style="background: var(--surface-3);">Suivant →</button>
         `;
     }
     updateReviewSelectionInfo();
@@ -3074,7 +3291,7 @@ async function submitExclusions(event) {
     formData.append("justification", justification);
     if (fileInput.files.length > 0) formData.append("file", fileInput.files[0]);
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/exclusions`, {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/exclusions`, {
             method: "POST",
             body: formData
         });
@@ -3100,7 +3317,7 @@ async function removeExclusions() {
         return;
     }
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/exclusions/remove`, {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/exclusions/remove`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ entity_ids: [...reviewExcludedSelection] })
@@ -3125,7 +3342,7 @@ async function approvePendingSnapshot() {
     if (!await confirmDialog("Approuver ce snapshot ?\nIl sera mis en production et remplacera les listes antérieures du même type (hors entités exclues).", { title: "Approbation d'homologation", confirmLabel: "Approuver" })) return;
     const comment = document.getElementById("review-comment").value.trim();
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/approve`, {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/approve`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ comment })
@@ -3157,7 +3374,7 @@ async function rejectPendingSnapshot() {
     }
     if (!await confirmDialog("Rejeter ce snapshot ?\nIl n'entrera jamais en production (conservé en base pour l'audit).", { title: "Rejet d'homologation", danger: true, confirmLabel: "Rejeter" })) return;
     try {
-        const response = await fetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/reject`, {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/reject`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ comment })
@@ -3208,7 +3425,8 @@ async function fetchAlerts(channel = "SCREENING") {
         if (filter) params.set("status", filter);
         const listFilterEl = document.getElementById(conf.listFilter);
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
-        const response = await fetch(`/api/alerts?${params}`);
+        tableLoading(document.querySelector(`#${conf.table} tbody`), 8);
+        const response = await apiFetch(`/api/alerts?${params}`);
         if (!response.ok) return;
         const data = await response.json();
         renderAlertsTable(channel, data.items || []);
@@ -3224,7 +3442,7 @@ function setAlertFilter(channel, filter) {
         section.querySelectorAll(".alerts-status-filters button").forEach(btn => {
             const active = btn.dataset.filter === filter;
             btn.classList.toggle("btn-secondary", active);
-            btn.style.background = active ? "" : "rgba(255,255,255,0.08)";
+            btn.style.background = active ? "" : "var(--surface-3)";
         });
     }
     fetchAlerts(channel);
@@ -3232,12 +3450,12 @@ function setAlertFilter(channel, filter) {
 
 function alertStatusBadge(status) {
     const styles = {
-        OPEN: ["#fbbf24", "OUVERTE"],
+        OPEN: ["var(--color-warning)", "OUVERTE"],
         IN_PROGRESS: ["#38bdf8", "EN COURS"],
-        ESCALATED: ["#f87171", "ESCALADÉE"],
+        ESCALATED: ["var(--color-alert)", "ESCALADÉE"],
         PENDING_VALIDATION: ["#c084fc", "À VALIDER (4-YEUX)"],
-        CLOSED_CONFIRMED: ["#f87171", "VRAI POSITIF"],
-        CLOSED_FALSE_POSITIVE: ["#4ade80", "FAUX POSITIF"],
+        CLOSED_CONFIRMED: ["var(--color-alert)", "VRAI POSITIF"],
+        CLOSED_FALSE_POSITIVE: ["var(--success-soft-text)", "FAUX POSITIF"],
         CLOSED_BY_RULE: ["#94a3b8", "CLÔTURÉE PAR RÈGLE"],
     };
     const [color, label] = styles[status] || ["#9ca3af", status];
@@ -3248,7 +3466,7 @@ function renderAlertsTable(channel, items) {
     const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
     if (!tbody) return;
     if (!items.length) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Aucune alerte pour ce filtre.</td></tr>';
+        tableEmpty(tbody, 8, "Aucune alerte pour ce filtre.", "✅");
         return;
     }
     tbody.innerHTML = items.map(a => {
@@ -3261,7 +3479,7 @@ function renderAlertsTable(channel, items) {
             <td>${subject}</td>
             <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
             <td>${listTypeBadge(a.list_type)}</td>
-            <td><strong style="color: ${a.final_score >= 90 ? '#f87171' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
+            <td><strong style="color: ${a.final_score >= 90 ? 'var(--color-alert)' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
             <td>${alertStatusBadge(a.status)}</td>
             <td>${escapeHtml(a.assigned_to || "—")}</td>
             <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})">🔎 Instruire</button></td>
@@ -3272,7 +3490,7 @@ function renderAlertsTable(channel, items) {
 async function openAlertModal(alertId) {
     currentAlertId = alertId;
     try {
-        const response = await fetch(`/api/alerts/${alertId}`);
+        const response = await apiFetch(`/api/alerts/${alertId}`);
         const a = await response.json();
         if (!response.ok) {
             showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
@@ -3303,14 +3521,14 @@ async function openAlertModal(alertId) {
             actionsHtml += `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">`;
             if (a.status !== "PENDING_VALIDATION") {
                 actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')">📌 M'assigner</button>`;
-                actionsHtml += `<button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="alertActionWithComment('comment', 'Commentaire')">💬 Commenter</button>`;
-                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5;" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')">⚠️ Escalader</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')">💬 Commenter</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')">⚠️ Escalader</button>`;
                 actionsHtml += `<button class="btn btn-sm btn-primary" onclick="proposeAlertDecision('FALSE_POSITIVE')">✅ Proposer : Faux positif</button>`;
                 actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposeAlertDecision('CONFIRMED')">🚨 Proposer : Vrai positif</button>`;
             } else if (isReviewer && a.proposed_by !== me) {
                 actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Proposé par @${escapeHtml(a.proposed_by)} : <strong>${a.proposed_decision === "CONFIRMED" ? "vrai positif" : "faux positif"}</strong></span>`;
                 actionsHtml += `<button class="btn btn-sm btn-primary" onclick="validateAlertDecision(true)">✔️ Valider (4-yeux)</button>`;
-                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5;" onclick="validateAlertDecision(false)">↩️ Refuser & renvoyer</button>`;
+                actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="validateAlertDecision(false)">↩️ Refuser & renvoyer</button>`;
             } else {
                 actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Décision proposée par @${escapeHtml(a.proposed_by)} — en attente d'un validateur différent (rôle réviseur).</span>`;
             }
@@ -3334,8 +3552,8 @@ async function openAlertModal(alertId) {
             ${actionsHtml}
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
                 <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()">📝 Générer un narratif</button>
-                <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="fetchAlertAdverseMedia('client')">📰 Presse : client</button>
-                <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="fetchAlertAdverseMedia('watchlist')">📰 Presse : listé</button>
+                <button class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchAlertAdverseMedia('client')">📰 Presse : client</button>
+                <button class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchAlertAdverseMedia('watchlist')">📰 Presse : listé</button>
             </div>
             <div id="alert-narrative-container" class="hidden" style="margin-top: 0.75rem;"></div>
             <div id="alert-adverse-container" class="hidden" style="margin-top: 0.75rem;"></div>
@@ -3353,7 +3571,7 @@ function closeAlertModal() {
 }
 
 async function _postAlertAction(path, body) {
-    const response = await fetch(`/api/alerts/${currentAlertId}/${path}`, {
+    const response = await apiFetch(`/api/alerts/${currentAlertId}/${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -3407,7 +3625,7 @@ async function fetchWhitelist() {
         const params = new URLSearchParams({ page_size: "100" });
         const listFilterEl = document.getElementById("whitelist-list-filter");
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
-        const response = await fetch(`/api/whitelist?${params}`);
+        const response = await apiFetch(`/api/whitelist?${params}`);
         if (!response.ok) return;
         const data = await response.json();
         renderWhitelistTable(data.items || []);
@@ -3420,11 +3638,11 @@ function renderWhitelistTable(items) {
     const tbody = document.querySelector("#whitelist-table tbody");
     if (!tbody) return;
     if (!items.length) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Aucune paire en liste blanche.</td></tr>';
+        tableEmpty(tbody, 8, "Aucune paire en liste blanche.");
         return;
     }
     const stateBadge = (state) => {
-        const map = { ACTIVE: ["#4ade80", "ACTIVE"], EXPIRED: ["#fbbf24", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
+        const map = { ACTIVE: ["var(--success-soft-text)", "ACTIVE"], EXPIRED: ["var(--color-warning)", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
         const [color, label] = map[state] || ["#9ca3af", state];
         return `<span style="color: ${color}; font-weight: 600; font-size: 0.8rem;">${label}</span>`;
     };
@@ -3437,7 +3655,7 @@ function renderWhitelistTable(items) {
             <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString("fr-FR") : ""}</small></td>
             <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString("fr-FR") : "—"}</td>
             <td>${stateBadge(p.state)}</td>
-            <td>${p.state === "ACTIVE" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5;" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>` : ""}</td>
+            <td>${p.state === "ACTIVE" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>` : ""}</td>
         </tr>
     `).join("");
 }
@@ -3449,7 +3667,7 @@ async function revokeWhitelistPair(pairId) {
     });
     if (comment === null) return;
     try {
-        const response = await fetch(`/api/whitelist/${pairId}/revoke`, {
+        const response = await apiFetch(`/api/whitelist/${pairId}/revoke`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ comment })
@@ -3501,7 +3719,7 @@ async function submitWhitelist(event) {
     const fileInput = document.getElementById("whitelist-file");
     if (fileInput.files.length > 0) formData.append("file", fileInput.files[0]);
     try {
-        const response = await fetch("/api/whitelist", { method: "POST", body: formData });
+        const response = await apiFetch("/api/whitelist", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) {
             showToast("Erreur : " + (data.detail || "Mise en liste blanche refusée."), "error");
@@ -3520,12 +3738,12 @@ async function submitWhitelist(event) {
 
 async function fetchKpis() {
     try {
-        const response = await fetch("/api/kpi");
+        const response = await apiFetch("/api/kpi");
         if (!response.ok) return;
         const k = await response.json();
 
         const tile = (label, value, color) => `
-            <div class="metric" style="flex: 1; min-width: 170px; background: rgba(255,255,255,0.04); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
+            <div class="metric" style="flex: 1; min-width: 170px; background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
                 <span class="metric-label" style="font-weight: 600;">${label}</span>
                 <span class="metric-value" style="font-size: 1.5rem; ${color ? "color: " + color + ";" : ""}">${value}</span>
             </div>`;
@@ -3549,14 +3767,214 @@ async function fetchKpis() {
         const syncs = k.recent_syncs || [];
         syncsBody.innerHTML = syncs.length
             ? syncs.map(s => `<tr>
-                <td>${s.executed_at ? new Date(s.executed_at).toLocaleString("fr-FR") : "-"}</td>
+                <td>${formatDateTime(s.executed_at)}</td>
                 <td>${escapeHtml(SYNC_SOURCE_LABELS[s.source] || s.source)} <small style="color:var(--text-muted)">${escapeHtml(s.trigger)}</small></td>
-                <td>${escapeHtml(s.status)}</td>
+                <td>${escapeHtml(statusLabel(s.status))}</td>
                 <td><small>+${s.added} / ~${s.modified} / -${s.removed}</small></td>
               </tr>`).join("")
             : '<tr><td colspan="4" style="color: var(--text-muted); text-align: center;">Aucune synchronisation.</td></tr>';
+
+        // Ventilation par analyste (volumes + délai moyen de décision)
+        const analystsBody = document.querySelector("#kpi-analysts-table tbody");
+        if (analystsBody) {
+            const analysts = a.by_analyst || [];
+            analystsBody.innerHTML = analysts.length
+                ? analysts.map(r => `<tr>
+                    <td>@${escapeHtml(r.analyst)}</td>
+                    <td><strong>${r.decided}</strong></td>
+                    <td>${r.avg_decision_hours !== null && r.avg_decision_hours !== undefined ? r.avg_decision_hours + " h" : "—"}</td>
+                  </tr>`).join("")
+                : '<tr><td colspan="3" style="color: var(--text-muted); text-align: center;">Aucune alerte décidée.</td></tr>';
+        }
+
+        // Efficacité des règles anti-faux positifs (hit_count)
+        const rulesBody = document.querySelector("#kpi-fprules-table tbody");
+        if (rulesBody) {
+            const rules = k.fp_rules || [];
+            rulesBody.innerHTML = rules.length
+                ? rules.map(r => `<tr>
+                    <td>${escapeHtml(r.name)} <small style="color:var(--text-muted)">v${r.version}${r.enabled ? "" : " (désactivée)"}</small></td>
+                    <td>${escapeHtml(r.channel === "FILTERING" ? "Filtrage" : "Criblage")}</td>
+                    <td><strong>${r.hit_count}</strong></td>
+                  </tr>`).join("")
+                : '<tr><td colspan="3" style="color: var(--text-muted); text-align: center;">Aucune règle active.</td></tr>';
+        }
     } catch (e) {
         console.error("Error fetching KPIs:", e);
+    }
+}
+
+// ------------------ ACCUEIL « VUE D'ENSEMBLE » (graphiques SVG natifs) ------------------
+
+// Courbe 30 jours : alertes créées (par canal) et clôturées — SVG sans dépendance
+function renderAlertsTimeseriesChart(containerId, ts) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const series = [
+        { key: "created_screening", label: "Criblage (créées)", color: "var(--color-primary)" },
+        { key: "created_filtering", label: "Filtrage (créées)", color: "var(--color-accent)" },
+        { key: "closed", label: "Clôturées", color: "var(--color-safe)" },
+    ];
+    if (!ts || !ts.length) {
+        container.innerHTML = '<p class="empty-state"><span class="empty-icon">📈</span>Aucune alerte sur les 30 derniers jours.</p>';
+        return;
+    }
+    const W = 640, H = 220, P = { l: 36, r: 12, t: 12, b: 26 };
+    const maxY = Math.max(1, ...ts.flatMap(d => series.map(s => d[s.key] || 0)));
+    const x = (i) => P.l + i * (W - P.l - P.r) / Math.max(1, ts.length - 1);
+    const y = (v) => H - P.b - (v / maxY) * (H - P.t - P.b);
+
+    let grid = "";
+    const gridSteps = 4;
+    for (let g = 0; g <= gridSteps; g++) {
+        const value = Math.round(maxY * g / gridSteps);
+        const gy = y(value).toFixed(1);
+        grid += `<line x1="${P.l}" y1="${gy}" x2="${W - P.r}" y2="${gy}" stroke="var(--border-color)" stroke-width="1"/>`
+              + `<text x="${P.l - 6}" y="${gy}" font-size="9" text-anchor="end" dominant-baseline="middle">${value}</text>`;
+    }
+    let xLabels = "";
+    const labelEvery = Math.max(1, Math.ceil(ts.length / 6));
+    ts.forEach((d, i) => {
+        if (i % labelEvery !== 0 && i !== ts.length - 1) return;
+        xLabels += `<text x="${x(i).toFixed(1)}" y="${H - 8}" font-size="9" text-anchor="middle">${escapeHtml(d.date.slice(5))}</text>`;
+    });
+    const lines = series.map(s =>
+        `<polyline fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${
+            ts.map((d, i) => `${x(i).toFixed(1)},${y(d[s.key] || 0).toFixed(1)}`).join(" ")}"/>`
+    ).join("");
+    const legend = `<div class="chart-legend">${series.map(s =>
+        `<span class="legend-item"><span class="legend-swatch" style="background:${s.color}"></span>${s.label}</span>`).join("")}</div>`;
+
+    container.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Alertes sur 30 jours">${grid}${xLabels}${lines}</svg>${legend}`;
+}
+
+// Barres horizontales : fiches en production par liste
+function renderListsBarChart(containerId, byType) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const entries = Object.entries(byType || {}).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) {
+        container.innerHTML = '<p class="empty-state"><span class="empty-icon">📊</span>Aucune liste en production.</p>';
+        return;
+    }
+    const W = 640, rowH = 30, P = { l: 70, r: 54 };
+    const H = entries.length * rowH + 8;
+    const maxV = Math.max(1, ...entries.map(([, v]) => v));
+    const bars = entries.map(([type, value], i) => {
+        const bw = Math.max(2, (value / maxV) * (W - P.l - P.r));
+        const by = i * rowH + 6;
+        return `<text x="${P.l - 8}" y="${by + 12}" font-size="10" text-anchor="end" dominant-baseline="middle">${escapeHtml(listTypeLabel(type))}</text>`
+             + `<rect x="${P.l}" y="${by}" width="${bw.toFixed(1)}" height="18" rx="4" fill="var(--color-primary)" opacity="0.85"/>`
+             + `<text x="${P.l + bw + 6}" y="${by + 12}" font-size="10" dominant-baseline="middle">${value.toLocaleString("fr-FR")}</text>`;
+    }).join("");
+    container.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Fiches par liste">${bars}</svg>`;
+}
+
+// Donut : répartition des alertes par statut
+const _DONUT_STATUS_COLORS = {
+    OPEN: "var(--color-warning)", IN_PROGRESS: "var(--color-primary)",
+    ESCALATED: "var(--color-alert)", PENDING_VALIDATION: "var(--color-secondary)",
+    CLOSED_CONFIRMED: "#b91c1c", CLOSED_FALSE_POSITIVE: "var(--color-safe)",
+    CLOSED_BY_RULE: "var(--text-muted)",
+};
+
+function renderStatusDonut(containerId, legendId, byStatus) {
+    const container = document.getElementById(containerId);
+    const legendEl = document.getElementById(legendId);
+    if (!container) return;
+    const entries = Object.entries(byStatus || {}).filter(([, v]) => v > 0);
+    const total = entries.reduce((sum, [, v]) => sum + v, 0);
+    if (!total) {
+        container.innerHTML = '<p class="empty-state"><span class="empty-icon">🗂</span>Aucune alerte enregistrée.</p>';
+        if (legendEl) legendEl.innerHTML = "";
+        return;
+    }
+    const R = 54, C = 2 * Math.PI * R;
+    let offset = 0;
+    const segments = entries.map(([status, value]) => {
+        const frac = value / total;
+        const color = _DONUT_STATUS_COLORS[status] || "var(--text-muted)";
+        const seg = `<circle r="${R}" cx="80" cy="80" fill="none" stroke="${color}" stroke-width="22"
+            stroke-dasharray="${(frac * C).toFixed(2)} ${(C - frac * C).toFixed(2)}"
+            stroke-dashoffset="${(-offset * C).toFixed(2)}" transform="rotate(-90 80 80)"/>`;
+        offset += frac;
+        return seg;
+    }).join("");
+    container.innerHTML = `<svg class="chart-svg" viewBox="0 0 160 160" style="max-width: 200px;" role="img" aria-label="Répartition des alertes">
+        ${segments}
+        <text x="80" y="76" font-size="22" font-weight="700" text-anchor="middle" style="fill: var(--text-primary);">${total}</text>
+        <text x="80" y="94" font-size="9" text-anchor="middle">alertes</text>
+    </svg>`;
+    if (legendEl) {
+        legendEl.innerHTML = `<div class="chart-legend" style="justify-content: center;">${entries.map(([status, value]) =>
+            `<span class="legend-item"><span class="legend-swatch" style="background:${_DONUT_STATUS_COLORS[status] || "var(--text-muted)"}"></span>${escapeHtml(statusLabel(status))} (${value})</span>`).join("")}</div>`;
+    }
+}
+
+async function fetchHomeDashboard() {
+    const tiles = document.getElementById("home-tiles");
+    if (!tiles) return;
+    try {
+        const [kpiResp, countersResp] = await Promise.all([
+            apiFetch("/api/kpi", { silent: true }),
+            apiFetch("/api/counters", { silent: true }),
+        ]);
+        if (!kpiResp.ok) return;
+        const k = await kpiResp.json();
+        const c = countersResp.ok ? await countersResp.json() : {};
+        const a = k.alerts || {};
+        const byStatus = a.by_status || {};
+
+        const tile = (icon, label, value, sub, onclick) => `
+            <div class="home-tile" ${onclick ? `onclick="${onclick}"` : ""} role="button" tabindex="0">
+                <div class="tile-label">${icon} ${label}</div>
+                <div class="tile-value">${value}</div>
+                ${sub ? `<div class="tile-sub">${sub}</div>` : ""}
+            </div>`;
+        const fpRate = (a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined)
+            ? a.false_positive_rate_pct + " %" : "—";
+        const avgH = (a.avg_decision_hours !== null && a.avg_decision_hours !== undefined)
+            ? a.avg_decision_hours + " h" : "—";
+        tiles.innerHTML =
+            tile("🚨", "Criblage", c.open_alerts_screening ?? 0, "alertes ouvertes",
+                 "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')") +
+            tile("💸", "Filtrage", c.open_alerts_filtering ?? 0, "alertes ouvertes",
+                 "switchTab('alerts'); switchSubTab('alerts', 'alerts-filtering')") +
+            tile("👁", "4 yeux", byStatus.PENDING_VALIDATION || 0, "décisions à valider",
+                 "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')") +
+            tile("📥", "Homologation", c.pending_reviews ?? 0, "snapshots en attente",
+                 "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')") +
+            tile("📉", "Faux positifs", fpRate, "taux sur alertes closes", "switchTab('kpi')") +
+            tile("⏱", "Délai moyen", avgH, "création → décision", "switchTab('kpi')");
+
+        renderAlertsTimeseriesChart("home-chart-alerts", a.timeseries_30d || []);
+        renderListsBarChart("home-chart-lists", (k.lists || {}).production_entities_by_type || {});
+        renderStatusDonut("home-chart-status", "home-chart-status-legend", byStatus);
+
+        // Liste « à traiter » : alertes ouvertes les plus anciennes
+        const todo = document.getElementById("home-todo-list");
+        if (todo) {
+            const oldest = a.oldest_open || [];
+            todo.innerHTML = oldest.length
+                ? oldest.map(al => `
+                    <li onclick="switchTab('alerts'); switchSubTab('alerts', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
+                        <span class="item-main">#${al.id} — ${escapeHtml(al.client_name || "?")} × ${escapeHtml(al.watchlist_name || "?")}</span>
+                        <span class="item-meta">${escapeHtml(statusLabel(al.status))} · ${formatDate(al.created_at)}</span>
+                    </li>`).join("")
+                : '<li style="cursor: default;"><span class="item-main" style="color: var(--text-muted);">✅ Aucune alerte en attente.</span></li>';
+        }
+
+        // Dernière synchronisation
+        const lastSyncEl = document.getElementById("home-last-sync");
+        const lastSync = (k.recent_syncs || [])[0];
+        if (lastSyncEl) {
+            lastSyncEl.innerHTML = lastSync
+                ? `<strong>${escapeHtml(SYNC_SOURCE_LABELS[lastSync.source] || lastSync.source)}</strong> — ${escapeHtml(statusLabel(lastSync.status))}
+                   <br><small style="color: var(--text-muted);">${formatDateTime(lastSync.executed_at)} · +${lastSync.added} / ~${lastSync.modified} / -${lastSync.removed}</small>`
+                : "Aucune synchronisation exécutée.";
+        }
+    } catch (e) {
+        console.error("Erreur de chargement de la vue d'ensemble :", e);
     }
 }
 
@@ -3574,7 +3992,7 @@ async function runTransactionScreening() {
     try {
         const formData = new FormData();
         formData.append("file", input.files[0]);
-        const response = await fetch("/api/transactions/screen", { method: "POST", body: formData });
+        const response = await apiFetch("/api/transactions/screen", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) {
             showToast("Erreur : " + (typeof data.detail === "string" ? data.detail : "message invalide."), "error");
@@ -3632,7 +4050,7 @@ async function generateAlertNarrative() {
     container.classList.remove("hidden");
     container.innerHTML = '<small style="color: var(--text-muted);">Génération du narratif...</small>';
     try {
-        const response = await fetch(`/api/alerts/${currentAlertId}/narrative`, { method: "POST" });
+        const response = await apiFetch(`/api/alerts/${currentAlertId}/narrative`, { method: "POST" });
         const data = await response.json();
         if (!response.ok) {
             container.innerHTML = `<small style="color: var(--color-alert);">Erreur : ${escapeHtml(data.detail || "génération impossible.")}</small>`;
@@ -3666,7 +4084,7 @@ async function fetchAlertAdverseMedia(which) {
     container.classList.remove("hidden");
     container.innerHTML = `<small style="color: var(--text-muted);">Recherche presse sur « ${escapeHtml(name)} »...</small>`;
     try {
-        const response = await fetch(`/api/adverse-media?name=${encodeURIComponent(name)}`);
+        const response = await apiFetch(`/api/adverse-media?name=${encodeURIComponent(name)}`);
         const data = await response.json();
         if (!response.ok) {
             container.innerHTML = `<small style="color: var(--color-alert);">Erreur : ${escapeHtml(data.detail || "recherche impossible.")}</small>`;
@@ -3706,7 +4124,7 @@ let blockingDraft = { SCREENING: [], FILTERING: [] };
 
 async function fetchBlockingSettings() {
     try {
-        const response = await fetch("/api/settings/blocking");
+        const response = await apiFetch("/api/settings/blocking");
         if (!response.ok) return;
         const data = await response.json();
         blockingComponents = data.components || [];
@@ -3728,9 +4146,9 @@ function renderBlockingEditor(channel, source) {
         <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.3); border-radius: 6px; margin-bottom: 0.4rem;">
             <span style="color: var(--text-muted); font-size: 0.8rem;">#${i + 1}</span>
             <strong style="flex: 1;">${escapeHtml(blockingLabels[comp] || comp)}</strong>
-            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08); padding: 0.1rem 0.5rem;" ${i === 0 ? "disabled" : ""} onclick="moveBlockingComponent('${channel}', ${i}, -1)">↑</button>
-            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08); padding: 0.1rem 0.5rem;" ${i === layout.length - 1 ? "disabled" : ""} onclick="moveBlockingComponent('${channel}', ${i}, 1)">↓</button>
-            <button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: #fca5a5; padding: 0.1rem 0.5rem;" onclick="removeBlockingComponent('${channel}', ${i})">✕</button>
+            <button class="btn btn-sm" style="background: var(--surface-3); padding: 0.1rem 0.5rem;" ${i === 0 ? "disabled" : ""} onclick="moveBlockingComponent('${channel}', ${i}, -1)">↑</button>
+            <button class="btn btn-sm" style="background: var(--surface-3); padding: 0.1rem 0.5rem;" ${i === layout.length - 1 ? "disabled" : ""} onclick="moveBlockingComponent('${channel}', ${i}, 1)">↓</button>
+            <button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text); padding: 0.1rem 0.5rem;" onclick="removeBlockingComponent('${channel}', ${i})">✕</button>
         </div>`).join("") || '<p class="section-desc" style="color: var(--color-warning);">Au moins une composante est requise.</p>';
     const available = blockingComponents.filter(c => !layout.includes(c));
     const addOptions = available.map(c => `<option value="${c}">${escapeHtml(blockingLabels[c] || c)}</option>`).join("");
@@ -3778,7 +4196,7 @@ async function saveBlocking(channel) {
         if (!ok) return;
     }
     try {
-        const response = await fetch("/api/settings/blocking", {
+        const response = await apiFetch("/api/settings/blocking", {
             method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
         });
         const data = await response.json();
@@ -3805,7 +4223,7 @@ function fpRuleStatusBadge(status) {
     const map = {
         DRAFT: ["#94a3b8", "BROUILLON"],
         PENDING_VALIDATION: ["#c084fc", "EN VALIDATION"],
-        ACTIVE: ["#4ade80", "ACTIVE"],
+        ACTIVE: ["var(--success-soft-text)", "ACTIVE"],
         SUPERSEDED: ["#6b7280", "REMPLACÉE"],
     };
     const [color, label] = map[status] || ["#9ca3af", status];
@@ -3814,7 +4232,7 @@ function fpRuleStatusBadge(status) {
 
 async function fetchFpRules() {
     try {
-        const response = await fetch(`/api/fprules?channel=${fpRuleChannel()}`);
+        const response = await apiFetch(`/api/fprules?channel=${fpRuleChannel()}`);
         if (!response.ok) return;
         const data = await response.json();
         fpRulesCache = data.items || [];
@@ -3873,23 +4291,23 @@ function fpRuleEditorHtml(rule) {
         actions = `
             <button class="btn btn-primary" onclick="saveFpRule()">💾 Enregistrer le brouillon</button>
             ${!isNew ? `<button class="btn btn-secondary" onclick="submitFpRule()">📤 Soumettre en validation</button>` : ""}
-            ${!isNew ? `<button class="btn" style="background: rgba(239,68,68,0.2); color:#fca5a5;" onclick="deleteFpRule()">🗑️ Supprimer</button>` : ""}`;
+            ${!isNew ? `<button class="btn" style="background: rgba(239,68,68,0.2); color:var(--danger-soft-text);" onclick="deleteFpRule()">🗑️ Supprimer</button>` : ""}`;
     } else if (status === "PENDING_VALIDATION") {
         const isSubmitter = rule.submitted_by === me;
         actions = `
             <span style="align-self:center; font-size: 0.85rem; color: var(--text-muted);">Soumise par @${escapeHtml(rule.submitted_by || "")}${isSubmitter ? " (vous — un autre habilité doit valider)" : ""}</span>
             ${!isSubmitter ? `<button class="btn btn-primary" onclick="validateFpRule()">✔️ Valider & mettre en production (4-yeux)</button>` : ""}
-            <button class="btn" style="background: rgba(239,68,68,0.2); color:#fca5a5;" onclick="rejectFpRule()">↩️ Renvoyer en brouillon</button>`;
+            <button class="btn" style="background: rgba(239,68,68,0.2); color:var(--danger-soft-text);" onclick="rejectFpRule()">↩️ Renvoyer en brouillon</button>`;
     } else if (status === "ACTIVE") {
         actions = `
             <button class="btn btn-secondary" onclick="editFpRuleVersion()">✏️ Modifier (nouvelle version)</button>
-            <button class="btn" style="background: rgba(255,255,255,0.08);" onclick="toggleFpRule()">${rule.enabled ? "⏸️ Désactiver" : "▶️ Activer"}</button>`;
+            <button class="btn" style="background: var(--surface-3);" onclick="toggleFpRule()">${rule.enabled ? "⏸️ Désactiver" : "▶️ Activer"}</button>`;
     }
     return `
         ${branchBanner}
         <div style="display:flex; justify-content: space-between; align-items:center;">
             <h3 style="margin:0;">${isNew ? "Nouvelle règle" : escapeHtml(rule.name)} ${rule ? fpRuleStatusBadge(rule.status) : ""}</h3>
-            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="closeFpRuleEditor()">Fermer</button>
+            <button class="btn btn-sm" style="background: var(--surface-3);" onclick="closeFpRuleEditor()">Fermer</button>
         </div>
         <div class="form-group"><label>Nom</label><input type="text" id="fprule-name" value="${escapeHtml(rule ? rule.name : "")}" ${editable ? "" : "disabled"}></div>
         <div class="form-group"><label>Description</label><input type="text" id="fprule-desc" value="${escapeHtml(rule ? (rule.description || "") : "")}" ${editable ? "" : "disabled"}></div>
@@ -3921,7 +4339,7 @@ function fpRuleDevBenchHtml() {
         <div id="fprule-tests-section"></div>
         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem;">
             <button class="btn btn-sm btn-secondary" onclick="runFpRuleTests()">▶ Lancer les tests unitaires</button>
-            <button class="btn btn-sm" style="background: rgba(255,255,255,0.08);" onclick="benchFpRule('history')">📜 Rejouer l'historique réel</button>
+            <button class="btn btn-sm" style="background: var(--surface-3);" onclick="benchFpRule('history')">📜 Rejouer l'historique réel</button>
         </div>
         <div id="fprule-bench-result" style="margin-top: 0.75rem;"></div>`;
 }
@@ -3946,11 +4364,11 @@ async function saveFpRule() {
     try {
         let response;
         if (currentFpRuleId) {
-            response = await fetch(`/api/fprules/${currentFpRuleId}`, {
+            response = await apiFetch(`/api/fprules/${currentFpRuleId}`, {
                 method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
             });
         } else {
-            response = await fetch("/api/fprules", {
+            response = await apiFetch("/api/fprules", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...payload, channel: fpRuleChannel() }),
             });
@@ -3970,7 +4388,7 @@ async function _fpRuleAction(path, body, confirmMsg) {
     if (!currentFpRuleId) return;
     if (confirmMsg && !await confirmDialog(confirmMsg)) return;
     try {
-        const response = await fetch(`/api/fprules/${currentFpRuleId}/${path}`, {
+        const response = await apiFetch(`/api/fprules/${currentFpRuleId}/${path}`, {
             method: path === "delete" ? "DELETE" : "POST",
             headers: { "Content-Type": "application/json" },
             body: path === "delete" ? undefined : JSON.stringify(body || {}),
@@ -4014,7 +4432,7 @@ async function toggleFpRule() {
 
 async function deleteFpRule() {
     if (!await confirmDialog("Supprimer ce brouillon de règle ?", { danger: true })) return;
-    const response = await fetch(`/api/fprules/${currentFpRuleId}`, { method: "DELETE" });
+    const response = await apiFetch(`/api/fprules/${currentFpRuleId}`, { method: "DELETE" });
     const data = await response.json();
     if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
     showToast("Règle supprimée.", "success");
@@ -4025,7 +4443,7 @@ async function deleteFpRule() {
 async function editFpRuleVersion() {
     // Modifier une règle ACTIVE crée une nouvelle version brouillon (branche)
     const payload = _fpRulePayload();
-    const response = await fetch(`/api/fprules/${currentFpRuleId}`, {
+    const response = await apiFetch(`/api/fprules/${currentFpRuleId}`, {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
     const data = await response.json();
@@ -4039,7 +4457,7 @@ async function editFpRuleVersion() {
 
 async function loadFpRuleTests(ruleId) {
     try {
-        const response = await fetch(`/api/fprules/${ruleId}/tests`);
+        const response = await apiFetch(`/api/fprules/${ruleId}/tests`);
         if (!response.ok) return;
         const data = await response.json();
         renderFpRuleTests(data.items || []);
@@ -4051,14 +4469,14 @@ function renderFpRuleTests(tests) {
     if (!el) return;
     const rows = tests.map(t => {
         const state = t.last_run_at
-            ? (t.last_error ? `<span style="color:#f87171;">erreur</span>`
-                : (t.last_result === t.expected ? `<span style="color:#4ade80;">✔ vert</span>` : `<span style="color:#f87171;">✘ échec</span>`))
+            ? (t.last_error ? `<span style="color:var(--color-alert);">erreur</span>`
+                : (t.last_result === t.expected ? `<span style="color:var(--success-soft-text);">✔ vert</span>` : `<span style="color:var(--color-alert);">✘ échec</span>`))
             : '<span style="color:var(--text-muted);">non exécuté</span>';
         return `<tr>
             <td>${escapeHtml(t.name)}</td>
             <td>${t.expected ? "supprimer" : "conserver"}</td>
             <td>${state}</td>
-            <td><button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color:#fca5a5; padding: 0.1rem 0.5rem;" onclick="deleteFpRuleTest(${t.id})">✕</button></td>
+            <td><button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color:var(--danger-soft-text); padding: 0.1rem 0.5rem;" onclick="deleteFpRuleTest(${t.id})">✕</button></td>
         </tr>`;
     }).join("");
     el.innerHTML = `
@@ -4079,7 +4497,7 @@ async function addFpRuleTest() {
     try { ctx = JSON.parse(ctxRaw); } catch (e) { showToast("JSON invalide.", "error"); return; }
     const expected = await confirmDialog("La règle doit-elle SUPPRIMER l'alerte pour ce cas ? (Annuler = conserver)", { confirmLabel: "Supprimer", cancelLabel: "Conserver" });
     try {
-        const response = await fetch(`/api/fprules/${currentFpRuleId}/tests`, {
+        const response = await apiFetch(`/api/fprules/${currentFpRuleId}/tests`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, ctx, expected }),
         });
@@ -4089,14 +4507,14 @@ async function addFpRuleTest() {
 }
 
 async function deleteFpRuleTest(testId) {
-    await fetch(`/api/fprules/${currentFpRuleId}/tests/${testId}`, { method: "DELETE" });
+    await apiFetch(`/api/fprules/${currentFpRuleId}/tests/${testId}`, { method: "DELETE" });
     loadFpRuleTests(currentFpRuleId);
 }
 
 async function runFpRuleTests() {
     // Enregistre le code courant avant de tester
     await saveFpRule();
-    const response = await fetch(`/api/fprules/${currentFpRuleId}/tests/run`, { method: "POST" });
+    const response = await apiFetch(`/api/fprules/${currentFpRuleId}/tests/run`, { method: "POST" });
     const data = await response.json();
     if (!response.ok) { showToast("Erreur : " + (data.detail || ""), "error"); return; }
     loadFpRuleTests(currentFpRuleId);
@@ -4108,7 +4526,7 @@ async function benchFpRule(source) {
     const bench = document.getElementById("fprule-bench-result");
     if (bench) bench.innerHTML = '<small style="color: var(--text-muted);">Rejeu en cours…</small>';
     try {
-        const response = await fetch(`/api/fprules/${currentFpRuleId}/bench`, {
+        const response = await apiFetch(`/api/fprules/${currentFpRuleId}/bench`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ source, sample_size: 200 }),
         });
@@ -4116,10 +4534,10 @@ async function benchFpRule(source) {
         if (!response.ok) { if (bench) bench.innerHTML = `<small style="color:var(--color-alert);">${escapeHtml(data.detail || "échec")}</small>`; return; }
         const tp = data.true_positive_hits || [];
         if (bench) bench.innerHTML = `
-            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.75rem;">
+            <div style="background: var(--surface-hover); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.75rem;">
                 <strong>Rejeu (${escapeHtml(source === "history" ? "historique réel" : "panel")})</strong> —
                 supprimées : <strong>${data.suppressed}</strong>, conservées : ${data.kept}, erreurs : ${data.errors}
-                ${tp.length ? `<div style="margin-top: 0.5rem; color: #f87171;">⚠️ ${tp.length} VRAI(S) POSITIF(S) confirmé(s) seraient supprimé(s) : ${tp.slice(0, 5).map(t => escapeHtml(t.client_name + " × " + t.entity_name)).join(", ")}${tp.length > 5 ? "…" : ""}. Corrigez la règle avant de soumettre.</div>` : (data.suppressed ? '<div style="margin-top: 0.5rem; color:#4ade80;">Aucun vrai positif confirmé impacté.</div>' : "")}
+                ${tp.length ? `<div style="margin-top: 0.5rem; color: var(--color-alert);">⚠️ ${tp.length} VRAI(S) POSITIF(S) confirmé(s) seraient supprimé(s) : ${tp.slice(0, 5).map(t => escapeHtml(t.client_name + " × " + t.entity_name)).join(", ")}${tp.length > 5 ? "…" : ""}. Corrigez la règle avant de soumettre.</div>` : (data.suppressed ? '<div style="margin-top: 0.5rem; color:var(--success-soft-text);">Aucun vrai positif confirmé impacté.</div>' : "")}
             </div>`;
     } catch (e) { if (bench) bench.innerHTML = '<small style="color:var(--color-alert);">Erreur réseau.</small>'; }
 }

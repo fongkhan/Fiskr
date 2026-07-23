@@ -199,3 +199,33 @@ def test_kpi_endpoint_structure(client):
     assert "production_entities_by_type" in k["lists"]
     assert "snapshots_by_status" in k["lists"]
     assert isinstance(k["recent_syncs"], list)
+
+
+def test_kpi_endpoint_extended_metrics(client):
+    """Series 30 jours, ventilations par liste/analyste, regles FP et alertes
+    les plus anciennes : les nouveaux blocs de l'accueil Vue d'ensemble."""
+    k = client.get("/api/kpi").json()
+    a = k["alerts"]
+
+    # Serie temporelle : 30 points, un par jour, cles created/closed par canal
+    ts = a["timeseries_30d"]
+    assert len(ts) == 30
+    for point in ts:
+        assert set(point.keys()) == {"date", "created_screening", "created_filtering", "closed"}
+    # Jours ordonnes croissants et distincts
+    dates = [p["date"] for p in ts]
+    assert dates == sorted(dates) and len(set(dates)) == 30
+
+    # Ventilations et stats structurees (types uniquement : la base de test varie)
+    assert isinstance(a["open_by_list_type"], dict)
+    assert isinstance(a["by_analyst"], list)
+    for row in a["by_analyst"]:
+        assert "analyst" in row and "decided" in row and "avg_decision_hours" in row
+    assert isinstance(a["oldest_open"], list) and len(a["oldest_open"]) <= 5
+    for al in a["oldest_open"]:
+        assert "id" in al and "channel" in al and "created_at" in al
+
+    # Efficacite des regles anti-faux positifs (hit_count expose)
+    assert isinstance(k["fp_rules"], list)
+    for r in k["fp_rules"]:
+        assert r["status"] == "ACTIVE" and "hit_count" in r
