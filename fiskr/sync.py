@@ -453,7 +453,14 @@ def run_ofac_sync(
         db.add(snap)
         db.commit()
 
-        record_count = persist_pivot_items(db, snap_id, parse_ofac_advanced_xml(str(temp_file)))
+        ofac_relations: list = []
+        record_count = persist_pivot_items(
+            db, snap_id, parse_ofac_advanced_xml(str(temp_file), relations_out=ofac_relations)
+        )
+        # Graphe de relations entre profils (ownership) rafraichi avec la liste
+        if ofac_relations:
+            from fiskr.database import refresh_source_relationships
+            refresh_source_relationships(db, "OFAC", ofac_relations)
         # Mode homologation : le snapshot attend un pointage humain, l'ancienne
         # liste READY reste en production jusqu'a l'approbation.
         staging = require_approval_enabled(db)

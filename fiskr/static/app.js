@@ -680,6 +680,8 @@ function switchSubTab(sectionId, subTabId) {
         fetchBlockingSettings();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
+    } else if (subTabId === "screening-batch") {
+        fetchBatchCampaigns();
     } else if (subTabId === "audit-screening") {
         fetchAuditHistory(1);
     } else if (subTabId === "audit-admin") {
@@ -2200,11 +2202,104 @@ function showWatchlistDetails(item) {
             <div class="details-item"><strong>Dernière Modification Manuelle</strong><span>${escapeHtml(modifiedStr)}</span></div>
         </div>
         ${extendedFieldsRows(item)}
+        <div id="entity-relations-section"></div>
         <div id="entity-changes-section"></div>
     `;
 
     modal.classList.remove("hidden");
     if (item.id) loadEntityChanges(item.id);
+    if (item.entity_id) loadEntityRelations(item.entity_id);
+}
+
+// ------------------ RELATIONS & LIENS CAPITALISTIQUES (règle des 50 %) ------------------
+
+async function loadEntityRelations(entityId) {
+    const container = document.getElementById("entity-relations-section");
+    if (!container) return;
+    container.innerHTML = '<p class="section-desc" style="margin: 1rem 0 0;">Chargement des relations…</p>';
+    try {
+        const response = await apiFetch(`/api/relationships/${encodeURIComponent(entityId)}`, { silent: true });
+        if (!response.ok) { container.innerHTML = ""; return; }
+        const data = await response.json();
+        const canEdit = currentUser && (userRoles(currentUser).includes("admin") || userRoles(currentUser).includes("reviewer"));
+
+        const inherited = (data.inherited_risk || []).map(chain => `
+            <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 0.6rem 0.9rem; margin-bottom: 0.5rem; font-size: 0.85rem;">
+                ⚠️ <strong>Règle des 50 %</strong> — détention majoritaire par
+                <strong>${escapeHtml(chain.owner_name || chain.owner_entity_id)}</strong>
+                ${chain.ownership_pct !== null && chain.ownership_pct !== undefined ? `(${chain.ownership_pct} %)` : "(contrôle présumé, source OFAC)"}
+                ${chain.via && chain.via.length ? `<small style="color: var(--text-muted);"> via ${chain.via.map(escapeHtml).join(" → ")}</small>` : ""}
+            </div>`).join("");
+
+        const rows = (data.relations || []).map(rel => {
+            const isOutgoing = rel.from_entity_id === entityId;
+            const otherName = isOutgoing ? (rel.to_name || rel.to_entity_id) : (rel.from_name || rel.from_entity_id);
+            const direction = isOutgoing ? "→" : "←";
+            return `<tr>
+                <td>${direction} ${escapeHtml(rel.relation_type_label)}${rel.relation_label ? ` <small style="color: var(--text-muted);">(${escapeHtml(rel.relation_label)})</small>` : ""}</td>
+                <td><strong>${escapeHtml(otherName)}</strong><br><small style="color: var(--text-muted);">${escapeHtml(isOutgoing ? rel.to_entity_id : rel.from_entity_id)}</small></td>
+                <td>${rel.ownership_pct !== null && rel.ownership_pct !== undefined ? rel.ownership_pct + " %" : "—"}</td>
+                <td><span class="badge-secondary">${escapeHtml(rel.source)}</span>${rel.comment ? `<br><small style="color: var(--text-muted);">${escapeHtml(rel.comment)}</small>` : ""}</td>
+                <td>${canEdit && rel.source === "MANUAL" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text); padding: 0.1rem 0.5rem;" onclick="deleteEntityRelation(${rel.id}, '${escapeHtml(entityId)}')">✕</button>` : ""}</td>
+            </tr>`;
+        }).join("");
+
+        const addForm = canEdit ? `
+            <div class="filter-bar" style="margin-top: 0.5rem;">
+                <input type="text" id="rel-other-id" placeholder="ID de l'entité liée (ex. 9101, UN-QDi.430)" style="flex: 1 1 200px;">
+                <select id="rel-type" style="min-width: 190px;">
+                    ${(data.relation_types || []).map(t => `<option value="${t.code}">${escapeHtml(t.label)}</option>`).join("")}
+                </select>
+                <input type="text" id="rel-pct" placeholder="% détention" style="flex: 0 1 110px; min-width: 100px;" title="Pourcentage de détention (règle des 50 %)">
+                <button class="btn btn-sm btn-secondary" onclick="addEntityRelation('${escapeHtml(entityId)}')">➕ Lier</button>
+            </div>` : "";
+
+        container.innerHTML = `
+            <div class="modal-section" style="margin-top: 1.25rem;">
+                <h4>🔗 Relations & liens capitalistiques</h4>
+                ${inherited}
+                ${rows ? `<div class="table-container" style="max-height: 220px;">
+                    <table><thead><tr><th>Relation</th><th>Entité liée</th><th>Détention</th><th>Source</th><th></th></tr></thead>
+                    <tbody>${rows}</tbody></table></div>`
+                  : '<p style="font-size: 0.85rem; color: var(--text-muted);">Aucune relation connue pour cette entité.</p>'}
+                ${addForm}
+            </div>`;
+    } catch (e) {
+        container.innerHTML = "";
+    }
+}
+
+async function addEntityRelation(entityId) {
+    const otherId = (document.getElementById("rel-other-id")?.value || "").trim();
+    const relType = document.getElementById("rel-type")?.value || "OWNED_BY";
+    const pctRaw = (document.getElementById("rel-pct")?.value || "").trim().replace(",", ".");
+    if (!otherId) { showToast("Renseignez l'identifiant de l'entité liée.", "error"); return; }
+    const payload = { from_entity_id: entityId, to_entity_id: otherId, relation_type: relType };
+    if (pctRaw) {
+        const pct = parseFloat(pctRaw);
+        if (isNaN(pct)) { showToast("Pourcentage de détention invalide.", "error"); return; }
+        payload.ownership_pct = pct;
+    }
+    try {
+        const response = await apiFetch("/api/relationships", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "création refusée."), "error"); return; }
+        showToast(data.message, "success");
+        loadEntityRelations(entityId);
+    } catch (e) { console.error("Relation create error:", e); }
+}
+
+async function deleteEntityRelation(relId, entityId) {
+    if (!await confirmDialog("Supprimer cette relation manuelle ?", { danger: true })) return;
+    try {
+        const response = await apiFetch(`/api/relationships/${relId}`, { method: "DELETE" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "suppression refusée."), "error"); return; }
+        showToast(data.message, "success");
+        loadEntityRelations(entityId);
+    } catch (e) { console.error("Relation delete error:", e); }
 }
 
 // Champs étendus : [champ, libellé] — affichés dans la modale seulement si non vides,
@@ -4874,4 +4969,121 @@ function initCommandPalette() {
         else if (e.key === "ArrowUp") { e.preventDefault(); paletteHover(Math.max(_paletteSelection - 1, 0)); }
         else if (e.key === "Enter") { e.preventDefault(); paletteActivate(_paletteSelection); }
     });
+}
+
+// ------------------ CAMPAGNES DE CRIBLAGE BATCH (serveur + inbox CFT) ------------------
+
+let _batchPollTimer = null;
+
+function campaignStatusBadge(status) {
+    const map = {
+        RUNNING: ["var(--color-warning)", "EN COURS"],
+        DONE: ["var(--success-soft-text)", "TERMINÉE"],
+        ERROR: ["var(--color-alert)", "ERREUR"],
+    };
+    const [color, label] = map[status] || ["var(--text-muted)", status];
+    return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>`;
+}
+
+async function fetchBatchCampaigns() {
+    const tbody = document.querySelector("#batch-campaigns-table tbody");
+    if (!tbody) return;
+    try {
+        const response = await apiFetch("/api/batch/campaigns", { silent: true });
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = data.items || [];
+        if (!items.length) {
+            tableEmpty(tbody, 9, "Aucune campagne : lancez-en une avec un fichier CSV, ou déposez un fichier dans l'inbox CFT.", "🗂");
+        } else {
+            tbody.innerHTML = items.map(c => `
+                <tr>
+                    <td>#${c.id}</td>
+                    <td><strong>${escapeHtml(c.name)}</strong>${c.file_name ? `<br><small style="color: var(--text-muted);">${escapeHtml(c.file_name)}</small>` : ""}</td>
+                    <td>${c.trigger === "inbox" ? '<span class="badge-secondary">📥 CFT</span>' : '<span class="badge-secondary">Manuel</span>'}</td>
+                    <td>${campaignStatusBadge(c.status)}${c.error_message ? `<br><small style="color: var(--color-alert);">${escapeHtml(c.error_message)}</small>` : ""}</td>
+                    <td>${c.processed_clients} / ${c.total_clients}</td>
+                    <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};">${c.alert_count}</strong></td>
+                    <td>${c.rejected_count || 0}</td>
+                    <td>${formatDateTime(c.created_at)}</td>
+                    <td>
+                        <button class="btn btn-sm btn-secondary" onclick="openBatchCampaign(${c.id})">🔎 Détails</button>
+                        <button class="btn btn-sm" style="background: var(--surface-3);" onclick="window.open('/api/export/batch/${c.id}.csv', '_blank')">⬇ CSV</button>
+                    </td>
+                </tr>`).join("");
+        }
+        // Rafraîchissement automatique tant qu'une campagne tourne et que l'onglet est visible
+        const anyRunning = items.some(c => c.status === "RUNNING");
+        clearTimeout(_batchPollTimer);
+        const batchVisible = document.getElementById("sub-sec-screening-batch")?.classList.contains("active");
+        if (anyRunning && batchVisible) {
+            _batchPollTimer = setTimeout(fetchBatchCampaigns, 4000);
+        }
+    } catch (e) { /* silencieux */ }
+}
+
+async function launchBatchCampaign() {
+    const input = document.getElementById("batch-file-input");
+    if (!input || !input.files || !input.files.length) {
+        showToast("Sélectionnez un fichier CSV de clients.", "error");
+        return;
+    }
+    const formData = new FormData();
+    formData.append("file", input.files[0]);
+    const nameEl = document.getElementById("batch-campaign-name");
+    if (nameEl && nameEl.value.trim()) formData.append("name", nameEl.value.trim());
+    try {
+        const response = await apiFetch("/api/batch/campaigns", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (typeof data.detail === "string" ? data.detail : "fichier refusé."), "error");
+            return;
+        }
+        showToast(data.message, "success");
+        input.value = "";
+        if (nameEl) nameEl.value = "";
+        fetchBatchCampaigns();
+    } catch (e) { console.error("Batch campaign launch error:", e); }
+}
+
+async function openBatchCampaign(campaignId, statusFilter = "") {
+    const container = document.getElementById("batch-campaign-detail");
+    if (!container) return;
+    container.classList.remove("hidden");
+    try {
+        const params = new URLSearchParams({ page_size: "200" });
+        if (statusFilter) params.set("status", statusFilter);
+        const response = await apiFetch(`/api/batch/campaigns/${campaignId}?${params}`);
+        if (!response.ok) return;
+        const c = await response.json();
+        const rows = (c.results || []).map(r => `
+            <tr>
+                <td>${escapeHtml(r.client_id || "—")}</td>
+                <td><strong>${escapeHtml(r.client_name || "—")}</strong></td>
+                <td>${escapeHtml(statusLabel(r.status))}</td>
+                <td>${r.final_score !== null && r.final_score !== undefined ? r.final_score.toFixed(1) + " %" : "—"}</td>
+                <td>${r.watchlist_name ? `${escapeHtml(r.watchlist_name)}<br><small style="color: var(--text-muted);">${escapeHtml(r.watchlist_entity_id || "")}</small>` : (r.error ? `<small style="color: var(--color-alert);">${escapeHtml(r.error)}</small>` : "—")}</td>
+                <td>${r.list_type ? listTypeBadge(r.list_type) : "—"}</td>
+                <td>${r.alert_id ? `<button class="btn btn-sm btn-secondary" onclick="switchTab('alerts'); switchSubTab('alerts', 'alerts-screening'); openAlertModal(${r.alert_id})">🚨 Alerte #${r.alert_id}</button>` : "—"}</td>
+            </tr>`).join("");
+        container.innerHTML = `
+            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Campagne #${c.id} — ${escapeHtml(c.name)} ${campaignStatusBadge(c.status)}</h3>
+            <p class="section-desc" style="margin-bottom: 0.75rem;">
+                ${c.processed_clients}/${c.total_clients} client(s) criblé(s) ·
+                <strong style="color: var(--color-alert);">${c.alert_count} alerte(s)</strong> ·
+                ${c.no_match_count} sans match · ${c.rejected_count} rejet(s) quality gate
+            </p>
+            <div class="filter-bar" style="margin-bottom: 0.5rem;">
+                <button class="btn btn-sm ${statusFilter === "" ? "btn-secondary" : ""}" style="${statusFilter === "" ? "" : "background: var(--surface-3);"}" onclick="openBatchCampaign(${c.id}, '')">Tous (${c.results_total})</button>
+                <button class="btn btn-sm ${statusFilter === "ALERT" ? "btn-secondary" : ""}" style="${statusFilter === "ALERT" ? "" : "background: var(--surface-3);"}" onclick="openBatchCampaign(${c.id}, 'ALERT')">Alertes</button>
+                <button class="btn btn-sm ${statusFilter === "REJECTED" ? "btn-secondary" : ""}" style="${statusFilter === "REJECTED" ? "" : "background: var(--surface-3);"}" onclick="openBatchCampaign(${c.id}, 'REJECTED')">Rejets</button>
+                <button class="btn btn-sm" style="background: var(--surface-3); margin-left: auto;" onclick="window.open('/api/export/batch/${c.id}.csv', '_blank')">⬇ Export CSV</button>
+            </div>
+            <div class="table-container max-height-table">
+                <table>
+                    <thead><tr><th>ID Client</th><th>Client</th><th>Statut</th><th>Score</th><th>Fiche listée / motif</th><th>Liste</th><th>Alerte</th></tr></thead>
+                    <tbody>${rows || '<tr><td colspan="7" class="empty-state">Aucun résultat pour ce filtre.</td></tr>'}</tbody>
+                </table>
+            </div>`;
+    } catch (e) { console.error("Batch campaign detail error:", e); }
 }

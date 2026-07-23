@@ -32,7 +32,9 @@ from fiskr.database import (
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
-    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES
+    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
+    EntityRelationship, RELATION_TYPES, refresh_source_relationships,
+    BatchCampaign, BatchResult
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import notify_event
@@ -336,10 +338,13 @@ async def lifespan(app: FastAPI):
     scheduler_task = None
     if get_sync_config()["auto_enabled"]:
         scheduler_task = asyncio.create_task(_daily_sync_scheduler())
+    # Inbox CFT surveillee (auto-desactivee si batch.inbox_dir est vide)
+    inbox_task = asyncio.create_task(_inbox_poller())
     yield
     # Shutdown
     if scheduler_task:
         scheduler_task.cancel()
+    inbox_task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -725,35 +730,15 @@ async def delete_user(
 
 # ------------------ DATA ENDPOINTS ------------------
 
-@app.post("/api/screen")
-async def screen_client(
-    request: ScreenClientRequest, 
-    db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
+def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: str,
+                          requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Screens a client profile against active watchlists in-memory cache.
-    1. Runs Data Quality Gate evaluation.
-    2. Runs exact Hard Match priority sequences.
-    3. Runs fuzzy matching and contextual adjustment calculations.
+    Cœur du criblage unitaire, PARTAGE entre l'endpoint temps réel /api/screen
+    et les campagnes batch : quality gate -> blocking -> scoring -> liste
+    blanche -> règles anti-faux positifs -> journal d'audit -> alerte.
+    Lève HTTPException 400 si le quality gate rejette le profil.
     """
-    client_dict = request.model_dump()
-
-    # Restriction eventuelle du perimetre de criblage (defaut : toutes listes).
-    # Validee strictement et retiree du profil client (elle n'en fait pas partie).
-    client_dict.pop("screening_lists", None)
-    requested_lists = None
-    if request.screening_lists:
-        requested_lists = sorted({v.strip().upper() for v in request.screening_lists if v and v.strip()})
-        invalid = [v for v in requested_lists if v not in WATCHLIST_FILE_TYPES]
-        if invalid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Type(s) de liste inconnu(s) : {', '.join(invalid)} (valeurs possibles : {', '.join(WATCHLIST_FILE_TYPES)})."
-            )
-        if set(requested_lists) == set(WATCHLIST_FILE_TYPES):
-            requested_lists = None  # toutes les listes = aucune restriction
-
+    client_dict = dict(client_dict)
     # Normalize client_type to PP/PM for internal validation and scoring engine
     if client_dict.get("client_type") in ["I", "PP"]:
         client_dict["client_type"] = "PP"
@@ -824,6 +809,13 @@ async def screen_client(
         # Tracabilite : toute restriction du perimetre de criblage est
         # persistee dans le decision_tree du journal immuable
         best_match["screening_lists_restriction"] = requested_lists or "ALL"
+        # Regle des 50 % : risque herite par detention majoritaire du liste
+        # matche (informatif, trace dans le decision_tree)
+        matched_entity_id = (best_match.get("watchlist_entity") or {}).get("entity_id")
+        if matched_entity_id:
+            inherited = compute_inherited_risk(db, matched_entity_id, max_depth=2)
+            if inherited:
+                best_match["ownership_inherited_risk"] = inherited
         # Regles anti-faux positifs du canal SCREENING : appliquees avant de
         # tracer, pour marquer la decision dans le journal immuable
         suppressed_by_rule = None
@@ -844,7 +836,7 @@ async def screen_client(
         # Une decision ALERT ouvre (ou re-detecte) une alerte de travail
         if best_match.get("status") == "ALERT":
             alert_id = open_or_redetect_alert(
-                db, audit_record, client_dict.get("client_id"), best_match, current_user["username"],
+                db, audit_record, client_dict.get("client_id"), best_match, username,
                 channel="SCREENING",
                 suppressed_by_rule=suppressed_by_rule,
                 detail_suffix=(
@@ -892,6 +884,39 @@ async def screen_client(
         "whitelist_pair_id": whitelist_pair_id,
         "screening_lists": requested_lists or "ALL"
     }
+
+def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
+    """Valide et normalise une restriction de perimetre (None = toutes listes)."""
+    if not raw_lists:
+        return None
+    requested = sorted({v.strip().upper() for v in raw_lists if v and v.strip()})
+    invalid = [v for v in requested if v not in WATCHLIST_FILE_TYPES]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Type(s) de liste inconnu(s) : {', '.join(invalid)} (valeurs possibles : {', '.join(WATCHLIST_FILE_TYPES)})."
+        )
+    if set(requested) == set(WATCHLIST_FILE_TYPES):
+        return None  # toutes les listes = aucune restriction
+    return requested
+
+@app.post("/api/screen")
+async def screen_client(
+    request: ScreenClientRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Screens a client profile against active watchlists in-memory cache.
+    1. Runs Data Quality Gate evaluation.
+    2. Runs exact Hard Match priority sequences.
+    3. Runs fuzzy matching and contextual adjustment calculations.
+    """
+    client_dict = request.model_dump()
+    # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
+    client_dict.pop("screening_lists", None)
+    requested_lists = _validate_screening_lists(request.screening_lists)
+    return screen_client_profile(db, client_dict, current_user["username"], requested_lists)
 
 @app.post("/api/transactions/screen")
 async def screen_transaction_message(
@@ -1035,7 +1060,8 @@ async def ingest_snapshot(
         db.commit()
         
         record_count = 0
-        
+        ofac_relations = None  # liens entre profils (OFAC uniquement)
+
         # 3. Parse contents based on File Type
         eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
         if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI") or eu_fsf_upload:
@@ -1063,8 +1089,10 @@ async def ingest_snapshot(
                 source_format = ssie_source_format or ssie_config.get("source_format") or DEFAULT_SOURCE_FORMAT
                 parser_stream = parse_ssie_xml(str(temp_file_path), selectors=selectors, source_format=source_format)
             else:
-                # OFAC Advanced XML parsing (iterparse)
-                parser_stream = parse_ofac_advanced_xml(str(temp_file_path))
+                # OFAC Advanced XML parsing (iterparse) — les liens entre
+                # profils (ownership) sont recoltes au passage
+                ofac_relations = []
+                parser_stream = parse_ofac_advanced_xml(str(temp_file_path), relations_out=ofac_relations)
 
             for item in parser_stream:
                 # Complete le decoupage prenoms / nom des individus si absent
@@ -1121,6 +1149,12 @@ async def ingest_snapshot(
                 )
                 db.add(db_ent)
                 record_count += 1
+
+            # Rafraichissement idempotent du graphe de relations OFAC
+            # (les relations MANUAL ne sont jamais touchees)
+            if ofac_relations:
+                rel_count = refresh_source_relationships(db, "OFAC", ofac_relations)
+                logger.info(f"OFAC : {rel_count} relation(s) entre profils rafraîchie(s).")
 
         elif file_type == "WATCHLIST_EU":
             # PDF or CSV
@@ -1811,6 +1845,184 @@ async def get_watchlist_entity_changes(
         ]
     }
 
+# ------------------ RELATIONS ENTRE ENTITES (OWNERSHIP, REGLE DES 50 %) ------------------
+
+RELATION_TYPE_LABELS = {
+    "OWNED_BY": "Détenu / contrôlé par",
+    "ACTING_FOR": "Agit pour le compte de",
+    "ASSOCIATE_OF": "Associé de",
+    "FAMILY_OF": "Membre de la famille de",
+    "LEADER_OF": "Dirigeant de / rôle de direction dans",
+    "PROVIDING_SUPPORT": "Apporte un soutien à",
+    "OTHER": "Autre relation",
+}
+
+def _entity_names_map(db: Session, entity_ids) -> Dict[str, str]:
+    """Resout entity_id -> nom principal (fiches en production d'abord)."""
+    ids = [i for i in set(entity_ids) if i]
+    if not ids:
+        return {}
+    rows = (
+        db.query(WatchlistEntity.entity_id, WatchlistEntity.primary_name, Snapshot.status)
+          .join(Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id)
+          .filter(WatchlistEntity.entity_id.in_(ids)).all()
+    )
+    names: Dict[str, str] = {}
+    for entity_id, name, snap_status in rows:
+        if entity_id not in names or snap_status == "READY":
+            names[entity_id] = name
+    return names
+
+def _relation_view(rel: EntityRelationship, names: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "id": rel.id,
+        "from_entity_id": rel.from_entity_id,
+        "from_name": names.get(rel.from_entity_id),
+        "to_entity_id": rel.to_entity_id,
+        "to_name": names.get(rel.to_entity_id),
+        "relation_type": rel.relation_type,
+        "relation_type_label": RELATION_TYPE_LABELS.get(rel.relation_type, rel.relation_type),
+        "relation_label": rel.relation_label,
+        "ownership_pct": rel.ownership_pct,
+        "source": rel.source,
+        "comment": rel.comment,
+        "created_by": rel.created_by,
+        "created_at": rel.created_at.isoformat() if rel.created_at else None,
+    }
+
+def compute_inherited_risk(db: Session, entity_id: str, max_depth: int = 3) -> List[Dict[str, Any]]:
+    """
+    Regle des 50 % (OFAC) : remonte les liens OWNED_BY dont la detention est
+    majoritaire (>= 50 %) ou presumee (relation OFAC sans pourcentage — figurer
+    au SDN comme « Owned or Controlled By » vaut presomption de controle).
+    Transitive avec garde de profondeur et de cycles.
+    """
+    chains: List[Dict[str, Any]] = []
+    visited = {entity_id}
+
+    def walk(current_id: str, path: List[str], depth: int):
+        if depth >= max_depth:
+            return
+        edges = db.query(EntityRelationship).filter(
+            EntityRelationship.from_entity_id == current_id,
+            EntityRelationship.relation_type == "OWNED_BY",
+        ).all()
+        for edge in edges:
+            owner = edge.to_entity_id
+            majority = (edge.ownership_pct is not None and edge.ownership_pct >= 50.0)
+            presumed = (edge.ownership_pct is None and edge.source == "OFAC")
+            if not (majority or presumed) or owner in visited:
+                continue
+            visited.add(owner)
+            chains.append({
+                "owner_entity_id": owner,
+                "ownership_pct": edge.ownership_pct,
+                "presumed": presumed,
+                "via": list(path),
+            })
+            walk(owner, path + [owner], depth + 1)
+
+    walk(entity_id, [], 0)
+    names = _entity_names_map(db, [c["owner_entity_id"] for c in chains])
+    for chain in chains:
+        chain["owner_name"] = names.get(chain["owner_entity_id"])
+    return chains
+
+class RelationshipCreate(BaseModel):
+    from_entity_id: str
+    to_entity_id: str
+    relation_type: str
+    ownership_pct: Optional[float] = None
+    comment: Optional[str] = None
+
+@app.get("/api/relationships/{entity_id}")
+async def get_entity_relationships(
+    entity_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Relations d'une entite listee (deux sens, noms resolus) + risque
+    herite par detention majoritaire (regle des 50 %)."""
+    from sqlalchemy import or_
+    rels = db.query(EntityRelationship).filter(or_(
+        EntityRelationship.from_entity_id == entity_id,
+        EntityRelationship.to_entity_id == entity_id,
+    )).order_by(EntityRelationship.relation_type.asc(), EntityRelationship.id.asc()).all()
+    names = _entity_names_map(
+        db, [r.from_entity_id for r in rels] + [r.to_entity_id for r in rels] + [entity_id]
+    )
+    return {
+        "entity_id": entity_id,
+        "entity_name": names.get(entity_id),
+        "relations": [_relation_view(r, names) for r in rels],
+        "relation_types": [
+            {"code": code, "label": RELATION_TYPE_LABELS[code]} for code in RELATION_TYPES
+        ],
+        "inherited_risk": compute_inherited_risk(db, entity_id),
+    }
+
+@app.post("/api/relationships")
+async def create_relationship(
+    payload: RelationshipCreate,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Ajout manuel d'une relation entre entites (reviewer/admin) — support de
+    la regle des 50 % via ownership_pct sur les liens OWNED_BY."""
+    from_id = (payload.from_entity_id or "").strip()
+    to_id = (payload.to_entity_id or "").strip()
+    rel_type = (payload.relation_type or "").strip().upper()
+    if not from_id or not to_id or from_id == to_id:
+        raise HTTPException(status_code=400, detail="Deux identifiants d'entités distincts sont requis.")
+    if rel_type not in RELATION_TYPES:
+        raise HTTPException(status_code=400, detail=f"Type de relation inconnu ({', '.join(RELATION_TYPES)}).")
+    if payload.ownership_pct is not None and not (0 < payload.ownership_pct <= 100):
+        raise HTTPException(status_code=400, detail="ownership_pct doit être entre 0 et 100.")
+    # Les deux entites doivent exister en base (n'importe quel snapshot)
+    known = _entity_names_map(db, [from_id, to_id])
+    missing = [i for i in (from_id, to_id) if i not in known]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Entité(s) introuvable(s) en base : {', '.join(missing)}.")
+    duplicate = db.query(EntityRelationship).filter(
+        EntityRelationship.from_entity_id == from_id,
+        EntityRelationship.to_entity_id == to_id,
+        EntityRelationship.relation_type == rel_type,
+    ).first()
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Cette relation existe déjà.")
+    rel = EntityRelationship(
+        from_entity_id=from_id, to_entity_id=to_id, relation_type=rel_type,
+        ownership_pct=payload.ownership_pct, source="MANUAL",
+        comment=(payload.comment or "").strip() or None, created_by=reviewer["username"],
+    )
+    db.add(rel)
+    log_admin_action(db, reviewer["username"], "RELATION_CREATED",
+                     target=f"{from_id} --{rel_type}--> {to_id}",
+                     after={"ownership_pct": payload.ownership_pct, "comment": payload.comment})
+    db.commit()
+    names = _entity_names_map(db, [from_id, to_id])
+    return {"message": "Relation créée.", "relation": _relation_view(rel, names)}
+
+@app.delete("/api/relationships/{rel_id}")
+async def delete_relationship(
+    rel_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Suppression d'une relation MANUELLE uniquement (les relations OFAC sont
+    rafraichies par les synchronisations et repousseraient)."""
+    rel = db.query(EntityRelationship).filter(EntityRelationship.id == rel_id).first()
+    if not rel:
+        raise HTTPException(status_code=404, detail="Relation introuvable.")
+    if rel.source != "MANUAL":
+        raise HTTPException(status_code=409, detail="Seules les relations manuelles peuvent être supprimées (les relations de source officielle sont gérées par les synchronisations).")
+    log_admin_action(db, reviewer["username"], "RELATION_DELETED",
+                     target=f"{rel.from_entity_id} --{rel.relation_type}--> {rel.to_entity_id}",
+                     before={"ownership_pct": rel.ownership_pct, "comment": rel.comment})
+    db.delete(rel)
+    db.commit()
+    return {"message": "Relation supprimée."}
+
 @app.get("/api/watchlist")
 async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Returns the active loaded in-memory watchlist."""
@@ -1819,6 +2031,326 @@ async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)
         "hash": watchlist_hash,
         "items": watchlist_store
     }
+
+# ------------------ CAMPAGNES DE CRIBLAGE BATCH (upload manuel / inbox CFT) ------------------
+# Un fichier de clients ad hoc est crible cote serveur en tache de fond avec
+# les MEMES garanties que le criblage unitaire (quality gate, liste blanche,
+# regles anti-faux positifs, journal d'audit immuable, alertes). L'inbox
+# surveillee est le point d'integration CFT : le moniteur de transfert depose
+# un fichier, Fiskr en fait une campagne.
+
+BATCH_MAX_ROWS = 20000
+
+def _batch_row_to_profile(row: Dict[str, str]) -> Dict[str, Any]:
+    """Ligne CSV -> profil de criblage (memes colonnes que CLIENT_BASE)."""
+    def val(*keys):
+        for key in keys:
+            v = row.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return None
+
+    def csv_list(key, sep=","):
+        return [c.strip() for c in (row.get(key) or "").split(sep) if c.strip()]
+
+    ctype = (val("client_type", "type") or "PP").upper()
+    return {
+        "client_id": val("client_id", "id"),
+        "client_type": "PP" if ctype in ("PP", "I") else "PM",
+        "client_first_name": val("client_first_name", "first_name") or "",
+        "client_last_name": val("client_last_name", "last_name") or "",
+        "client_maiden_name": val("client_maiden_name", "maiden_name") or "",
+        "client_company_name": val("client_company_name", "company_name", "name") or "",
+        "client_dob": val("client_dob", "dob", "birth_date"),
+        "client_gender": val("client_gender", "gender") or "U",
+        "client_is_deceased": False,
+        "client_countries": {
+            "nationality": csv_list("nationality"),
+            "residence": csv_list("residence"),
+            "birth_country": csv_list("birth_country"),
+            "registration_country": csv_list("registration_country"),
+        },
+        "client_place_of_birth": val("client_place_of_birth", "place_of_birth"),
+        "client_lei_number": val("client_lei_number", "lei_number"),
+        "client_bic": val("client_bic", "bic"),
+        "client_tax_id": val("client_tax_id", "tax_id"),
+        "client_iban": val("client_iban", "iban"),
+        "client_crypto_wallets": csv_list("client_crypto_wallets", ";"),
+        "client_alternative_addresses": [],
+        "client_national_registry_ids": [],
+        "client_other_registration_ids": [],
+        "client_passport_documents": json.loads(row["client_passport_documents"]) if row.get("client_passport_documents") else [],
+        "client_national_id_documents": json.loads(row["client_national_id_documents"]) if row.get("client_national_id_documents") else [],
+        "client_other_id_documents": [],
+    }
+
+def _parse_batch_csv(path: Path) -> List[Dict[str, Any]]:
+    """Parse un fichier clients CSV (separateur , ou ; auto-detecte)."""
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        head = f.readline()
+        delimiter = ";" if head.count(";") > head.count(",") else ","
+        f.seek(0)
+        reader = __import__("csv").DictReader(f, delimiter=delimiter)
+        profiles = []
+        for row in reader:
+            row = {(k or "").strip().lower(): v for k, v in row.items()}
+            profiles.append(_batch_row_to_profile(row))
+            if len(profiles) > BATCH_MAX_ROWS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Fichier trop volumineux (> {BATCH_MAX_ROWS} lignes) : découpez la campagne."
+                )
+    if not profiles:
+        raise HTTPException(status_code=400, detail="Aucune ligne client exploitable dans le fichier.")
+    return profiles
+
+def _campaign_summary(c: BatchCampaign) -> Dict[str, Any]:
+    return {
+        "id": c.id, "name": c.name, "file_name": c.file_name, "trigger": c.trigger,
+        "status": c.status, "error_message": c.error_message,
+        "screening_lists": c.screening_lists or "ALL",
+        "total_clients": c.total_clients, "processed_clients": c.processed_clients,
+        "alert_count": c.alert_count, "no_match_count": c.no_match_count,
+        "rejected_count": c.rejected_count,
+        "created_by": c.created_by,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "finished_at": c.finished_at.isoformat() if c.finished_at else None,
+    }
+
+def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
+                        username: str, requested_lists: Optional[List[str]]) -> None:
+    """Corps de la campagne (thread dedie, session DB propre)."""
+    from fiskr.database import SessionLocal
+    db = SessionLocal()
+    try:
+        campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
+        if campaign is None:
+            return
+        for profile in profiles:
+            try:
+                result = screen_client_profile(db, profile, username, requested_lists)
+                best = result.get("best_match") or {}
+                wl_entity = best.get("watchlist_entity") or {}
+                result_status = best.get("status") or "NO_MATCH"
+                db.add(BatchResult(
+                    campaign_id=campaign_id,
+                    client_id=profile.get("client_id"),
+                    client_name=(result.get("client_quality_report") or {}).get("cleansed_name")
+                                or profile.get("client_company_name") or profile.get("client_last_name"),
+                    status=result_status,
+                    final_score=best.get("final_score"),
+                    watchlist_entity_id=wl_entity.get("entity_id"),
+                    watchlist_name=wl_entity.get("primary_name"),
+                    list_type=wl_entity.get("_list_type"),
+                    audit_id=result.get("audit_trail_id"),
+                    alert_id=result.get("alert_id"),
+                ))
+                if result_status == "ALERT":
+                    campaign.alert_count += 1
+                else:
+                    campaign.no_match_count += 1
+            except HTTPException as gate_error:
+                # Quality gate : ligne refusee, motif conserve (jamais silencieux)
+                db.add(BatchResult(
+                    campaign_id=campaign_id,
+                    client_id=profile.get("client_id"),
+                    client_name=profile.get("client_company_name") or profile.get("client_last_name"),
+                    status="REJECTED",
+                    error=json.dumps(gate_error.detail, ensure_ascii=False, default=str),
+                ))
+                campaign.rejected_count += 1
+            campaign.processed_clients += 1
+            if campaign.processed_clients % 25 == 0:
+                db.commit()
+        campaign.status = "DONE"
+        campaign.finished_at = datetime.utcnow()
+        db.commit()
+        logger.info(f"Campagne batch #{campaign_id} terminée : {campaign.alert_count} alerte(s) "
+                    f"sur {campaign.processed_clients} client(s).")
+    except Exception as e:
+        db.rollback()
+        campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
+        if campaign is not None:
+            campaign.status = "ERROR"
+            campaign.error_message = str(e)
+            campaign.finished_at = datetime.utcnow()
+            db.commit()
+        logger.error(f"Campagne batch #{campaign_id} en erreur : {e}")
+    finally:
+        db.close()
+
+def _launch_batch_campaign(db: Session, name: str, file_name: Optional[str],
+                           profiles: List[Dict[str, Any]], username: str,
+                           requested_lists: Optional[List[str]],
+                           trigger: str = "manual") -> BatchCampaign:
+    import threading
+    campaign = BatchCampaign(
+        name=name, file_name=file_name, trigger=trigger, status="RUNNING",
+        screening_lists=requested_lists, total_clients=len(profiles),
+        created_by=username,
+    )
+    db.add(campaign)
+    db.commit()
+    db.refresh(campaign)
+    threading.Thread(
+        target=_run_batch_campaign,
+        args=(campaign.id, profiles, username, requested_lists),
+        daemon=True,
+    ).start()
+    return campaign
+
+@app.post("/api/batch/campaigns")
+async def create_batch_campaign(
+    file: UploadFile = File(...),
+    name: Optional[str] = Form(None),
+    screening_lists: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Lance une campagne de criblage batch depuis un fichier CSV de clients
+    (colonnes CLIENT_BASE). Execution en tache de fond, progression consultable."""
+    requested_lists = _validate_screening_lists(
+        [v for v in (screening_lists or "").split(",") if v.strip()]
+    )
+    safe_upload_name = re.sub(r"[^\w.\-]", "_", file.filename or "clients.csv")
+    temp_path = PROJECT_ROOT / "temp_ingestion" / f"batch_{uuid.uuid4().hex[:8]}_{safe_upload_name}"
+    temp_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(temp_path, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+    try:
+        profiles = _parse_batch_csv(temp_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    campaign = _launch_batch_campaign(
+        db, (name or "").strip() or f"Campagne {datetime.utcnow().strftime('%d/%m/%Y %H:%M')}",
+        file.filename, profiles, current_user["username"], requested_lists,
+    )
+    return {"message": f"Campagne lancée sur {len(profiles)} client(s).", **_campaign_summary(campaign)}
+
+@app.get("/api/batch/campaigns")
+async def list_batch_campaigns(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Dernieres campagnes batch (progression et statut inclus)."""
+    rows = db.query(BatchCampaign).order_by(BatchCampaign.created_at.desc()).limit(50).all()
+    return {"items": [_campaign_summary(c) for c in rows]}
+
+@app.get("/api/batch/campaigns/{campaign_id}")
+async def get_batch_campaign(
+    campaign_id: int,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Detail d'une campagne : progression + resultats unitaires pagines."""
+    campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campagne introuvable.")
+    query = db.query(BatchResult).filter(BatchResult.campaign_id == campaign_id)
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        query = query.filter(BatchResult.status.in_(statuses))
+    total = query.count()
+    rows = query.order_by(BatchResult.final_score.desc().nullslast(), BatchResult.id.asc()) \
+                .offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        **_campaign_summary(campaign),
+        "results_total": total, "page": page, "page_size": page_size,
+        "results": [
+            {
+                "id": r.id, "client_id": r.client_id, "client_name": r.client_name,
+                "status": r.status, "final_score": r.final_score,
+                "watchlist_entity_id": r.watchlist_entity_id, "watchlist_name": r.watchlist_name,
+                "list_type": r.list_type, "audit_id": r.audit_id, "alert_id": r.alert_id,
+                "error": r.error,
+            }
+            for r in rows
+        ],
+    }
+
+@app.get("/api/export/batch/{campaign_id}.csv")
+async def export_batch_campaign_csv(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV des resultats d'une campagne batch."""
+    campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campagne introuvable.")
+    rows = db.query(BatchResult).filter(BatchResult.campaign_id == campaign_id) \
+             .order_by(BatchResult.id.asc()).limit(_EXPORT_MAX_ROWS).all()
+    header = ["client_id", "client", "statut", "score", "fiche_listee_id", "fiche_listee",
+              "liste", "audit_id", "alerte_id", "motif_rejet"]
+    data = [
+        [r.client_id or "", r.client_name or "", r.status,
+         f"{r.final_score:.1f}" if r.final_score is not None else "",
+         r.watchlist_entity_id or "", r.watchlist_name or "", r.list_type or "",
+         r.audit_id or "", r.alert_id or "", r.error or ""]
+        for r in rows
+    ]
+    return _csv_response(f"fiskr_campagne_{campaign_id}.csv", header, data)
+
+# ------------------ INBOX CFT SURVEILLEE (depot de fichiers clients) ------------------
+
+def _process_inbox_once() -> int:
+    """
+    Scrute le repertoire de depot (batch.inbox_dir, la ou CFT pose ses
+    fichiers) : chaque *.csv stable est archive puis crible en campagne.
+    Retourne le nombre de campagnes lancees.
+    """
+    from fiskr.database import SessionLocal
+    batch_cfg = config.get("batch", {}) or {}
+    inbox_raw = (batch_cfg.get("inbox_dir") or "").strip()
+    if not inbox_raw:
+        return 0
+    inbox = Path(inbox_raw)
+    if not inbox.is_dir():
+        return 0
+    archive = Path((batch_cfg.get("archive_dir") or "").strip() or (inbox / "archive"))
+    archive.mkdir(parents=True, exist_ok=True)
+    launched = 0
+    import time as _time
+    for candidate in sorted(inbox.glob("*.csv")):
+        try:
+            # Fichier encore en cours de transfert : attendre la prochaine passe
+            if _time.time() - candidate.stat().st_mtime < 5:
+                continue
+            archived = archive / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{candidate.name}"
+            shutil.move(str(candidate), str(archived))
+            profiles = _parse_batch_csv(archived)
+            db = SessionLocal()
+            try:
+                _launch_batch_campaign(
+                    db, f"Dépôt CFT — {candidate.name}", candidate.name,
+                    profiles, "cft-inbox", None, trigger="inbox",
+                )
+            finally:
+                db.close()
+            launched += 1
+            logger.info(f"Inbox CFT : campagne lancée pour {candidate.name} ({len(profiles)} client(s)).")
+        except HTTPException as bad_file:
+            logger.error(f"Inbox CFT : fichier {candidate.name} refusé — {bad_file.detail}")
+        except Exception as e:
+            logger.error(f"Inbox CFT : échec sur {candidate.name} — {e}")
+    return launched
+
+async def _inbox_poller():
+    """Boucle de scrutation de l'inbox CFT (desactivee si batch.inbox_dir vide)."""
+    while True:
+        batch_cfg = config.get("batch", {}) or {}
+        poll_seconds = max(10, int(batch_cfg.get("inbox_poll_seconds", 60) or 60))
+        if not (batch_cfg.get("inbox_dir") or "").strip():
+            await asyncio.sleep(300)
+            continue
+        try:
+            await asyncio.to_thread(_process_inbox_once)
+        except Exception as e:
+            logger.error(f"Scrutation de l'inbox CFT en échec : {e}")
+        await asyncio.sleep(poll_seconds)
 
 WATCHLIST_DB_SCOPES = ("production", "all", "PENDING_REVIEW", "SUPERSEDED", "REJECTED", "EXCLUDED")
 
