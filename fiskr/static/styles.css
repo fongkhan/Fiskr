@@ -1706,3 +1706,64 @@ th.sortable.sort-desc::after {
         margin-right: 0;
     }
 }
+
+/* ------------------ Progression des operations longues ------------------ */
+.progress-tracker { margin-top: 1rem; }
+.progress-tracker-label {
+    display: flex; justify-content: space-between; gap: 1rem;
+    font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.35rem;
+}
+.progress-tracker-bar {
+    height: 8px; border-radius: 4px; overflow: hidden;
+    background: var(--border-color);
+}
+.progress-tracker-fill {
+    height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--color-primary), var(--color-accent));
+    border-radius: 4px; transition: width 0.4s ease;
+}
+.progress-tracker-fill.indeterminate {
+    width: 100%;
+    background: repeating-linear-gradient(45deg,
+        var(--color-primary) 0, var(--color-primary) 12px,
+        var(--color-accent) 12px, var(--color-accent) 24px);
+    background-size: 34px 100%;
+    animation: progress-stripes 1s linear infinite;
+}
+@keyframes progress-stripes {
+    from { background-position: 0 0; }
+    to { background-position: 34px 0; }
+}
+
+/* ------------------ Atelier de regles anti-FP ------------------ */
+.fp-nl-section {
+    border: 1px dashed var(--border-color); border-radius: 8px;
+    padding: 0.75rem; margin-bottom: 1rem;
+}
+.fp-nl-section textarea { width: 100%; }
+.fp-toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.4rem; }
+.fp-toolbar select { max-width: 260px; }
+.fp-ctx-palette { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.4rem; }
+.fp-ctx-chip {
+    font-family: monospace; font-size: 0.72rem; cursor: pointer;
+    padding: 0.15rem 0.5rem; border-radius: 999px;
+    background: var(--surface-hover); color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+.fp-ctx-chip:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.fp-validate-msg { min-height: 1.2rem; font-size: 0.82rem; margin-top: 0.3rem; }
+.fp-validate-msg a { text-decoration: underline; cursor: pointer; }
+.fp-autocomplete {
+    position: absolute; z-index: 50; min-width: 210px; max-height: 190px; overflow-y: auto;
+    background: var(--modal-bg); border: 1px solid var(--border-color);
+    border-radius: 6px; box-shadow: var(--shadow-modal);
+    font-family: monospace; font-size: 0.8rem;
+}
+.fp-ac-item {
+    display: flex; justify-content: space-between; gap: 0.75rem;
+    padding: 0.3rem 0.6rem; cursor: pointer;
+}
+.fp-ac-item small { color: var(--text-muted); }
+.fp-ac-item:hover, .fp-ac-item.selected { background: var(--surface-hover); color: var(--color-primary); }
+.fp-form-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.4rem; }
+.fp-form-row select, .fp-form-row input { max-width: 240px; }

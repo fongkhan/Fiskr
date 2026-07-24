@@ -286,6 +286,11 @@
                                     Charger & Archiver
                                 </button>
                             </form>
+                            <!-- Progression de l'import (gros fichiers) : alimentee par GET /api/progress -->
+                            <div id="ingest-progress" class="progress-tracker hidden" aria-live="polite">
+                                <div class="progress-tracker-label"><span id="ingest-progress-phase">Préparation…</span><span id="ingest-progress-count"></span></div>
+                                <div class="progress-tracker-bar"><div id="ingest-progress-fill" class="progress-tracker-fill"></div></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -817,6 +822,13 @@
                                     </div>
                                     <button class="btn" id="generate-panel-btn" onclick="generateTestPanel()" style="background: var(--surface-3);">⚙️ Générer un panel</button>
                                     <button class="btn btn-primary" id="run-backtest-btn" onclick="runReviewBacktest()">▶ Lancer le cahier de tests</button>
+                                </div>
+                                <div style="display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; margin-top: 0.75rem;">
+                                    <div class="form-group" style="flex: 1; min-width: 260px; margin: 0;">
+                                        <label for="backtest-candidate-rule">Règle anti-FP candidate à évaluer (facultatif)</label>
+                                        <select id="backtest-candidate-rule"><option value="">Aucune — règles actives uniquement</option></select>
+                                    </div>
+                                    <a href="#" onclick="showTab('alerts'); return false;" style="font-size: 0.85rem;">✏️ Créer une règle (onglet Alertes → Paramétrage &amp; Règles)</a>
                                 </div>
                                 <div id="backtest-results" class="hidden" style="margin-top: 1.25rem;"></div>
                             </div>

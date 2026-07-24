@@ -19,11 +19,13 @@ ignoree (l'alerte est CONSERVEE) et l'erreur loggee.
 """
 import logging
 import math
+import os
 import re
 import unicodedata
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from fiskr.config import config
 from fiskr.database import FpRule
 
 logger = logging.getLogger("fiskr.fprules")
@@ -179,6 +181,159 @@ def annotate_suppression(best_match: Dict[str, Any], db_rule: FpRule) -> None:
         "version": db_rule.version,
         "channel": db_rule.channel,
     }
+
+
+def validate_rule_code(code: str) -> Dict[str, Any]:
+    """
+    Validation detaillee du code d'une regle, pour l'aide a l'edition :
+    retourne {valid, error, line, offset} — la ligne/colonne d'une erreur de
+    syntaxe permet au front de positionner le curseur sur la faute.
+    """
+    if not (code or "").strip():
+        return {"valid": False, "error": "Le code de la règle est vide.",
+                "line": None, "offset": None}
+    try:
+        compile(code, "<fp_rule>", "exec")
+    except SyntaxError as e:
+        return {"valid": False, "error": e.msg or "syntaxe invalide",
+                "line": e.lineno, "offset": e.offset}
+    try:
+        compile_rule(code)
+    except ValueError as e:
+        return {"valid": False, "error": str(e), "line": None, "offset": None}
+    return {"valid": True, "error": None, "line": None, "offset": None}
+
+
+# ---------------------------------------------------------------------------
+# Generation de regle en langage naturel (IA optionnelle, cle Anthropic)
+# ---------------------------------------------------------------------------
+
+def get_fprules_llm_config() -> Dict[str, Any]:
+    cfg = config.get("fprules", {}) or {}
+    return {
+        "llm_enabled": bool(cfg.get("llm_enabled", False)),
+        "llm_model": cfg.get("llm_model", "claude-sonnet-5"),
+    }
+
+
+class RuleGenerationUnavailable(RuntimeError):
+    """La generation IA n'est pas configuree (flag ou cle absents) : le front
+    doit proposer le formulaire structure a la place."""
+
+
+class RuleGenerationFailed(RuntimeError):
+    """Le modele a produit un code invalide malgre la relance. `raw_code`
+    contient la derniere sortie brute pour correction manuelle."""
+
+    def __init__(self, message: str, raw_code: str = ""):
+        super().__init__(message)
+        self.raw_code = raw_code
+
+
+_GENERATION_SYSTEM_PROMPT = """Tu es un assistant de conformité LCB-FT qui écrit des règles Python \
+anti-faux positifs pour le moteur de criblage Fiskr.
+
+Contrat STRICT :
+- Le code doit définir exactement `def rule(ctx):` retournant un booléen.
+- True = SUPPRIMER l'alerte candidate (auto-clôture tracée à l'audit), False = la CONSERVER.
+- Modules disponibles (déjà importés, n'ajoute AUCUN import) : re, math, datetime, date, timedelta, unicodedata.
+- Clés de ctx (canal SCREENING = criblage clients) : channel, client_id, client_name, entity_id, \
+entity_name, list_type, final_score (float 0-100), base_score (float), hard_match (bool), \
+adjustments (dict), client (dict profil complet ou None), entity (dict fiche listée), \
+party (None en criblage), message (None en criblage).
+- Canal FILTERING (filtrage transactionnel) : client vaut None ; party est un dict \
+{name, roles, country, bic, is_agent, address, birth_date} ; message est {type, msg_id}.
+- Accède aux sous-dictionnaires de façon sûre : (ctx.get("client") or {}).get("...").
+- GARDE-FOU : ne supprime JAMAIS une alerte dont ctx["hard_match"] est True, sauf si \
+l'instruction le demande explicitement.
+- Reste conservateur : en cas de doute sur un champ, retourne False (l'alerte est conservée).
+
+Format de réponse OBLIGATOIRE, sans texte autour :
+# EXPLICATION: <une phrase en français décrivant ce que fait la règle>
+def rule(ctx):
+    ..."""
+
+
+def _extract_generated_code(text: str) -> Tuple[str, str]:
+    """Extrait (code, explication) d'une reponse du modele : retire les
+    eventuelles clotures Markdown et la ligne # EXPLICATION:."""
+    body = (text or "").strip()
+    fence = re.search(r"```(?:python)?\s*\n(.*?)```", body, re.DOTALL)
+    if fence:
+        body = fence.group(1).strip()
+    explanation = ""
+    lines = []
+    for line in body.splitlines():
+        m = re.match(r"\s*#\s*EXPLICATION\s*:\s*(.*)", line, re.IGNORECASE)
+        if m and not explanation:
+            explanation = m.group(1).strip()
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip(), explanation
+
+
+def generate_rule_code(instruction: str, channel: str,
+                       model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Genere le code d'une regle depuis une instruction en langage naturel via
+    l'API Claude. Erreurs EXPLICITES (pas de repli silencieux : c'est un clic
+    utilisateur) : RuleGenerationUnavailable si non configure,
+    RuleGenerationFailed (avec le code brut) si la sortie reste invalide apres
+    une relance. Le code retourne n'est qu'un BROUILLON : le circuit normal
+    (tests unitaires, soumission, validation 4-yeux) s'applique inchange.
+    """
+    cfg = get_fprules_llm_config()
+    if not cfg["llm_enabled"]:
+        raise RuleGenerationUnavailable(
+            "La génération par IA est désactivée (fprules.llm_enabled dans config.yaml). "
+            "Utilisez le formulaire structuré ou l'éditeur Python."
+        )
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuleGenerationUnavailable(
+            "ANTHROPIC_API_KEY n'est pas configurée sur le serveur. "
+            "Utilisez le formulaire structuré ou l'éditeur Python."
+        )
+    try:
+        import anthropic
+    except ImportError:
+        raise RuleGenerationUnavailable(
+            "Le paquet Python 'anthropic' n'est pas installé sur le serveur "
+            "(pip install anthropic). Utilisez le formulaire structuré."
+        )
+    model = model or cfg["llm_model"]
+    client = anthropic.Anthropic()
+    user_prompt = (
+        f"Canal de la règle : {channel}\n"
+        f"Instruction du responsable conformité :\n{instruction.strip()}"
+    )
+    messages = [{"role": "user", "content": user_prompt}]
+    raw_code = ""
+    for attempt in range(2):
+        response = client.messages.create(
+            model=model,
+            max_tokens=2048,
+            system=_GENERATION_SYSTEM_PROMPT,
+            messages=messages,
+        )
+        text = "".join(b.text for b in response.content if b.type == "text")
+        raw_code, explanation = _extract_generated_code(text)
+        try:
+            compile_rule(raw_code)
+            return {"code": raw_code, "explanation": explanation, "model": model}
+        except ValueError as e:
+            if attempt == 0:
+                # Une seule relance, avec l'erreur en contexte
+                messages.append({"role": "assistant", "content": text})
+                messages.append({"role": "user", "content": (
+                    f"Ce code est invalide ({e}). Corrige-le et renvoie "
+                    "uniquement le format demandé (# EXPLICATION: puis def rule)."
+                )})
+            else:
+                raise RuleGenerationFailed(
+                    f"Le code généré reste invalide après relance : {e}",
+                    raw_code=raw_code,
+                )
+    raise RuleGenerationFailed("Génération impossible.", raw_code=raw_code)
 
 
 # Squelette propose dans l'editeur du mode DEV

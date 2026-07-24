@@ -29,6 +29,12 @@ class Snapshot(Base):
     backtest_report = Column(JSON, nullable=True)
     backtest_at = Column(DateTime, nullable=True)
     backtest_by = Column(String(100), nullable=True)
+    # Progression d'un import en cours (statut PROCESSING) : nombre de fiches
+    # deja persistees, total estime (lignes/octets) et phase courante
+    # (DOWNLOAD|HASH|PARSE|PERSIST|DELTA|RELOAD|DONE) — commits periodiques
+    processed_count = Column(Integer, nullable=True)
+    total_hint = Column(Integer, nullable=True)
+    phase = Column(String(30), nullable=True)
 
 class WatchlistEntity(Base):
     __tablename__ = "watchlist_entities"
@@ -694,6 +700,9 @@ def init_db():
                 ("backtest_report", "JSON"),
                 ("backtest_at", "TIMESTAMP"),
                 ("backtest_by", "VARCHAR(100)"),
+                ("processed_count", "INTEGER"),
+                ("total_hint", "INTEGER"),
+                ("phase", "VARCHAR(30)"),
             ],
             "watchlist_entities": [
                 ("excluded", "BOOLEAN"),

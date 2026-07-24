@@ -436,3 +436,229 @@ def test_eurlex_sync_staging_merge_base_includes_pending(db, tmp_path):
     # Le pending du jour 1 n'est pas supersede (decision humaine explicite)
     snap1 = db.query(Snapshot).filter(Snapshot.snapshot_id == report1.snapshot_id).first()
     assert snap1.status == "PENDING_REVIEW"
+
+
+# ------------------ FIABILITE RESEAU (retries transport, UA, echecs visibles) ------------------
+
+import fiskr.sync as sync_mod
+from fiskr.sync import (
+    _with_retries, _RetryableHTTP, download_to_file, http_get_text, get_sync_config,
+)
+
+
+def _zero_backoff_config(monkeypatch):
+    """Configuration reseau sans attente entre tentatives (tests instantanes)."""
+    cfg = get_sync_config()
+    cfg["network"]["backoff_seconds"] = 0
+    monkeypatch.setattr(sync_mod, "get_sync_config", lambda: cfg)
+    return cfg
+
+
+def test_network_config_defaults():
+    net = get_sync_config()["network"]
+    assert net["retries"] >= 1
+    assert net["timeout_seconds"] > 0
+    assert net["download_timeout_seconds"] > 0
+    assert net["backoff_seconds"] >= 0
+    assert net["user_agent"]  # UA navigateur : les portails filtrent l'UA httpx
+
+
+def test_with_retries_recovers_from_transport_errors():
+    import httpx
+    calls = {"n": 0}
+
+    def op():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            # L'erreur exacte du bug signale : elle sortait sans reprise
+            raise httpx.ConnectError("connection refused")
+        return "ok"
+
+    assert _with_retries(op, "https://eur-lex.europa.eu/x", retries=3, backoff=0) == "ok"
+    assert calls["n"] == 3
+
+
+def test_with_retries_exhausts_then_raises_runtime():
+    import httpx
+
+    def op():
+        raise httpx.ConnectError("network is down")
+
+    with pytest.raises(RuntimeError) as exc:
+        _with_retries(op, "https://eur-lex.europa.eu/x", retries=2, backoff=0)
+    assert "3 tentatives" in str(exc.value)
+
+
+def test_http_get_text_retries_transport_then_succeeds(monkeypatch):
+    import httpx
+    _zero_backoff_config(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeResponse:
+        status_code = 200
+        text = "<html>Journal Officiel</html>"
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise httpx.ConnectError("connection reset by peer")
+            return FakeResponse()
+
+    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: FakeClient())
+    assert http_get_text("https://eur-lex.europa.eu/oj") == "<html>Journal Officiel</html>"
+    assert calls["n"] == 3
+
+
+def test_http_get_text_404_fails_immediately_without_retry(monkeypatch):
+    _zero_backoff_config(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeResponse:
+        status_code = 404
+        text = "not found"
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            calls["n"] += 1
+            return FakeResponse()
+
+    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: FakeClient())
+    with pytest.raises(RuntimeError):
+        http_get_text("https://eur-lex.europa.eu/absent")
+    assert calls["n"] == 1  # erreur deterministe : aucune reprise inutile
+
+
+def test_http_get_text_empty_200_is_retried(monkeypatch):
+    # Anti-robot EUR-Lex : 200 a corps vide, puis la vraie page
+    _zero_backoff_config(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            calls["n"] += 1
+
+            class R:
+                status_code = 200
+                text = "" if calls["n"] == 1 else "<html>page</html>"
+            return R()
+
+    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: FakeClient())
+    assert http_get_text("https://eur-lex.europa.eu/oj") == "<html>page</html>"
+    assert calls["n"] == 2
+
+
+def test_download_to_file_sends_browser_user_agent(monkeypatch, tmp_path):
+    import httpx
+    _zero_backoff_config(monkeypatch)
+    captured = {}
+
+    class FakeStream:
+        status_code = 200
+        headers = {"content-length": "4"}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size):
+            yield b"data"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_stream(method, url, timeout=None, follow_redirects=None, headers=None):
+        captured["headers"] = headers or {}
+        return FakeStream()
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    dest = tmp_path / "acte.pdf"
+    download_to_file("https://eur-lex.europa.eu/doc.pdf", dest, retries=0)
+    assert dest.read_bytes() == b"data"
+    assert captured["headers"].get("User-Agent")  # anti-robot : UA explicite
+
+
+def test_download_to_file_retries_transient_status(monkeypatch, tmp_path):
+    import httpx
+    _zero_backoff_config(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeStream:
+        def __init__(self, status):
+            self.status_code = status
+            self.headers = {}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size):
+            yield b"pdfok"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_stream(method, url, timeout=None, follow_redirects=None, headers=None):
+        calls["n"] += 1
+        return FakeStream(503 if calls["n"] == 1 else 200)
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    dest = tmp_path / "acte2.pdf"
+    download_to_file("https://eur-lex.europa.eu/doc2.pdf", dest, retries=2)
+    assert calls["n"] == 2
+    assert dest.read_bytes() == b"pdfok"
+
+
+# Journal avec DEUX actes "mesures restrictives" pour tester l'echec partiel
+MOCK_DAILY_OJ_HTML_2ACTS = """
+<html><body>
+<div class="daily-acts">
+    <a href="./legal-content/EN/TXT/HTML/?uri=OJ:L_2026_1111">Council Regulation (EU) 2026/1111 concerning restrictive measures against Examplia</a>
+    <a href="./legal-content/EN/TXT/HTML/?uri=OJ:L_2026_2222">Council Regulation (EU) 2026/2222 concerning restrictive measures against Otheria</a>
+</div>
+</body></html>
+"""
+
+
+def _flaky_getter(failing_fragment):
+    """Getter qui echoue (erreur reseau simulee) pour les URLs contenant le
+    fragment. NB : les URLs d'actes sont resolues RELATIVEMENT a la page du JO
+    (elles contiennent aussi daily-view) — seul ojDate identifie le sommaire."""
+    def getter(url, timeout=60.0):
+        if "ojDate" in url:
+            return MOCK_DAILY_OJ_HTML_2ACTS
+        if failing_fragment and failing_fragment in url:
+            raise RuntimeError("Echec apres 4 tentatives (connexion)")
+        return MOCK_ACT_HTML
+    return getter
+
+
+def test_eurlex_partial_failure_is_success_with_visible_failures(db, tmp_path):
+    report = run_eurlex_sync(
+        db, for_date=date(2026, 7, 10),
+        http_get=_flaky_getter("L_2026_2222"),
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+    )
+    # Un acte sur deux scrape : la sync aboutit mais l'anomalie est VISIBLE
+    assert report.status == "SUCCESS"
+    assert "inaccessibles" in report.message
+    failures = (report.delta_report or {}).get("fetch_failures") or []
+    assert len(failures) == 1
+    assert "L_2026_2222" in failures[0]["url"]
+
+
+def test_eurlex_total_failure_is_error_not_no_change(db, tmp_path):
+    report = run_eurlex_sync(
+        db, for_date=date(2026, 7, 11),
+        http_get=_flaky_getter("legal-content"),  # tous les actes en echec
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+    )
+    # Panne reseau totale : ERROR (jamais un faux NO_CHANGE rassurant)
+    assert report.status == "ERROR"
+    assert "erreurs de connexion" in report.message
+    failures = (report.delta_report or {}).get("fetch_failures") or []
+    assert len(failures) == 2

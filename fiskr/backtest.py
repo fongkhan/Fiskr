@@ -88,13 +88,18 @@ def _client_label(client: Dict[str, Any]) -> str:
 # ------------------ CRIBLAGE A BLANC (DRY-RUN) ------------------
 
 def _dry_run_screen(db, clients: List[Dict[str, Any]],
-                    entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+                    entities: List[Dict[str, Any]],
+                    rule_set: Optional[List[Any]] = None) -> Dict[str, Any]:
     """
     Crible le panel contre un univers d'entites via un index de blocking local.
-    Memes seuils par liste, meme liste blanche et meme layout de blocking que
-    la production (match_entities + is_whitelisted), mais AUCUNE ecriture.
+    Memes seuils par liste, meme liste blanche, meme layout de blocking et
+    memes regles anti-faux positifs que la production (match_entities +
+    is_whitelisted + rule_set), mais AUCUNE ecriture. Les regles sont
+    appliquees en boucle locale fail-open (pas evaluate_fp_rules : pas
+    d'increment de hit_count en dry-run, et une regle candidate injectable).
     """
     from fiskr.settings import blocking_layout, blocking_config_for
+    from fiskr.fprules import build_screening_ctx, run_rule
     screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
 
     index: Dict[str, List[Dict[str, Any]]] = {}
@@ -104,6 +109,9 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
 
     pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
     whitelisted_suppressed = 0
+    alerts_before_rules = 0
+    rule_suppressed = 0
+    rule_suppressed_pairs: List[Dict[str, Any]] = []
 
     for client in clients:
         candidates: Dict[str, Dict[str, Any]] = {}
@@ -128,6 +136,33 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
             whitelisted_suppressed += 1
             continue
 
+        alerts_before_rules += 1
+
+        matched_rule = None
+        if rule_set:
+            ctx = build_screening_ctx(client, best_ent, best)
+            for r in rule_set:
+                result, error = run_rule(r.code, ctx)
+                if error:
+                    continue  # fail-open : une regle en erreur conserve l'alerte
+                if result:
+                    matched_rule = r
+                    break
+        if matched_rule is not None:
+            rule_suppressed += 1
+            if len(rule_suppressed_pairs) < MAX_PAIR_DETAILS:
+                rule_suppressed_pairs.append({
+                    "client_id": client.get("client_id"),
+                    "client_name": _client_label(client),
+                    "entity_id": best_ent.get("entity_id"),
+                    "entity_name": best_ent.get("primary_name"),
+                    "list_type": best_ent.get("_list_type"),
+                    "score": round(float(best.get("final_score", 0)), 2),
+                    "rule_id": matched_rule.id,
+                    "rule_name": matched_rule.name,
+                })
+            continue
+
         pairs[(client.get("client_id"), best_ent.get("entity_id"))] = {
             "client_id": client.get("client_id"),
             "client_name": _client_label(client),
@@ -137,21 +172,54 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
             "score": round(float(best.get("final_score", 0)), 2),
         }
 
-    return {"alerts": len(pairs), "pairs": pairs, "whitelisted_suppressed": whitelisted_suppressed}
+    return {
+        "alerts": len(pairs),
+        "pairs": pairs,
+        "whitelisted_suppressed": whitelisted_suppressed,
+        "alerts_before_rules": alerts_before_rules,
+        "rule_suppressed": rule_suppressed,
+        "rule_suppressed_pairs": rule_suppressed_pairs,
+    }
 
 
 def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
-                 threshold_pct: float, executed_by: str) -> Dict[str, Any]:
+                 threshold_pct: float, executed_by: str,
+                 candidate_rule_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Execute le cahier de tests A/B et retourne le rapport (non persiste ici).
+
+    Les regles anti-FP ACTIVES du canal criblage sont appliquees des deux
+    cotes (le cahier de tests reflete la production). Avec candidate_rule_id,
+    la regle candidate (DRAFT/PENDING_VALIDATION/ACTIVE, canal SCREENING) est
+    ajoutee cote candidat UNIQUEMENT : l'ecart chiffre montre l'effet de la
+    regle avant de la soumettre a validation. Leve ValueError si la regle
+    candidate est invalide (l'endpoint repond 400).
     """
+    from fiskr.fprules import active_rules
+    from fiskr.database import FpRule
+
     clients = _panel_clients(db, panel_snapshot_id)
     current_ids, candidate_ids = _universe_snapshot_ids(db, pending_snap)
     current_entities = _entity_dicts(db, current_ids) if current_ids else []
     candidate_entities = _entity_dicts(db, candidate_ids) if candidate_ids else []
 
-    current = _dry_run_screen(db, clients, current_entities)
-    candidate = _dry_run_screen(db, clients, candidate_entities)
+    current_rules = active_rules(db, "SCREENING")
+    candidate_rules = list(current_rules)
+    candidate_rule = None
+    if candidate_rule_id:
+        candidate_rule = db.query(FpRule).filter(FpRule.id == candidate_rule_id).first()
+        if not candidate_rule:
+            raise ValueError("Règle candidate introuvable.")
+        if candidate_rule.channel != "SCREENING":
+            raise ValueError("Seules les règles du canal criblage peuvent être évaluées au cahier de tests.")
+        if candidate_rule.status not in ("DRAFT", "PENDING_VALIDATION", "ACTIVE"):
+            raise ValueError("Statut de règle non évaluable : brouillon, en validation ou active attendus.")
+        if not any(r.id == candidate_rule.id for r in candidate_rules):
+            candidate_rules.append(candidate_rule)
+            candidate_rules.sort(key=lambda r: ((r.run_order if r.run_order is not None else 100), r.id))
+
+    current = _dry_run_screen(db, clients, current_entities, rule_set=current_rules)
+    candidate = _dry_run_screen(db, clients, candidate_entities, rule_set=candidate_rules)
 
     panel_size = len(clients)
 
@@ -167,18 +235,47 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     else:
         gap_pct = round(abs(candidate["alerts"] - current["alerts"]) * 100.0 / current["alerts"], 2)
 
+    # Meme ecart, calcule AVANT application des regles anti-FP : isole la part
+    # de l'ecart imputable a la liste elle-meme vs aux regles
+    if current["alerts_before_rules"] == 0:
+        gap_pct_before_rules = 0.0 if candidate["alerts_before_rules"] == 0 else 100.0
+    else:
+        gap_pct_before_rules = round(
+            abs(candidate["alerts_before_rules"] - current["alerts_before_rules"]) * 100.0
+            / current["alerts_before_rules"], 2)
+
     return {
+        # Cle additive : anciens rapports (sans "rules") toujours valides,
+        # le gate d'approbation ne lit que "verdict"
+        "rules": {
+            "active_count": len(current_rules),
+            "candidate_rule": ({
+                "id": candidate_rule.id,
+                "name": candidate_rule.name,
+                "version": candidate_rule.version,
+                "status": candidate_rule.status,
+            } if candidate_rule else None),
+            "current_suppressed": current["rule_suppressed"],
+            "candidate_suppressed": candidate["rule_suppressed"],
+            "suppressed_delta": candidate["rule_suppressed"] - current["rule_suppressed"],
+            "candidate_suppressed_pairs": candidate["rule_suppressed_pairs"],
+            "gap_pct_before_rules": gap_pct_before_rules,
+        },
         "panel_snapshot_id": panel_snapshot_id,
         "panel_size": panel_size,
         "current": {
             "alerts": current["alerts"],
             "interception_rate_pct": _rate(current["alerts"]),
             "whitelisted_suppressed": current["whitelisted_suppressed"],
+            "alerts_before_rules": current["alerts_before_rules"],
+            "rule_suppressed": current["rule_suppressed"],
         },
         "candidate": {
             "alerts": candidate["alerts"],
             "interception_rate_pct": _rate(candidate["alerts"]),
             "whitelisted_suppressed": candidate["whitelisted_suppressed"],
+            "alerts_before_rules": candidate["alerts_before_rules"],
+            "rule_suppressed": candidate["rule_suppressed"],
         },
         "gap_pct": gap_pct,
         "threshold_pct": threshold_pct,

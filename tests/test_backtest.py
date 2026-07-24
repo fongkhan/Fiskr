@@ -317,3 +317,167 @@ def test_compare_snapshots_returns_report(client, ab_setup):
     report = response.json()
     assert report is not None and "summary" in report and "details" in report
     assert report["comparison_metadata"]["file_type"] == "WATCHLIST_EU"
+
+
+# ------------------ REGLES ANTI-FP DANS LE CAHIER DE TESTS ------------------
+
+from fiskr.database import FpRule, FpRuleChange
+
+
+def _cleanup_bt_rules():
+    db = next(get_db())
+    try:
+        rules = db.query(FpRule).filter(FpRule.name.like("test_bt_rule_%")).all()
+        ids = [r.id for r in rules]
+        if ids:
+            db.query(FpRuleChange).filter(FpRuleChange.rule_id.in_(ids)).delete(synchronize_session=False)
+            db.query(FpRule).filter(FpRule.id.in_(ids)).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def bt_rule_factory():
+    created = []
+
+    def factory(tag, status="DRAFT", enabled=True, channel="SCREENING",
+                code=None, run_order=100):
+        db = next(get_db())
+        try:
+            rule = FpRule(
+                channel=channel, name=f"test_bt_rule_{tag}_{uuid.uuid4().hex[:6]}",
+                code=code or "def rule(ctx):\n    return False",
+                status=status, enabled=enabled, run_order=run_order,
+            )
+            db.add(rule)
+            db.commit()
+            db.refresh(rule)
+            created.append(rule.id)
+            return rule.id
+        finally:
+            db.close()
+
+    yield factory
+    _cleanup_bt_rules()
+
+
+def _suppress_tag_code(tag):
+    # Supprime toute alerte dont l'entite listee porte le tag du test
+    # (comparaison en majuscules : le quality gate normalise les noms)
+    return f'def rule(ctx):\n    return "{tag.upper()}" in (ctx["entity_name"] or "").upper()'
+
+
+def test_backtest_report_has_additive_rules_key(client, ab_setup):
+    response = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"]},
+    )
+    assert response.status_code == 200, response.text
+    report = response.json()
+    rules = report["rules"]
+    assert rules["candidate_rule"] is None
+    assert rules["current_suppressed"] == 0
+    assert rules["candidate_suppressed"] == 0
+    assert rules["suppressed_delta"] == 0
+    # Sans regle, l'ecart avant/apres regles est identique
+    assert rules["gap_pct_before_rules"] == report["gap_pct"]
+
+
+def test_backtest_candidate_draft_rule_shows_delta(client, ab_setup, bt_rule_factory):
+    tag = ab_setup["tag"]
+    rule_id = bt_rule_factory(tag, status="DRAFT", code=_suppress_tag_code(f"Nouveauov{tag}"))
+
+    # Sans la regle : l'ajout d'Igor cree une nouvelle alerte
+    base = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"]},
+    ).json()
+    assert base["candidate"]["alerts"] == base["current"]["alerts"] + 1
+
+    # Avec la regle candidate : l'alerte d'Igor est supprimee cote candidat SEULEMENT
+    response = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"], "candidate_rule_id": rule_id},
+    )
+    assert response.status_code == 200, response.text
+    report = response.json()
+    rules = report["rules"]
+    assert rules["candidate_rule"]["id"] == rule_id
+    assert rules["candidate_rule"]["status"] == "DRAFT"
+    assert rules["current_suppressed"] == 0     # un brouillon ne touche pas la production
+    assert rules["candidate_suppressed"] == 1
+    assert rules["suppressed_delta"] == 1
+    assert report["candidate"]["alerts"] == report["current"]["alerts"]  # ecart resorbe
+    # L'ecart AVANT regles reste visible : la liste elle-meme ajoute bien une alerte
+    assert rules["gap_pct_before_rules"] > report["gap_pct"]
+    # Echantillon des paires supprimees, avec la regle en cause
+    pairs = rules["candidate_suppressed_pairs"]
+    assert len(pairs) == 1
+    assert pairs[0]["rule_id"] == rule_id
+    assert ab_setup["igor_client_id"] == pairs[0]["client_id"]
+
+
+def test_backtest_active_rule_applies_to_both_sides(client, ab_setup, bt_rule_factory):
+    tag = ab_setup["tag"]
+    bt_rule_factory(tag, status="ACTIVE", enabled=True,
+                    code=_suppress_tag_code(f"Nouveauov{tag}"))
+
+    response = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"]},
+    )
+    assert response.status_code == 200, response.text
+    report = response.json()
+    rules = report["rules"]
+    assert rules["active_count"] >= 1
+    # La regle active supprime l'alerte d'Igor cote candidat (comme en prod le ferait)
+    assert report["candidate"]["rule_suppressed"] == 1
+    assert report["candidate"]["alerts"] == report["current"]["alerts"]
+    # L'effet de la liste reste mesurable avant regles
+    assert report["candidate"]["alerts_before_rules"] == report["current"]["alerts_before_rules"] + 1
+
+
+def test_backtest_invalid_candidate_rule_is_400(client, ab_setup, bt_rule_factory):
+    # Inexistante
+    resp = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"], "candidate_rule_id": 99999999},
+    )
+    assert resp.status_code == 400
+
+    # Mauvais canal (filtrage)
+    filtering_id = bt_rule_factory(ab_setup["tag"], channel="FILTERING")
+    resp = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"], "candidate_rule_id": filtering_id},
+    )
+    assert resp.status_code == 400
+
+    # Statut non evaluable (remplacee)
+    superseded_id = bt_rule_factory(ab_setup["tag"], status="SUPERSEDED")
+    resp = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
+        json={"panel_snapshot_id": ab_setup["panel_id"], "candidate_rule_id": superseded_id},
+    )
+    assert resp.status_code == 400
+
+
+def test_approve_gate_accepts_legacy_report_without_rules_key(client, ab_setup):
+    # Un rapport archive AVANT l'ajout de la cle `rules` reste valide :
+    # le gate d'approbation ne lit que le verdict
+    db = next(get_db())
+    try:
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == ab_setup["pending_id"]).first()
+        snap.backtest_report = {"verdict": "OK", "gap_pct": 0.0, "threshold_pct": 20.0}
+        db.commit()
+    finally:
+        db.close()
+    assert client.put("/api/settings/ingestion", json={
+        "require_approval": True, "backtest_required": True}).status_code == 200
+
+    response = client.post(
+        f"/api/review/snapshots/{ab_setup['pending_id']}/approve",
+        json={"comment": "test_bt approbation rapport legacy"},
+    )
+    assert response.status_code == 200, response.text
