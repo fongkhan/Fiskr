@@ -276,16 +276,21 @@ async function apiFetch(url, options = {}) {
 
 // ------------------ FORMATAGE DES DATES (fr-FR) ------------------
 
+// Locale d'affichage suivant la langue active (i18n), repli francais
+function uiLocale() {
+    return (window.fiskrI18n && window.fiskrI18n.locale) ? window.fiskrI18n.locale() : uiLocale();
+}
+
 function formatDateTime(value) {
     if (!value) return "—";
     const d = new Date(value);
-    return isNaN(d.getTime()) ? String(value) : d.toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" });
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleString(uiLocale(), { dateStyle: "short", timeStyle: "short" });
 }
 
 function formatDate(value) {
     if (!value) return "—";
     const d = new Date(value);
-    return isNaN(d.getTime()) ? String(value) : d.toLocaleDateString("fr-FR");
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleDateString(uiLocale());
 }
 
 // ------------------ ÉTATS DE TABLES (chargement / vide) ------------------
@@ -971,7 +976,7 @@ function renderSnapshotsTable(snaps) {
     }
 
     snaps.forEach(snap => {
-        const dateStr = new Date(snap.uploaded_at).toLocaleString("fr-FR");
+        const dateStr = new Date(snap.uploaded_at).toLocaleString(uiLocale());
         const tr = document.createElement("tr");
 
         tr.innerHTML = `
@@ -1008,7 +1013,7 @@ function populateCompareSelects(snaps) {
     newSelect.innerHTML = '<option value="">Sélectionnez un snapshot...</option>';
     
     snaps.forEach(snap => {
-        const dateStr = new Date(snap.uploaded_at).toLocaleString("fr-FR");
+        const dateStr = new Date(snap.uploaded_at).toLocaleString(uiLocale());
         const optionText = `${snap.file_name} (${listTypeLabel(snap.file_type)}) - ${dateStr}`;
         
         const opt1 = document.createElement("option");
@@ -1186,7 +1191,7 @@ function renderSyncReportsTable(reports) {
     }
 
     reports.forEach(report => {
-        const dateStr = new Date(report.executed_at).toLocaleString("fr-FR");
+        const dateStr = new Date(report.executed_at).toLocaleString(uiLocale());
         const tr = document.createElement("tr");
         tr.style.cursor = "pointer";
 
@@ -2052,7 +2057,7 @@ function renderAuditHistoryTable(logs) {
     }
 
     logs.forEach(log => {
-        const dateStr = new Date(log.timestamp + "Z").toLocaleString("fr-FR");
+        const dateStr = new Date(log.timestamp + "Z").toLocaleString(uiLocale());
         const tr = document.createElement("tr");
 
         tr.innerHTML = `
@@ -2074,7 +2079,7 @@ function viewAuditLogDetail(logId) {
     
     const modal = document.getElementById("audit-modal");
     const content = document.getElementById("modal-audit-details");
-    const dateStr = new Date(log.timestamp + "Z").toLocaleString("fr-FR");
+    const dateStr = new Date(log.timestamp + "Z").toLocaleString(uiLocale());
     
     let tree = typeof log.decision_tree === "string" ? JSON.parse(log.decision_tree) : log.decision_tree;
     let configState = typeof log.config_state === "string" ? JSON.parse(log.config_state) : log.config_state;
@@ -2240,7 +2245,7 @@ function showWatchlistDetails(item) {
     const aliasesStr = [...highAliases, ...lowAliases].join(", ") || "-";
 
     const modifiedStr = item.modified_by
-        ? `@${item.modified_by} — ${item.modified_at ? new Date(item.modified_at + (item.modified_at.endsWith("Z") ? "" : "Z")).toLocaleString("fr-FR") : ""}`
+        ? `@${item.modified_by} — ${item.modified_at ? new Date(item.modified_at + (item.modified_at.endsWith("Z") ? "" : "Z")).toLocaleString(uiLocale()) : ""}`
         : "-";
     const editBar = canEditWatchlistEntity(item)
         ? `<div style="display:flex; justify-content:flex-end; margin-bottom: 0.75rem;">
@@ -2467,7 +2472,7 @@ async function loadEntityChanges(entityPk) {
                     <tbody>
                         ${items.map(c => `
                             <tr>
-                                <td><small>${c.changed_at ? new Date(c.changed_at + "Z").toLocaleString("fr-FR") : "-"}</small></td>
+                                <td><small>${c.changed_at ? new Date(c.changed_at + "Z").toLocaleString(uiLocale()) : "-"}</small></td>
                                 <td><small>@${escapeHtml(c.changed_by || "")}</small></td>
                                 <td><small>${escapeHtml(ENTITY_FIELD_LABELS[c.field] || c.field)}</small></td>
                                 <td><small style="color:var(--text-muted)">${escapeHtml(c.old_value ?? "∅")}</small></td>
@@ -2721,7 +2726,7 @@ function renderUsersTable(users) {
             `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block;">${badgeLabels[r] || escapeHtml(r.toUpperCase())}</span>`
         ).join("") || `<span style="${badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem;">ANALYSTE USER</span>`;
 
-        const dateFormatted = u.created_at ? new Date(u.created_at).toLocaleDateString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "N/A";
+        const dateFormatted = u.created_at ? new Date(u.created_at).toLocaleDateString(uiLocale(), { hour: "2-digit", minute: "2-digit" }) : "N/A";
         const isSelf = currentUser && currentUser.id === u.id;
 
         return `
@@ -3091,7 +3096,7 @@ function renderPendingTable(pending) {
         return;
     }
     tbody.innerHTML = pending.map(snap => {
-        const dateStr = snap.uploaded_at ? new Date(snap.uploaded_at).toLocaleString("fr-FR") : "-";
+        const dateStr = snap.uploaded_at ? new Date(snap.uploaded_at).toLocaleString(uiLocale()) : "-";
         return `
             <tr>
                 <td>${escapeHtml(dateStr)}</td>
@@ -3141,7 +3146,7 @@ async function openReviewDetail(snapshotId) {
         }
         document.getElementById("review-detail-card").classList.remove("hidden");
         document.getElementById("review-detail-title").textContent = `Examen du Snapshot — ${data.file_name}`;
-        const uploadedStr = data.uploaded_at ? new Date(data.uploaded_at).toLocaleString("fr-FR") : "-";
+        const uploadedStr = data.uploaded_at ? new Date(data.uploaded_at).toLocaleString(uiLocale()) : "-";
         document.getElementById("review-detail-meta").textContent =
             `Liste ${listTypeLabel(data.file_type)} · ${data.record_count} fiches · importé le ${uploadedStr} · delta calculé par rapport à la production actuelle` +
             (data.production_snapshot_id ? "" : " (aucune liste du même type en production : tout est en ajout)");
@@ -3323,7 +3328,7 @@ function renderBacktestReport(report) {
 
     const newPairs = report.new_pairs || [];
     const resolvedPairs = report.resolved_pairs || [];
-    const executedStr = report.executed_at ? new Date(report.executed_at).toLocaleString("fr-FR") : "";
+    const executedStr = report.executed_at ? new Date(report.executed_at).toLocaleString(uiLocale()) : "";
 
     container.classList.remove("hidden");
     container.innerHTML = `
@@ -3381,7 +3386,7 @@ async function bulkGoodGuys() {
     }
     const justification = await promptDialog(
         `Justification commune pour ${checked.length} paire(s) « Good Guy »`,
-        { placeholder: "Ex. : homonymes avérés lors du cahier de tests d'homologation du " + new Date().toLocaleDateString("fr-FR"), textarea: true }
+        { placeholder: "Ex. : homonymes avérés lors du cahier de tests d'homologation du " + new Date().toLocaleDateString(uiLocale()), textarea: true }
     );
     if (justification === null) return;
     const pairs = checked.map(cb => ({
@@ -3801,7 +3806,7 @@ async function openAlertModal(alertId) {
 
         const eventsHtml = (a.events || []).map(e => `
             <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
-                <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString("fr-FR") : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+                <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
                 ${e.detail ? `<div style="font-size: 0.85rem;">${escapeHtml(e.detail)}</div>` : ""}
             </div>
         `).join("");
@@ -3824,7 +3829,7 @@ async function openAlertModal(alertId) {
             }
             actionsHtml += `</div>`;
         } else {
-            actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString("fr-FR") : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
+            actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
             // Faux positif avere : proposer la mise en liste blanche (reviseurs)
             if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer) {
                 actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="openWhitelistModal('${escapeHtml(a.client_id || "")}', '${escapeHtml(a.watchlist_entity_id)}', '${escapeHtml(a.client_name)}', '${escapeHtml(a.watchlist_name)}')">🛡️ Mettre en liste blanche</button>`;
@@ -4006,8 +4011,8 @@ function renderWhitelistTable(items) {
             <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
             <td>${listTypeBadge(p.list_type)}</td>
             <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;">📎 ${escapeHtml(p.evidence_file_name)}</a>` : ""}</td>
-            <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString("fr-FR") : ""}</small></td>
-            <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString("fr-FR") : "—"}</td>
+            <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString(uiLocale()) : ""}</small></td>
+            <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString(uiLocale()) : "—"}</td>
             <td>${stateBadge(p.state)}</td>
             <td>${p.state === "ACTIVE" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>` : ""}</td>
         </tr>
@@ -4219,7 +4224,7 @@ function renderListsBarChart(containerId, byType) {
         const by = i * rowH + 6;
         return `<text x="${P.l - 8}" y="${by + 12}" font-size="10" text-anchor="end" dominant-baseline="middle">${escapeHtml(listTypeLabel(type))}</text>`
              + `<rect x="${P.l}" y="${by}" width="${bw.toFixed(1)}" height="18" rx="4" fill="var(--color-primary)" opacity="0.85"/>`
-             + `<text x="${P.l + bw + 6}" y="${by + 12}" font-size="10" dominant-baseline="middle">${value.toLocaleString("fr-FR")}</text>`;
+             + `<text x="${P.l + bw + 6}" y="${by + 12}" font-size="10" dominant-baseline="middle">${value.toLocaleString(uiLocale())}</text>`;
     }).join("");
     container.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Fiches par liste">${bars}</svg>`;
 }

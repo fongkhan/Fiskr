@@ -9,6 +9,7 @@ Tests du lot international & roles :
 - i18n : moteur + dictionnaires 5 langues presents, selecteur de langue sur
   le dashboard et la page de connexion, regles RTL pour l'arabe.
 """
+import json
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -281,3 +282,37 @@ def test_i18n_assets_complete():
     assert login.count('id="lang-select"') == 1 and "i18n.js" in login
     # Regles RTL pour l'arabe
     assert '[dir="rtl"] .sidebar' in styles and '[dir="rtl"] .main-content' in styles
+
+
+def test_i18n_paragraphs_and_locales():
+    """Couverture etendue : paragraphes descriptifs, chaines composees
+    (regex), locales de dates — chaque paragraphe de l'ecran est traduit
+    dans les 5 langues et les dates suivent la langue active."""
+    i18n = (STATIC / "i18n.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    # Tous les paragraphes section-desc de l'ecran sont dans le dictionnaire P
+    import html as html_mod
+    descs = re.findall(r'<p class="section-desc"[^>]*>(.*?)</p>', index, re.S)
+    keys = set()
+    for d in descs:
+        text = html_mod.unescape(re.sub(r"<[^>]+>", "", d))
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            keys.add(text)
+    assert len(keys) >= 45
+    missing = [k for k in keys if json.dumps(k, ensure_ascii=False) not in i18n]
+    assert not missing, f"paragraphes non traduits : {missing[:3]}"
+    # Chaque entree paragraphe porte les 5 langues (sondage sur une entree)
+    assert '"Historique immuable de toutes les décisions de criblage' in i18n
+    for probe in ('"Immutable history', '"Unveränderliche Historie',
+                  '"Historial inmutable', '引擎所有筛查决策', 'تاريخ ثابت لكل قرارات'):
+        assert probe in i18n
+
+    # Chaines composees (pagination, selection) traduites par regles regex
+    assert "élément\\(s\\) — page" in i18n and "sélectionnée\\(s\\)" in i18n
+    # Locales par langue + dates localisees dans app.js
+    assert 'zh: "zh-CN"' in i18n and 'ar: "ar-SA-u-nu-latn"' in i18n
+    assert "function uiLocale()" in app_js
+    assert '"fr-FR"' not in app_js.replace('? window.fiskrI18n.locale() : "fr-FR"', "")
