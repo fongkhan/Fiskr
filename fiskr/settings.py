@@ -38,8 +38,11 @@ SYNC_SOURCES = ("ofac", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi")
 SETTING_ALERT_SLA_HOURS = "alerts.sla_hours"
 # Notifications metier : activation par evenement
 SETTING_NOTIFICATIONS = "notifications.events"
+# Digest KPI periodique (synthese conformite envoyee par email/webhooks)
+SETTING_DIGEST = "notifications.digest"
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
+DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
 DEFAULT_NOTIFICATION_EVENTS = {
     "alert_created": False,
     "alert_pending_validation": False,
@@ -210,6 +213,19 @@ def notification_events(db) -> Dict[str, bool]:
         for event, enabled in value.items():
             if event in out:
                 out[event] = bool(enabled)
+    return out
+
+
+def digest_settings(db) -> Dict[str, Any]:
+    """Reglage du digest KPI periodique : activation + expression cron 5 champs
+    (defaut : 8h00 en semaine)."""
+    value = get_setting_with_source(db, SETTING_DIGEST, dict(DEFAULT_DIGEST))["value"]
+    out = dict(DEFAULT_DIGEST)
+    if isinstance(value, dict):
+        out["enabled"] = bool(value.get("enabled", out["enabled"]))
+        cron_expr = str(value.get("cron") or "").strip()
+        if cron_expr:
+            out["cron"] = cron_expr
     return out
 
 

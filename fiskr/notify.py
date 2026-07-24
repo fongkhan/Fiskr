@@ -29,6 +29,7 @@ EVENT_LABELS = {
     "alert_pending_validation": "Décision d'alerte en attente de validation 4-yeux",
     "snapshot_pending_review": "Snapshot en attente d'homologation",
     "sync_error": "Échec de synchronisation d'une source",
+    "kpi_digest": "Synthèse conformité périodique",
 }
 
 

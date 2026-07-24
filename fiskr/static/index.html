@@ -1289,10 +1289,24 @@
                                 <select id="screening-list-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par type de liste"></select>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
+                            <div id="screening-bulk-bar" class="bulk-bar hidden">
+                                <span id="screening-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
+                                <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('SCREENING')">📌 M'assigner la sélection</button>
+                                <select id="screening-bulk-priority" style="min-width: 140px;">
+                                    <option value="">Priorité…</option>
+                                    <option value="CRITICAL">Critique</option>
+                                    <option value="HIGH">Haute</option>
+                                    <option value="MEDIUM">Moyenne</option>
+                                    <option value="LOW">Basse</option>
+                                </select>
+                                <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('SCREENING')">Appliquer la priorité</button>
+                                <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('SCREENING')">✕ Vider la sélection</button>
+                            </div>
                             <div class="table-container max-height-table">
                                 <table id="screening-alerts-table">
                                     <thead>
                                         <tr>
+                                            <th style="width: 34px;"><input type="checkbox" id="screening-select-all" onchange="toggleSelectAllAlerts('SCREENING', this.checked)" aria-label="Tout sélectionner"></th>
                                             <th>Priorité</th><th>Date</th><th>Client</th><th>Listé</th><th>Liste</th>
                                             <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
@@ -1327,10 +1341,24 @@
                                 <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
+                            <div id="filtering-bulk-bar" class="bulk-bar hidden">
+                                <span id="filtering-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
+                                <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('FILTERING')">📌 M'assigner la sélection</button>
+                                <select id="filtering-bulk-priority" style="min-width: 140px;">
+                                    <option value="">Priorité…</option>
+                                    <option value="CRITICAL">Critique</option>
+                                    <option value="HIGH">Haute</option>
+                                    <option value="MEDIUM">Moyenne</option>
+                                    <option value="LOW">Basse</option>
+                                </select>
+                                <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('FILTERING')">Appliquer la priorité</button>
+                                <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('FILTERING')">✕ Vider la sélection</button>
+                            </div>
                             <div class="table-container max-height-table">
                                 <table id="filtering-alerts-table">
                                     <thead>
                                         <tr>
+                                            <th style="width: 34px;"><input type="checkbox" id="filtering-select-all" onchange="toggleSelectAllAlerts('FILTERING', this.checked)" aria-label="Tout sélectionner"></th>
                                             <th>Priorité</th><th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
                                             <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
                                         </tr>
@@ -1637,7 +1665,37 @@
                                 Échec de synchronisation d'une source
                             </label>
                         </div>
+                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">📈 Digest conformité périodique</h3>
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Synthèse envoyée par email/webhooks à heure fixe (expression cron 5 champs) : files ouvertes par canal, retards SLA, 4-yeux en attente, homologations, volumétrie 24 h et santé des synchronisations.</p>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-digest-enabled" style="width: 18px; height: 18px;">
+                                Activer le digest périodique
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
+                            <label for="setting-digest-cron">Planification (cron 5 champs, ex. <code>0 8 * * 1-5</code> = 8h00 en semaine)</label>
+                            <input type="text" id="setting-digest-cron" placeholder="0 8 * * 1-5">
+                        </div>
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
+                    </div>
+
+                    <!-- Double authentification TOTP (tous les utilisateurs) -->
+                    <div class="card form-card" id="mfa-card">
+                        <h2>🛡 Double Authentification (MFA)</h2>
+                        <p class="section-desc">Code à usage unique (TOTP, RFC 6238) demandé à chaque connexion, généré par une application d'authentification (Google Authenticator, Aegis, FreeOTP…). En cas de téléphone perdu, un administrateur peut réinitialiser la MFA du compte.</p>
+                        <div id="mfa-status" style="margin-bottom: 1rem;"></div>
+                        <div id="mfa-setup-zone" class="hidden" style="margin-bottom: 1rem;">
+                            <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">1. Saisissez ce secret dans votre application (ou scannez l'URI) — <strong>il n'est affiché qu'une seule fois</strong> :</p>
+                            <pre id="mfa-secret" style="user-select: all; padding: 0.75rem; font-size: 1rem; letter-spacing: 0.08em;"></pre>
+                            <pre id="mfa-uri" style="user-select: all; padding: 0.5rem; font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;"></pre>
+                            <p style="font-size: 0.9rem; margin: 0.75rem 0 0.5rem;">2. Confirmez avec le code affiché par l'application :</p>
+                            <div class="filter-bar">
+                                <input type="text" id="mfa-confirm-code" inputmode="numeric" maxlength="6" placeholder="123456" style="max-width: 140px;">
+                                <button class="btn btn-sm btn-primary" onclick="confirmTotp()">Confirmer & activer</button>
+                            </div>
+                        </div>
+                        <div id="mfa-actions"></div>
                     </div>
 
                     <!-- Clés d'API techniques (comptes de service) -->
@@ -1684,6 +1742,7 @@
                                     <th>Nom d'utilisateur</th>
                                     <th>Nom Complet</th>
                                     <th>Rôle</th>
+                                    <th>MFA</th>
                                     <th>Date de Création</th>
                                     <th style="text-align: right;">Actions</th>
                                 </tr>
@@ -1918,7 +1977,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.4"></script>
+    <script src="/static/app.js?v=6.5"></script>
 
 
 

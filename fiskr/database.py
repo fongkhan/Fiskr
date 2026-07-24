@@ -564,6 +564,10 @@ class User(Base):
     # Anti-brute-force : compteur d'echecs consecutifs + verrouillage temporaire
     failed_login_count = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
+    # MFA TOTP (RFC 6238) : secret base32 stocke des la phase d'enrolement,
+    # actif seulement quand totp_enabled est vrai (confirmation par un code)
+    totp_secret = Column(String(64), nullable=True)
+    totp_enabled = Column(Boolean, default=False)
 
 class ApiKey(Base):
     """
@@ -740,6 +744,8 @@ def init_db():
             "users": [
                 ("failed_login_count", "INTEGER"),
                 ("locked_until", "TIMESTAMP"),
+                ("totp_secret", "VARCHAR(64)"),
+                ("totp_enabled", "BOOLEAN"),
             ],
         }
         inspector = inspect(engine)
