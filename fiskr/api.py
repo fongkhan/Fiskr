@@ -34,7 +34,7 @@ from fiskr.database import (
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
-    BatchCampaign, BatchResult, ApiKey
+    BatchCampaign, BatchResult, ApiKey, SavedView
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import notify_event
@@ -77,8 +77,10 @@ from fiskr.settings import (
     alert_sla_hours, notification_events,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
-    digest_settings, SETTING_DIGEST
+    digest_settings, SETTING_DIGEST,
+    retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS
 )
+from fiskr.retention import preview_retention, run_retention
 
 
 
@@ -442,6 +444,38 @@ async def _digest_scheduler():
         except Exception as e:
             logger.error(f"Digest KPI en échec sur ce tick : {e}")
 
+async def _retention_scheduler():
+    """
+    Purge de retention quotidienne : chaque minute, si au moins une famille a
+    une duree de conservation non nulle et que l'expression cron de la
+    politique matche, la purge s'execute (tracee RETENTION_PURGE au journal).
+    """
+    from fiskr.cron import cron_matches, CronError
+
+    while True:
+        now = datetime.now()
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        tick = datetime.now()
+        try:
+            db = next(get_db())
+            try:
+                policy = retention_policy(db)
+                if not any(int(policy[f] or 0) > 0 for f in RETENTION_FAMILIES):
+                    continue
+                try:
+                    if not cron_matches(policy["cron"], tick):
+                        continue
+                except CronError as bad:
+                    logger.error(f"Cron de rétention invalide ({policy['cron']}) : {bad}")
+                    continue
+                deleted = await asyncio.to_thread(run_retention, db)
+                if any(deleted.values()):
+                    logger.info(f"Purge de rétention planifiée : {deleted}")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Purge de rétention en échec sur ce tick : {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -458,12 +492,15 @@ async def lifespan(app: FastAPI):
     inbox_task = asyncio.create_task(_inbox_poller())
     # Digest KPI periodique (reglage a chaud notifications.digest)
     digest_task = asyncio.create_task(_digest_scheduler())
+    # Purge de retention quotidienne (reglage a chaud retention.policy)
+    retention_task = asyncio.create_task(_retention_scheduler())
     yield
     # Shutdown
     if scheduler_task:
         scheduler_task.cancel()
     inbox_task.cancel()
     digest_task.cancel()
+    retention_task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -938,6 +975,83 @@ async def get_admin_log(
             for r in rows
         ],
     }
+
+# ------------------ RETENTION DES DONNEES (RGPD / ARCHIVAGE) ------------------
+
+class RetentionSettingsUpdate(BaseModel):
+    audit_trail: Optional[int] = None
+    closed_alerts: Optional[int] = None
+    sync_reports: Optional[int] = None
+    batch_campaigns: Optional[int] = None
+    cron: Optional[str] = None
+
+@app.get("/api/admin/retention")
+async def get_retention(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Politique de retention effective + volumes qui seraient purges
+    aujourd'hui (previsualisation sans aucune ecriture). Le journal des
+    actions d'administration n'est jamais purge."""
+    return {"policy": retention_policy(db), "preview": preview_retention(db),
+            "min_days": RETENTION_MIN_DAYS}
+
+@app.put("/api/settings/retention")
+async def update_retention_settings(
+    payload: RetentionSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Regle a chaud les durees de conservation (jours, 0 = illimite) et l'heure
+    de purge quotidienne. Garde-fou : jamais moins de RETENTION_MIN_DAYS
+    quand une purge est activee.
+    """
+    before = retention_policy(db)
+    merged = dict(before)
+    provided = False
+    for family in RETENTION_FAMILIES:
+        value = getattr(payload, family)
+        if value is None:
+            continue
+        provided = True
+        if value != 0 and value < RETENTION_MIN_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Durée trop courte pour {family} : minimum {RETENTION_MIN_DAYS} jours (0 = conservation illimitée).")
+        merged[family] = int(value)
+    if payload.cron is not None:
+        cron_expr = payload.cron.strip()
+        if cron_expr:
+            from fiskr.cron import parse_cron, CronError
+            try:
+                parse_cron(cron_expr)
+            except CronError as bad:
+                raise HTTPException(status_code=400, detail=f"Expression cron de purge invalide : {bad}")
+            merged["cron"] = cron_expr
+            provided = True
+    if not provided:
+        raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
+    set_setting(db, SETTING_RETENTION, merged, updated_by=admin_user["username"])
+    delta = {k: v for k, v in merged.items() if before.get(k) != v}
+    if delta:
+        log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="retention",
+                         before={k: before.get(k) for k in delta}, after=delta)
+        db.commit()
+    return {"message": "Politique de rétention mise à jour.",
+            "policy": retention_policy(db), "preview": preview_retention(db)}
+
+@app.post("/api/admin/retention/run")
+async def run_retention_now(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Execute la purge de retention immediatement (tracee RETENTION_PURGE)."""
+    deleted = run_retention(db, username=admin_user["username"])
+    total = sum(deleted.values())
+    return {"deleted": deleted,
+            "message": f"Purge effectuée : {total} enregistrement(s) supprimé(s)."
+                       if total else "Rien à purger avec la politique actuelle."}
 
 @app.post("/api/users")
 async def create_user(
@@ -3354,6 +3468,203 @@ async def export_watchlist_csv(
         ])
     return _csv_response(f"fiskr_listes_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
 
+# ------------------ RAPPORT D'ACTIVITE REGLEMENTAIRE (periode) ------------------
+
+def _parse_report_period(date_from: Optional[str], date_to: Optional[str]):
+    """Bornes de periode [debut, fin) : dates ISO AAAA-MM-JJ, fin incluse.
+    Defaut : les 30 derniers jours."""
+    try:
+        end_day = datetime.strptime(date_to, "%Y-%m-%d") if date_to else datetime.utcnow()
+        start = datetime.strptime(date_from, "%Y-%m-%d") if date_from else end_day - timedelta(days=30)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Dates invalides (format attendu : AAAA-MM-JJ).")
+    end = end_day.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1) \
+        if date_to else end_day
+    if start >= end:
+        raise HTTPException(status_code=400, detail="La date de début doit précéder la date de fin.")
+    return start, end
+
+def _count_by(rows) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for key, count in rows:
+        out[str(key) if key else "—"] = count
+    return out
+
+def build_activity_report(db, start: datetime, end: datetime) -> Dict[str, Any]:
+    """
+    Synthese d'activite de la periode pour le reporting reglementaire
+    (ACPR/FED) : volumetrie de criblage, alertes et decisions, delais,
+    liste blanche, synchronisations et campagnes batch.
+    """
+    from sqlalchemy import func
+
+    screenings_q = db.query(AuditTrail).filter(
+        AuditTrail.timestamp >= start, AuditTrail.timestamp < end)
+    alerts_created_q = db.query(Alert).filter(
+        Alert.created_at >= start, Alert.created_at < end)
+    alerts_decided_q = db.query(Alert).filter(
+        Alert.decided_at.isnot(None), Alert.decided_at >= start, Alert.decided_at < end)
+
+    decided = alerts_decided_q.all()
+    delays = [
+        (a.decided_at - a.created_at).total_seconds() / 3600.0
+        for a in decided if a.created_at and a.decided_at and a.decided_at >= a.created_at
+    ]
+
+    return {
+        "period": {"from": start.strftime("%Y-%m-%d"),
+                   "to": (end - timedelta(seconds=1)).strftime("%Y-%m-%d")},
+        "screenings": {
+            "total": screenings_q.count(),
+            "by_status": _count_by(
+                screenings_q.with_entities(AuditTrail.status, func.count(AuditTrail.id))
+                            .group_by(AuditTrail.status).all()),
+            "by_list_type": _count_by(
+                screenings_q.with_entities(AuditTrail.list_type, func.count(AuditTrail.id))
+                            .group_by(AuditTrail.list_type).all()),
+        },
+        "alerts": {
+            "created": alerts_created_q.count(),
+            "created_by_channel": _count_by(
+                alerts_created_q.with_entities(Alert.channel, func.count(Alert.id))
+                                .group_by(Alert.channel).all()),
+            "created_by_priority": _count_by(
+                alerts_created_q.with_entities(Alert.priority, func.count(Alert.id))
+                                .group_by(Alert.priority).all()),
+            "decided": len(decided),
+            "decided_by_status": _count_by(
+                alerts_decided_q.with_entities(Alert.status, func.count(Alert.id))
+                                .group_by(Alert.status).all()),
+            "avg_decision_hours": round(sum(delays) / len(delays), 1) if delays else None,
+            "escalations": db.query(AlertEvent).filter(
+                AlertEvent.action == "ESCALATED",
+                AlertEvent.timestamp >= start, AlertEvent.timestamp < end).count(),
+            "still_open": db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count(),
+        },
+        "whitelist": {
+            "created": db.query(WhitelistPair).filter(
+                WhitelistPair.created_at >= start, WhitelistPair.created_at < end).count(),
+            "revoked": db.query(WhitelistPair).filter(
+                WhitelistPair.revoked_at.isnot(None),
+                WhitelistPair.revoked_at >= start, WhitelistPair.revoked_at < end).count(),
+        },
+        "syncs": {
+            "total": db.query(SyncReport).filter(
+                SyncReport.executed_at >= start, SyncReport.executed_at < end).count(),
+            "by_status": _count_by(
+                db.query(SyncReport.status, func.count(SyncReport.id))
+                  .filter(SyncReport.executed_at >= start, SyncReport.executed_at < end)
+                  .group_by(SyncReport.status).all()),
+            "by_source": _count_by(
+                db.query(SyncReport.source, func.count(SyncReport.id))
+                  .filter(SyncReport.executed_at >= start, SyncReport.executed_at < end)
+                  .group_by(SyncReport.source).all()),
+        },
+        "batch": {
+            "campaigns": db.query(BatchCampaign).filter(
+                BatchCampaign.created_at >= start, BatchCampaign.created_at < end).count(),
+            "clients_screened": int(db.query(func.coalesce(func.sum(BatchCampaign.processed_clients), 0))
+                                     .filter(BatchCampaign.created_at >= start,
+                                             BatchCampaign.created_at < end).scalar() or 0),
+        },
+    }
+
+@app.get("/api/reports/activity")
+async def get_activity_report(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Rapport d'activite sur la periode (defaut : 30 derniers jours)."""
+    start, end = _parse_report_period(date_from, date_to)
+    return build_activity_report(db, start, end)
+
+def _activity_report_rows(report: Dict[str, Any]):
+    """Aplatis le rapport en lignes (section ; indicateur ; valeur) pour le CSV."""
+    rows = []
+    def emit(section, label, value):
+        rows.append([section, label, value if value is not None else ""])
+    emit("Période", "Du", report["period"]["from"])
+    emit("Période", "Au", report["period"]["to"])
+    emit("Criblage", "Décisions totales", report["screenings"]["total"])
+    for status, count in sorted(report["screenings"]["by_status"].items()):
+        emit("Criblage", f"Décisions {status}", count)
+    for lt, count in sorted(report["screenings"]["by_list_type"].items()):
+        emit("Criblage", f"Décisions liste {lt}", count)
+    alerts = report["alerts"]
+    emit("Alertes", "Créées", alerts["created"])
+    for channel, count in sorted(alerts["created_by_channel"].items()):
+        emit("Alertes", f"Créées canal {channel}", count)
+    for prio, count in sorted(alerts["created_by_priority"].items()):
+        emit("Alertes", f"Créées priorité {prio}", count)
+    emit("Alertes", "Décidées", alerts["decided"])
+    for status, count in sorted(alerts["decided_by_status"].items()):
+        emit("Alertes", f"Décidées {status}", count)
+    emit("Alertes", "Délai moyen de décision (h)", alerts["avg_decision_hours"])
+    emit("Alertes", "Escalades", alerts["escalations"])
+    emit("Alertes", "Encore ouvertes (fin de période)", alerts["still_open"])
+    emit("Liste blanche", "Paires créées", report["whitelist"]["created"])
+    emit("Liste blanche", "Paires révoquées", report["whitelist"]["revoked"])
+    emit("Synchronisations", "Total", report["syncs"]["total"])
+    for status, count in sorted(report["syncs"]["by_status"].items()):
+        emit("Synchronisations", f"Statut {status}", count)
+    for source, count in sorted(report["syncs"]["by_source"].items()):
+        emit("Synchronisations", f"Source {source}", count)
+    emit("Batch", "Campagnes", report["batch"]["campaigns"])
+    emit("Batch", "Clients criblés", report["batch"]["clients_screened"])
+    return rows
+
+@app.get("/api/reports/activity.csv")
+async def export_activity_report_csv(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV du rapport d'activite (Excel FR : « ; » + BOM)."""
+    start, end = _parse_report_period(date_from, date_to)
+    report = build_activity_report(db, start, end)
+    return _csv_response(
+        f"fiskr_activite_{report['period']['from']}_{report['period']['to']}.csv",
+        ["Section", "Indicateur", "Valeur"], _activity_report_rows(report))
+
+@app.get("/api/reports/activity/print")
+async def print_activity_report(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Rapport d'activite HTML autonome imprimable (impression -> PDF)."""
+    from html import escape
+    start, end = _parse_report_period(date_from, date_to)
+    report = build_activity_report(db, start, end)
+    rows_html = "\n".join(
+        f"<tr><td>{escape(str(section))}</td><td>{escape(str(label))}</td>"
+        f"<td style='text-align:right'>{escape(str(value))}</td></tr>"
+        for section, label, value in _activity_report_rows(report)
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Fiskr — Rapport d'activité {escape(report['period']['from'])} → {escape(report['period']['to'])}</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #111; margin: 2rem auto; max-width: 860px; }}
+h1 {{ font-size: 1.4rem; }} .sub {{ color: #555; margin-bottom: 1.5rem; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; }}
+th {{ background: #f0f0f0; }}
+@media print {{ .no-print {{ display: none; }} body {{ margin: 0; }} }}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
+<h1>Fiskr — Rapport d'activité conformité</h1>
+<p class="sub">Période du {escape(report['period']['from'])} au {escape(report['period']['to'])}
+ — généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC.</p>
+<table><thead><tr><th>Section</th><th>Indicateur</th><th>Valeur</th></tr></thead>
+<tbody>{rows_html}</tbody></table>
+</body></html>"""
+    return HTMLResponse(content=html)
+
 @app.get("/api/counters")
 async def get_sidebar_counters(
     db: Session = Depends(get_db),
@@ -5181,6 +5492,76 @@ async def bulk_alert_action(
     db.commit()
     return {"updated": updated, "skipped": skipped,
             "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."}
+
+# ------------------ VUES SAUVEGARDEES (filtres des files d'alertes) ------------------
+
+class SavedViewCreate(BaseModel):
+    name: str
+    channel: str = "SCREENING"
+    filters: Dict[str, Any] = {}
+
+_SAVED_VIEW_FILTER_KEYS = ("status", "priority", "list_type")
+
+def _saved_view_summary(v: SavedView) -> Dict[str, Any]:
+    return {"id": v.id, "name": v.name, "channel": v.channel, "filters": v.filters or {},
+            "created_at": v.created_at.isoformat() if v.created_at else None}
+
+@app.get("/api/views")
+async def list_saved_views(
+    channel: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Vues sauvegardees de l'utilisateur courant (filtres de file memorises)."""
+    query = db.query(SavedView).filter(SavedView.username == current_user["username"])
+    if channel:
+        query = query.filter(SavedView.channel == channel.strip().upper())
+    rows = query.order_by(SavedView.name.asc()).all()
+    return {"items": [_saved_view_summary(v) for v in rows]}
+
+@app.post("/api/views")
+async def create_saved_view(
+    payload: SavedViewCreate,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Sauvegarde la combinaison de filtres courante sous un nom (par utilisateur)."""
+    name = (payload.name or "").strip()
+    if not name or len(name) > 100:
+        raise HTTPException(status_code=400, detail="Nom de vue requis (100 caractères max).")
+    channel = (payload.channel or "SCREENING").strip().upper()
+    if channel not in ("SCREENING", "FILTERING"):
+        raise HTTPException(status_code=400, detail="Canal inconnu (SCREENING ou FILTERING).")
+    filters = {k: str(v) for k, v in (payload.filters or {}).items()
+               if k in _SAVED_VIEW_FILTER_KEYS and v is not None and str(v).strip()}
+    existing = db.query(SavedView).filter(
+        SavedView.username == current_user["username"],
+        SavedView.channel == channel, SavedView.name == name).first()
+    if existing:
+        # Meme nom = mise a jour de la vue (comportement attendu d'un « enregistrer »)
+        existing.filters = filters
+        db.commit()
+        return {"message": f"Vue « {name} » mise à jour.", **_saved_view_summary(existing)}
+    view = SavedView(username=current_user["username"], name=name, channel=channel, filters=filters)
+    db.add(view)
+    db.commit()
+    return {"message": f"Vue « {name} » sauvegardée.", **_saved_view_summary(view)}
+
+@app.delete("/api/views/{view_id}")
+async def delete_saved_view(
+    view_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Supprime une de ses vues (un admin peut supprimer n'importe laquelle)."""
+    view = db.query(SavedView).filter(SavedView.id == view_id).first()
+    if not view:
+        raise HTTPException(status_code=404, detail="Vue introuvable.")
+    if view.username != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
+        raise HTTPException(status_code=403, detail="Cette vue appartient à un autre utilisateur.")
+    db.delete(view)
+    db.commit()
+    return {"message": f"Vue « {view.name} » supprimée."}
 
 # Pieces jointes des alertes (justificatifs d'instruction)
 ALERT_EVIDENCE_DIR = PROJECT_ROOT / "alert_evidence"

@@ -434,6 +434,21 @@ class BatchResult(Base):
     alert_id = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)              # motif de rejet quality gate
 
+class SavedView(Base):
+    """
+    Vue sauvegardee d'une file d'alertes : un analyste memorise sa combinaison
+    de filtres (statuts, priorite, type de liste) sous un nom et la restaure
+    en un clic. Propre a chaque utilisateur.
+    """
+    __tablename__ = "saved_views"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(100), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    channel = Column(String(20), nullable=False, default="SCREENING")
+    filters = Column(JSON, nullable=False)           # {status, priority, list_type}
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 FP_RULE_STATUSES = ("DRAFT", "PENDING_VALIDATION", "ACTIVE", "SUPERSEDED")
 
 class FpRule(Base):
