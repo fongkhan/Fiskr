@@ -1658,3 +1658,51 @@ th.sortable.sort-desc::after {
     color: var(--text-primary);
     margin-right: 0.25rem;
 }
+
+/* ===== Internationalisation : sélecteur de langue + RTL (arabe) ===== */
+
+.lang-select {
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 0.4rem 0.5rem;
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+[dir="rtl"] body,
+[dir="rtl"] {
+    direction: rtl;
+}
+
+[dir="rtl"] .sidebar {
+    left: auto;
+    right: 0;
+    border-right: none;
+    border-left: 1px solid var(--border-color);
+}
+
+[dir="rtl"] .main-content {
+    margin-left: 0;
+    margin-right: var(--sidebar-width);
+}
+
+[dir="rtl"] .nav-item.active {
+    border-left: none;
+    border-right: 3px solid var(--color-primary);
+    padding-left: 1rem;
+    padding-right: calc(1rem - 3px);
+}
+
+[dir="rtl"] th,
+[dir="rtl"] td {
+    text-align: right;
+}
+
+@media (max-width: 1024px) {
+    [dir="rtl"] .main-content {
+        margin-right: 0;
+    }
+}

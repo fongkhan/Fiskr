@@ -545,6 +545,8 @@ async function checkAuthUser() {
             if (retentionCard) retentionCard.classList.toggle("hidden", !isAdmin);
             const portabilityCard = document.getElementById("config-portability-card");
             if (portabilityCard) portabilityCard.classList.toggle("hidden", !isAdmin);
+            const scoringCard = document.getElementById("scoring-card");
+            if (scoringCard) scoringCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -629,6 +631,8 @@ function switchTab(tabId) {
         fetchApiKeys();
         refreshMfaCard();
         fetchRetentionSettings();
+        fetchAbsenceCard();
+        fetchScoringSettings();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -2712,7 +2716,7 @@ function renderUsersTable(users) {
             reviewer: 'background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--color-warning); font-weight: 600;',
             user: 'background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; font-weight: 600;'
         };
-        const badgeLabels = { admin: "ADMINISTRATEUR", reviewer: "RÉVISEUR", user: "ANALYSTE USER" };
+        const badgeLabels = { admin: "ADMINISTRATEUR", reviewer: "RÉVISEUR", user: "ANALYSTE USER", auditor: "AUDITEUR (LECTURE SEULE)" };
         const roleBadge = userRoles(u).map(r =>
             `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block;">${badgeLabels[r] || escapeHtml(r.toUpperCase())}</span>`
         ).join("") || `<span style="${badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem;">ANALYSTE USER</span>`;
@@ -2723,7 +2727,7 @@ function renderUsersTable(users) {
         return `
             <tr>
                 <td style="font-weight: bold; color: var(--text-secondary);">#${u.id}</td>
-                <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: var(--success-soft-text); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}</td>
+                <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: var(--success-soft-text); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}${u.absent_until ? `<span title="Absent jusqu'au ${formatDateTime(u.absent_until)} — délégué : @${escapeHtml(u.delegate_to || "?")}" style="font-size: 0.7rem; background: rgba(245, 158, 11, 0.2); color: var(--color-warning); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">🌴 ABSENT → @${escapeHtml(u.delegate_to || "?")}</span>` : ''}</td>
                 <td>${escapeHtml(u.full_name || "—")}</td>
                 <td>${roleBadge}</td>
                 <td>${u.totp_enabled
@@ -6061,4 +6065,117 @@ async function importAppConfig(input) {
         fetchIngestionSettings();
         fetchRetentionSettings();
     } catch (e) { console.error("Config import error:", e); }
+}
+
+// =========================================================================
+// LOT INTL : ABSENCE/DELEGATION + SEUILS DE SCORE
+// =========================================================================
+
+// --- Absence & délégation ---
+async function fetchAbsenceCard() {
+    const statusEl = document.getElementById("absence-status");
+    const delegateSel = document.getElementById("absence-delegate");
+    if (!statusEl || !delegateSel) return;
+    try {
+        const response = await apiFetch("/api/users/directory", { silent: true });
+        if (!response.ok) return;
+        const items = (await response.json()).items || [];
+        const meName = currentUser ? currentUser.username : "";
+        delegateSel.innerHTML = `<option value="">Choisir…</option>` + items
+            .filter(u => u.username !== meName && !(u.roles || []).includes("auditor"))
+            .map(u => `<option value="${escapeHtml(u.username)}">@${escapeHtml(u.username)}${u.full_name ? " — " + escapeHtml(u.full_name) : ""}${u.absent ? " (absent)" : ""}</option>`)
+            .join("");
+        const me = items.find(u => u.username === meName);
+        if (me && me.absent) {
+            statusEl.innerHTML = `<span style="color: var(--color-warning); font-weight: 700;">🌴 Absence active</span> — vos alertes vont à <strong>@${escapeHtml(me.delegate_to || "?")}</strong>.`;
+            if (me.delegate_to) delegateSel.value = me.delegate_to;
+        } else {
+            statusEl.innerHTML = `<span style="color: var(--success-soft-text); font-weight: 600;">Présent</span> — aucune délégation active.`;
+        }
+    } catch (e) { console.error("Absence card error:", e); }
+}
+
+async function saveAbsence() {
+    const until = document.getElementById("absence-until")?.value;
+    const delegate = document.getElementById("absence-delegate")?.value;
+    if (!until) { showToast("Indiquez la date de fin d'absence.", "error"); return; }
+    if (!delegate) { showToast("Choisissez un délégué.", "error"); return; }
+    try {
+        const response = await apiFetch("/api/users/me/absence", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                absent_until: until, delegate_to: delegate,
+                reassign_open: !!document.getElementById("absence-reassign")?.checked,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Déclaration refusée."), "error");
+            return;
+        }
+        showToast(data.message || "Absence enregistrée.", "success");
+        fetchAbsenceCard();
+    } catch (e) { console.error("Absence save error:", e); }
+}
+
+async function clearAbsence() {
+    try {
+        const response = await apiFetch("/api/users/me/absence", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ absent_until: null }),
+        });
+        const data = await response.json();
+        showToast(data.message || data.detail || "Absence terminée.", response.ok ? "success" : "error");
+        fetchAbsenceCard();
+    } catch (e) { console.error("Absence clear error:", e); }
+}
+
+// --- Seuils de score à chaud (admin) ---
+const SCORING_OVERRIDE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_UN",
+                                "WATCHLIST_DGT", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SSIE"];
+
+async function fetchScoringSettings() {
+    const card = document.getElementById("scoring-card");
+    if (!card || card.classList.contains("hidden")) return;
+    try {
+        const response = await apiFetch("/api/settings/scoring", { silent: true });
+        if (!response.ok) return;
+        const data = await response.json();
+        const globalEl = document.getElementById("scoring-global");
+        if (globalEl) globalEl.value = data.cut_off_threshold;
+        const row = document.getElementById("scoring-overrides-row");
+        if (row) {
+            row.innerHTML = SCORING_OVERRIDE_TYPES.map(t => `
+                <div class="form-group">
+                    <label for="scoring-ov-${t}">${listTypeLabel(t)}</label>
+                    <input type="number" id="scoring-ov-${t}" min="0" max="100" step="0.5"
+                           placeholder="global" value="${data.cut_off_overrides[t] ?? ""}">
+                </div>`).join("");
+        }
+    } catch (e) { console.error("Scoring settings error:", e); }
+}
+
+async function saveScoringSettings() {
+    const overrides = {};
+    for (const t of SCORING_OVERRIDE_TYPES) {
+        const raw = document.getElementById(`scoring-ov-${t}`)?.value;
+        overrides[t] = raw === "" || raw === undefined ? null : parseFloat(raw);
+    }
+    const payload = {
+        cut_off_threshold: parseFloat(document.getElementById("scoring-global")?.value) || 75,
+        cut_off_overrides: overrides,
+    };
+    try {
+        const response = await apiFetch("/api/settings/scoring", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Réglage refusé."), "error");
+            return;
+        }
+        showToast(data.message || "Seuils mis à jour.", "success");
+        fetchScoringSettings();
+    } catch (e) { console.error("Scoring save error:", e); }
 }

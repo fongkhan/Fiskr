@@ -583,6 +583,10 @@ class User(Base):
     # actif seulement quand totp_enabled est vrai (confirmation par un code)
     totp_secret = Column(String(64), nullable=True)
     totp_enabled = Column(Boolean, default=False)
+    # Delegation d'absence : jusqu'a absent_until, les assignations d'alertes
+    # destinees a ce compte sont redirigees vers delegate_to
+    absent_until = Column(DateTime, nullable=True)
+    delegate_to = Column(String(100), nullable=True)
 
 class ApiKey(Base):
     """
@@ -761,6 +765,8 @@ def init_db():
                 ("locked_until", "TIMESTAMP"),
                 ("totp_secret", "VARCHAR(64)"),
                 ("totp_enabled", "BOOLEAN"),
+                ("absent_until", "TIMESTAMP"),
+                ("delegate_to", "VARCHAR(100)"),
             ],
         }
         inspector = inspect(engine)

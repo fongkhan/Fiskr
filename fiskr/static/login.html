@@ -9,7 +9,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=3.1">
+    <link rel="stylesheet" href="/static/styles.css?v=3.2">
+    <!-- Internationalisation (FR/EN/DE/ES/ZH/AR) -->
+    <script src="/static/i18n.js?v=1.0"></script>
     <!-- Thème appliqué avant le premier rendu (pas de flash) -->
     <script>
         (function () {
@@ -208,6 +210,17 @@
 
         <div class="login-footer">
             Fiskr Security Engine • Identification requise (ACPR / AMF)
+            <div style="margin-top: 0.75rem;">
+                <select id="lang-select" class="lang-select" onchange="fiskrI18n.setLang(this.value)"
+                        title="Langue / Language" aria-label="Langue / Language">
+                    <option value="fr">🇫🇷 Français</option>
+                    <option value="en">🇬🇧 English</option>
+                    <option value="de">🇩🇪 Deutsch</option>
+                    <option value="es">🇪🇸 Español</option>
+                    <option value="zh">🇨🇳 中文</option>
+                    <option value="ar">🇸🇦 العربية</option>
+                </select>
+            </div>
         </div>
     </div>
 

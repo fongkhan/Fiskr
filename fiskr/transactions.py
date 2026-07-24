@@ -351,9 +351,11 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     restriction = screening_lists or "ALL"
     # Layout de blocking du canal FILTERING (parametrable a chaud, defaut
     # phonetique seule) + index local construit une seule fois par message
-    from fiskr.settings import blocking_layout, blocking_config_for
+    from fiskr.settings import blocking_layout, blocking_config_for, scoring_config_with_thresholds
     from fiskr.fprules import evaluate_fp_rules, build_filtering_ctx, annotate_suppression
     filtering_cfg = blocking_config_for(blocking_layout(db, "FILTERING"))
+    # Seuils de cut-off a chaud (reglage > config.yaml), memes regles qu'au criblage
+    scoring_config = scoring_config_with_thresholds(db)
     all_entities = [item for items in watchlist_index.values() for item in items]
     # Dedup par entity_id (une entite apparait sous plusieurs cles de l'index criblage)
     unique_entities = {e["entity_id"]: e for e in all_entities}.values()
@@ -370,7 +372,7 @@ def screen_payment_message(db, parsed: Dict[str, Any],
             # d'un paiement ne portent pas leur nature PP/PM.
             as_individual = candidate.get("entity_type") == "I"
             client = _party_client_dict(party, as_individual, client_id)
-            score = match_entities(client, candidate, config)
+            score = match_entities(client, candidate, scoring_config)
             score["watchlist_entity"] = candidate
             if best is None or score["final_score"] > best["final_score"]:
                 best = score
@@ -416,7 +418,7 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                     "gender": {"score": 0.0, "description": "N/A"},
                     "geography": {"score": 0.0, "description": "N/A"},
                 },
-                "cut_off_applied": resolve_cut_off(config),
+                "cut_off_applied": resolve_cut_off(scoring_config),
                 "screening_lists_restriction": restriction,
             }
             audit = log_compliance_decision(

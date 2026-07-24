@@ -137,11 +137,32 @@ def authenticate_api_key(db: Session, full_key: str) -> Optional[Dict[str, Any]]
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
+# Lecture seule auditeur : toute methode mutante est refusee, a l'exception
+# de la gestion de sa propre session (deconnexion, mot de passe, MFA)
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_AUDITOR_WRITE_WHITELIST = {
+    "/api/auth/logout", "/api/users/me/password",
+    "/api/auth/totp/setup", "/api/auth/totp/confirm", "/api/auth/totp/disable",
+}
+
+
+def enforce_auditor_readonly(request: Optional[Request], roles: List[str]) -> None:
+    """403 pour un auditeur sur toute ecriture (hors gestion de sa session)."""
+    if "auditor" not in roles or request is None:
+        return
+    if request.method in _MUTATING_METHODS and request.url.path not in _AUDITOR_WRITE_WHITELIST:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Compte auditeur : accès en lecture seule."
+        )
+
 # Roles empilables : la colonne User.role contient une liste separee par des
 # virgules (ex: "user,reviewer"). Les anciennes valeurs mono-role restent valides.
 # `param` : equipe criblage (parametrage) — blocking keys et regles anti-faux
 # positifs, criblage comme filtrage. Les admins ont toujours ces droits.
-VALID_ROLES = {"admin", "user", "reviewer", "blocking", "rules"}
+# `auditor` : lecture seule integrale (controleur externe) — exclusif, jamais
+# combine a un autre role, toute ecriture refusee par get_current_user.
+VALID_ROLES = {"admin", "user", "reviewer", "blocking", "rules", "auditor"}
 
 def parse_roles(role_str: Optional[str]) -> List[str]:
     """Decoupe la chaine de roles en liste normalisee (minuscules, sans doublons)."""
@@ -161,6 +182,8 @@ def normalize_roles(role_str: str) -> str:
             f"Rôle(s) invalide(s): {', '.join(invalid) if invalid else '(vide)'}. "
             f"Rôles autorisés: {', '.join(sorted(VALID_ROLES))}."
         )
+    if "auditor" in roles and len(roles) > 1:
+        raise ValueError("Le rôle auditeur est exclusif : il ne se combine à aucun autre rôle (lecture seule).")
     return ",".join(sorted(roles))
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -202,6 +225,7 @@ async def get_current_user(
     if api_key_candidate:
         service_account = authenticate_api_key(db, api_key_candidate)
         if service_account:
+            enforce_auditor_readonly(request, service_account["roles"])
             return service_account
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -236,12 +260,14 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
         
+    roles = parse_roles(user.role)
+    enforce_auditor_readonly(request, roles)
     return {
         "id": user.id,
         "username": user.username,
         "full_name": user.full_name,
         "role": user.role,
-        "roles": parse_roles(user.role),
+        "roles": roles,
         "totp_enabled": bool(user.totp_enabled),
     }
 

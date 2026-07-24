@@ -7,6 +7,11 @@ on:
     branches: ["master"]
   workflow_dispatch:
 
+# Un push qui en remplace un autre sur la même branche annule le run précédent
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     name: Tests (pytest)
@@ -27,6 +32,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Validate config.yaml
+        run: python -c "import yaml; yaml.safe_load(open('config.yaml')); print('config.yaml OK')"
+
+      - name: Import smoke test
+        run: python -c "from fiskr.api import app; print('fiskr.api import OK')"
+
       # La suite s'exécute sur le repli SQLite (aucun PostgreSQL requis en CI)
       - name: Run test suite
         run: python -m pytest tests/ -v --tb=short
@@ -44,5 +55,11 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Syntax-check app.js
-        run: node --check fiskr/static/app.js
+      # Tous les fichiers JS servis par le dashboard (app.js, i18n.js, futurs modules)
+      - name: Syntax-check dashboard JS
+        run: |
+          set -e
+          for f in fiskr/static/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
