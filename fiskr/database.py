@@ -616,6 +616,26 @@ class ApiKey(Base):
     revoked_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
 
+
+class HookDelivery(Base):
+    """
+    Livraison d'un webhook entrant (SI amont) : garantit l'idempotence par
+    cle X-Idempotency-Key — la reponse d'origine est stockee et rejouee a
+    l'identique en cas de retransmission (retries reseau de l'appelant).
+    Table auto-nettoyee : les livraisons de plus de 90 jours sont purgees
+    opportunistement a chaque appel de webhook.
+    """
+    __tablename__ = "hook_deliveries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(200), unique=True, nullable=False, index=True)
+    endpoint = Column(String(100), nullable=False)      # screening | client-upsert
+    caller = Column(String(200), nullable=True)          # apikey:<nom>
+    status_code = Column(Integer, nullable=False, default=200)
+    response_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 import secrets
 import os
 

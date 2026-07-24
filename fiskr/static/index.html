@@ -1551,6 +1551,29 @@
                         </div>
                     </div>
 
+                    <!-- Qualité des données du référentiel clients -->
+                    <div class="card result-card" id="quality-card">
+                        <h2>🧪 Qualité des Données Clients</h2>
+                        <p class="section-desc">Complétude des champs KYC du référentiel clients en production : un dossier incomplet (date de naissance ou pays manquants) dégrade la précision du criblage et augmente les faux positifs. Barres vertes ≥ 95 %, orange ≥ 80 %, rouges en dessous.</p>
+                        <div id="quality-summary" style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.9rem;"></div>
+                        <div id="quality-fields"></div>
+                        <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; margin-top: 1rem;">
+                            <div style="flex: 1; min-width: 260px;">
+                                <h4 style="margin: 0 0 0.4rem;">Segments les moins complets</h4>
+                                <div class="table-container" style="max-height: 220px; overflow-y: auto;">
+                                    <table id="quality-segments-table">
+                                        <thead><tr><th>Segment</th><th>Clients</th><th>Complétude</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div style="flex: 1; min-width: 260px;">
+                                <h4 style="margin: 0 0 0.4rem;">Fiches à risque pour le criblage</h4>
+                                <ul id="quality-risky" style="list-style: none; padding: 0; font-size: 0.9rem;"></ul>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Rapport d'activité réglementaire sur période -->
                     <div class="card result-card" id="activity-report-card">
                         <h2>📄 Rapport d'Activité (période)</h2>
