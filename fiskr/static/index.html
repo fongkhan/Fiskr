@@ -1287,6 +1287,8 @@
                                     <option value="LOW">Basse</option>
                                 </select>
                                 <select id="screening-list-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par type de liste"></select>
+                                <select id="screening-views" onchange="applySavedView('SCREENING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
+                                <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('SCREENING')" title="Sauvegarder les filtres courants comme vue">💾</button>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div id="screening-bulk-bar" class="bulk-bar hidden">
@@ -1339,6 +1341,8 @@
                                     <option value="LOW">Basse</option>
                                 </select>
                                 <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
+                                <select id="filtering-views" onchange="applySavedView('FILTERING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
+                                <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue">💾</button>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
                             </div>
                             <div id="filtering-bulk-bar" class="bulk-bar hidden">
@@ -1499,6 +1503,27 @@
                                     </table>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- Rapport d'activité réglementaire sur période -->
+                    <div class="card result-card" id="activity-report-card">
+                        <h2>📄 Rapport d'Activité (période)</h2>
+                        <p class="section-desc">Synthèse réglementaire prête pour un contrôle : volumétrie de criblage, alertes et décisions, délais, liste blanche, synchronisations et campagnes batch. Export CSV ou impression PDF.</p>
+                        <div class="filter-bar" style="margin-bottom: 1rem;">
+                            <label for="activity-from" style="align-self: center;">Du</label>
+                            <input type="date" id="activity-from">
+                            <label for="activity-to" style="align-self: center;">au</label>
+                            <input type="date" id="activity-to">
+                            <button class="btn btn-sm btn-primary" onclick="fetchActivityReport()">Afficher</button>
+                            <button class="btn btn-sm btn-secondary" onclick="exportActivityCsv()" title="Export CSV Excel">⬇ CSV</button>
+                            <button class="btn btn-sm btn-secondary" onclick="printActivityReport()" title="Rapport imprimable">🖨 Imprimer</button>
+                        </div>
+                        <div class="table-container max-height-table">
+                            <table id="activity-report-table">
+                                <thead><tr><th>Section</th><th>Indicateur</th><th style="text-align: right;">Valeur</th></tr></thead>
+                                <tbody><tr><td colspan="3" style="color: var(--text-muted);">Choisissez une période puis « Afficher ».</td></tr></tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -1696,6 +1721,27 @@
                             </div>
                         </div>
                         <div id="mfa-actions"></div>
+                    </div>
+
+                    <!-- Rétention des données (admin) -->
+                    <div class="card form-card hidden" id="retention-card">
+                        <h2>🗄 Rétention des Données (Admin)</h2>
+                        <p class="section-desc">Durée de conservation (jours) par famille — <strong>0 = conservation illimitée</strong> (défaut), minimum 30 jours quand une purge est activée. La purge tourne chaque jour à l'heure indiquée et chaque exécution est tracée <code>RETENTION_PURGE</code>. Le journal des actions d'administration n'est <strong>jamais</strong> purgé ; les décisions de criblage encore liées à une alerte conservée ne sont jamais supprimées.</p>
+                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+                            <div class="form-group"><label for="retention-audit">Décisions de criblage</label><input type="number" id="retention-audit" min="0" step="1"></div>
+                            <div class="form-group"><label for="retention-alerts">Alertes clôturées</label><input type="number" id="retention-alerts" min="0" step="1"></div>
+                            <div class="form-group"><label for="retention-syncs">Rapports de sync</label><input type="number" id="retention-syncs" min="0" step="1"></div>
+                            <div class="form-group"><label for="retention-batch">Campagnes batch</label><input type="number" id="retention-batch" min="0" step="1"></div>
+                        </div>
+                        <div class="form-group" style="max-width: 420px;">
+                            <label for="retention-cron">Heure de purge (cron 5 champs)</label>
+                            <input type="text" id="retention-cron" placeholder="30 2 * * *">
+                        </div>
+                        <p id="retention-preview" class="section-desc" style="margin: 0.5rem 0 1rem;"></p>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="saveRetentionSettings()">Enregistrer la politique</button>
+                            <button class="btn btn-secondary" onclick="runRetentionNow()">🗑 Purger maintenant…</button>
+                        </div>
                     </div>
 
                     <!-- Clés d'API techniques (comptes de service) -->
@@ -1977,7 +2023,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.5"></script>
+    <script src="/static/app.js?v=6.6"></script>
 
 
 

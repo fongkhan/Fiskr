@@ -40,9 +40,16 @@ SETTING_ALERT_SLA_HOURS = "alerts.sla_hours"
 SETTING_NOTIFICATIONS = "notifications.events"
 # Digest KPI periodique (synthese conformite envoyee par email/webhooks)
 SETTING_DIGEST = "notifications.digest"
+# Retention des donnees : duree de conservation (jours) par famille, 0 = illimite.
+# Le journal des actions d'administration n'est JAMAIS purge (append-only).
+SETTING_RETENTION = "retention.policy"
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
+RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_campaigns")
+RETENTION_MIN_DAYS = 30  # garde-fou : jamais moins de 30 jours quand une purge est activee
+DEFAULT_RETENTION = {"audit_trail": 0, "closed_alerts": 0, "sync_reports": 0,
+                     "batch_campaigns": 0, "cron": "30 2 * * *"}
 DEFAULT_NOTIFICATION_EVENTS = {
     "alert_created": False,
     "alert_pending_validation": False,
@@ -223,6 +230,23 @@ def digest_settings(db) -> Dict[str, Any]:
     out = dict(DEFAULT_DIGEST)
     if isinstance(value, dict):
         out["enabled"] = bool(value.get("enabled", out["enabled"]))
+        cron_expr = str(value.get("cron") or "").strip()
+        if cron_expr:
+            out["cron"] = cron_expr
+    return out
+
+
+def retention_policy(db) -> Dict[str, Any]:
+    """Politique de retention effective : jours par famille (0 = conservation
+    illimitee) + expression cron de la purge quotidienne."""
+    value = get_setting_with_source(db, SETTING_RETENTION, dict(DEFAULT_RETENTION))["value"]
+    out = dict(DEFAULT_RETENTION)
+    if isinstance(value, dict):
+        for family in RETENTION_FAMILIES:
+            try:
+                out[family] = max(0, int(value.get(family, out[family])))
+            except (TypeError, ValueError):
+                continue
         cron_expr = str(value.get("cron") or "").strip()
         if cron_expr:
             out["cron"] = cron_expr

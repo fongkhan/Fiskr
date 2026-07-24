@@ -541,6 +541,8 @@ async function checkAuthUser() {
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
             const apiKeysCard = document.getElementById("apikeys-card");
             if (apiKeysCard) apiKeysCard.classList.toggle("hidden", !isAdmin);
+            const retentionCard = document.getElementById("retention-card");
+            if (retentionCard) retentionCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -612,14 +614,18 @@ function switchTab(tabId) {
         fetchAlerts("SCREENING");
         fetchAlerts("FILTERING");
         fetchWhitelist();
+        fetchSavedViews("SCREENING");
+        fetchSavedViews("FILTERING");
     }
     if (tabId === "kpi") {
         fetchKpis();
+        initActivityReportDates();
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
         fetchApiKeys();
         refreshMfaCard();
+        fetchRetentionSettings();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -5727,4 +5733,233 @@ async function resetUserTotp(userId, username) {
         showToast(data.message || "MFA réinitialisée.", "success");
         fetchUsersList();
     } catch (e) { console.error("TOTP reset error:", e); }
+}
+
+// =========================================================================
+// LOT GOUVERNANCE : RETENTION + VUES SAUVEGARDEES + RAPPORT D'ACTIVITE
+// =========================================================================
+
+// --- Rétention des données (admin) ---
+async function fetchRetentionSettings() {
+    const card = document.getElementById("retention-card");
+    if (!card || card.classList.contains("hidden")) return;
+    try {
+        const response = await apiFetch("/api/admin/retention", { silent: true });
+        if (!response.ok) return;
+        const data = await response.json();
+        const policy = data.policy || {};
+        const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        setVal("retention-audit", policy.audit_trail ?? 0);
+        setVal("retention-alerts", policy.closed_alerts ?? 0);
+        setVal("retention-syncs", policy.sync_reports ?? 0);
+        setVal("retention-batch", policy.batch_campaigns ?? 0);
+        setVal("retention-cron", policy.cron || "30 2 * * *");
+        renderRetentionPreview(data.preview || {});
+    } catch (e) { console.error("Retention fetch error:", e); }
+}
+
+function renderRetentionPreview(preview) {
+    const el = document.getElementById("retention-preview");
+    if (!el) return;
+    const labels = { audit_trail: "décisions de criblage", closed_alerts: "alertes clôturées",
+                     sync_reports: "rapports de sync", batch_campaigns: "campagnes batch" };
+    const parts = Object.entries(preview).filter(([, n]) => n > 0)
+        .map(([family, n]) => `${n} ${labels[family] || family}`);
+    el.textContent = parts.length
+        ? `Purge aujourd'hui avec cette politique : ${parts.join(", ")}.`
+        : "Rien à purger avec la politique actuelle.";
+}
+
+async function saveRetentionSettings() {
+    const val = (id) => parseInt(document.getElementById(id)?.value, 10) || 0;
+    const payload = {
+        audit_trail: val("retention-audit"),
+        closed_alerts: val("retention-alerts"),
+        sync_reports: val("retention-syncs"),
+        batch_campaigns: val("retention-batch"),
+        cron: (document.getElementById("retention-cron")?.value || "").trim(),
+    };
+    try {
+        const response = await apiFetch("/api/settings/retention", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Réglage refusé."), "error");
+            return;
+        }
+        showToast(data.message || "Politique de rétention mise à jour.", "success");
+        renderRetentionPreview(data.preview || {});
+    } catch (e) { console.error("Retention save error:", e); }
+}
+
+async function runRetentionNow() {
+    const ok = await confirmDialog(
+        "Exécuter la purge de rétention maintenant ? Les enregistrements au-delà des durées configurées seront définitivement supprimés (action tracée au journal).");
+    if (!ok) return;
+    try {
+        const response = await apiFetch("/api/admin/retention/run", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Purge refusée."), "error");
+            return;
+        }
+        showToast(data.message || "Purge effectuée.", "success");
+        fetchRetentionSettings();
+    } catch (e) { console.error("Retention run error:", e); }
+}
+
+// --- Vues sauvegardées des files d'alertes ---
+let savedViewsByChannel = { SCREENING: [], FILTERING: [] };
+
+function _viewsSelectId(channel) { return channel === "FILTERING" ? "filtering-views" : "screening-views"; }
+
+async function fetchSavedViews(channel) {
+    const select = document.getElementById(_viewsSelectId(channel));
+    if (!select) return;
+    try {
+        const response = await apiFetch(`/api/views?channel=${channel}`, { silent: true });
+        if (!response.ok) return;
+        const items = (await response.json()).items || [];
+        savedViewsByChannel[channel] = items;
+        select.innerHTML = `<option value="">Vues…</option>` +
+            items.map(v => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join("") +
+            (items.length ? `<option value="__delete__">🗑 Supprimer une vue…</option>` : "");
+    } catch (e) { console.error("Saved views fetch error:", e); }
+}
+
+async function applySavedView(channel, value) {
+    const select = document.getElementById(_viewsSelectId(channel));
+    if (!value) return;
+    if (value === "__delete__") {
+        select.value = "";
+        const views = savedViewsByChannel[channel];
+        const name = await promptDialog("Nom exact de la vue à supprimer :", {
+            placeholder: views.map(v => v.name).join(", ") });
+        if (!name) return;
+        const view = views.find(v => v.name === name.trim());
+        if (!view) { showToast("Vue introuvable.", "error"); return; }
+        const response = await apiFetch(`/api/views/${view.id}`, { method: "DELETE" });
+        const data = await response.json();
+        showToast(data.message || data.detail || "Vue supprimée.", response.ok ? "success" : "error");
+        fetchSavedViews(channel);
+        return;
+    }
+    const view = savedViewsByChannel[channel].find(v => String(v.id) === String(value));
+    if (!view) return;
+    const filters = view.filters || {};
+    const conf = ALERT_CHANNEL_CONF[channel];
+    alertsFilterByChannel[channel] = filters.status || "";
+    const prioEl = document.getElementById(conf.priorityFilter);
+    if (prioEl) prioEl.value = filters.priority || "";
+    const listEl = document.getElementById(conf.listFilter);
+    if (listEl) listEl.value = filters.list_type || "";
+    // Synchronise l'état visuel des boutons de statut avec le filtre restauré
+    const section = document.getElementById(`sub-sec-${conf.section}`);
+    if (section) {
+        section.querySelectorAll(".alerts-status-filters button").forEach(btn => {
+            const active = btn.dataset.filter === (filters.status || "");
+            btn.classList.toggle("btn-secondary", active);
+            btn.style.background = active ? "" : "var(--surface-3)";
+        });
+    }
+    fetchAlerts(channel, 1);
+    showToast(`Vue « ${view.name} » appliquée.`, "success");
+}
+
+async function saveCurrentView(channel) {
+    const name = await promptDialog("Nom de la vue (les filtres courants seront mémorisés) :",
+                                    { placeholder: "Ex. Critiques criblage à traiter" });
+    if (!name) return;
+    const conf = ALERT_CHANNEL_CONF[channel];
+    const filters = {
+        status: alertsFilterByChannel[channel] || "",
+        priority: document.getElementById(conf.priorityFilter)?.value || "",
+        list_type: document.getElementById(conf.listFilter)?.value || "",
+    };
+    try {
+        const response = await apiFetch("/api/views", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name.trim(), channel, filters }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Sauvegarde refusée."), "error");
+            return;
+        }
+        showToast(data.message || "Vue sauvegardée.", "success");
+        fetchSavedViews(channel);
+    } catch (e) { console.error("Saved view create error:", e); }
+}
+
+// --- Rapport d'activité réglementaire (période) ---
+function initActivityReportDates() {
+    const fromEl = document.getElementById("activity-from");
+    const toEl = document.getElementById("activity-to");
+    if (!fromEl || !toEl || fromEl.value) return;
+    const today = new Date();
+    const monthAgo = new Date(today.getTime() - 30 * 86400000);
+    toEl.value = today.toISOString().slice(0, 10);
+    fromEl.value = monthAgo.toISOString().slice(0, 10);
+}
+
+function _activityParams() {
+    const params = new URLSearchParams();
+    const from = document.getElementById("activity-from")?.value;
+    const to = document.getElementById("activity-to")?.value;
+    if (from) params.set("date_from", from);
+    if (to) params.set("date_to", to);
+    return params;
+}
+
+async function fetchActivityReport() {
+    const tbody = document.querySelector("#activity-report-table tbody");
+    if (!tbody) return;
+    tableLoading(tbody, 3);
+    try {
+        const response = await apiFetch(`/api/reports/activity?${_activityParams()}`);
+        const report = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (report.detail || "Rapport indisponible."), "error");
+            tableEmpty(tbody, 3, "Rapport indisponible.", "⚠️");
+            return;
+        }
+        const rows = [];
+        const emit = (section, label, value) =>
+            rows.push(`<tr><td>${escapeHtml(section)}</td><td>${escapeHtml(label)}</td><td style="text-align: right; font-weight: 600;">${value ?? "—"}</td></tr>`);
+        emit("Criblage", "Décisions totales", report.screenings.total);
+        Object.entries(report.screenings.by_status).forEach(([status, count]) =>
+            emit("Criblage", `Décisions ${STATUS_LABELS[status] || status}`, count));
+        emit("Alertes", "Créées", report.alerts.created);
+        Object.entries(report.alerts.created_by_channel).forEach(([channel, count]) =>
+            emit("Alertes", `Créées — ${channel === "FILTERING" ? "filtrage" : "criblage"}`, count));
+        Object.entries(report.alerts.created_by_priority).forEach(([prio, count]) =>
+            emit("Alertes", `Créées priorité ${prio}`, count));
+        emit("Alertes", "Décidées", report.alerts.decided);
+        Object.entries(report.alerts.decided_by_status).forEach(([status, count]) =>
+            emit("Alertes", `Décidées — ${STATUS_LABELS[status] || status}`, count));
+        emit("Alertes", "Délai moyen de décision (h)", report.alerts.avg_decision_hours);
+        emit("Alertes", "Escalades", report.alerts.escalations);
+        emit("Alertes", "Encore ouvertes", report.alerts.still_open);
+        emit("Liste blanche", "Paires créées", report.whitelist.created);
+        emit("Liste blanche", "Paires révoquées", report.whitelist.revoked);
+        emit("Synchronisations", "Total", report.syncs.total);
+        Object.entries(report.syncs.by_status).forEach(([status, count]) =>
+            emit("Synchronisations", `Statut ${status}`, count));
+        emit("Batch", "Campagnes", report.batch.campaigns);
+        emit("Batch", "Clients criblés", report.batch.clients_screened);
+        tbody.innerHTML = rows.join("");
+    } catch (e) {
+        console.error("Activity report error:", e);
+        tableEmpty(tbody, 3, "Erreur réseau.", "⚠️");
+    }
+}
+
+function exportActivityCsv() {
+    window.open(`/api/reports/activity.csv?${_activityParams()}`, "_blank");
+}
+
+function printActivityReport() {
+    window.open(`/api/reports/activity/print?${_activityParams()}`, "_blank");
 }
