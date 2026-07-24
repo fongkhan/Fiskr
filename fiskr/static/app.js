@@ -543,6 +543,8 @@ async function checkAuthUser() {
             if (apiKeysCard) apiKeysCard.classList.toggle("hidden", !isAdmin);
             const retentionCard = document.getElementById("retention-card");
             if (retentionCard) retentionCard.classList.toggle("hidden", !isAdmin);
+            const portabilityCard = document.getElementById("config-portability-card");
+            if (portabilityCard) portabilityCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -620,6 +622,7 @@ function switchTab(tabId) {
     if (tabId === "kpi") {
         fetchKpis();
         initActivityReportDates();
+        fetchWorkload();
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
@@ -5754,6 +5757,8 @@ async function fetchRetentionSettings() {
         setVal("retention-syncs", policy.sync_reports ?? 0);
         setVal("retention-batch", policy.batch_campaigns ?? 0);
         setVal("retention-cron", policy.cron || "30 2 * * *");
+        const archiveEl = document.getElementById("retention-archive");
+        if (archiveEl) archiveEl.checked = policy.archive !== false;
         renderRetentionPreview(data.preview || {});
     } catch (e) { console.error("Retention fetch error:", e); }
 }
@@ -5778,6 +5783,7 @@ async function saveRetentionSettings() {
         sync_reports: val("retention-syncs"),
         batch_campaigns: val("retention-batch"),
         cron: (document.getElementById("retention-cron")?.value || "").trim(),
+        archive: !!document.getElementById("retention-archive")?.checked,
     };
     try {
         const response = await apiFetch("/api/settings/retention", {
@@ -5962,4 +5968,97 @@ function exportActivityCsv() {
 
 function printActivityReport() {
     window.open(`/api/reports/activity/print?${_activityParams()}`, "_blank");
+}
+
+// =========================================================================
+// LOT PILOTAGE & PORTABILITE : ARCHIVE, CHARGE DE TRAVAIL, CONFIG
+// =========================================================================
+
+// --- Charge de travail des analystes (échéances SLA) ---
+async function fetchWorkload() {
+    const tbody = document.querySelector("#workload-table tbody");
+    if (!tbody) return;
+    tableLoading(tbody, 9);
+    try {
+        const channel = document.getElementById("workload-channel")?.value || "";
+        const params = channel ? `?channel=${channel}` : "";
+        const response = await apiFetch(`/api/alerts/workload${params}`);
+        if (!response.ok) { tableEmpty(tbody, 9, "Charge indisponible.", "⚠️"); return; }
+        const data = await response.json();
+        const totalsEl = document.getElementById("workload-totals");
+        if (totalsEl) {
+            totalsEl.textContent =
+                `${data.totals.open} ouverte(s) · ${data.totals.overdue} en retard · ${data.totals.pending_validation} à valider (4-yeux)`;
+        }
+        const row = (label, b, muted = false) => `
+            <tr${muted ? ' style="opacity: 0.85;"' : ""}>
+                <td>${label}</td>
+                <td><strong>${b.open_total}</strong></td>
+                <td>${b.by_priority.CRITICAL ? `<span style="color: var(--color-alert); font-weight: 700;">${b.by_priority.CRITICAL}</span>` : "—"}</td>
+                <td>${b.by_priority.HIGH ? `<span style="color: var(--color-warning); font-weight: 600;">${b.by_priority.HIGH}</span>` : "—"}</td>
+                <td>${b.by_priority.MEDIUM || "—"}</td>
+                <td>${b.by_priority.LOW || "—"}</td>
+                <td>${b.overdue ? `<span style="color: var(--color-alert); font-weight: 700;">⏰ ${b.overdue}</span>` : "—"}</td>
+                <td>${b.next_due_at ? formatDateTime(b.next_due_at) : "—"}</td>
+                <td>${b.pending_validation || "—"}</td>
+            </tr>`;
+        const rows = [];
+        if (data.unassigned.open_total > 0) {
+            rows.push(row(`<em style="color: var(--color-warning);">Non assignées</em>`, data.unassigned, true));
+        }
+        data.analysts.forEach(a => rows.push(row(`<strong>@${escapeHtml(a.username)}</strong>`, a)));
+        if (!rows.length) {
+            tableEmpty(tbody, 9, "Aucune alerte ouverte : file à jour.", "✅");
+            return;
+        }
+        tbody.innerHTML = rows.join("");
+    } catch (e) {
+        console.error("Workload error:", e);
+        tableEmpty(tbody, 9, "Erreur réseau.", "⚠️");
+    }
+}
+
+// --- Portabilité de la configuration (admin) ---
+function exportAppConfig() {
+    window.open("/api/admin/config/export", "_blank");
+}
+
+async function importAppConfig(input) {
+    const file = input.files && input.files[0];
+    input.value = "";
+    if (!file) return;
+    const resultEl = document.getElementById("config-import-result");
+    let parsed;
+    try {
+        parsed = JSON.parse(await file.text());
+    } catch (e) {
+        showToast("Fichier illisible : JSON invalide.", "error");
+        return;
+    }
+    const settings = parsed.settings || parsed;
+    if (typeof settings !== "object" || Array.isArray(settings)) {
+        showToast("Format inattendu : objet « settings » requis.", "error");
+        return;
+    }
+    const ok = await confirmDialog(
+        `Importer ${Object.keys(settings).length} réglage(s) depuis « ${file.name} » ? Les réglages actuels seront remplacés (delta journalisé).`);
+    if (!ok) return;
+    try {
+        const response = await apiFetch("/api/admin/config/import", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ settings }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Import refusé."), "error");
+            return;
+        }
+        showToast(data.message || "Configuration importée.", "success");
+        if (resultEl) {
+            resultEl.textContent = `Appliqués : ${data.applied.join(", ")}`
+                + (data.skipped.length ? ` — ignorés : ${data.skipped.join(", ")}` : "");
+        }
+        fetchIngestionSettings();
+        fetchRetentionSettings();
+    } catch (e) { console.error("Config import error:", e); }
 }

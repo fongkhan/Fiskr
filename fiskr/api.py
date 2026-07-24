@@ -34,7 +34,7 @@ from fiskr.database import (
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
-    BatchCampaign, BatchResult, ApiKey, SavedView
+    BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import notify_event
@@ -984,6 +984,7 @@ class RetentionSettingsUpdate(BaseModel):
     sync_reports: Optional[int] = None
     batch_campaigns: Optional[int] = None
     cron: Optional[str] = None
+    archive: Optional[bool] = None
 
 @app.get("/api/admin/retention")
 async def get_retention(
@@ -1030,6 +1031,9 @@ async def update_retention_settings(
                 raise HTTPException(status_code=400, detail=f"Expression cron de purge invalide : {bad}")
             merged["cron"] = cron_expr
             provided = True
+    if payload.archive is not None:
+        merged["archive"] = bool(payload.archive)
+        provided = True
     if not provided:
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     set_setting(db, SETTING_RETENTION, merged, updated_by=admin_user["username"])
@@ -1040,6 +1044,86 @@ async def update_retention_settings(
         db.commit()
     return {"message": "Politique de rétention mise à jour.",
             "policy": retention_policy(db), "preview": preview_retention(db)}
+
+# ------------------ IMPORT / EXPORT DE LA CONFIGURATION ------------------
+
+# Seuls les reglages a chaud connus sont portables : jamais de secrets
+# (les cles d'API, comptes et mots de passe ne transitent pas par ici)
+_PORTABLE_SETTINGS = {
+    SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
+    SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
+    SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
+    SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
+    SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
+    SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
+    SETTING_DIGEST, SETTING_RETENTION,
+}
+
+class ConfigImportRequest(BaseModel):
+    settings: Dict[str, Any]
+
+@app.get("/api/admin/config/export")
+async def export_app_config(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Export JSON des reglages a chaud (portabilite entre environnements :
+    recette -> production). Uniquement les reglages connus, aucun secret.
+    """
+    rows = db.query(AppSetting).filter(AppSetting.key.in_(_PORTABLE_SETTINGS)).all()
+    payload = {
+        "application": "fiskr",
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_by": admin_user["username"],
+        "settings": {row.key: row.value for row in rows},
+    }
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition":
+                 f'attachment; filename="fiskr_config_{datetime.utcnow().strftime("%Y%m%d_%H%M")}.json"'},
+    )
+
+@app.post("/api/admin/config/import")
+async def import_app_config(
+    payload: ConfigImportRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Import des reglages exportes : seules les cles connues sont appliquees
+    (les autres sont restituees dans `skipped`), le delta est journalise
+    SETTINGS_IMPORTED. Prend effet immediatement, sans redemarrage.
+    """
+    if not payload.settings:
+        raise HTTPException(status_code=400, detail="Aucun réglage dans le fichier importé.")
+    applied, skipped, before, after = [], [], {}, {}
+    for key, value in payload.settings.items():
+        if key not in _PORTABLE_SETTINGS:
+            skipped.append(key)
+            continue
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        old_value = row.value if row else None
+        if old_value != value:
+            before[key] = old_value
+            after[key] = value
+        set_setting(db, key, value, updated_by=admin_user["username"])
+        applied.append(key)
+    if not applied:
+        raise HTTPException(status_code=400,
+                            detail="Aucune clé reconnue dans le fichier (clés attendues : "
+                                   + ", ".join(sorted(_PORTABLE_SETTINGS)) + ").")
+    if after:
+        log_admin_action(db, admin_user["username"], "SETTINGS_IMPORTED", target="config",
+                         before=before, after=after,
+                         detail=f"{len(applied)} réglage(s) importé(s), {len(skipped)} ignoré(s).")
+        db.commit()
+    return {"applied": sorted(applied), "skipped": sorted(skipped),
+            "changed": sorted(after.keys()),
+            "message": f"{len(applied)} réglage(s) appliqué(s)"
+                       + (f", {len(skipped)} clé(s) inconnue(s) ignorée(s)" if skipped else "")
+                       + "."}
 
 @app.post("/api/admin/retention/run")
 async def run_retention_now(
@@ -5160,6 +5244,67 @@ def _get_open_alert(db: Session, alert_id: int) -> Alert:
 
 def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
     db.add(AlertEvent(alert_id=alert_id, username=username, action=action, detail=detail or None))
+
+@app.get("/api/alerts/workload")
+async def get_alerts_workload(
+    channel: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Charge de travail de la file : par analyste assigne — alertes ouvertes
+    par priorite, retards SLA, prochaine echeance — plus la file non
+    assignee et les validations 4-yeux en attente. Le tableau de bord du
+    responsable d'equipe pour repartir le travail.
+    """
+    now = datetime.utcnow()
+    query = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    if channel:
+        ch = channel.strip().upper()
+        if ch == "SCREENING":
+            query = query.filter((Alert.channel == "SCREENING") | (Alert.channel.is_(None)))
+        else:
+            query = query.filter(Alert.channel == ch)
+    open_alerts = query.all()
+
+    def _bucket():
+        return {"open_total": 0, "by_priority": {p: 0 for p in ALERT_PRIORITIES},
+                "overdue": 0, "next_due_at": None, "pending_validation": 0}
+
+    analysts: Dict[str, Dict[str, Any]] = {}
+    unassigned = _bucket()
+    for alert in open_alerts:
+        bucket = analysts.setdefault(alert.assigned_to, _bucket()) if alert.assigned_to else unassigned
+        bucket["open_total"] += 1
+        if alert.priority in bucket["by_priority"]:
+            bucket["by_priority"][alert.priority] += 1
+        if alert.due_at:
+            if alert.due_at < now:
+                bucket["overdue"] += 1
+            if bucket["next_due_at"] is None or alert.due_at < bucket["next_due_at"]:
+                bucket["next_due_at"] = alert.due_at
+        if alert.status == "PENDING_VALIDATION":
+            bucket["pending_validation"] += 1
+
+    def _serialize(bucket):
+        return {**bucket,
+                "next_due_at": bucket["next_due_at"].isoformat() if bucket["next_due_at"] else None}
+
+    return {
+        "generated_at": now.isoformat(),
+        "analysts": [
+            {"username": username, **_serialize(bucket)}
+            for username, bucket in sorted(
+                analysts.items(),
+                key=lambda kv: (-kv[1]["overdue"], -kv[1]["open_total"]))
+        ],
+        "unassigned": _serialize(unassigned),
+        "totals": {
+            "open": len(open_alerts),
+            "overdue": sum(1 for a in open_alerts if a.due_at and a.due_at < now),
+            "pending_validation": sum(1 for a in open_alerts if a.status == "PENDING_VALIDATION"),
+        },
+    }
 
 @app.get("/api/alerts")
 async def list_alerts(
