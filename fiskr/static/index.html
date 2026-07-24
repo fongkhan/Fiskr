@@ -1506,6 +1506,29 @@
                         </div>
                     </div>
 
+                    <!-- Charge de travail des analystes (échéances SLA) -->
+                    <div class="card result-card" id="workload-card">
+                        <h2>👥 Charge de Travail des Analystes</h2>
+                        <p class="section-desc">Alertes ouvertes par analyste assigné, ventilées par priorité, avec les retards SLA et la prochaine échéance — pour répartir le travail. Les alertes non assignées apparaissent en tête.</p>
+                        <div class="filter-bar" style="margin-bottom: 1rem;">
+                            <select id="workload-channel" onchange="fetchWorkload()">
+                                <option value="">Tous canaux</option>
+                                <option value="SCREENING">Criblage clients</option>
+                                <option value="FILTERING">Filtrage transactionnel</option>
+                            </select>
+                            <span id="workload-totals" style="align-self: center; color: var(--text-muted); font-size: 0.85rem;"></span>
+                        </div>
+                        <div class="table-container max-height-table">
+                            <table id="workload-table">
+                                <thead><tr>
+                                    <th>Analyste</th><th>Ouvertes</th><th>Critique</th><th>Haute</th>
+                                    <th>Moyenne</th><th>Basse</th><th>⏰ En retard</th><th>Prochaine échéance</th><th>4-yeux</th>
+                                </tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+
                     <!-- Rapport d'activité réglementaire sur période -->
                     <div class="card result-card" id="activity-report-card">
                         <h2>📄 Rapport d'Activité (période)</h2>
@@ -1737,11 +1760,29 @@
                             <label for="retention-cron">Heure de purge (cron 5 champs)</label>
                             <input type="text" id="retention-cron" placeholder="30 2 * * *">
                         </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="retention-archive" style="width: 18px; height: 18px;">
+                                Archiver avant purge (JSON Lines dans <code>retention_archive/</code>, à externaliser par l'exploitation)
+                            </label>
+                        </div>
                         <p id="retention-preview" class="section-desc" style="margin: 0.5rem 0 1rem;"></p>
                         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                             <button class="btn btn-primary" onclick="saveRetentionSettings()">Enregistrer la politique</button>
                             <button class="btn btn-secondary" onclick="runRetentionNow()">🗑 Purger maintenant…</button>
                         </div>
+                    </div>
+
+                    <!-- Portabilité de la configuration (admin) -->
+                    <div class="card form-card hidden" id="config-portability-card">
+                        <h2>💼 Portabilité de la Configuration (Admin)</h2>
+                        <p class="section-desc">Export/import JSON des réglages à chaud (homologation, 4-yeux, blocking keys, planification cron, SLA, notifications, rétention…) pour aligner recette et production. <strong>Aucun secret ne transite</strong> : ni comptes, ni clés d'API. Chaque import est journalisé <code>SETTINGS_IMPORTED</code> avec le delta.</p>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="exportAppConfig()">⬇ Exporter la configuration</button>
+                            <button class="btn btn-secondary" onclick="document.getElementById('config-import-file').click()">⬆ Importer…</button>
+                            <input type="file" id="config-import-file" accept=".json,application/json" style="display: none;" onchange="importAppConfig(this)">
+                        </div>
+                        <p id="config-import-result" class="section-desc" style="margin-top: 0.75rem;"></p>
                     </div>
 
                     <!-- Clés d'API techniques (comptes de service) -->
@@ -2023,7 +2064,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.6"></script>
+    <script src="/static/app.js?v=6.7"></script>
 
 
 

@@ -49,7 +49,7 @@ DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
 RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_campaigns")
 RETENTION_MIN_DAYS = 30  # garde-fou : jamais moins de 30 jours quand une purge est activee
 DEFAULT_RETENTION = {"audit_trail": 0, "closed_alerts": 0, "sync_reports": 0,
-                     "batch_campaigns": 0, "cron": "30 2 * * *"}
+                     "batch_campaigns": 0, "cron": "30 2 * * *", "archive": True}
 DEFAULT_NOTIFICATION_EVENTS = {
     "alert_created": False,
     "alert_pending_validation": False,
@@ -250,6 +250,8 @@ def retention_policy(db) -> Dict[str, Any]:
         cron_expr = str(value.get("cron") or "").strip()
         if cron_expr:
             out["cron"] = cron_expr
+        if "archive" in value:
+            out["archive"] = bool(value.get("archive"))
     return out
 
 

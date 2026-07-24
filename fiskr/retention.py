@@ -15,10 +15,12 @@ Regles de conception :
   leurs pieces jointes (fichiers supprimes au mieux) et la reference depuis
   les resultats batch mise a neant.
 """
+import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from fiskr.database import (
     AuditTrail, Alert, AlertEvent, AlertAttachment, AdminAuditLog,
@@ -27,6 +29,31 @@ from fiskr.database import (
 from fiskr.settings import retention_policy, RETENTION_FAMILIES
 
 logger = logging.getLogger("fiskr.retention")
+
+# Archive des donnees purgees (JSON par table) : la purge reste reversible
+# hors ligne — le dossier est a externaliser (bande, coffre) par l'exploitation
+ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "retention_archive"
+
+
+def _row_to_dict(row) -> Dict:
+    """Serialisation generique d'une ligne SQLAlchemy (colonnes de la table)."""
+    out = {}
+    for column in row.__table__.columns:
+        value = getattr(row, column.name)
+        out[column.name] = value.isoformat() if isinstance(value, datetime) else value
+    return out
+
+
+def _archive_rows(archive_path: Path, table_name: str, rows: List) -> int:
+    """Ecrit les lignes en JSON Lines avant leur suppression (une par ligne)."""
+    if not rows:
+        return 0
+    archive_path.mkdir(parents=True, exist_ok=True)
+    target = archive_path / f"{table_name}.jsonl"
+    with open(target, "a", encoding="utf-8") as out:
+        for row in rows:
+            out.write(json.dumps(_row_to_dict(row), ensure_ascii=False, default=str) + "\n")
+    return len(rows)
 
 
 def _cutoffs(policy: Dict) -> Dict[str, Optional[datetime]]:
@@ -96,6 +123,9 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
     policy = retention_policy(db)
     cutoffs = _cutoffs(policy)
     deleted = {family: 0 for family in RETENTION_FAMILIES}
+    # Archive horodatee de cette purge (desactivable dans la politique)
+    archive_enabled = bool(policy.get("archive", True))
+    archive_path = ARCHIVE_DIR / f"purge_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
 
     # 1. Alertes cloturees expirees (events + pieces jointes + refs batch)
     cutoff = cutoffs["closed_alerts"]
@@ -104,6 +134,12 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
         if alert_ids:
             attachments = db.query(AlertAttachment).filter(
                 AlertAttachment.alert_id.in_(alert_ids)).all()
+            if archive_enabled:
+                _archive_rows(archive_path, "alerts",
+                              db.query(Alert).filter(Alert.id.in_(alert_ids)).all())
+                _archive_rows(archive_path, "alert_events",
+                              db.query(AlertEvent).filter(AlertEvent.alert_id.in_(alert_ids)).all())
+                _archive_rows(archive_path, "alert_attachments", attachments)
             for attachment in attachments:
                 try:
                     if attachment.file_path and os.path.exists(attachment.file_path):
@@ -122,31 +158,44 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
     # 2. Journal de criblage : lignes expirees plus referencees par une alerte
     cutoff = cutoffs["audit_trail"]
     if cutoff is not None:
+        if archive_enabled:
+            _archive_rows(archive_path, "compliance_audit_trail",
+                          _purgeable_audit_query(db, cutoff).all())
         deleted["audit_trail"] = _purgeable_audit_query(db, cutoff).delete(synchronize_session=False)
 
     # 3. Rapports de synchronisation
     cutoff = cutoffs["sync_reports"]
     if cutoff is not None:
-        deleted["sync_reports"] = db.query(SyncReport).filter(
-            SyncReport.executed_at < cutoff).delete(synchronize_session=False)
+        expired_syncs = db.query(SyncReport).filter(SyncReport.executed_at < cutoff)
+        if archive_enabled:
+            _archive_rows(archive_path, "sync_reports", expired_syncs.all())
+        deleted["sync_reports"] = expired_syncs.delete(synchronize_session=False)
 
     # 4. Campagnes batch terminees (resultats puis campagnes)
     cutoff = cutoffs["batch_campaigns"]
     if cutoff is not None:
         campaign_ids = _purgeable_campaign_ids(db, cutoff)
         if campaign_ids:
+            if archive_enabled:
+                _archive_rows(archive_path, "batch_campaigns",
+                              db.query(BatchCampaign).filter(BatchCampaign.id.in_(campaign_ids)).all())
+                _archive_rows(archive_path, "batch_results",
+                              db.query(BatchResult).filter(BatchResult.campaign_id.in_(campaign_ids)).all())
             db.query(BatchResult).filter(
                 BatchResult.campaign_id.in_(campaign_ids)).delete(synchronize_session=False)
             deleted["batch_campaigns"] = db.query(BatchCampaign).filter(
                 BatchCampaign.id.in_(campaign_ids)).delete(synchronize_session=False)
 
     if any(deleted.values()):
+        archived_to = str(archive_path) if archive_enabled and archive_path.exists() else None
         db.add(AdminAuditLog(
             username=username, action="RETENTION_PURGE", target="retention",
-            after={**deleted, "policy": {f: policy[f] for f in RETENTION_FAMILIES}},
+            after={**deleted, "policy": {f: policy[f] for f in RETENTION_FAMILIES},
+                   "archive": archived_to},
             detail="Purge de rétention : " + ", ".join(
-                f"{family}={count}" for family, count in deleted.items() if count),
+                f"{family}={count}" for family, count in deleted.items() if count)
+                   + (f" — archivée dans {archived_to}" if archived_to else " — sans archive"),
         ))
-        logger.info(f"Purge de rétention effectuée : {deleted}")
+        logger.info(f"Purge de rétention effectuée : {deleted} (archive : {archived_to})")
     db.commit()
     return deleted
