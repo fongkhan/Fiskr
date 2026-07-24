@@ -638,6 +638,7 @@ function switchTab(tabId) {
         fetchKpis();
         initActivityReportDates();
         fetchWorkload();
+        fetchClientQuality();
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
@@ -6650,6 +6651,61 @@ async function fetchWorkload() {
     }
 }
 
+// --- Qualité des données du référentiel clients ---
+async function fetchClientQuality() {
+    const fieldsEl = document.getElementById("quality-fields");
+    const summaryEl = document.getElementById("quality-summary");
+    if (!fieldsEl) return;
+    fieldsEl.innerHTML = '<small style="color: var(--text-muted);">Analyse du référentiel…</small>';
+    try {
+        const response = await apiFetch("/api/quality/clients");
+        if (!response.ok) { fieldsEl.innerHTML = ""; return; }
+        const data = await response.json();
+        if (!data.snapshot) {
+            if (summaryEl) summaryEl.textContent = "";
+            fieldsEl.innerHTML = '<p style="color: var(--text-muted);">Aucune base clients en production — importez un référentiel CLIENT_BASE.</p>';
+            document.querySelector("#quality-segments-table tbody").innerHTML = "";
+            document.getElementById("quality-risky").innerHTML = "";
+            return;
+        }
+        const barColor = (pct) => pct >= 95 ? "var(--color-safe, #22c55e)" : (pct >= 80 ? "var(--color-warning)" : "var(--color-alert)");
+        if (summaryEl) {
+            summaryEl.innerHTML =
+                `Référentiel <strong>${escapeHtml(data.snapshot.file_name)}</strong> — ` +
+                `${data.snapshot.record_count.toLocaleString(uiLocale())} fiches (${data.snapshot.pp_count.toLocaleString(uiLocale())} PP) · ` +
+                `score global de complétude : <strong style="color: ${barColor(data.global_score_pct || 0)};">${data.global_score_pct ?? "—"} %</strong>`;
+        }
+        fieldsEl.innerHTML = (data.fields || []).filter(f => f.total).map(f => `
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.35rem;">
+                <span style="width: 210px; font-size: 0.85rem;">${escapeHtml(f.label)}${f.pp_only ? ' <small style="color: var(--text-muted);">(PP)</small>' : ""}</span>
+                <div style="flex: 1; height: 10px; background: var(--border-color); border-radius: 5px; overflow: hidden;">
+                    <div style="width: ${Math.min(100, f.pct)}%; height: 100%; background: ${barColor(f.pct)};"></div>
+                </div>
+                <span style="width: 130px; text-align: right; font-size: 0.82rem; color: var(--text-muted);">${f.pct} % <small>(${f.filled.toLocaleString(uiLocale())}/${f.total.toLocaleString(uiLocale())})</small></span>
+            </div>`).join("");
+        const segBody = document.querySelector("#quality-segments-table tbody");
+        if (segBody) {
+            segBody.innerHTML = (data.segments || []).slice(0, 12).map(s => `
+                <tr><td>${escapeHtml(s.segment)}</td><td>${s.clients.toLocaleString(uiLocale())}</td>
+                <td><span style="color: ${barColor(s.pct || 0)}; font-weight: 600;">${s.pct ?? "—"} %</span></td></tr>`).join("")
+                || '<tr><td colspan="3" style="color: var(--text-muted);">Aucun segment.</td></tr>';
+        }
+        const riskyEl = document.getElementById("quality-risky");
+        if (riskyEl) {
+            const r = data.risky_records || {};
+            const line = (count, label) =>
+                `<li style="margin-bottom: 0.3rem;">${count > 0 ? "⚠" : "✅"} <strong>${(count || 0).toLocaleString(uiLocale())}</strong> ${label}</li>`;
+            riskyEl.innerHTML =
+                line(r.dob_missing_pp, "personne(s) physique(s) sans date de naissance") +
+                line(r.country_missing, "fiche(s) sans aucun pays renseigné") +
+                line(r.pp_without_first_name, "personne(s) physique(s) sans prénom");
+        }
+    } catch (e) {
+        console.error("Quality error:", e);
+        fieldsEl.innerHTML = "";
+    }
+}
+
 // --- Portabilité de la configuration (admin) ---
 function exportAppConfig() {
     window.open("/api/admin/config/export", "_blank");
@@ -6877,6 +6933,8 @@ function renderCasefile(cf) {
             ${alertPriorityBadge(cf)} ${alertStatusBadge(cf.status)}
             <span style="margin-left: auto;"></span>
             <a class="btn btn-sm btn-secondary" href="/api/alerts/${cf.id}/casefile/print" target="_blank">🖨 Imprimer le dossier</a>
+            ${(userRoles(currentUser).includes("admin") || userRoles(currentUser).includes("reviewer"))
+                ? `<a class="btn btn-sm btn-secondary" href="/api/alerts/${cf.id}/str-draft/print" target="_blank" title="Projet de déclaration de soupçon TRACFIN pré-rempli — à relire et valider par le correspondant avant télédéclaration ERMES">🇫🇷 Projet de déclaration</a>` : ""}
             <button class="btn btn-sm btn-secondary" onclick="document.getElementById('casefile-modal').classList.add('hidden'); openAlertModal(${cf.id});">🔎 Instruire</button>
         </div>
         <div class="c360-section">

@@ -224,6 +224,36 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Simulation d'impact des seuils** (`POST /api/settings/scoring/simulate`) : rejeu du journal d'audit des N derniers jours avec les seuils candidats — alertes en plus/en moins par liste, sans aucune écriture — le réglage des cut-offs devient piloté par les données.
 * **Clés d'API techniques** (`fsk_…`, carte admin des Paramètres) : comptes de service pour les intégrations (CFT, supervision) — clé montrée une seule fois, hash SHA-256 stocké, authentification `X-API-Key`, révocation immédiate, rôle admin interdit (moindre privilège).
 * **Healthcheck** `GET /api/health` non authentifié (statut/base/cache, volontairement minimal) pour load-balancers et supervision.
+* **Projet de déclaration de soupçon TRACFIN** (`GET /api/alerts/{id}/str-draft` + `/print`, rôle reviewer/admin, bouton « 🇫🇷 Projet de déclaration » de la modale dossier 📁) : projet **pré-rempli** aux rubriques d'une télédéclaration — déclarant (section `institution` de `config.yaml` : nom, SIREN, correspondant), personne concernée (KYC du référentiel en production), personne listée (programmes, motifs de désignation, référence officielle), motifs tracés (scores, seuil appliqué, ajustements, règle des 50 %) et chronologie append-only. **Aucune transmission automatique** (ERMES est un portail humain) : bandeau « projet à valider par le correspondant TRACFIN », génération tracée `STR_DRAFT_GENERATED` dans l'historique de l'alerte.
+* **Qualité des données clients** (`GET /api/quality/clients`, carte « 🧪 Qualité des Données Clients » de Pilotage) : complétude des champs KYC du référentiel en production (barres vert ≥ 95 % / orange ≥ 80 % / rouge), ventilation par segment, **fiches à risque pour le criblage** (PP sans date de naissance, fiches sans pays, PP sans prénom) et score global — un dossier incomplet dégrade la précision du criblage.
+
+### 🔗 Intégration SI amont (webhooks entrants)
+
+Deux endpoints permettent au SI amont (core banking, CRM) de pousser des demandes vers Fiskr, **authentifiés par clé d'API `fsk_`** (en-tête `X-API-Key`, comptes de service ci-dessus — les sessions humaines sont refusées) :
+
+* **`POST /api/hooks/screening`** — criblage temps réel : même charge utile et même réponse que `POST /api/screen` (même cœur de criblage : quality gate, blocking, scoring, liste blanche, règles anti-FP, audit immuable, alerte).
+* **`POST /api/hooks/client-upsert`** — création/mise à jour d'une fiche client unitaire dans le dernier référentiel `CLIENT_BASE` en production (tracée `CLIENT_UPSERT_HOOK` au journal des actions d'administration).
+
+Garanties d'intégration :
+
+* **Signature HMAC facultative** : si `hooks.secret` est renseigné dans `config.yaml`, l'en-tête `X-Fiskr-Signature` (HMAC-SHA256 hexadécimal du corps brut) devient obligatoire sur ces endpoints.
+* **Idempotence** : l'en-tête `X-Idempotency-Key` (recommandé) garantit qu'une retransmission (retry réseau de l'appelant) **rejoue la réponse d'origine** sans recribler ni dupliquer (`X-Idempotency-Replayed: true` sur la réponse rejouée) ; les livraisons sont conservées 90 jours (table `hook_deliveries`, auto-nettoyée).
+
+```bash
+# Criblage temps réel signé + idempotent
+BODY='{"client_id":"CUST-001","client_type":"PP","client_first_name":"Vladimir","client_last_name":"Putin","client_dob":"1952-10-07","client_countries":{"nationality":["RU"]}}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$FISKR_HOOKS_SECRET" -hex | awk '{print $NF}')
+curl -X POST https://fiskr.example/api/hooks/screening \
+  -H "X-API-Key: $FISKR_API_KEY" -H "Content-Type: application/json" \
+  -H "X-Fiskr-Signature: $SIG" -H "X-Idempotency-Key: req-2026-07-24-0001" \
+  -d "$BODY"
+
+# Upsert d'une fiche client dans le référentiel en production
+curl -X POST https://fiskr.example/api/hooks/client-upsert \
+  -H "X-API-Key: $FISKR_API_KEY" -H "Content-Type: application/json" \
+  -H "X-Idempotency-Key: crm-evt-88412" \
+  -d '{"client_id":"CUST-001","client_type":"PP","client_first_name":"Jean","client_last_name":"Dupont","client_dob":"1980-01-01","client_email":"jean@exemple.fr"}'
+```
 
 ### 🖥️ Interface (dashboard)
 

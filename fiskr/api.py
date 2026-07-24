@@ -9,10 +9,10 @@ import shutil
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -34,7 +34,7 @@ from fiskr.database import (
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
-    BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting
+    BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting, HookDelivery
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import notify_event
@@ -5888,6 +5888,554 @@ th {{ background: #f0f0f0; }} ul {{ margin: 0.5rem 0 0 1.2rem; }} .sub {{ color:
 <tbody>{events_html}</tbody></table>
 </body></html>"""
     return HTMLResponse(content=html)
+
+# ------------------ PROJET DE DECLARATION DE SOUPCON (TRACFIN) ------------------
+
+def _institution_config() -> Dict[str, Any]:
+    """Identite de l'etablissement declarant (rubrique declarant du projet)."""
+    cfg = config.get("institution", {}) or {}
+    return {
+        "name": str(cfg.get("name") or "").strip(),
+        "siren": str(cfg.get("siren") or "").strip(),
+        "correspondent_name": str(cfg.get("correspondent_name") or "").strip(),
+        "correspondent_email": str(cfg.get("correspondent_email") or "").strip(),
+        "correspondent_phone": str(cfg.get("correspondent_phone") or "").strip(),
+    }
+
+
+STR_DISCLAIMER = (
+    "PROJET généré automatiquement par Fiskr à partir des données tracées au "
+    "journal d'audit. Il doit être relu, complété et validé par le correspondant "
+    "TRACFIN désigné avant toute télédéclaration sur ERMES — aucune transmission "
+    "automatique n'est effectuée."
+)
+
+
+def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]:
+    """Assemble le projet de declaration de soupcon structure aux rubriques
+    d'une teledeclaration TRACFIN, exclusivement depuis les donnees tracees."""
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    tree = (audit.decision_tree if audit else {}) or {}
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert.id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+
+    # Personne concernee : fiche KYC du dernier referentiel en production
+    # (criblage clients) ou partie du message (filtrage transactionnel)
+    person: Dict[str, Any] = {"nom_complet": alert.client_name, "reference_interne": alert.client_id}
+    kyc_row = None
+    if alert.client_id and not str(alert.client_id).startswith("TXN:"):
+        kyc_row = (
+            db.query(ClientEntity, Snapshot)
+              .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
+              .filter(ClientEntity.client_id == alert.client_id, Snapshot.status == "READY")
+              .order_by(Snapshot.uploaded_at.desc()).first()
+        )
+    if kyc_row:
+        entity, _snap = kyc_row
+        person.update({
+            "type": "Personne physique" if entity.client_type == "PP" else "Personne morale",
+            "prenom": entity.client_first_name, "nom": entity.client_last_name,
+            "raison_sociale": entity.client_company_name,
+            "date_naissance": entity.client_dob,
+            "lieu_naissance": entity.client_place_of_birth,
+            "adresse": entity.client_address, "ville": entity.client_city,
+            "pays": entity.client_country, "nationalites": (entity.client_countries or {}).get("nationality"),
+            "iban": entity.client_iban, "bic": entity.client_bic,
+            "identifiant_fiscal": entity.client_tax_id,
+            "telephone": entity.client_phone, "email": entity.client_email,
+            "segment": entity.client_segment, "secteur_activite": entity.client_activity_sector,
+            "notation_risque": entity.client_risk_rating,
+            "ppe_declare": bool(entity.client_pep_flag),
+            "entree_en_relation": entity.client_relationship_start,
+        })
+
+    # Operation concernee (filtrage transactionnel) : donnees du message
+    operation = None
+    if (alert.channel or "SCREENING") == "FILTERING":
+        operation = {
+            "reference_message": alert.client_id,
+            "type_message": tree.get("message_type"),
+            "partie_en_cause": alert.client_name,
+            "role_partie": tree.get("party_role"),
+        }
+
+    listed_entity = tree.get("watchlist_entity") or {}
+    inherited = compute_inherited_risk(db, alert.watchlist_entity_id, max_depth=2)
+
+    adjustments = tree.get("adjustments") or {}
+    motifs = {
+        "resume": (
+            f"Correspondance de criblage entre « {alert.client_name} » et la personne/entité "
+            f"listée « {alert.watchlist_name} » ({alert.list_type or 'liste inconnue'}), "
+            f"score final {float(alert.final_score or 0):.1f} %."
+        ),
+        "score_final": alert.final_score,
+        "score_base": tree.get("base_score"),
+        "correspondance_exacte": bool(tree.get("hard_match_triggered", False)),
+        "seuil_applique": tree.get("cut_off_applied"),
+        "ajustements": adjustments,
+        "regle_des_50_pct": [
+            {"detenteur": r.get("owner_name") or r.get("owner_id"), "detail": r}
+            for r in (inherited or [])
+        ],
+        "decision_analyste": {
+            "statut": alert.status, "decide_par": alert.decided_by,
+            "decide_le": alert.decided_at.isoformat() if alert.decided_at else None,
+            "commentaire": alert.decision_comment,
+        },
+    }
+
+    return {
+        "type": "PROJET_DECLARATION_SOUPCON",
+        "avertissement": STR_DISCLAIMER,
+        "genere_le": datetime.utcnow().isoformat() + "Z",
+        "genere_par": username,
+        "declarant": _institution_config(),
+        "alerte": {
+            "id": alert.id, "canal": alert.channel or "SCREENING",
+            "creee_le": alert.created_at.isoformat() if alert.created_at else None,
+            "statut": alert.status, "priorite": alert.priority,
+            "liste": alert.list_type, "score": alert.final_score,
+        },
+        "personne_concernee": person,
+        "personne_listee": {
+            "entity_id": alert.watchlist_entity_id,
+            "nom": alert.watchlist_name,
+            "liste": alert.list_type,
+            "programmes": listed_entity.get("programs"),
+            "motifs_designation": listed_entity.get("designation_reasons"),
+            "reference_officielle": listed_entity.get("official_reference"),
+            "fiche": listed_entity or None,
+        },
+        "operation_concernee": operation,
+        "motifs": motifs,
+        "chronologie": [
+            {"date": e.timestamp.isoformat() if e.timestamp else None,
+             "par": e.username, "action": e.action, "detail": e.detail}
+            for e in events
+        ],
+    }
+
+
+@app.get("/api/alerts/{alert_id}/str-draft")
+async def get_alert_str_draft(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Projet de declaration de soupcon TRACFIN pre-rempli (JSON structure) :
+    declarant (config institution), personne concernee (KYC), personne listee,
+    operation (filtrage), motifs traces (scores, seuil, regle des 50 %) et
+    chronologie. AUCUNE transmission automatique (ERMES est un portail humain) ;
+    la generation est tracee STR_DRAFT_GENERATED dans l'historique de l'alerte.
+    """
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    draft = _build_str_draft(db, alert, reviewer["username"])
+    _log_alert_event(db, alert.id, reviewer["username"], "STR_DRAFT_GENERATED",
+                     "Projet de déclaration de soupçon généré (format JSON)")
+    db.commit()
+    return draft
+
+
+@app.get("/api/alerts/{alert_id}/str-draft/print")
+async def print_alert_str_draft(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Projet de declaration de soupcon en HTML autonome imprimable, avec
+    bandeau « projet a valider par le correspondant TRACFIN »."""
+    from html import escape
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    draft = _build_str_draft(db, alert, reviewer["username"])
+    _log_alert_event(db, alert.id, reviewer["username"], "STR_DRAFT_GENERATED",
+                     "Projet de déclaration de soupçon généré (format imprimable)")
+    db.commit()
+
+    def esc(value):
+        return escape(str(value)) if value not in (None, "", []) else "—"
+
+    def rows(mapping: Dict[str, Any], labels: Dict[str, str]) -> str:
+        out = []
+        for key, label in labels.items():
+            value = mapping.get(key)
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value) if value else None
+            if isinstance(value, dict):
+                continue
+            out.append(f"<tr><th>{escape(label)}</th><td>{esc(value)}</td></tr>")
+        return "\n".join(out)
+
+    declarant = draft["declarant"]
+    person = draft["personne_concernee"]
+    listed = draft["personne_listee"]
+    motifs = draft["motifs"]
+    adjustments_html = "\n".join(
+        f"<tr><td>{esc(k)}</td><td>{esc((v or {}).get('score'))}</td><td>{esc((v or {}).get('description'))}</td></tr>"
+        for k, v in (motifs.get("ajustements") or {}).items())
+    fifty_html = "".join(
+        f"<li>{esc(r.get('detenteur'))}</li>" for r in motifs.get("regle_des_50_pct") or [])
+    chrono_html = "\n".join(
+        f"<tr><td>{esc((e['date'] or '')[:19].replace('T', ' '))}</td><td>@{esc(e['par'])}</td>"
+        f"<td>{esc(e['action'])}</td><td>{esc(e['detail'])}</td></tr>"
+        for e in draft["chronologie"])
+    operation = draft.get("operation_concernee")
+    operation_html = (
+        "<h2>Opération concernée</h2><table><tbody>"
+        + rows(operation, {"reference_message": "Référence du message",
+                           "type_message": "Type de message",
+                           "partie_en_cause": "Partie en cause",
+                           "role_partie": "Rôle de la partie"})
+        + "</tbody></table>") if operation else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Fiskr — Projet de déclaration de soupçon — Alerte #{alert.id}</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #111; margin: 2rem auto; max-width: 860px; }}
+h1 {{ font-size: 1.3rem; }} h2 {{ font-size: 1.02rem; margin-top: 1.4rem; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }}
+th, td {{ border: 1px solid #ccc; padding: 5px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #f0f0f0; width: 220px; }}
+.banner {{ border: 2px solid #b45309; background: #fef3c7; color: #7c2d12; padding: 0.7rem 1rem; border-radius: 6px; font-size: 0.9rem; margin: 1rem 0; }}
+.sub {{ color: #555; }} ul {{ margin: 0.4rem 0 0 1.2rem; }}
+@media print {{ .no-print {{ display: none; }} body {{ margin: 0; }} }}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
+<h1>Projet de déclaration de soupçon (TRACFIN) — Alerte #{alert.id}</h1>
+<p class="sub">Généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC par @{esc(reviewer['username'])} — support de préparation à la télédéclaration ERMES.</p>
+<div class="banner">⚠ {escape(STR_DISCLAIMER)}</div>
+<h2>1. Déclarant (établissement)</h2>
+<table><tbody>{rows(declarant, {"name": "Établissement", "siren": "SIREN",
+    "correspondent_name": "Correspondant TRACFIN", "correspondent_email": "Email",
+    "correspondent_phone": "Téléphone"})}</tbody></table>
+<h2>2. Personne concernée</h2>
+<table><tbody>{rows(person, {"type": "Type", "nom_complet": "Nom complet", "prenom": "Prénom",
+    "nom": "Nom", "raison_sociale": "Raison sociale", "date_naissance": "Date de naissance",
+    "lieu_naissance": "Lieu de naissance", "adresse": "Adresse", "ville": "Ville", "pays": "Pays",
+    "nationalites": "Nationalité(s)", "iban": "IBAN", "bic": "BIC",
+    "identifiant_fiscal": "Identifiant fiscal", "telephone": "Téléphone", "email": "Email",
+    "segment": "Segment", "secteur_activite": "Secteur d'activité",
+    "notation_risque": "Notation de risque", "ppe_declare": "PPE auto-déclaré",
+    "entree_en_relation": "Entrée en relation", "reference_interne": "Référence interne"})}</tbody></table>
+<h2>3. Personne / entité listée</h2>
+<table><tbody>{rows(listed, {"nom": "Nom sur la liste", "entity_id": "Identifiant",
+    "liste": "Liste d'origine", "programmes": "Programmes de sanctions",
+    "motifs_designation": "Motifs de la désignation", "reference_officielle": "Référence officielle"})}</tbody></table>
+{operation_html}
+<h2>4. Motifs du soupçon (données tracées)</h2>
+<p>{esc(motifs.get('resume'))}</p>
+<table><tbody>{rows(motifs, {"score_final": "Score final (%)", "score_base": "Score de base (%)",
+    "correspondance_exacte": "Correspondance exacte (hard match)", "seuil_applique": "Seuil appliqué (%)"})}</tbody></table>
+{'<h3>Ajustements contextuels</h3><table><thead><tr><th>Critère</th><th>Score</th><th>Détail</th></tr></thead><tbody>' + adjustments_html + '</tbody></table>' if adjustments_html else ''}
+{'<p><strong>⚠ Règle des 50 % — détentions par des personnes listées :</strong></p><ul>' + fifty_html + '</ul>' if fifty_html else ''}
+<h2>5. Chronologie du traitement (append-only)</h2>
+<table><thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
+<tbody>{chrono_html}</tbody></table>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+# ------------------ QUALITE DES DONNEES CLIENTS ------------------
+
+# Champs KYC evalues : (attribut, libelle, PP seulement)
+_QUALITY_FIELDS = [
+    ("client_dob", "Date de naissance", True),
+    ("client_countries", "Pays (nationalité...)", False),
+    ("client_address", "Adresse", False),
+    ("client_first_name", "Prénom", True),
+    ("client_tax_id", "Identifiant fiscal", False),
+    ("client_email", "Email", False),
+    ("client_phone", "Téléphone", False),
+    ("client_risk_rating", "Notation de risque", False),
+    ("client_segment", "Segment", False),
+    ("client_activity_sector", "Secteur d'activité", False),
+    ("client_relationship_start", "Entrée en relation", False),
+]
+
+
+def _quality_field_filled(entity: ClientEntity, attr: str) -> bool:
+    value = getattr(entity, attr)
+    if attr == "client_countries":
+        countries = value or {}
+        return any(countries.get(k) for k in ("nationality", "residence",
+                                              "birth_country", "registration_country")) \
+            or bool(entity.client_country)
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None and value != {} and value != []
+
+
+@app.get("/api/quality/clients")
+async def get_client_data_quality(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Tableau de bord qualite des donnees du referentiel clients (dernier
+    snapshot CLIENT_BASE en production) : taux de completude par champ KYC,
+    ventilation par segment, fiches a risque pour le criblage (DOB manquante,
+    pays manquant, PP sans prenom) et score global. Lecture seule.
+    """
+    snap = db.query(Snapshot).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY"
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    if not snap:
+        return {"snapshot": None, "message": "Aucune base clients en production."}
+
+    fields = {attr: {"label": label, "pp_only": pp_only, "filled": 0, "total": 0}
+              for attr, label, pp_only in _QUALITY_FIELDS}
+    segments: Dict[str, Dict[str, int]] = {}
+    risky = {"dob_missing_pp": 0, "country_missing": 0, "pp_without_first_name": 0}
+    total = 0
+    pp_total = 0
+
+    query = db.query(ClientEntity).filter(ClientEntity.snapshot_id == snap.snapshot_id)
+    for entity in query.yield_per(2000):
+        total += 1
+        is_pp = entity.client_type == "PP"
+        if is_pp:
+            pp_total += 1
+        seg = (entity.client_segment or "(non renseigné)").strip() or "(non renseigné)"
+        seg_bucket = segments.setdefault(seg, {"total": 0, "filled": 0, "checks": 0})
+        seg_bucket["total"] += 1
+
+        for attr, label, pp_only in _QUALITY_FIELDS:
+            if pp_only and not is_pp:
+                continue
+            bucket = fields[attr]
+            bucket["total"] += 1
+            seg_bucket["checks"] += 1
+            if _quality_field_filled(entity, attr):
+                bucket["filled"] += 1
+                seg_bucket["filled"] += 1
+
+        if is_pp and not (entity.client_dob or "").strip():
+            risky["dob_missing_pp"] += 1
+        if not _quality_field_filled(entity, "client_countries"):
+            risky["country_missing"] += 1
+        if is_pp and not (entity.client_first_name or "").strip():
+            risky["pp_without_first_name"] += 1
+
+    def _pct(filled, denom):
+        return round(filled * 100.0 / denom, 1) if denom else None
+
+    field_rows = [
+        {"field": attr, "label": bucket["label"], "pp_only": bucket["pp_only"],
+         "filled": bucket["filled"], "total": bucket["total"],
+         "pct": _pct(bucket["filled"], bucket["total"])}
+        for attr, bucket in fields.items()
+    ]
+    checked = [r for r in field_rows if r["total"]]
+    global_score = round(sum(r["pct"] for r in checked) / len(checked), 1) if checked else None
+    segment_rows = sorted(
+        ({"segment": seg, "clients": b["total"], "pct": _pct(b["filled"], b["checks"])}
+         for seg, b in segments.items()),
+        key=lambda r: (r["pct"] if r["pct"] is not None else 101))
+
+    return {
+        "snapshot": {
+            "snapshot_id": snap.snapshot_id, "file_name": snap.file_name,
+            "uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
+            "record_count": total, "pp_count": pp_total,
+        },
+        "global_score_pct": global_score,
+        "fields": field_rows,
+        "segments": segment_rows,
+        "risky_records": risky,
+    }
+
+
+# ------------------ WEBHOOKS ENTRANTS (SI AMONT) ------------------
+
+_HOOK_DELIVERY_TTL_DAYS = 90
+
+
+def _hooks_secret() -> str:
+    return str((config.get("hooks", {}) or {}).get("secret") or "").strip()
+
+
+async def _verify_hook_request(request: Request, current_user: Dict[str, Any]) -> bytes:
+    """Garde commune des webhooks entrants : reserve aux cles d'API (comptes
+    de service), signature HMAC-SHA256 du corps brut obligatoire si
+    hooks.secret est configure. Retourne le corps brut (une seule lecture)."""
+    if not current_user.get("is_api_key"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Les webhooks entrants sont réservés aux clés d'API (X-API-Key)."
+        )
+    body = await request.body()
+    secret = _hooks_secret()
+    if secret:
+        import hmac as hmac_mod
+        provided = (request.headers.get("X-Fiskr-Signature") or "").strip().lower()
+        expected = hmac_mod.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        if not provided or not hmac_mod.compare_digest(provided, expected):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Signature X-Fiskr-Signature absente ou invalide (HMAC-SHA256 du corps brut)."
+            )
+    return body
+
+
+def _hook_idempotency_replay(db: Session, request: Request) -> Tuple[Optional[str], Optional[JSONResponse]]:
+    """Si X-Idempotency-Key correspond a une livraison connue, rejoue la
+    reponse d'origine. Purge opportuniste des livraisons expirees."""
+    key = (request.headers.get("X-Idempotency-Key") or "").strip()
+    if not key:
+        return None, None
+    if len(key) > 200:
+        raise HTTPException(status_code=400, detail="X-Idempotency-Key : 200 caractères maximum.")
+    cutoff = datetime.utcnow() - timedelta(days=_HOOK_DELIVERY_TTL_DAYS)
+    db.query(HookDelivery).filter(HookDelivery.created_at < cutoff).delete(synchronize_session=False)
+    existing = db.query(HookDelivery).filter(HookDelivery.idempotency_key == key).first()
+    if existing:
+        return key, JSONResponse(
+            status_code=existing.status_code,
+            content=existing.response_json,
+            headers={"X-Idempotency-Replayed": "true"},
+        )
+    return key, None
+
+
+def _hook_store_delivery(db: Session, key: Optional[str], endpoint: str,
+                         caller: str, status_code: int, response: Dict[str, Any]) -> None:
+    if not key:
+        return
+    db.add(HookDelivery(idempotency_key=key, endpoint=endpoint, caller=caller,
+                        status_code=status_code, response_json=response))
+    db.commit()
+
+
+@app.post("/api/hooks/screening")
+async def hook_screening(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Webhook entrant de criblage temps reel (SI amont -> Fiskr) : meme charge
+    utile que POST /api/screen, authentifie par cle d'API fsk_ (+ signature
+    HMAC-SHA256 si hooks.secret est configure), idempotent par X-Idempotency-Key
+    (la reponse d'origine est rejouee a la retransmission). Meme cœur de
+    criblage que le temps reel : audit immuable et alerte crees a l'identique.
+    """
+    body = await _verify_hook_request(request, current_user)
+    key, replay = _hook_idempotency_replay(db, request)
+    if replay is not None:
+        return replay
+    try:
+        payload = ScreenClientRequest.model_validate_json(body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
+    client_dict = payload.model_dump()
+    client_dict.pop("screening_lists", None)
+    requested_lists = _validate_screening_lists(payload.screening_lists)
+    result = screen_client_profile(db, client_dict, current_user["username"], requested_lists)
+    _hook_store_delivery(db, key, "screening", current_user["username"], 200, result)
+    return result
+
+
+class HookClientUpsert(BaseModel):
+    # Fiche client unitaire : memes champs que l'import CLIENT_BASE
+    client_id: str
+    client_type: str = "PP"
+    client_first_name: Optional[str] = None
+    client_last_name: Optional[str] = None
+    client_maiden_name: Optional[str] = None
+    client_company_name: Optional[str] = None
+    client_dob: Optional[str] = None
+    client_gender: Optional[str] = "U"
+    client_countries: Optional[Dict[str, Any]] = None
+    client_address: Optional[str] = None
+    client_city: Optional[str] = None
+    client_country: Optional[str] = None
+    client_iban: Optional[str] = None
+    client_bic: Optional[str] = None
+    client_tax_id: Optional[str] = None
+    client_phone: Optional[str] = None
+    client_email: Optional[str] = None
+    client_risk_rating: Optional[str] = None
+    client_pep_flag: Optional[bool] = None
+    client_segment: Optional[str] = None
+    client_activity_sector: Optional[str] = None
+    client_relationship_start: Optional[str] = None
+    client_status: Optional[str] = None
+
+
+@app.post("/api/hooks/client-upsert")
+async def hook_client_upsert(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Webhook entrant d'upsert d'une fiche client (SI amont -> Fiskr) dans le
+    dernier referentiel CLIENT_BASE en production : mise a jour par client_id
+    ou creation. Trace au journal des actions d'administration
+    (CLIENT_UPSERT_HOOK), idempotent par X-Idempotency-Key.
+    """
+    body = await _verify_hook_request(request, current_user)
+    key, replay = _hook_idempotency_replay(db, request)
+    if replay is not None:
+        return replay
+    try:
+        payload = HookClientUpsert.model_validate_json(body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
+    if payload.client_type not in ("PP", "PM"):
+        raise HTTPException(status_code=400, detail="client_type doit valoir PP ou PM.")
+
+    snap = db.query(Snapshot).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY"
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    if not snap:
+        raise HTTPException(
+            status_code=409,
+            detail="Aucune base clients en production : importez d'abord un référentiel CLIENT_BASE."
+        )
+
+    values = payload.model_dump()
+    existing = db.query(ClientEntity).filter(
+        ClientEntity.snapshot_id == snap.snapshot_id,
+        ClientEntity.client_id == payload.client_id,
+    ).first()
+    if existing:
+        before = {k: getattr(existing, k) for k, v in values.items()
+                  if k != "client_id" and getattr(existing, k) != v}
+        for field_name, value in values.items():
+            if field_name != "client_id":
+                setattr(existing, field_name, value)
+        existing.entity_checksum = compute_checksum(values)
+        action_detail = "updated"
+        changed_fields = sorted(before.keys())
+    else:
+        db.add(ClientEntity(snapshot_id=snap.snapshot_id,
+                            entity_checksum=compute_checksum(values), **values))
+        snap.record_count = (snap.record_count or 0) + 1
+        action_detail = "created"
+        changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
+
+    log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
+                     target=payload.client_id,
+                     after={"operation": action_detail, "fields": changed_fields,
+                            "snapshot_id": snap.snapshot_id})
+    db.commit()
+    result = {
+        "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} dans le référentiel en production.",
+        "operation": action_detail,
+        "client_id": payload.client_id,
+        "snapshot_id": snap.snapshot_id,
+        "changed_fields": changed_fields,
+    }
+    _hook_store_delivery(db, key, "client-upsert", current_user["username"], 200, result)
+    return result
+
 
 @app.get("/api/alerts/workload")
 async def get_alerts_workload(

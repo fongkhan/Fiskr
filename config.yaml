@@ -110,6 +110,22 @@ narrative:
   llm_enabled: false            # true = reformulation en prose via l'API Claude
   llm_model: "claude-opus-4-8"  # necessite ANTHROPIC_API_KEY et `pip install anthropic`
 
+# Identite de l'etablissement declarant : pre-remplit la rubrique
+# « declarant » des projets de declaration de soupcon TRACFIN.
+institution:
+  name: "Etablissement Fiskr (a configurer)"
+  siren: ""
+  correspondent_name: ""       # correspondant/declarant TRACFIN designe
+  correspondent_email: ""
+  correspondent_phone: ""
+
+# Webhooks ENTRANTS (SI amont -> Fiskr) : criblage temps reel et upsert de
+# fiches clients. Authentifies par cle d'API fsk_ ; si `secret` est renseigne,
+# l'en-tete X-Fiskr-Signature (HMAC-SHA256 hexadecimal du corps brut) devient
+# OBLIGATOIRE sur ces endpoints.
+hooks:
+  secret: ""
+
 # Regles anti-faux positifs : generation d'un brouillon de regle depuis une
 # instruction en langage naturel (API Claude). Le brouillon suit ensuite le
 # circuit normal : tests unitaires, soumission, validation 4-yeux.
