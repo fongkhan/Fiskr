@@ -46,6 +46,16 @@ SETTING_RETENTION = "retention.policy"
 # Seuils de score du criblage : seuil global + surcharges par type de liste,
 # modifiables a chaud (prioritaires sur config.yaml scoring.*)
 SETTING_SCORE_THRESHOLDS = "scoring.thresholds"
+# Checklist d'instruction des alertes (dossier d'investigation)
+SETTING_CHECKLIST = "investigation.checklist"
+DEFAULT_CHECKLIST = [
+    "Identité vérifiée (nom, date de naissance, pays)",
+    "Identifiants croisés (passeport, LEI, BIC, crypto...)",
+    "Relations et détentions examinées (règle des 50 %)",
+    "Adverse media consulté",
+    "Historique du client et alertes antérieures revus",
+    "Décision documentée et justifiée",
+]
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
@@ -282,6 +292,14 @@ def scoring_config_with_thresholds(db) -> Dict[str, Any]:
     scoring_cfg["cut_off_overrides"] = dict(thresholds["cut_off_overrides"])
     cfg["scoring"] = scoring_cfg
     return cfg
+
+
+def investigation_checklist(db) -> list:
+    """Points de controle de l'instruction d'une alerte (dossier), a chaud."""
+    value = get_setting(db, SETTING_CHECKLIST, None)
+    if isinstance(value, list) and value and all(isinstance(i, str) and i.strip() for i in value):
+        return [i.strip() for i in value]
+    return list(DEFAULT_CHECKLIST)
 
 
 def retention_policy(db) -> Dict[str, Any]:

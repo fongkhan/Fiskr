@@ -282,6 +282,8 @@ class Alert(Base):
     # et echeance SLA (due_at = created_at + delai du reglage par priorite)
     priority = Column(String(12), nullable=True, index=True)  # LOW|MEDIUM|HIGH|CRITICAL
     due_at = Column(DateTime, nullable=True)
+    # Checklist d'instruction (dossier) : {"0": {done, by, at}, ...}
+    checklist_state = Column(JSON, nullable=True)
 
 ALERT_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
@@ -753,6 +755,7 @@ def init_db():
                 ("channel", "VARCHAR(20)"),
                 ("priority", "VARCHAR(12)"),
                 ("due_at", "TIMESTAMP"),
+                ("checklist_state", "JSON"),
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),

@@ -260,6 +260,12 @@ function toggleSidebar(force) {
 // options.silent = pas de toast (polling de badges, rafraîchissements de fond).
 async function apiFetch(url, options = {}) {
     const { silent, ...fetchOptions } = options;
+    // Langue active envoyée au backend : les messages detail/message des
+    // réponses JSON arrivent traduits (fiskr/apimessages.py)
+    if (window.fiskrI18n && fiskrI18n.currentLang() !== "fr") {
+        fetchOptions.headers = { ...(fetchOptions.headers || {}),
+                                 "Accept-Language": fiskrI18n.currentLang() };
+    }
     let response;
     try {
         response = await fetch(url, fetchOptions);
@@ -552,6 +558,8 @@ async function checkAuthUser() {
             if (portabilityCard) portabilityCard.classList.toggle("hidden", !isAdmin);
             const scoringCard = document.getElementById("scoring-card");
             if (scoringCard) scoringCard.classList.toggle("hidden", !isAdmin);
+            const checklistCard = document.getElementById("checklist-card");
+            if (checklistCard) checklistCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -638,6 +646,7 @@ function switchTab(tabId) {
         fetchRetentionSettings();
         fetchAbsenceCard();
         fetchScoringSettings();
+        fetchChecklistSettings();
     }
     if (tabId === "watchlist-mgmt") {
         const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -3855,6 +3864,7 @@ async function openAlertModal(alertId) {
                 · Priorité : ${prioritySelector}
                 ${a.due_at ? `· Échéance SLA : <strong style="${a.overdue ? "color: var(--color-alert);" : ""}">${formatDateTime(a.due_at)}${a.overdue ? " ⏰" : ""}</strong>` : ""}
                 <span style="margin-left: auto; display: inline-flex; gap: 0.4rem;">
+                    <button class="btn btn-sm btn-primary" onclick="openCasefileModal(${a.id})" title="Dossier d'investigation complet (checklist, contexte, relations)">📁 Dossier</button>
                     ${a.client_id && !String(a.client_id).startsWith("TXN:") ? `<button class="btn btn-sm btn-secondary" onclick="openClient360('${escapeHtml(a.client_id)}')" title="Tout l'historique de ce client">👤 Client 360°</button>` : ""}
                     <a class="btn btn-sm btn-secondary" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)">🖨 Rapport</a>
                 </span>
@@ -6183,4 +6193,187 @@ async function saveScoringSettings() {
         showToast(data.message || "Seuils mis à jour.", "success");
         fetchScoringSettings();
     } catch (e) { console.error("Scoring save error:", e); }
+}
+
+// =========================================================================
+// LOT GO : DOSSIER D'INVESTIGATION + SIMULATION DE SEUILS + CHECKLIST
+// =========================================================================
+
+let currentCasefileAlertId = null;
+
+async function openCasefileModal(alertId) {
+    currentCasefileAlertId = alertId;
+    const modal = document.getElementById("casefile-modal");
+    const body = document.getElementById("casefile-body");
+    if (!modal || !body) return;
+    modal.classList.remove("hidden");
+    body.innerHTML = `<p style="color: var(--text-muted);">Chargement…</p>`;
+    try {
+        const response = await apiFetch(`/api/alerts/${alertId}/casefile`);
+        const cf = await response.json();
+        if (!response.ok) {
+            body.innerHTML = `<p style="color: var(--danger-soft-text);">${escapeHtml(cf.detail || "Dossier indisponible.")}</p>`;
+            return;
+        }
+        document.getElementById("casefile-title").innerHTML =
+            `📁 Dossier — Alerte #${cf.id} · ${escapeHtml(cf.client_name)} × ${escapeHtml(cf.watchlist_name)}`;
+        renderCasefile(cf);
+    } catch (e) { console.error("Casefile error:", e); }
+}
+
+function renderCasefile(cf) {
+    const body = document.getElementById("casefile-body");
+    const doneCount = cf.checklist.filter(i => i.done).length;
+    const closed = String(cf.status || "").startsWith("CLOSED");
+    const checklistHtml = cf.checklist.map(item => `
+        <label style="display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.35rem 0; cursor: ${closed ? "default" : "pointer"};">
+            <input type="checkbox" ${item.done ? "checked" : ""} ${closed ? "disabled" : ""}
+                   onchange="toggleCasefileCheck(${item.index}, this.checked)" style="margin-top: 3px;">
+            <span>${escapeHtml(item.label)}
+                ${item.done && item.by ? `<small style="color: var(--text-muted);"> — @${escapeHtml(item.by)} ${item.at ? formatDateTime(item.at) : ""}</small>` : ""}
+            </span>
+        </label>`).join("");
+
+    const ctx = cf.client_context;
+    const contextHtml = ctx
+        ? `<p>Criblages antérieurs : <strong>${ctx.screenings}</strong> · autres alertes : <strong>${ctx.other_alerts}</strong> · liste blanche : <strong>${ctx.whitelist_pairs}</strong>
+           <button class="btn btn-sm btn-secondary" style="margin-left: 0.5rem;" onclick="openClient360('${escapeHtml(ctx.client_id)}')">👤 Client 360°</button></p>`
+        : `<p style="color: var(--text-muted);">Partie de transaction (pas de dossier client).</p>`;
+
+    const inherited = cf.entity_relations.inherited_risk || [];
+    const inheritedHtml = inherited.length
+        ? `<p style="color: var(--danger-soft-text); font-weight: 600;">⚠ Règle des 50 % : ${inherited.map(r => escapeHtml(r.owner_name || r.owner_id)).join(" ; ")}</p>`
+        : "";
+    const relationsHtml = `
+        <p>${cf.entity_relations.count} relation(s) connue(s) pour cette fiche.
+           ${cf.entity_relations.count ? `<button class="btn btn-sm btn-secondary" style="margin-left: 0.5rem;" onclick="openRelationGraph('${escapeHtml(cf.watchlist_entity_id)}')">🕸 Graphe</button>` : ""}
+        </p>${inheritedHtml}`;
+
+    const attachmentsHtml = (cf.attachments || []).map(att =>
+        `<li>${escapeHtml(att.file_name)} <small style="color: var(--text-muted);">(@${escapeHtml(att.uploaded_by)})</small></li>`
+    ).join("") || `<li style="color: var(--text-muted);">Aucune pièce jointe.</li>`;
+
+    const eventsHtml = (cf.events || []).slice(-15).map(e => `
+        <div style="border-left: 2px solid var(--border-color); padding: 0.3rem 0 0.3rem 0.7rem;">
+            <small style="color: var(--text-muted);">${e.timestamp ? formatDateTime(e.timestamp) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+            ${e.detail ? `<div style="font-size: 0.83rem;">${escapeHtml(e.detail)}</div>` : ""}
+        </div>`).join("");
+
+    body.innerHTML = `
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+            ${alertPriorityBadge(cf)} ${alertStatusBadge(cf.status)}
+            <span style="margin-left: auto;"></span>
+            <a class="btn btn-sm btn-secondary" href="/api/alerts/${cf.id}/casefile/print" target="_blank">🖨 Imprimer le dossier</a>
+            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('casefile-modal').classList.add('hidden'); openAlertModal(${cf.id});">🔎 Instruire</button>
+        </div>
+        <div class="c360-section">
+            <h4>Checklist d'instruction (${doneCount}/${cf.checklist.length})</h4>
+            ${checklistHtml}
+        </div>
+        <div class="c360-section"><h4>Contexte client</h4>${contextHtml}</div>
+        <div class="c360-section"><h4>Relations de la fiche listée</h4>${relationsHtml}</div>
+        <div class="c360-section"><h4>Pièces jointes</h4><ul style="list-style: none;">${attachmentsHtml}</ul></div>
+        <div class="c360-section"><h4>Dernières actions</h4>${eventsHtml || '<p style="color: var(--text-muted);">Aucune action.</p>'}</div>`;
+}
+
+async function toggleCasefileCheck(index, done) {
+    if (!currentCasefileAlertId) return;
+    try {
+        const response = await apiFetch(`/api/alerts/${currentCasefileAlertId}/checklist`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ index, done }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Mise à jour refusée."), "error");
+            openCasefileModal(currentCasefileAlertId);
+            return;
+        }
+        showToast(`Checklist : ${data.done}/${data.total}`, "success");
+        openCasefileModal(currentCasefileAlertId);
+    } catch (e) { console.error("Checklist toggle error:", e); }
+}
+
+// --- Checklist d'instruction (réglage admin) ---
+async function fetchChecklistSettings() {
+    const card = document.getElementById("checklist-card");
+    if (!card || card.classList.contains("hidden")) return;
+    try {
+        const response = await apiFetch("/api/settings/checklist", { silent: true });
+        if (!response.ok) return;
+        const data = await response.json();
+        const box = document.getElementById("checklist-items");
+        if (box) box.value = (data.items || []).join("\n");
+    } catch (e) { console.error("Checklist settings error:", e); }
+}
+
+async function saveChecklistSettings() {
+    const raw = document.getElementById("checklist-items")?.value || "";
+    const items = raw.split("\n").map(l => l.trim()).filter(Boolean);
+    try {
+        const response = await apiFetch("/api/settings/checklist", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "Réglage refusé."), "error");
+            return;
+        }
+        showToast(data.message || "Checklist mise à jour.", "success");
+        fetchChecklistSettings();
+    } catch (e) { console.error("Checklist save error:", e); }
+}
+
+// --- Simulation d'impact des seuils ---
+async function simulateScoringImpact() {
+    const resultEl = document.getElementById("scoring-simulate-result");
+    if (!resultEl) return;
+    const overrides = {};
+    for (const t of SCORING_OVERRIDE_TYPES) {
+        const raw = document.getElementById(`scoring-ov-${t}`)?.value;
+        overrides[t] = raw === "" || raw === undefined ? null : parseFloat(raw);
+    }
+    const payload = {
+        cut_off_threshold: parseFloat(document.getElementById("scoring-global")?.value) || 75,
+        cut_off_overrides: overrides,
+        days: 30,
+    };
+    resultEl.innerHTML = `<p style="color: var(--text-muted);">Simulation en cours…</p>`;
+    try {
+        const response = await apiFetch("/api/settings/scoring/simulate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            resultEl.innerHTML = "";
+            showToast("Erreur : " + (data.detail || "Simulation refusée."), "error");
+            return;
+        }
+        const deltaBadge = (d) => d === 0
+            ? `<span style="color: var(--text-muted);">=</span>`
+            : d > 0
+                ? `<span style="color: var(--color-alert); font-weight: 700;">+${d}</span>`
+                : `<span style="color: var(--success-soft-text); font-weight: 700;">${d}</span>`;
+        const rows = Object.entries(data.by_list).map(([lt, b]) => `
+            <tr><td>${listTypeBadge(lt)}</td><td>${b.replayed}</td>
+                <td>${b.alerts_now}</td><td>${b.alerts_candidate}</td>
+                <td>${deltaBadge(b.delta)}</td></tr>`).join("");
+        resultEl.innerHTML = `
+            <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">
+                Rejeu de <strong>${data.totals.replayed}</strong> décision(s) sur ${data.period_days} jours
+                avec un seuil global à <strong>${data.candidate.cut_off_threshold}</strong> :
+                <strong>${data.totals.alerts_candidate}</strong> alertes au lieu de
+                <strong>${data.totals.alerts_now}</strong> (${deltaBadge(data.totals.delta)})
+                ${data.truncated ? " — échantillon tronqué à 50 000 lignes" : ""}.
+                <em style="color: var(--text-muted);">Aucune modification appliquée.</em>
+            </p>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Liste</th><th>Rejouées</th><th>Alertes actuelles</th><th>Alertes candidates</th><th>Δ</th></tr></thead>
+                    <tbody>${rows || '<tr><td colspan="5" style="color: var(--text-muted);">Aucune décision rejouable sur la période.</td></tr>'}</tbody>
+                </table>
+            </div>`;
+    } catch (e) { console.error("Simulate error:", e); }
 }
