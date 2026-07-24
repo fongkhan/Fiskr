@@ -1821,7 +1821,21 @@
                         <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;" id="scoring-overrides-row">
                             <!-- Rempli dynamiquement par liste -->
                         </div>
-                        <button class="btn btn-primary" onclick="saveScoringSettings()" style="margin-top: 0.5rem;">Enregistrer les seuils</button>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">
+                            <button class="btn btn-primary" onclick="saveScoringSettings()">Enregistrer les seuils</button>
+                            <button class="btn btn-secondary" onclick="simulateScoringImpact()" title="Rejoue l'historique récent avec les seuils saisis, sans rien modifier">🧪 Simuler l'impact (30 j)</button>
+                        </div>
+                        <div id="scoring-simulate-result" style="margin-top: 1rem;"></div>
+                    </div>
+
+                    <!-- Checklist d'instruction (admin) -->
+                    <div class="card form-card hidden" id="checklist-card">
+                        <h2>📋 Checklist d'Instruction (Admin)</h2>
+                        <p class="section-desc">Points de contrôle affichés dans le dossier d'investigation de chaque alerte (un par ligne, 20 maximum). Chaque coche est tracée dans l'historique append-only de l'alerte. Vider le champ = retour à la checklist par défaut.</p>
+                        <div class="form-group">
+                            <textarea id="checklist-items" rows="7" style="width: 100%; font-family: var(--font-body);"></textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveChecklistSettings()">Enregistrer la checklist</button>
                     </div>
 
                     <!-- Portabilité de la configuration (admin) -->
@@ -2075,6 +2089,15 @@
     </div>
 
     <!-- Vue client 360° -->
+    <!-- Modale dossier d'investigation -->
+    <div id="casefile-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 860px;">
+            <button class="close-modal" onclick="document.getElementById('casefile-modal').classList.add('hidden')" aria-label="Fermer">&times;</button>
+            <h2 id="casefile-title">📁 Dossier d'investigation</h2>
+            <div id="casefile-body" class="modal-body-content"></div>
+        </div>
+    </div>
+
     <div id="client360-modal" class="modal hidden">
         <div class="modal-content" style="max-width: 880px;">
             <button class="close-modal" onclick="document.getElementById('client360-modal').classList.add('hidden')" aria-label="Fermer">&times;</button>
@@ -2116,7 +2139,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.9"></script>
+    <script src="/static/app.js?v=7.0"></script>
 
 
 

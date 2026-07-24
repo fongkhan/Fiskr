@@ -79,9 +79,11 @@ from fiskr.settings import (
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     digest_settings, SETTING_DIGEST,
     retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
-    score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS
+    score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
+    investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST
 )
 from fiskr.retention import preview_retention, run_retention
+from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 
 
 
@@ -535,6 +537,35 @@ async def add_security_headers(request: Request, call_next):
     for header, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(header, value)
     return response
+
+@app.middleware("http")
+async def translate_api_messages(request: Request, call_next):
+    """
+    Messages d'API multilingues : quand le client prefere une langue
+    supportee (Accept-Language), les champs detail/message des reponses
+    JSON sont traduits depuis le catalogue (fiskr/apimessages.py).
+    Les messages hors catalogue restent en francais.
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        return response
+    lang = resolve_api_lang(request.headers.get("accept-language"))
+    if lang == "fr":
+        return response
+    content_type = response.headers.get("content-type", "")
+    if not content_type.startswith("application/json"):
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    try:
+        data = json.loads(body)
+        if translate_payload(data, lang):
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        pass
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    return Response(content=body, status_code=response.status_code,
+                    headers=headers, media_type="application/json")
 
 @app.get("/api/health")
 async def healthcheck():
@@ -1208,6 +1239,87 @@ async def update_scoring_settings(
                          before={k: before.get(k) for k in delta}, after=delta)
         db.commit()
     return {"message": "Seuils de score mis à jour (effet immédiat).", **after}
+
+class ScoringSimulateRequest(BaseModel):
+    cut_off_threshold: Optional[float] = None
+    cut_off_overrides: Optional[Dict[str, Optional[float]]] = None
+    days: int = 30
+
+_SIMULATE_MAX_ROWS = 50000
+
+@app.post("/api/settings/scoring/simulate")
+async def simulate_scoring_thresholds(
+    payload: ScoringSimulateRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Simulation d'impact AVANT de changer les seuils : rejoue les decisions
+    de criblage des N derniers jours (journal d'audit immuable) avec les
+    seuils candidats et compte, par liste, les alertes en plus / en moins.
+    Aucune ecriture : le reglage reel reste inchange.
+    """
+    if not (1 <= payload.days <= 365):
+        raise HTTPException(status_code=400, detail="La période doit être entre 1 et 365 jours.")
+    current = score_thresholds(db)
+    candidate_global = current["cut_off_threshold"]
+    candidate_overrides = dict(current["cut_off_overrides"])
+    if payload.cut_off_threshold is not None:
+        if not (0 <= payload.cut_off_threshold <= 100):
+            raise HTTPException(status_code=400, detail="Le seuil global doit être entre 0 et 100.")
+        candidate_global = float(payload.cut_off_threshold)
+    if payload.cut_off_overrides is not None:
+        for list_type, threshold in payload.cut_off_overrides.items():
+            key = str(list_type).strip().upper()
+            if threshold is None:
+                candidate_overrides.pop(key, None)
+            else:
+                if not (0 <= float(threshold) <= 100):
+                    raise HTTPException(status_code=400, detail=f"Seuil invalide pour {key} (0-100).")
+                candidate_overrides[key] = float(threshold)
+
+    def candidate_cutoff(list_type: Optional[str]) -> float:
+        if list_type and list_type in candidate_overrides:
+            return candidate_overrides[list_type]
+        return candidate_global
+
+    since = datetime.utcnow() - timedelta(days=payload.days)
+    # Seules les decisions avec un vrai candidat sont rejouables ; les
+    # suppressions gouvernees (liste blanche, regles) restent supprimees
+    rows = (db.query(AuditTrail.list_type, AuditTrail.status, AuditTrail.final_score)
+              .filter(AuditTrail.timestamp >= since,
+                      AuditTrail.watchlist_id != "NONE",
+                      ~AuditTrail.status.in_(("WHITELISTED", "CLOSED_BY_RULE")))
+              .limit(_SIMULATE_MAX_ROWS).all())
+
+    by_list: Dict[str, Dict[str, int]] = {}
+    for list_type, status_val, final_score in rows:
+        key = list_type or "UNKNOWN"
+        bucket = by_list.setdefault(key, {"replayed": 0, "alerts_now": 0, "alerts_candidate": 0})
+        bucket["replayed"] += 1
+        if status_val == "ALERT":
+            bucket["alerts_now"] += 1
+        if final_score is not None and final_score >= candidate_cutoff(key):
+            bucket["alerts_candidate"] += 1
+    for bucket in by_list.values():
+        bucket["delta"] = bucket["alerts_candidate"] - bucket["alerts_now"]
+
+    totals = {
+        "replayed": sum(b["replayed"] for b in by_list.values()),
+        "alerts_now": sum(b["alerts_now"] for b in by_list.values()),
+        "alerts_candidate": sum(b["alerts_candidate"] for b in by_list.values()),
+    }
+    totals["delta"] = totals["alerts_candidate"] - totals["alerts_now"]
+    return {
+        "period_days": payload.days,
+        "current": {"cut_off_threshold": current["cut_off_threshold"],
+                    "cut_off_overrides": current["cut_off_overrides"]},
+        "candidate": {"cut_off_threshold": candidate_global,
+                      "cut_off_overrides": candidate_overrides},
+        "by_list": by_list,
+        "totals": totals,
+        "truncated": len(rows) >= _SIMULATE_MAX_ROWS,
+    }
 
 # ------------------ IMPORT / EXPORT DE LA CONFIGURATION ------------------
 
@@ -5409,6 +5521,210 @@ def _get_open_alert(db: Session, alert_id: int) -> Alert:
 
 def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
     db.add(AlertEvent(alert_id=alert_id, username=username, action=action, detail=detail or None))
+
+# ------------------ DOSSIER D'INVESTIGATION ------------------
+
+class ChecklistToggleRequest(BaseModel):
+    index: int
+    done: bool
+
+class ChecklistSettingsUpdate(BaseModel):
+    items: List[str]
+
+def _checklist_payload(db: Session, alert: Alert) -> List[Dict[str, Any]]:
+    """Checklist effective de l'alerte : items du reglage + etat coche par item."""
+    items = investigation_checklist(db)
+    state = alert.checklist_state or {}
+    return [
+        {"index": i, "label": label, **(
+            {"done": bool(item_state.get("done")), "by": item_state.get("by"),
+             "at": item_state.get("at")}
+            if isinstance(item_state := state.get(str(i)), dict)
+            else {"done": False, "by": None, "at": None})}
+        for i, label in enumerate(items)
+    ]
+
+@app.get("/api/alerts/{alert_id}/casefile")
+async def get_alert_casefile(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Dossier d'investigation : tout ce qu'un analyste doit examiner autour
+    d'une alerte, en un seul appel — alerte, arbre de decision, historique
+    d'actions, pieces jointes, checklist d'instruction, contexte client
+    (criblages et alertes anterieurs, liste blanche) et relations/risque
+    herite de la fiche listee (regle des 50 %).
+    """
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id) \
+                    .order_by(AlertAttachment.uploaded_at.asc()).all()
+
+    client_context = None
+    if alert.client_id and not str(alert.client_id).startswith("TXN:"):
+        past_audits = db.query(AuditTrail).filter(AuditTrail.client_id == alert.client_id).count()
+        past_alerts = db.query(Alert).filter(
+            Alert.client_id == alert.client_id, Alert.id != alert.id).count()
+        wl_pairs = db.query(WhitelistPair).filter(
+            WhitelistPair.client_id == alert.client_id).count()
+        client_context = {"client_id": alert.client_id, "screenings": past_audits,
+                          "other_alerts": past_alerts, "whitelist_pairs": wl_pairs}
+
+    relations = db.query(EntityRelationship).filter(
+        (EntityRelationship.from_entity_id == alert.watchlist_entity_id)
+        | (EntityRelationship.to_entity_id == alert.watchlist_entity_id)).count()
+    inherited = compute_inherited_risk(db, alert.watchlist_entity_id, max_depth=2)
+
+    return {
+        **_alert_summary(alert),
+        "decision_tree": audit.decision_tree if audit else None,
+        "events": [
+            {"timestamp": e.timestamp.isoformat() if e.timestamp else None,
+             "username": e.username, "action": e.action, "detail": e.detail}
+            for e in events
+        ],
+        "attachments": [
+            {"id": att.id, "file_name": att.file_name, "comment": att.comment,
+             "uploaded_by": att.uploaded_by,
+             "uploaded_at": att.uploaded_at.isoformat() if att.uploaded_at else None}
+            for att in attachments
+        ],
+        "checklist": _checklist_payload(db, alert),
+        "client_context": client_context,
+        "entity_relations": {"count": relations, "inherited_risk": inherited},
+    }
+
+@app.post("/api/alerts/{alert_id}/checklist")
+async def toggle_checklist_item(
+    alert_id: int,
+    payload: ChecklistToggleRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Coche/decoche un point de controle du dossier (trace CHECKLIST,
+    append-only comme toute action d'alerte)."""
+    alert = _get_open_alert(db, alert_id)
+    items = investigation_checklist(db)
+    if not (0 <= payload.index < len(items)):
+        raise HTTPException(status_code=400, detail="Point de contrôle inconnu.")
+    state = dict(alert.checklist_state or {})
+    state[str(payload.index)] = {
+        "done": bool(payload.done), "by": current_user["username"],
+        "at": datetime.utcnow().isoformat(),
+    }
+    alert.checklist_state = state
+    _log_alert_event(db, alert.id, current_user["username"], "CHECKLIST",
+                     f"{'☑' if payload.done else '☐'} {items[payload.index]}")
+    db.commit()
+    done_count = sum(1 for s in state.values() if isinstance(s, dict) and s.get("done"))
+    return {"message": "Point de contrôle mis à jour.",
+            "done": done_count, "total": len(items),
+            "checklist": _checklist_payload(db, alert)}
+
+@app.get("/api/settings/checklist")
+async def get_checklist_settings(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Points de controle d'instruction effectifs (reglage a chaud)."""
+    return {"items": investigation_checklist(db), "default": list(DEFAULT_CHECKLIST)}
+
+@app.put("/api/settings/checklist")
+async def update_checklist_settings(
+    payload: ChecklistSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Regle la checklist d'instruction (1 a 20 points, journalise).
+    Liste vide = retour a la checklist par defaut."""
+    items = [i.strip() for i in payload.items if isinstance(i, str) and i.strip()]
+    if len(items) > 20 or any(len(i) > 200 for i in items):
+        raise HTTPException(status_code=400,
+                            detail="Checklist invalide : 20 points maximum, 200 caractères par point.")
+    before = investigation_checklist(db)
+    set_setting(db, SETTING_CHECKLIST, items or None, updated_by=admin_user["username"])
+    after = investigation_checklist(db)
+    if before != after:
+        log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="checklist",
+                         before={"items": before}, after={"items": after})
+        db.commit()
+    return {"message": "Checklist d'instruction mise à jour.", "items": after}
+
+@app.get("/api/alerts/{alert_id}/casefile/print")
+async def print_alert_casefile(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Dossier d'investigation HTML autonome imprimable (impression -> PDF) :
+    la piece unique a remettre au regulateur pour une alerte."""
+    from html import escape
+    casefile = await get_alert_casefile(alert_id, db, current_user)
+
+    def esc(value):
+        return escape(str(value)) if value not in (None, "") else "—"
+
+    checklist_html = "\n".join(
+        f"<li>{'☑' if item['done'] else '☐'} {esc(item['label'])}"
+        + (f" <small>— {esc(item['by'])}</small>" if item["done"] and item["by"] else "")
+        + "</li>"
+        for item in casefile["checklist"])
+    events_html = "\n".join(
+        f"<tr><td>{esc((e['timestamp'] or '')[:19].replace('T', ' '))}</td>"
+        f"<td>@{esc(e['username'])}</td><td>{esc(e['action'])}</td><td>{esc(e['detail'])}</td></tr>"
+        for e in casefile["events"])
+    attachments_html = "\n".join(
+        f"<li>{esc(att['file_name'])} <small>({esc(att['uploaded_by'])})</small></li>"
+        for att in casefile["attachments"]) or "<li>Aucune pièce jointe.</li>"
+    adjustments = ((casefile.get("decision_tree") or {}).get("adjustments")) or {}
+    adjustments_html = "\n".join(
+        f"<tr><td>{esc(key)}</td><td>{esc(value.get('score'))}</td><td>{esc(value.get('description'))}</td></tr>"
+        for key, value in adjustments.items())
+    inherited = casefile["entity_relations"]["inherited_risk"]
+    inherited_html = ("<p><strong>⚠ Règle des 50 % :</strong> " + "; ".join(
+        esc(r.get("owner_name") or r.get("owner_id")) for r in inherited) + "</p>") if inherited else ""
+    context = casefile.get("client_context")
+    context_html = (
+        f"<p>Criblages antérieurs : {context['screenings']} — autres alertes : "
+        f"{context['other_alerts']} — paires de liste blanche : {context['whitelist_pairs']}</p>"
+        if context else "<p>Partie de transaction (pas de dossier client).</p>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Fiskr — Dossier d'investigation — Alerte #{casefile['id']}</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #111; margin: 2rem auto; max-width: 860px; }}
+h1 {{ font-size: 1.35rem; }} h2 {{ font-size: 1.05rem; margin-top: 1.5rem; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }}
+th, td {{ border: 1px solid #ccc; padding: 5px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #f0f0f0; }} ul {{ margin: 0.5rem 0 0 1.2rem; }} .sub {{ color: #555; }}
+@media print {{ .no-print {{ display: none; }} body {{ margin: 0; }} }}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
+<h1>Dossier d'investigation — Alerte #{casefile['id']}</h1>
+<p class="sub">{esc(casefile['client_name'])} × {esc(casefile['watchlist_name'])}
+ ({esc(casefile['watchlist_entity_id'])}) — score {casefile['final_score']:.1f} % —
+ statut {esc(casefile['status'])} — priorité {esc(casefile['priority'])} —
+ généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC.</p>
+<h2>Checklist d'instruction</h2><ul>{checklist_html}</ul>
+<h2>Contexte client</h2>{context_html}
+<h2>Relations de la fiche listée</h2>
+<p>{casefile['entity_relations']['count']} relation(s) connue(s).</p>{inherited_html}
+<h2>Ajustements contextuels du score</h2>
+<table><thead><tr><th>Critère</th><th>Score</th><th>Détail</th></tr></thead>
+<tbody>{adjustments_html}</tbody></table>
+<h2>Pièces jointes</h2><ul>{attachments_html}</ul>
+<h2>Historique des actions (append-only)</h2>
+<table><thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
+<tbody>{events_html}</tbody></table>
+</body></html>"""
+    return HTMLResponse(content=html)
 
 @app.get("/api/alerts/workload")
 async def get_alerts_workload(
