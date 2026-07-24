@@ -992,20 +992,25 @@ function renderSnapshotsTable(snaps) {
             <td>${escapeHtml(dateStr)}</td>
             <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}...</small></td>
             <td>${listTypeBadge(snap.file_type)}</td>
-            <td>${snap.record_count}</td>
-            <td>${snapshotStatusBadge(snap.status)}</td>
+            <td>${snap.status === "PROCESSING" && snap.processed_count
+                ? `${snap.processed_count.toLocaleString(uiLocale())}…` : snap.record_count}</td>
+            <td>${snapshotStatusBadge(snap.status, snap)}</td>
         `;
         tbody.appendChild(tr);
     });
 }
 
 // Badge de statut d'un snapshot (incl. cycle de vie homologation)
-function snapshotStatusBadge(status) {
+function snapshotStatusBadge(status, snap) {
     if (status === "PENDING_REVIEW") {
         return '<span class="status-dot orange"></span> <span style="color: var(--color-warning); font-weight: 600;">EN ATTENTE D\'HOMOLOGATION</span>';
     }
     if (status === "REJECTED") {
         return '<span class="status-dot" style="background: var(--color-alert);"></span> <span style="color: var(--color-alert); font-weight: 600;">REJETÉ</span>';
+    }
+    if (status === "PROCESSING" && snap && snap.phase) {
+        const phaseLabel = PROGRESS_PHASE_LABELS[snap.phase] || snap.phase;
+        return `<span class="status-dot orange"></span> PROCESSING <small style="color:var(--text-muted)">— ${escapeHtml(phaseLabel)}</small>`;
     }
     return `<span class="status-dot ${status === 'READY' ? 'green' : 'orange'}"></span> ${status}`;
 }
@@ -1047,6 +1052,71 @@ function toggleSsieOptions() {
     panel.classList.toggle("hidden", fileType !== "WATCHLIST_SSIE");
 }
 
+// ------------------ PROGRESSION DES OPERATIONS LONGUES ------------------
+// Libellés français des phases renvoyées par GET /api/progress
+const PROGRESS_PHASE_LABELS = {
+    UPLOAD: "Téléversement du fichier…",
+    DOWNLOAD: "Téléchargement depuis la source…",
+    HASH: "Calcul de l'empreinte SHA-256…",
+    PARSE: "Analyse du fichier…",
+    PERSIST: "Enregistrement des fiches…",
+    DELTA: "Calcul du delta…",
+    RELOAD: "Rechargement du cache de production…",
+    DONE: "Terminé",
+};
+
+// Démarre l'interrogation périodique de GET /api/progress?id=<token> et
+// alimente la barre #<barPrefix>-progress. Retourne une fonction stop().
+function startProgressPolling(token, barPrefix, intervalMs = 1500) {
+    const wrap = document.getElementById(`${barPrefix}-progress`);
+    const phaseEl = document.getElementById(`${barPrefix}-progress-phase`);
+    const countEl = document.getElementById(`${barPrefix}-progress-count`);
+    const fillEl = document.getElementById(`${barPrefix}-progress-fill`);
+    if (!wrap) return () => {};
+    wrap.classList.remove("hidden");
+    if (phaseEl) phaseEl.textContent = "Préparation…";
+    if (countEl) countEl.textContent = "";
+    if (fillEl) { fillEl.style.width = "0%"; fillEl.classList.add("indeterminate"); }
+
+    let stopped = false;
+    const tick = async () => {
+        if (stopped) return;
+        try {
+            const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(token)}`);
+            if (resp.ok) {
+                const p = await resp.json();
+                if (phaseEl) phaseEl.textContent = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "En cours…";
+                if (countEl) {
+                    let txt = "";
+                    if (p.processed) {
+                        txt = p.total
+                            ? `${p.processed.toLocaleString(uiLocale())} / ${p.total.toLocaleString(uiLocale())}`
+                            : p.processed.toLocaleString(uiLocale());
+                    }
+                    countEl.textContent = txt;
+                }
+                if (fillEl) {
+                    if (p.pct !== null && p.pct !== undefined) {
+                        fillEl.classList.remove("indeterminate");
+                        fillEl.style.width = `${Math.min(100, p.pct)}%`;
+                    } else {
+                        fillEl.classList.add("indeterminate");
+                        fillEl.style.width = "100%";
+                    }
+                }
+            }
+        } catch (e) { /* la progression ne doit jamais casser l'opération */ }
+    };
+    const timer = setInterval(tick, intervalMs);
+    tick();
+    return function stop() {
+        stopped = true;
+        clearInterval(timer);
+        wrap.classList.add("hidden");
+        if (fillEl) fillEl.classList.remove("indeterminate");
+    };
+}
+
 // Handle Snapshot Ingestion (Upload file)
 async function handleIngestion(event) {
     event.preventDefault();
@@ -1083,9 +1153,16 @@ async function handleIngestion(event) {
         }
     }
     
+    // Jeton de progression : le serveur alimente GET /api/progress pendant
+    // que la requête d'import est encore en vol (gros fichiers)
+    const progressId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+        : `ing-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    formData.append("progress_id", progressId);
+
     btn.disabled = true;
     btn.textContent = "Importation en cours...";
-    
+    const stopProgress = startProgressPolling(progressId, "ingest");
+
     try {
         const response = await apiFetch("/api/ingest", {
             method: "POST",
@@ -1117,6 +1194,7 @@ async function handleIngestion(event) {
         console.error("Error ingesting snapshot:", e);
         showToast("Erreur réseau de communication.", "error");
     } finally {
+        stopProgress();
         btn.disabled = false;
         btn.textContent = "Charger & Archiver";
     }
@@ -1137,6 +1215,20 @@ async function handleSourceSync(source) {
     btn.disabled = true;
     const originalText = btn.textContent;
     btn.textContent = "Synchronisation en cours...";
+
+    // Progression en direct dans le bouton (phase + compteur), jeton sync:<source>
+    const syncToken = `sync:${source.toLowerCase()}`;
+    const syncTimer = setInterval(async () => {
+        try {
+            const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(syncToken)}`);
+            if (!resp.ok) return;
+            const p = await resp.json();
+            if (p.status !== "RUNNING") return;
+            const label = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "";
+            const count = p.processed ? ` ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}` : "";
+            btn.textContent = `${label}${count}`;
+        } catch (e) { /* jamais bloquant */ }
+    }, 1500);
 
     try {
         const response = await apiFetch("/api/sync/run", {
@@ -1173,6 +1265,7 @@ async function handleSourceSync(source) {
         console.error("Error running source sync:", e);
         showToast("Erreur réseau pendant la synchronisation.", "error");
     } finally {
+        clearInterval(syncTimer);
         btn.disabled = false;
         btn.textContent = originalText;
     }
@@ -1208,6 +1301,14 @@ function renderSyncReportsTable(reports) {
         if (report.status === "SUCCESS") statusBadge = '<span class="status-badge no_match">SUCCESS</span>';
         else if (report.status === "ERROR") statusBadge = '<span class="status-badge alert">ERROR</span>';
         else statusBadge = `<span class="status-badge warning">${escapeHtml(report.status)}</span>`;
+
+        // Echecs partiels (actes/PDF inaccessibles) : la synchronisation a
+        // abouti mais une partie de la source n'a pas pu être récupérée
+        const delta = report.delta_report || {};
+        const partialFailures = (delta.fetch_failures || []).length + (delta.pdf_failures || []).length;
+        if (partialFailures > 0 && report.status !== "ERROR") {
+            statusBadge += ` <span class="status-badge warning" title="${partialFailures} élément(s) inaccessibles — repris au prochain run">⚠ ${partialFailures}</span>`;
+        }
 
         const sourceLabel = SYNC_SOURCE_LABELS[report.source] || report.source;
 
@@ -3167,6 +3268,7 @@ async function openReviewDetail(snapshotId) {
         // Cahier de tests : panels disponibles + dernier rapport archivé
         showReviewStep(1);
         fetchTestPanels();
+        fetchBacktestCandidateRules();
         renderBacktestReport(data.backtest_report);
         await loadReviewEntitiesPage(1);
         document.getElementById("review-detail-card").scrollIntoView({ behavior: "smooth" });
@@ -3239,6 +3341,26 @@ async function fetchTestPanels(selectSnapshotId = null) {
     }
 }
 
+// Règles anti-FP candidates proposées au cahier de tests (canal criblage) :
+// brouillons en tête, puis en validation, puis actives. Silencieux si le
+// compte n'a pas le rôle `rules` (403) — le select reste sur « Aucune ».
+async function fetchBacktestCandidateRules() {
+    const select = document.getElementById("backtest-candidate-rule");
+    if (!select) return;
+    try {
+        const response = await apiFetch("/api/fprules?channel=SCREENING", { silent: true });
+        if (!response.ok) return;
+        const data = await response.json();
+        const weight = { DRAFT: 0, PENDING_VALIDATION: 1, ACTIVE: 2 };
+        const rules = (data.items || [])
+            .filter(r => r.status in weight)
+            .sort((a, b) => (weight[a.status] - weight[b.status]) || (a.id - b.id));
+        const labels = { DRAFT: "brouillon", PENDING_VALIDATION: "en validation", ACTIVE: "active" };
+        select.innerHTML = '<option value="">Aucune — règles actives uniquement</option>' +
+            rules.map(r => `<option value="${r.id}">#${r.id} ${escapeHtml(r.name)} (${labels[r.status]}, v${r.version})</option>`).join("");
+    } catch (e) { /* rôle rules absent ou réseau : select inchangé */ }
+}
+
 async function generateTestPanel() {
     const btn = document.getElementById("generate-panel-btn");
     const size = parseInt(document.getElementById("backtest-panel-size").value, 10) || 500;
@@ -3277,10 +3399,15 @@ async function runReviewBacktest() {
     btn.disabled = true;
     btn.textContent = "Criblage à blanc en cours...";
     try {
+        const candidateRuleSel = document.getElementById("backtest-candidate-rule");
+        const payload = { panel_snapshot_id: panelId };
+        if (candidateRuleSel && candidateRuleSel.value) {
+            payload.candidate_rule_id = parseInt(candidateRuleSel.value, 10);
+        }
         const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/backtest`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ panel_snapshot_id: panelId }),
+            body: JSON.stringify(payload),
         });
         const data = await response.json();
         if (!response.ok) {
@@ -3378,6 +3505,7 @@ function renderBacktestReport(report) {
                     </table>
                 </div>
             </details>` : ""}
+        ${backtestRulesBlockHtml(report)}
     `;
 
     if (reminder) {
@@ -3385,6 +3513,50 @@ function renderBacktestReport(report) {
             ? `<p class="section-desc" style="color: var(--color-safe);">✅ Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).</p>`
             : `<p class="section-desc" style="color: var(--color-warning);">⚠️ Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
     }
+}
+
+// Bloc « Règles anti-FP » du rapport de backtest. Les anciens rapports
+// (antérieurs à la clé additive `rules`) restent valides : bloc omis.
+function backtestRulesBlockHtml(report) {
+    const rules = report.rules;
+    if (!rules) return "";
+    const cand = rules.candidate_rule;
+    const delta = rules.suppressed_delta || 0;
+    const deltaTxt = delta > 0 ? `−${delta} alerte(s) en moins grâce à la règle candidate`
+        : (delta < 0 ? `+${-delta} alerte(s) de plus (la règle candidate en supprime moins)` : "aucun écart imputable aux règles");
+    const suppressedPairs = rules.candidate_suppressed_pairs || [];
+    const pairRows = suppressedPairs.slice(0, 50).map(p => `
+        <tr>
+            <td><code>${escapeHtml(p.client_id || "")}</code><br><small>${escapeHtml(p.client_name || "")}</small></td>
+            <td><small><strong>${escapeHtml(p.entity_name || "")}</strong></small></td>
+            <td>${listTypeBadge(p.list_type)}</td>
+            <td>${p.score}</td>
+            <td><small>${escapeHtml(p.rule_name || "")}</small></td>
+        </tr>`).join("");
+    return `
+        <div style="margin-top: 1rem; border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem;">
+            <h4 style="margin: 0 0 0.4rem;">🧩 Règles anti-faux positifs dans ce cahier de tests</h4>
+            <p class="section-desc" style="margin: 0 0 0.5rem;">
+                ${rules.active_count} règle(s) active(s) appliquée(s) des deux côtés (comme en production).
+                ${cand ? `Règle candidate évaluée côté candidat : <strong>#${cand.id} ${escapeHtml(cand.name)}</strong> (${escapeHtml(cand.status)}, v${cand.version}).` : "Aucune règle candidate évaluée sur ce run."}
+            </p>
+            <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem;">
+                <span>Supprimées par règles — production : <strong>${rules.current_suppressed}</strong></span>
+                <span>candidat : <strong>${rules.candidate_suppressed}</strong></span>
+                <span>${cand ? `Effet : <strong>${deltaTxt}</strong>` : ""}</span>
+                <span>Écart avant règles : <strong>${rules.gap_pct_before_rules} %</strong> (vs ${report.gap_pct} % après)</span>
+            </div>
+            ${suppressedPairs.length ? `
+            <details style="margin-top: 0.5rem;">
+                <summary style="cursor: pointer; font-weight: 600;">Échantillon des alertes supprimées par règle côté candidat (${suppressedPairs.length})</summary>
+                <div class="table-container" style="max-height: 220px; overflow-y: auto;">
+                    <table>
+                        <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th><th>Règle</th></tr></thead>
+                        <tbody>${pairRows}</tbody>
+                    </table>
+                </div>
+            </details>` : ""}
+        </div>`;
 }
 
 async function bulkGoodGuys() {
@@ -4681,9 +4853,15 @@ function fpRuleEditorHtml(rule) {
         <div class="form-group"><label>Nom</label><input type="text" id="fprule-name" value="${escapeHtml(rule ? rule.name : "")}" ${editable ? "" : "disabled"}></div>
         <div class="form-group"><label>Description</label><input type="text" id="fprule-desc" value="${escapeHtml(rule ? (rule.description || "") : "")}" ${editable ? "" : "disabled"}></div>
         <div class="form-group" style="max-width: 160px;"><label>Ordre d'exécution</label><input type="number" id="fprule-order" value="${rule ? rule.run_order : 100}" ${editable ? "" : "disabled"}></div>
+        ${editable ? fpRuleNlSectionHtml() : ""}
+        ${editable ? fpRuleToolbarHtml() : ""}
         <div class="form-group">
             <label>Code Python — <code>def rule(ctx) -&gt; bool</code> (True = supprimer l'alerte)</label>
-            <textarea id="fprule-code" rows="14" style="font-family: monospace; font-size: 0.82rem;" ${editable ? "" : "disabled"}>${escapeHtml(rule ? rule.code : FP_RULE_TEMPLATE)}</textarea>
+            <div style="position: relative;">
+                <textarea id="fprule-code" rows="14" style="font-family: monospace; font-size: 0.82rem;" ${editable ? `oninput="onFpRuleCodeInput(event)" onkeydown="onFpRuleCodeKeydown(event)" onclick="hideFpAutocomplete()" onblur="setTimeout(hideFpAutocomplete, 200)"` : "disabled"}>${escapeHtml(rule ? rule.code : FP_RULE_TEMPLATE)}</textarea>
+                <div id="fprule-autocomplete" class="fp-autocomplete hidden" role="listbox"></div>
+            </div>
+            ${editable ? '<div id="fprule-validate-msg" class="fp-validate-msg"></div>' : ""}
         </div>
         <div style="display:flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">${actions}</div>
         ${(rule && rule.status === "DRAFT") ? fpRuleDevBenchHtml() : ""}
@@ -4701,6 +4879,440 @@ const FP_RULE_TEMPLATE = `def rule(ctx):
     return False
 `;
 
+// ---- Atelier d'édition : palette ctx, snippets, validation, autocomplétion ----
+
+// Clés du contexte rule(ctx), typées pour la palette, l'autocomplétion et le
+// formulaire structuré (miroir du contrat de fiskr/fprules.py)
+const FP_CTX_KEYS = [
+    { key: "channel", type: "str", desc: "SCREENING ou FILTERING" },
+    { key: "client_id", type: "str", desc: "identifiant client" },
+    { key: "client_name", type: "str", desc: "nom complet du client" },
+    { key: "entity_id", type: "str", desc: "identifiant de l'entité listée" },
+    { key: "entity_name", type: "str", desc: "nom principal de l'entité listée" },
+    { key: "list_type", type: "str", desc: "liste d'origine (WATCHLIST_OFAC…)" },
+    { key: "final_score", type: "num", desc: "score final 0-100" },
+    { key: "base_score", type: "num", desc: "score avant ajustements" },
+    { key: "hard_match", type: "bool", desc: "correspondance exacte (identifiant)" },
+    { key: "adjustments", type: "dict", desc: "détail des ajustements de score" },
+    { key: "client", type: "dict", desc: "profil client complet (criblage)" },
+    { key: "entity", type: "dict", desc: "fiche listée complète" },
+    { key: "party", type: "dict", desc: "partie du message (filtrage)" },
+    { key: "message", type: "dict", desc: "message ISO 20022 (filtrage)" },
+];
+// Sous-clés les plus utiles pour l'autocomplétion imbriquée et le formulaire
+const FP_CTX_SUBKEYS = {
+    party: ["name", "roles", "country", "bic", "is_agent", "address", "birth_date"],
+    message: ["type", "msg_id"],
+    entity: ["entity_type", "primary_name", "countries", "dates_of_birth", "programs", "designation_date"],
+    client: ["client_type", "client_first_name", "client_last_name", "client_company_name", "client_dob", "client_countries", "client_segment"],
+};
+
+// Modèles de code insérables (snippets)
+const FP_RULE_SNIPPETS = [
+    ["Seuil de score (hors hard match)", `    # Supprimer sous un seuil de score, jamais sur correspondance exacte
+    return ctx["final_score"] < 82 and not ctx["hard_match"]`],
+    ["Pays hors périmètre", `    # Supprimer si aucun pays de l'entité n'est dans la zone surveillée
+    surveilles = {"RU", "IR", "KP", "SY"}
+    pays = set((ctx.get("entity") or {}).get("countries", {}).get("citizenship") or [])
+    return not (pays & surveilles) and not ctx["hard_match"]`],
+    ["Motif regex sur le nom", `    # Supprimer les collisions sur un nom générique (ex : sociétés homonymes)
+    return bool(re.search(r"\\b(TRADING|HOLDING)\\b", ctx["entity_name"] or "", re.I)) and ctx["final_score"] < 90`],
+    ["Type d'entité différent", `    # Supprimer si le client est une personne physique et l'entité une société
+    client_type = (ctx.get("client") or {}).get("client_type")
+    entity_type = (ctx.get("entity") or {}).get("entity_type")
+    return client_type == "PP" and entity_type == "E" and not ctx["hard_match"]`],
+    ["Date de naissance absente côté liste", `    # Score moyen sans DOB côté liste : purement homonymique
+    dobs = (ctx.get("entity") or {}).get("dates_of_birth") or []
+    return not dobs and ctx["final_score"] < 88 and not ctx["hard_match"]`],
+    ["Rôle de partie (filtrage)", `    # Filtrage : ignorer les agents techniques (banques intermédiaires)
+    party = ctx.get("party") or {}
+    return bool(party.get("is_agent")) and ctx["final_score"] < 92 and not ctx["hard_match"]`],
+    ["Écart d'ajustement pays", `    # Supprimer quand le malus pays a déjà fortement réduit le score
+    adj = ctx.get("adjustments") or {}
+    return adj.get("country_penalty", 0) <= -10 and ctx["final_score"] < 85`],
+    ["Combinaison ET/OU", `    # Combinaison de critères : score bas ET (pas de pays commun OU type différent)
+    faible = ctx["final_score"] < 84 and not ctx["hard_match"]
+    entity = ctx.get("entity") or {}
+    sans_pays = not (entity.get("countries") or {}).get("citizenship")
+    return faible and sans_pays`],
+];
+
+function fpRuleToolbarHtml() {
+    const chips = FP_CTX_KEYS.map(k =>
+        `<button type="button" class="fp-ctx-chip" title="${escapeHtml(k.desc)}" onclick="insertFpCtxKey('${k.key}')">${k.key}</button>`
+    ).join("");
+    const snippetOpts = FP_RULE_SNIPPETS.map((s, i) => `<option value="${i}">${escapeHtml(s[0])}</option>`).join("");
+    return `
+        <div class="fp-toolbar">
+            <select id="fprule-snippet-select" onchange="insertFpSnippet(this)">
+                <option value="">📋 Insérer un modèle…</option>${snippetOpts}
+            </select>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="checkFpRuleSyntax(false)">✓ Vérifier la syntaxe</button>
+        </div>
+        <div class="fp-ctx-palette" title="Cliquer pour insérer au curseur">${chips}</div>`;
+}
+
+// Insertion au curseur dans la textarea de code
+function insertAtFpCursor(text) {
+    const ta = document.getElementById("fprule-code");
+    if (!ta) return;
+    ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
+    ta.focus();
+    scheduleFpValidation();
+}
+
+function insertFpCtxKey(key) {
+    insertAtFpCursor(`ctx["${key}"]`);
+}
+
+function insertFpSnippet(sel) {
+    const idx = sel.value;
+    sel.value = "";
+    if (idx === "") return;
+    const snippet = FP_RULE_SNIPPETS[parseInt(idx, 10)];
+    if (snippet) insertAtFpCursor(`\n${snippet[1]}\n`);
+}
+
+// ---- Validation serveur (débouncée 800 ms + bouton) ----
+let fpValidateTimer = null;
+
+function scheduleFpValidation() {
+    clearTimeout(fpValidateTimer);
+    fpValidateTimer = setTimeout(() => checkFpRuleSyntax(true), 800);
+}
+
+async function checkFpRuleSyntax(silent) {
+    const ta = document.getElementById("fprule-code");
+    const msgEl = document.getElementById("fprule-validate-msg");
+    if (!ta || !msgEl) return;
+    try {
+        const response = await apiFetch("/api/fprules/validate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: ta.value }), silent: true,
+        });
+        if (!response.ok) return;
+        const v = await response.json();
+        if (v.valid) {
+            msgEl.innerHTML = '<span style="color: var(--success-soft-text);">✓ Syntaxe valide — <code>rule(ctx)</code> prête à être testée.</span>';
+        } else if (v.line) {
+            // Message cliquable : positionne le curseur sur la ligne fautive
+            msgEl.innerHTML = `<a href="javascript:void(0)" onclick="gotoFpRuleLine(${v.line})" style="color: var(--color-alert);">⚠ Ligne ${v.line}${v.offset ? `, col. ${v.offset}` : ""} : ${escapeHtml(v.error || "syntaxe invalide")}</a>`;
+        } else {
+            msgEl.innerHTML = `<span style="color: var(--color-alert);">⚠ ${escapeHtml(v.error || "code invalide")}</span>`;
+        }
+    } catch (e) { if (!silent) showToast("Validation impossible (réseau).", "error"); }
+}
+
+function gotoFpRuleLine(line) {
+    const ta = document.getElementById("fprule-code");
+    if (!ta) return;
+    const lines = ta.value.split("\n");
+    let pos = 0;
+    for (let i = 0; i < Math.min(line - 1, lines.length); i++) pos += lines[i].length + 1;
+    ta.focus();
+    ta.setSelectionRange(pos, pos + (lines[line - 1] || "").length);
+}
+
+// ---- Autocomplétion maison sur ctx[" (zéro lib, CSP OK) ----
+let fpAcState = { open: false, items: [], selected: 0, anchor: 0 };
+
+function onFpRuleCodeInput() {
+    scheduleFpValidation();
+    updateFpAutocomplete();
+}
+
+// Position pixel du caret dans une textarea : technique du div miroir
+function fpCaretCoords(ta) {
+    const div = document.createElement("div");
+    const style = getComputedStyle(ta);
+    ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
+     "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+     "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+     "boxSizing", "whiteSpace", "wordWrap", "width"].forEach(p => { div.style[p] = style[p]; });
+    div.style.position = "absolute";
+    div.style.visibility = "hidden";
+    div.style.whiteSpace = "pre-wrap";
+    div.style.wordWrap = "break-word";
+    div.textContent = ta.value.substring(0, ta.selectionStart);
+    const marker = document.createElement("span");
+    marker.textContent = "​";
+    div.appendChild(marker);
+    document.body.appendChild(div);
+    const coords = { left: marker.offsetLeft, top: marker.offsetTop + marker.offsetHeight };
+    document.body.removeChild(div);
+    return { left: coords.left - ta.scrollLeft, top: coords.top - ta.scrollTop };
+}
+
+function updateFpAutocomplete() {
+    const ta = document.getElementById("fprule-code");
+    const box = document.getElementById("fprule-autocomplete");
+    if (!ta || !box) return;
+    const before = ta.value.substring(0, ta.selectionStart);
+    // Déclencheur 1 : ctx[" ou ctx[' en cours de frappe
+    let m = before.match(/ctx\[\s*["']([A-Za-z_]*)$/);
+    let items = [];
+    let anchor = 0;
+    if (m) {
+        const prefix = m[1].toLowerCase();
+        anchor = ta.selectionStart - m[1].length;
+        items = FP_CTX_KEYS.filter(k => k.key.startsWith(prefix))
+            .map(k => ({ label: k.key, hint: k.type, insert: k.key }));
+    } else {
+        // Déclencheur 2 : sous-clés — party.get(" / (ctx.get("party") or {}).get("
+        m = before.match(/(party|message|entity|client)"?\)?(?:\s*or\s*\{\})?\)?\.get\(\s*["']([A-Za-z_]*)$/);
+        if (m && FP_CTX_SUBKEYS[m[1]]) {
+            const prefix = m[2].toLowerCase();
+            anchor = ta.selectionStart - m[2].length;
+            items = FP_CTX_SUBKEYS[m[1]].filter(k => k.startsWith(prefix))
+                .map(k => ({ label: `${m[1]}.${k}`, hint: "", insert: k }));
+        }
+    }
+    if (!items.length) { hideFpAutocomplete(); return; }
+    fpAcState = { open: true, items, selected: 0, anchor };
+    const pos = fpCaretCoords(ta);
+    box.style.left = `${Math.min(pos.left, ta.clientWidth - 230)}px`;
+    box.style.top = `${pos.top}px`;
+    renderFpAutocomplete();
+    box.classList.remove("hidden");
+}
+
+function renderFpAutocomplete() {
+    const box = document.getElementById("fprule-autocomplete");
+    if (!box) return;
+    box.innerHTML = fpAcState.items.map((it, i) =>
+        `<div class="fp-ac-item${i === fpAcState.selected ? " selected" : ""}" role="option" onmousedown="event.preventDefault(); pickFpAutocomplete(${i})">
+            <span>${escapeHtml(it.label)}</span>${it.hint ? `<small>${escapeHtml(it.hint)}</small>` : ""}
+        </div>`).join("");
+}
+
+function pickFpAutocomplete(index) {
+    const ta = document.getElementById("fprule-code");
+    const item = fpAcState.items[index];
+    if (!ta || !item) return;
+    ta.setRangeText(item.insert, fpAcState.anchor, ta.selectionStart, "end");
+    hideFpAutocomplete();
+    ta.focus();
+    scheduleFpValidation();
+}
+
+function hideFpAutocomplete() {
+    const box = document.getElementById("fprule-autocomplete");
+    if (box) box.classList.add("hidden");
+    fpAcState.open = false;
+}
+
+function onFpRuleCodeKeydown(e) {
+    if (!fpAcState.open) return;
+    if (e.key === "ArrowDown") {
+        e.preventDefault();
+        fpAcState.selected = (fpAcState.selected + 1) % fpAcState.items.length;
+        renderFpAutocomplete();
+    } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        fpAcState.selected = (fpAcState.selected - 1 + fpAcState.items.length) % fpAcState.items.length;
+        renderFpAutocomplete();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pickFpAutocomplete(fpAcState.selected);
+    } else if (e.key === "Escape") {
+        hideFpAutocomplete();
+    }
+}
+
+// ---- Test unitaire pré-rempli depuis une alerte réelle ----
+async function addFpRuleTestFromAlert() {
+    if (!currentFpRuleId) { showToast("Enregistrez d'abord le brouillon.", "warning"); return; }
+    const alertId = await promptDialog("N° de l'alerte à rejouer (le contexte ctx sera pré-rempli)");
+    if (!alertId) return;
+    try {
+        const response = await apiFetch(`/api/fprules/context-from-alert/${encodeURIComponent(alertId.trim())}`);
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "alerte introuvable."), "error"); return; }
+        const ctxRaw = await promptDialog(
+            `Contexte reconstruit de l'alerte #${data.alert_id} — ajustez si besoin puis validez`,
+            { textarea: true, message: JSON.stringify(data.ctx, null, 2).substring(0, 4000) }
+        );
+        // Le contexte proposé est affiché dans le message ; champ vide = le reprendre tel quel
+        let ctx;
+        try { ctx = ctxRaw && ctxRaw.trim() ? JSON.parse(ctxRaw) : data.ctx; }
+        catch (e) { showToast("JSON invalide.", "error"); return; }
+        if (ctxRaw === null) return;
+        const expected = await confirmDialog(
+            "La règle doit-elle SUPPRIMER l'alerte pour ce cas ? (Annuler = conserver)",
+            { confirmLabel: "Supprimer", cancelLabel: "Conserver" });
+        const resp2 = await apiFetch(`/api/fprules/${currentFpRuleId}/tests`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: `Alerte #${data.alert_id}`, ctx, expected }),
+        });
+        if (!resp2.ok) { const d = await resp2.json(); showToast("Erreur : " + (d.detail || ""), "error"); return; }
+        showToast("Cas de test créé depuis l'alerte.", "success");
+        loadFpRuleTests(currentFpRuleId);
+    } catch (e) { showToast("Erreur réseau.", "error"); }
+}
+
+// ---- Création en langage naturel : IA + formulaire structuré ----
+
+function fpRuleNlSectionHtml() {
+    return `
+        <div class="fp-nl-section">
+            <label style="font-weight: 600;">🗣️ Décrire la règle en langage naturel</label>
+            <p class="section-desc" style="margin: 0.2rem 0 0.5rem;">Deux assistants génèrent un brouillon de code dans l'éditeur ci-dessous — le circuit de gouvernance (tests, soumission, validation 4-yeux) reste inchangé.</p>
+            <textarea id="fprule-nl-input" rows="2" placeholder="Ex : supprimer les alertes sous 85 % quand l'entité listée n'a pas de date de naissance, sauf correspondance exacte"></textarea>
+            <div style="display:flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem;">
+                <button type="button" class="btn btn-sm btn-primary" onclick="generateFpRuleFromNL()">✨ Générer par IA</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="toggleFpFormBuilder()">🧩 Formulaire structuré (sans IA)</button>
+            </div>
+            <div id="fprule-nl-status" style="margin-top: 0.4rem;"></div>
+            <div id="fprule-form-builder" class="hidden" style="margin-top: 0.75rem;"></div>
+        </div>`;
+}
+
+async function generateFpRuleFromNL() {
+    const input = document.getElementById("fprule-nl-input");
+    const statusEl = document.getElementById("fprule-nl-status");
+    const instruction = input ? input.value.trim() : "";
+    if (!instruction) { showToast("Décrivez d'abord la règle souhaitée.", "warning"); return; }
+    statusEl.innerHTML = '<small style="color: var(--text-muted);">✨ Génération en cours…</small>';
+    try {
+        const response = await apiFetch("/api/fprules/generate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ instruction, channel: fpRuleChannel() }),
+        });
+        const data = await response.json();
+        if (response.status === 503) {
+            statusEl.innerHTML = `<small style="color: var(--color-warning);">⚠ ${escapeHtml(data.detail || "IA non configurée.")} </small>`;
+            toggleFpFormBuilder(true);
+            return;
+        }
+        if (response.status === 422 && data.detail && data.detail.raw_code) {
+            document.getElementById("fprule-code").value = data.detail.raw_code;
+            statusEl.innerHTML = `<small style="color: var(--color-alert);">⚠ ${escapeHtml(data.detail.message || "Code généré invalide")} — le code brut a été déposé dans l'éditeur pour correction manuelle.</small>`;
+            checkFpRuleSyntax(true);
+            return;
+        }
+        if (!response.ok) {
+            statusEl.innerHTML = `<small style="color: var(--color-alert);">Erreur : ${escapeHtml(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))}</small>`;
+            return;
+        }
+        document.getElementById("fprule-code").value = data.code;
+        statusEl.innerHTML = `<small style="color: var(--success-soft-text);">✓ Brouillon généré (${escapeHtml(data.model || "IA")})${data.explanation ? " — " + escapeHtml(data.explanation) : ""}. Relisez, testez, puis soumettez.</small>`;
+        checkFpRuleSyntax(true);
+    } catch (e) {
+        statusEl.innerHTML = '<small style="color: var(--color-alert);">Erreur réseau pendant la génération.</small>';
+    }
+}
+
+// Champs proposés par le formulaire structuré (générateur de code sans IA)
+const FP_FORM_FIELDS = [
+    { id: "final_score", label: "Score final (%)", type: "num", access: 'ctx["final_score"]' },
+    { id: "base_score", label: "Score de base (%)", type: "num", access: 'ctx["base_score"]' },
+    { id: "hard_match", label: "Correspondance exacte", type: "bool", access: 'ctx["hard_match"]' },
+    { id: "list_type", label: "Liste d'origine", type: "str", access: 'ctx["list_type"]' },
+    { id: "entity_name", label: "Nom de l'entité listée", type: "str", access: 'ctx["entity_name"]' },
+    { id: "client_name", label: "Nom du client", type: "str", access: 'ctx["client_name"]' },
+    { id: "entity_type", label: "Type d'entité (I/E)", type: "str", access: '(ctx.get("entity") or {}).get("entity_type")' },
+    { id: "client_type", label: "Type de client (PP/PM)", type: "str", access: '(ctx.get("client") or {}).get("client_type")' },
+    { id: "party_country", label: "Pays de la partie (filtrage)", type: "str", access: '(ctx.get("party") or {}).get("country")' },
+    { id: "party_is_agent", label: "Partie = agent technique (filtrage)", type: "bool", access: '(ctx.get("party") or {}).get("is_agent")' },
+];
+const FP_FORM_OPERATORS = {
+    num: [["<", "inférieur à"], ["<=", "inférieur ou égal à"], [">", "supérieur à"], [">=", "supérieur ou égal à"], ["==", "égal à"]],
+    str: [["==", "égal à"], ["!=", "différent de"], ["contains", "contient"], ["regex", "correspond à la regex"]],
+    bool: [["is_true", "est vrai"], ["is_false", "est faux"]],
+};
+
+function toggleFpFormBuilder(forceOpen) {
+    const panel = document.getElementById("fprule-form-builder");
+    if (!panel) return;
+    const open = forceOpen === true || panel.classList.contains("hidden");
+    panel.classList.toggle("hidden", !open);
+    if (open && !panel.innerHTML) {
+        panel.innerHTML = `
+            <div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; background: var(--surface-hover);">
+                <strong>Conditions (la règle SUPPRIME l'alerte quand elles sont réunies)</strong>
+                <div id="fprule-form-rows" style="margin-top: 0.5rem;"></div>
+                <div style="display:flex; gap: 0.5rem; align-items:center; flex-wrap: wrap; margin-top: 0.5rem;">
+                    <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="addFpFormRow()">+ Condition</button>
+                    <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.85rem;">Combinaison
+                        <select id="fprule-form-combinator"><option value="and">ET (toutes)</option><option value="or">OU (au moins une)</option></select>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.85rem;">
+                        <input type="checkbox" id="fprule-form-guard" checked> Ne jamais supprimer un hard match
+                    </label>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="insertFpFormCode()">⤵ Générer le code dans l'éditeur</button>
+                </div>
+            </div>`;
+        addFpFormRow();
+    }
+}
+
+function addFpFormRow() {
+    const rows = document.getElementById("fprule-form-rows");
+    if (!rows) return;
+    const idx = rows.children.length;
+    const fieldOpts = FP_FORM_FIELDS.map(f => `<option value="${f.id}">${escapeHtml(f.label)}</option>`).join("");
+    const row = document.createElement("div");
+    row.className = "fp-form-row";
+    row.innerHTML = `
+        <select class="fp-form-field" onchange="onFpFormFieldChange(this)">${fieldOpts}</select>
+        <select class="fp-form-op">${FP_FORM_OPERATORS.num.map(o => `<option value="${o[0]}">${o[1]}</option>`).join("")}</select>
+        <input type="text" class="fp-form-value" placeholder="valeur">
+        <button type="button" class="btn btn-sm" style="background: rgba(239,68,68,0.15); color: var(--danger-soft-text);" onclick="this.parentElement.remove()">✕</button>`;
+    rows.appendChild(row);
+    if (idx === 0) onFpFormFieldChange(row.querySelector(".fp-form-field"));
+}
+
+function onFpFormFieldChange(sel) {
+    const field = FP_FORM_FIELDS.find(f => f.id === sel.value);
+    const row = sel.parentElement;
+    const opSel = row.querySelector(".fp-form-op");
+    const valInput = row.querySelector(".fp-form-value");
+    const ops = FP_FORM_OPERATORS[field ? field.type : "num"];
+    opSel.innerHTML = ops.map(o => `<option value="${o[0]}">${o[1]}</option>`).join("");
+    valInput.style.display = (field && field.type === "bool") ? "none" : "";
+}
+
+// Génère du Python déterministe depuis les lignes du formulaire (accès sûrs,
+// valeurs échappées via JSON.stringify) — le serveur reste le garde-fou final
+function buildRuleCode(conditions, combinator, guardHardMatch) {
+    const parts = conditions.map(c => {
+        const field = FP_FORM_FIELDS.find(f => f.id === c.field);
+        if (!field) return null;
+        const acc = field.access;
+        if (field.type === "bool") return c.op === "is_true" ? `bool(${acc})` : `not ${acc}`;
+        if (field.type === "num") {
+            const num = parseFloat(String(c.value).replace(",", "."));
+            if (isNaN(num)) return null;
+            return `(${acc} or 0) ${c.op} ${num}`;
+        }
+        const value = JSON.stringify(String(c.value));
+        if (c.op === "contains") return `${value}.lower() in str(${acc} or "").lower()`;
+        if (c.op === "regex") return `bool(re.search(${value}, str(${acc} or ""), re.I))`;
+        return `str(${acc} or "") ${c.op} ${value}`;
+    }).filter(Boolean);
+    if (!parts.length) return null;
+    const joiner = combinator === "or" ? " or " : " and ";
+    const conditionExpr = parts.length > 1 ? parts.map(p => `(${p})`).join(joiner) : parts[0];
+    const guard = guardHardMatch ? `    if ctx["hard_match"]:\n        return False  # garde-fou : jamais de suppression sur correspondance exacte\n` : "";
+    return `def rule(ctx):\n    """Générée par le formulaire structuré — ${conditions.length} condition(s), combinaison ${combinator === "or" ? "OU" : "ET"}."""\n${guard}    return ${conditionExpr}\n`;
+}
+
+function insertFpFormCode() {
+    const rows = Array.from(document.querySelectorAll("#fprule-form-rows .fp-form-row"));
+    const conditions = rows.map(r => ({
+        field: r.querySelector(".fp-form-field").value,
+        op: r.querySelector(".fp-form-op").value,
+        value: r.querySelector(".fp-form-value").value,
+    }));
+    const combinator = document.getElementById("fprule-form-combinator").value;
+    const guard = document.getElementById("fprule-form-guard").checked;
+    const code = buildRuleCode(conditions, combinator, guard);
+    if (!code) { showToast("Complétez au moins une condition valide.", "warning"); return; }
+    document.getElementById("fprule-code").value = code;
+    showToast("Code généré dans l'éditeur — relisez puis testez.", "success");
+    checkFpRuleSyntax(true);
+}
+
 function fpRuleDevBenchHtml() {
     return `
         <hr style="border-color: var(--border-color); margin: 1.25rem 0;">
@@ -4709,6 +5321,7 @@ function fpRuleDevBenchHtml() {
         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem;">
             <button class="btn btn-sm btn-secondary" onclick="runFpRuleTests()">▶ Lancer les tests unitaires</button>
             <button class="btn btn-sm" style="background: var(--surface-3);" onclick="benchFpRule('history')">📜 Rejouer l'historique réel</button>
+            <button class="btn btn-sm" style="background: var(--surface-3);" onclick="addFpRuleTestFromAlert()">🎯 + Test depuis une alerte</button>
         </div>
         <div id="fprule-bench-result" style="margin-top: 0.75rem;"></div>`;
 }

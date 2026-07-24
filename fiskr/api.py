@@ -40,7 +40,9 @@ from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import notify_event
 from fiskr.fprules import (
     evaluate_fp_rules, build_screening_ctx, annotate_suppression, compile_rule,
-    run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE
+    run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE, validate_rule_code,
+    generate_rule_code, get_fprules_llm_config,
+    RuleGenerationUnavailable, RuleGenerationFailed
 )
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.backtest import (
@@ -84,6 +86,7 @@ from fiskr.settings import (
 )
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
+from fiskr import progress as progress_registry
 
 
 
@@ -168,7 +171,7 @@ def load_watchlist_cache(db: Session):
     entities = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True)
-    ).all()
+    ).yield_per(2000)
 
     temp_store = []
     temp_index = {}
@@ -1881,14 +1884,34 @@ def adverse_media_lookup(
         )
 
 
+_INGEST_COMMIT_EVERY = 1000
+
+def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
+                          progress_id: Optional[str]) -> Snapshot:
+    """
+    Point de progression periodique d'un import : persiste le compteur
+    (visible par polling meme depuis une autre session), vide l'identity
+    map SQLAlchemy (un import de 750 000 fiches n'accumule plus les objets
+    en RAM) et actualise le registre memoire.
+    """
+    snap.processed_count = count
+    snap.phase = "PERSIST"
+    db.commit()
+    db.expunge_all()
+    snap = db.merge(snap)
+    progress_registry.update(progress_id, phase="PERSIST", processed=count,
+                             snapshot_id=snap.snapshot_id)
+    return snap
+
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
-async def ingest_snapshot(
+def ingest_snapshot(
     file_type: str = Form(...),
     file: UploadFile = File(...),
     delimiter: str = Form(","),
     ssie_selectors: Optional[str] = Form(None),
     ssie_source_format: Optional[str] = Form(None),
+    progress_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -1897,6 +1920,9 @@ async def ingest_snapshot(
     Performs data quality validation and saves snapshot.
     WATCHLIST_SSIE runs the Smart Sanctions Ingestion Engine pipeline
     (Discovery -> Resolution -> Restitution) with configurable tag selectors.
+    Fonction synchrone volontairement (`def`) : FastAPI l'execute dans le
+    threadpool, l'event loop reste disponible pour servir GET /api/progress
+    pendant toute la duree de l'import (suivi en direct des gros fichiers).
     """
     # Validate SSIE selectors overrides upfront (before any snapshot record is created)
     ssie_selector_overrides = None
@@ -1916,13 +1942,19 @@ async def ingest_snapshot(
     temp_file_path = temp_dir / file.filename
     
     try:
+        # 1+2. Copie du televersement ET empreinte SHA-256 en une seule passe
+        # streamee (jamais le fichier entier en memoire — 750k fiches PEP
+        # representent plusieurs centaines de Mo)
+        progress_registry.update(progress_id, phase="UPLOAD")
+        hasher = hashlib.sha256()
+        bytes_received = 0
         with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-            
-        # 2. Compute file checksum hash
-        with open(temp_file_path, "rb") as f:
-            content = f.read()
-            fhash = hashlib.sha256(content).hexdigest()
+            while chunk := file.file.read(1024 * 1024):
+                buffer.write(chunk)
+                hasher.update(chunk)
+                bytes_received += len(chunk)
+                progress_registry.update(progress_id, phase="UPLOAD", processed=bytes_received)
+        fhash = hasher.hexdigest()
             
         # Clean up any existing failed snapshots with the same hash
         failed_snapshots = db.query(Snapshot).filter(Snapshot.file_hash == fhash, Snapshot.status == "ERROR").all()
@@ -2048,6 +2080,8 @@ async def ingest_snapshot(
                 )
                 db.add(db_ent)
                 record_count += 1
+                if record_count % _INGEST_COMMIT_EVERY == 0:
+                    snap = _ingest_progress_tick(db, snap, record_count, progress_id)
 
             # Rafraichissement idempotent du graphe de relations OFAC
             # (les relations MANUAL ne sont jamais touchees)
@@ -2097,6 +2131,8 @@ async def ingest_snapshot(
                     )
                     db.add(db_ent)
                     record_count += 1
+                    if record_count % _INGEST_COMMIT_EVERY == 0:
+                        snap = _ingest_progress_tick(db, snap, record_count, progress_id)
             else:
                 for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
                     # Moteur de detection des noms : colonnes explicites ou
@@ -2159,7 +2195,9 @@ async def ingest_snapshot(
                     )
                     db.add(db_ent)
                     record_count += 1
-                    
+                    if record_count % _INGEST_COMMIT_EVERY == 0:
+                        snap = _ingest_progress_tick(db, snap, record_count, progress_id)
+
         elif file_type == "CLIENT_BASE":
             # Client base CSV
             for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
@@ -2226,18 +2264,26 @@ async def ingest_snapshot(
                 )
                 db.add(db_ent)
                 record_count += 1
-                
+                if record_count % _INGEST_COMMIT_EVERY == 0:
+                    snap = _ingest_progress_tick(db, snap, record_count, progress_id)
+
         # Update Snapshot status. En mode homologation, les watchlists attendent
         # un pointage humain (PENDING_REVIEW) et restent hors du cache de criblage.
         staging = file_type in WATCHLIST_FILE_TYPES and require_approval_enabled(db)
         snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
+        snap.processed_count = record_count
+        snap.phase = "RELOAD" if (file_type in WATCHLIST_FILE_TYPES and not staging) else "DONE"
         db.commit()
 
         # Reload cache to integrate newly loaded watchlists
         rescreen_result = None
         if file_type in WATCHLIST_FILE_TYPES and not staging:
+            progress_registry.update(progress_id, phase="RELOAD", processed=record_count,
+                                     snapshot_id=snap_id)
             load_watchlist_cache(db)
+            snap.phase = "DONE"
+            db.commit()
             # Surveillance continue : re-criblage du referentiel clients
             # contre les entites du nouveau snapshot
             if auto_rescreen_enabled(db):
@@ -2255,6 +2301,7 @@ async def ingest_snapshot(
                 })
         else:
             message = f"Successfully imported {record_count} items."
+        progress_registry.finish(progress_id)
         return {
             "message": message,
             "snapshot_id": snap_id,
@@ -2265,6 +2312,7 @@ async def ingest_snapshot(
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to ingest file: {e}")
+        progress_registry.finish(progress_id, status="ERROR", error=str(e))
         # Mark snapshot as ERROR
         if 'snap_id' in locals():
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
@@ -4209,7 +4257,44 @@ async def get_sync_configuration(
         except CronError:
             next_runs[source] = None
     cfg["next_runs"] = next_runs
+    # Synchronisations en cours d'execution (le front peut alors interroger
+    # GET /api/progress?id=sync:<source> pour afficher la progression)
+    cfg["running"] = sorted(_running_syncs)
     return cfg
+
+@app.get("/api/progress")
+async def get_operation_progress(
+    id: str = Query(..., description="Jeton de progression (UUID d'ingestion, sync:<source> ou snapshot_id)"),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Etat d'avancement d'une operation longue (import de liste, synchronisation).
+
+    Source primaire : le registre memoire (fiskr.progress), alimente pendant que
+    la requete d'origine est encore en vol. Repli : si le jeton correspond a un
+    snapshot_id connu (ex. apres redemarrage du processus), l'etat est reconstruit
+    depuis les colonnes persistees Snapshot.processed_count/total_hint/phase."""
+    state = progress_registry.get(id)
+    if state is not None:
+        return {"id": id, **state}
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == id).first()
+    if snap is not None:
+        processed = snap.processed_count or 0
+        total = snap.total_hint
+        pct = round(100.0 * processed / total, 1) if total and processed <= total else None
+        status = "RUNNING" if snap.status == "PROCESSING" else ("ERROR" if snap.status == "ERROR" else "DONE")
+        return {
+            "id": id,
+            "phase": snap.phase or ("DONE" if status == "DONE" else "PERSIST"),
+            "processed": processed,
+            "total": total,
+            "pct": pct,
+            "snapshot_id": snap.snapshot_id,
+            "status": status,
+            "error": "Import en erreur (voir la table des snapshots)" if status == "ERROR" else None,
+            "updated_at": None,
+        }
+    raise HTTPException(status_code=404, detail="Operation inconnue ou expiree")
 
 class SyncSchedulesUpdate(BaseModel):
     # source -> expression cron 5 champs ; chaine vide = retour au defaut
@@ -4579,6 +4664,33 @@ class FpRuleBenchRequest(BaseModel):
     panel_snapshot_id: Optional[str] = None
     sample_size: int = 200
 
+class FpRuleValidateRequest(BaseModel):
+    code: str
+
+class FpRuleGenerateRequest(BaseModel):
+    instruction: str
+    channel: str = "SCREENING"
+
+
+def _ctx_from_alert(db: Session, alert: Alert) -> Dict[str, Any]:
+    """Reconstruit le contexte rule(ctx) d'une alerte reelle depuis son journal
+    d'audit — utilise par le banc d'essai (rejeu historique) et par l'aide
+    « creer un test depuis une alerte » de l'editeur de regles."""
+    channel = alert.channel or "SCREENING"
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    tree = (audit.decision_tree if audit else {}) or {}
+    return {
+        "channel": channel,
+        "client_id": alert.client_id, "client_name": alert.client_name,
+        "entity_id": alert.watchlist_entity_id, "entity_name": alert.watchlist_name,
+        "list_type": alert.list_type, "final_score": float(alert.final_score or 0.0),
+        "base_score": float(tree.get("base_score", 0.0)),
+        "hard_match": bool(tree.get("hard_match_triggered", False)),
+        "adjustments": tree.get("adjustments") or {},
+        "client": None, "entity": (tree.get("watchlist_entity") or {}),
+        "party": None, "message": None,
+    }
+
 
 @app.get("/api/fprules")
 async def list_fp_rules(
@@ -4624,6 +4736,61 @@ async def create_fp_rule(
     db.commit()
     db.refresh(rule)
     return _fp_rule_summary(rule, with_code=True)
+
+
+# NB : routes a segment fixe declarees AVANT les routes /{rule_id}
+@app.post("/api/fprules/validate")
+async def validate_fp_rule_code(
+    payload: FpRuleValidateRequest,
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Validation syntaxique detaillee du code d'une regle (aide a l'edition) :
+    retourne la ligne/colonne de l'erreur pour positionner le curseur."""
+    return validate_rule_code(payload.code)
+
+
+@app.get("/api/fprules/context-from-alert/{alert_id}")
+async def fp_rule_context_from_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """Contexte rule(ctx) reconstruit depuis une alerte reelle : pre-remplit
+    un cas de test de regle sans saisir le JSON a la main."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    return {"alert_id": alert.id, "channel": alert.channel or "SCREENING",
+            "ctx": _ctx_from_alert(db, alert)}
+
+
+@app.post("/api/fprules/generate")
+async def generate_fp_rule(
+    payload: FpRuleGenerateRequest,
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """
+    Genere le code d'une regle depuis une instruction en langage naturel
+    (API Claude, si configuree). Le resultat n'est qu'un BROUILLON depose dans
+    l'editeur : tests unitaires, soumission et validation 4-yeux s'appliquent
+    inchanges. Erreurs explicites : 503 si l'IA n'est pas configuree (le front
+    propose alors le formulaire structure), 422 si le code genere reste
+    invalide (le code brut est restitue pour correction manuelle).
+    """
+    channel = payload.channel.strip().upper()
+    if channel not in FP_RULE_CHANNELS:
+        raise HTTPException(status_code=400, detail=f"Canal inconnu ({', '.join(FP_RULE_CHANNELS)}).")
+    if not (payload.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="Décrivez la règle souhaitée en langage naturel.")
+    try:
+        result = generate_rule_code(payload.instruction, channel)
+    except RuleGenerationUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except RuleGenerationFailed as e:
+        raise HTTPException(status_code=422, detail={"message": str(e), "raw_code": e.raw_code})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Appel au modèle impossible : {e}")
+    return result
 
 
 @app.put("/api/fprules/{rule_id}")
@@ -4984,19 +5151,8 @@ async def bench_fp_rule(
             (Alert.channel.is_(None) if rule.channel == "SCREENING" else False)
         ).order_by(Alert.created_at.desc()).limit(max(1, min(payload.sample_size, 2000))).all()
         for a in alerts:
-            audit = db.query(AuditTrail).filter(AuditTrail.id == a.audit_id).first()
-            tree = (audit.decision_tree if audit else {}) or {}
-            ctx = {
-                "channel": rule.channel,
-                "client_id": a.client_id, "client_name": a.client_name,
-                "entity_id": a.watchlist_entity_id, "entity_name": a.watchlist_name,
-                "list_type": a.list_type, "final_score": float(a.final_score or 0.0),
-                "base_score": float(tree.get("base_score", 0.0)),
-                "hard_match": bool(tree.get("hard_match_triggered", False)),
-                "adjustments": tree.get("adjustments") or {},
-                "client": None, "entity": (tree.get("watchlist_entity") or {}),
-                "party": None, "message": None,
-            }
+            ctx = _ctx_from_alert(db, a)
+            ctx["channel"] = rule.channel
             result, error = run_rule(rule.code, ctx)
             if error:
                 errors += 1
@@ -5093,6 +5249,9 @@ async def get_review_detail(
 
 class BacktestRequest(BaseModel):
     panel_snapshot_id: str
+    # Regle anti-FP candidate a evaluer (ajoutee cote candidat uniquement) :
+    # l'ecart chiffre montre l'effet de la regle avant sa validation 4-yeux
+    candidate_rule_id: Optional[int] = None
 
 @app.post("/api/review/snapshots/{snapshot_id}/backtest")
 async def run_review_backtest(
@@ -5119,9 +5278,13 @@ async def run_review_backtest(
     if not (panel.record_count or 0):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le panel choisi est vide.")
 
-    report = run_backtest(db, snap, panel.snapshot_id,
-                          threshold_pct=backtest_max_gap_pct(db),
-                          executed_by=reviewer["username"])
+    try:
+        report = run_backtest(db, snap, panel.snapshot_id,
+                              threshold_pct=backtest_max_gap_pct(db),
+                              executed_by=reviewer["username"],
+                              candidate_rule_id=payload.candidate_rule_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     snap.backtest_report = report
     snap.backtest_at = datetime.utcnow()
     snap.backtest_by = reviewer["username"]

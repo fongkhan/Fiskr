@@ -83,9 +83,22 @@ MAX_REPORT_DETAILS = 100
 def get_sync_config() -> Dict[str, Any]:
     """Configuration de synchronisation (config.yaml, section sync) avec defauts."""
     sync_cfg = config.get("sync", {}) or {}
+    network_cfg = sync_cfg.get("network") or {}
     return {
         "auto_enabled": bool(sync_cfg.get("auto_enabled", False)),
         "schedule_time": sync_cfg.get("schedule_time", "06:00"),
+        # Parametres reseau partages par toutes les sources (repris par les
+        # helpers HTTP : reprises sur erreurs de transport, User-Agent, delais)
+        "network": {
+            "timeout_seconds": float(network_cfg.get("timeout_seconds", 60) or 60),
+            "download_timeout_seconds": float(network_cfg.get("download_timeout_seconds", 120) or 120),
+            "retries": int(network_cfg.get("retries", 3) or 3),
+            "backoff_seconds": float(network_cfg.get("backoff_seconds", 3) or 3),
+            "user_agent": str(network_cfg.get(
+                "user_agent",
+                "Mozilla/5.0 (compatible; Fiskr-Compliance/2.4; +https://github.com/fongkhan/Fiskr)"
+            )),
+        },
         "ofac": {
             "enabled": bool((sync_cfg.get("ofac") or {}).get("enabled", True)),
             "url": (sync_cfg.get("ofac") or {}).get("url", DEFAULT_OFAC_URL),
@@ -124,39 +137,131 @@ def get_sync_config() -> Dict[str, Any]:
 
 # ------------------ RECUPERATION HTTP ------------------
 
-def download_to_file(url: str, dest_path: Path, timeout: float = 300.0) -> None:
-    """Telecharge un fichier volumineux en streaming vers dest_path."""
+# Statuts qui valent la peine d'etre retentes : 202 = anti-robot EUR-Lex
+# (reponse differree a corps vide), 408/429 = throttling, 5xx = incident
+# serveur transitoire. Les 403/404 echouent immediatement (deterministes).
+_RETRYABLE_STATUS = {202, 408, 429, 500, 502, 503, 504}
+
+_shared_http_client = None
+_shared_client_lock = None
+
+
+def _browser_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": get_sync_config()["network"]["user_agent"],
+        "Accept-Language": "en, fr;q=0.8",
+    }
+
+
+def _get_shared_client():
+    """Client httpx module-level (keep-alive) : evite un handshake TCP+TLS
+    par requete — la sync EUR-Lex en fait 2N+1 vers le meme hote."""
+    global _shared_http_client, _shared_client_lock
+    import threading
     import httpx
-    with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
-        response.raise_for_status()
-        with open(dest_path, "wb") as f:
-            for chunk in response.iter_bytes(chunk_size=1024 * 256):
-                f.write(chunk)
+    if _shared_client_lock is None:
+        _shared_client_lock = threading.Lock()
+    with _shared_client_lock:
+        if _shared_http_client is None or _shared_http_client.is_closed:
+            _shared_http_client = httpx.Client(follow_redirects=True, headers=_browser_headers())
+    return _shared_http_client
 
 
-def http_get_text(url: str, timeout: float = 60.0, retries: int = 2) -> str:
+class _RetryableHTTP(RuntimeError):
+    """Reponse HTTP recue mais a retenter (statut transitoire ou corps vide)."""
+
+
+def _with_retries(operation, url: str, retries: int, backoff: float):
     """
-    Recupere le contenu textuel d'une page web avec reprises.
-    EUR-Lex repond parfois HTTP 202 avec un corps vide (anti-robot / backoff) :
-    on reessaie apres un delai, et on echoue franchement plutot que de traiter
-    une page vide comme un Journal Officiel sans publication.
+    Execute `operation` avec reprises sur les erreurs TRANSPORT
+    (httpx.TransportError : ConnectError, timeouts, coupure TLS/proxy...)
+    ET sur les reponses transitoires (_RetryableHTTP levee par l'operation).
+    C'est le correctif du « probleme de connexions » : la boucle historique
+    ne couvrait que les statuts HTTP, jamais les exceptions de transport.
     """
     import time
     import httpx
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Fiskr-Compliance/2.4; +https://github.com/fongkhan/Fiskr)",
-        "Accept-Language": "fr",
-    }
-    last_status, last_length = None, 0
+    last_error: Exception = RuntimeError(f"Echec inconnu sur {url}")
     for attempt in range(retries + 1):
-        response = httpx.get(url, timeout=timeout, follow_redirects=True, headers=headers)
-        if response.status_code == 200 and response.text.strip():
-            return response.text
-        last_status, last_length = response.status_code, len(response.text)
-        logger.warning(f"Reponse HTTP {last_status} ({last_length} octets) de {url}, tentative {attempt + 1}/{retries + 1}")
-        if attempt < retries:
-            time.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"Reponse invalide de {url} (HTTP {last_status}, {last_length} octets apres {retries + 1} tentatives)")
+        try:
+            return operation()
+        except (_RetryableHTTP, httpx.TransportError) as e:
+            last_error = e
+            logger.warning(f"{url}: {e} — tentative {attempt + 1}/{retries + 1}")
+            if attempt < retries:
+                time.sleep(backoff * (attempt + 1))
+    raise RuntimeError(f"Echec apres {retries + 1} tentatives sur {url}: {last_error}")
+
+
+def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
+                     retries: Optional[int] = None, progress=None) -> None:
+    """
+    Telecharge un fichier volumineux en streaming vers dest_path, avec
+    reprises sur erreurs de transport, User-Agent navigateur (les portails
+    officiels filtrent l'UA httpx par defaut) et timeouts granulaires : le
+    timeout de lecture s'applique PAR CHUNK, pas au telechargement entier.
+    `progress(octets_recus, taille_totale_ou_None)` est appele ~tous les Mo.
+    """
+    import httpx
+    network = get_sync_config()["network"]
+    read_timeout = timeout if timeout is not None else network["download_timeout_seconds"]
+    max_retries = retries if retries is not None else network["retries"]
+    granular_timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
+
+    def _attempt():
+        with httpx.stream("GET", url, timeout=granular_timeout, follow_redirects=True,
+                          headers=_browser_headers()) as response:
+            if response.status_code in _RETRYABLE_STATUS:
+                raise _RetryableHTTP(f"HTTP {response.status_code}")
+            response.raise_for_status()
+            total = None
+            try:
+                total = int(response.headers.get("content-length", "") or 0) or None
+            except ValueError:
+                pass
+            received, last_reported = 0, 0
+            # Nouveau fichier a chaque tentative : jamais de contenu partiel concatene
+            with open(dest_path, "wb") as f:
+                for chunk in response.iter_bytes(chunk_size=1024 * 256):
+                    f.write(chunk)
+                    received += len(chunk)
+                    if progress and received - last_reported >= 1024 * 1024:
+                        last_reported = received
+                        try:
+                            progress(received, total)
+                        except Exception:
+                            pass
+            if progress:
+                try:
+                    progress(received, total)
+                except Exception:
+                    pass
+
+    _with_retries(_attempt, url, max_retries, network["backoff_seconds"])
+
+
+def http_get_text(url: str, timeout: Optional[float] = None, retries: Optional[int] = None) -> str:
+    """
+    Recupere le contenu textuel d'une page web avec reprises couvrant les
+    erreurs de transport ET les reponses transitoires. EUR-Lex repond parfois
+    HTTP 202 avec un corps vide (anti-robot) : on reessaie apres un delai, et
+    on echoue franchement plutot que de traiter une page vide comme un
+    Journal Officiel sans publication.
+    """
+    network = get_sync_config()["network"]
+    page_timeout = timeout if timeout is not None else network["timeout_seconds"]
+    max_retries = retries if retries is not None else network["retries"]
+
+    def _attempt():
+        response = _get_shared_client().get(url, timeout=page_timeout)
+        if response.status_code in _RETRYABLE_STATUS or (
+                response.status_code == 200 and not response.text.strip()):
+            raise _RetryableHTTP(f"HTTP {response.status_code} ({len(response.text)} octets)")
+        if response.status_code != 200:
+            raise RuntimeError(f"Reponse invalide de {url} (HTTP {response.status_code})")
+        return response.text
+
+    return _with_retries(_attempt, url, max_retries, network["backoff_seconds"])
 
 
 # ------------------ PERSISTANCE DES SNAPSHOTS ------------------
@@ -220,8 +325,14 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
     )))
 
 
-def persist_pivot_items(db, snap_id: str, items) -> int:
-    """Valide (Quality Gate) et persiste des enregistrements pivots. Retourne le nombre insere."""
+def persist_pivot_items(db, snap_id: str, items, commit_every: int = 1000,
+                        progress: Optional[Callable[[int], None]] = None) -> int:
+    """
+    Valide (Quality Gate) et persiste des enregistrements pivots. Retourne le
+    nombre insere. Commits periodiques : la progression devient visible par
+    polling ET l'identity map SQLAlchemy est videe regulierement (un dataset
+    PEP de 750 000 fiches n'accumule plus les objets en RAM).
+    """
     count = 0
     for item in items:
         # Complete le decoupage prenoms / nom de famille des individus quand la
@@ -236,6 +347,14 @@ def persist_pivot_items(db, snap_id: str, items) -> int:
             continue
         db.add(build_watchlist_entity(snap_id, item, report))
         count += 1
+        if commit_every and count % commit_every == 0:
+            db.commit()
+            db.expunge_all()
+            if progress:
+                try:
+                    progress(count)
+                except Exception:
+                    pass
     return count
 
 
@@ -282,8 +401,11 @@ def _existing_snapshot_with_hash(db, file_type: str, fhash: str) -> Optional[Sna
 
 
 def _snapshot_entity_dicts(db, snapshot_id: str) -> List[Dict[str, Any]]:
-    ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == snapshot_id).all()
-    return [{c.name: getattr(e, c.name) for c in e.__table__.columns} for e in ents]
+    # yield_per : streaming ORM — reduit fortement le pic memoire du calcul
+    # de delta sur les tres grandes listes (les dicts restent en RAM, pas
+    # les objets ORM ni l'identity map)
+    query = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == snapshot_id).yield_per(2000)
+    return [{c.name: getattr(e, c.name) for c in WatchlistEntity.__table__.columns} for e in query]
 
 
 def _supersede_previous_snapshots(db, file_type: str, keep_snapshot_id: str) -> None:
@@ -638,6 +760,8 @@ def _run_list_replacement_sync(
     puis application (supersede + rechargement du cache) ou attente de
     pointage humain si le mode homologation est actif.
     """
+    from fiskr import progress as progress_registry
+    progress_token = f"sync:{source.lower()}"
     fetch = fetcher or download_to_file
     temp_dir = PROJECT_ROOT / "temp_ingestion"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -647,10 +771,20 @@ def _run_list_replacement_sync(
     snap_id = None
     try:
         logger.info(f"Sync {source}: telechargement de {url}")
-        fetch(url, temp_file)
+        progress_registry.update(progress_token, phase="DOWNLOAD")
+        if fetcher is None:
+            # Telechargement instrumente : octets recus / taille annoncee
+            download_to_file(url, temp_file, progress=lambda done, total: progress_registry.update(
+                progress_token, phase="DOWNLOAD", processed=done, total=total))
+        else:
+            fetch(url, temp_file)
 
+        progress_registry.update(progress_token, phase="HASH")
+        hasher = hashlib.sha256()
         with open(temp_file, "rb") as f:
-            fhash = hashlib.sha256(f.read()).hexdigest()
+            while chunk := f.read(1024 * 1024):
+                hasher.update(chunk)
+        fhash = hasher.hexdigest()
 
         duplicate = _existing_snapshot_with_hash(db, file_type, fhash)
         if duplicate:
@@ -676,12 +810,28 @@ def _run_list_replacement_sync(
         db.add(snap)
         db.commit()
 
-        record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)))
+        def _persist_progress(count: int) -> None:
+            progress_registry.update(progress_token, phase="PERSIST", processed=count,
+                                     snapshot_id=snap_id)
+            row = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+            if row:
+                row.processed_count = count
+                row.phase = "PERSIST"
+                db.commit()
+
+        record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)),
+                                           progress=_persist_progress)
+        # Le snapshot a pu etre detache par les commits periodiques
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         staging = require_approval_enabled(db)
         snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
+        snap.processed_count = record_count
+        snap.phase = "DELTA"
         db.commit()
 
+        progress_registry.update(progress_token, phase="DELTA", processed=record_count,
+                                 snapshot_id=snap_id)
         old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
@@ -690,7 +840,13 @@ def _run_list_replacement_sync(
             _supersede_previous_snapshots(db, file_type, snap_id)
             db.commit()
             if reload_cache:
+                progress_registry.update(progress_token, phase="RELOAD",
+                                         processed=record_count, snapshot_id=snap_id)
                 reload_cache()
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+        if snap:
+            snap.phase = "DONE"
+            db.commit()
 
         summary = delta["summary"]
         message = f"{record_count} fiches importees depuis la source {source}."
@@ -709,6 +865,7 @@ def _run_list_replacement_sync(
     except Exception as e:
         db.rollback()
         logger.error(f"Echec de la synchronisation {source}: {e}")
+        progress_registry.finish(progress_token, status="ERROR", error=str(e))
         if snap_id:
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
             if error_snap:
@@ -719,6 +876,7 @@ def _run_list_replacement_sync(
             message=f"Echec: {e}"
         )
     finally:
+        progress_registry.finish(progress_token)
         if temp_file.exists():
             os.remove(temp_file)
 
@@ -1134,7 +1292,7 @@ def _act_pdf_url(act_url: str) -> str:
 
 
 def _archive_act_pdf(act: Dict[str, str], pdf_fetcher: Callable[[str, Path], None],
-                     archive_dir: Path) -> None:
+                     archive_dir: Path) -> bool:
     """
     Telecharge et archive le PDF officiel de l'acte (version qui fait foi lors
     des audits), avec empreinte SHA-256 pour garantir son integrite probante.
@@ -1151,11 +1309,13 @@ def _archive_act_pdf(act: Dict[str, str], pdf_fetcher: Callable[[str, Path], Non
         with open(dest, "rb") as f:
             act["pdf_sha256"] = hashlib.sha256(f.read()).hexdigest()
         act["pdf_file"] = filename
+        return True
     except Exception as e:
         logger.warning(f"Echec de l'archivage du PDF officiel {act['url']}: {e}")
         act["pdf_file"] = None
         if dest.exists():
             os.remove(dest)
+        return False
 
 
 def fetch_eurlex_entities(
@@ -1163,10 +1323,12 @@ def fetch_eurlex_entities(
     http_get: Callable[[str], str],
     daily_url_template: str,
     keyword: str,
-) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
     """
     Recupere le JO du jour, filtre les actes "mesures restrictives" et scrape
-    chacun d'eux. Retourne (actes retenus, entites extraites).
+    chacun d'eux. Retourne (actes retenus, entites extraites, actes en echec
+    reseau) — les echecs ne sont plus avales : ils remontent au rapport de
+    sync pour ne jamais presenter une liste amputee comme complete.
     """
     daily_url = daily_url_template.format(date=for_date.strftime("%d%m%Y"))
     logger.info(f"Sync EUR-Lex: lecture du Journal Officiel {daily_url}")
@@ -1174,15 +1336,17 @@ def fetch_eurlex_entities(
     acts = extract_daily_acts(daily_html, daily_url, keyword)
 
     all_entities: Dict[str, Dict[str, Any]] = {}
+    failed_acts: List[Dict[str, str]] = []
     for act in acts:
         try:
             act_html = http_get(act["url"])
         except Exception as e:
             logger.warning(f"Sync EUR-Lex: echec du chargement de l'acte {act['url']}: {e}")
+            failed_acts.append({"url": act["url"], "title": act.get("title", ""), "error": str(e)})
             continue
         for ent in scrape_act_entities(act_html, act["title"], act["url"]):
             all_entities[ent["entity_id"]] = ent
-    return acts, list(all_entities.values())
+    return acts, list(all_entities.values()), failed_acts
 
 
 def run_eurlex_sync(
@@ -1212,17 +1376,34 @@ def run_eurlex_sync(
     previous = _latest_reviewable_snapshot(db, "WATCHLIST_EU")
     snap_id = None
     try:
-        acts, scraped = fetch_eurlex_entities(for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
+        acts, scraped, failed_acts = fetch_eurlex_entities(
+            for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
 
-        # Archivage probant : le PDF officiel de chaque acte retenu fait foi
+        # Archivage probant : le PDF officiel de chaque acte retenu fait foi.
+        # Les echecs de telechargement sont restitues au rapport (piece
+        # probante manquante = anomalie visible, plus jamais silencieuse).
+        pdf_failures = []
         for act in acts:
-            _archive_act_pdf(act, pdf_getter, archive_dir)
+            if not _archive_act_pdf(act, pdf_getter, archive_dir):
+                pdf_failures.append(act["url"])
 
         if not acts:
             return _finalize_report(
                 db, source="EURLEX", trigger=trigger, status="NO_PUBLICATION",
                 message=f"Aucun acte mentionnant \"{cfg['keyword']}\" au JO du {for_date.strftime('%d/%m/%Y')}.",
                 previous_snapshot_id=previous.snapshot_id if previous else None
+            )
+        if failed_acts and not scraped:
+            # Tous les actes retenus sont inaccessibles : c'est une PANNE
+            # reseau, pas un JO sans listes — rapport ERROR, pas NO_CHANGE
+            return _finalize_report(
+                db, source="EURLEX", trigger=trigger, status="ERROR",
+                message=f"{len(failed_acts)} acte(s) inaccessibles au JO du "
+                        f"{for_date.strftime('%d/%m/%Y')} (erreurs de connexion) : "
+                        + " ; ".join(f["url"] for f in failed_acts[:3])
+                        + (" …" if len(failed_acts) > 3 else ""),
+                previous_snapshot_id=previous.snapshot_id if previous else None,
+                delta_report={"acts": acts, "fetch_failures": failed_acts}
             )
         if not scraped:
             return _finalize_report(
@@ -1292,7 +1473,13 @@ def run_eurlex_sync(
         summary = delta["summary"]
         delta_stored = _truncate_delta_details(delta)
         delta_stored["acts"] = acts
+        if failed_acts:
+            delta_stored["fetch_failures"] = failed_acts
+        if pdf_failures:
+            delta_stored["pdf_failures"] = pdf_failures
         message = f"{len(acts)} acte(s) \"{cfg['keyword']}\" au JO du {for_date.strftime('%d/%m/%Y')} ; {len(scraped)} liste(s) extrait(s), {carried} fiche(s) reconduite(s)."
+        if failed_acts:
+            message += f" ⚠ {len(failed_acts)} acte(s) inaccessibles (repris au prochain run)."
         if staging:
             message += " Snapshot en attente d'homologation (pointage humain requis)."
         return _finalize_report(

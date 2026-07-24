@@ -50,6 +50,14 @@ review:
 sync:
   auto_enabled: false        # true = execution automatique chaque matin
   schedule_time: "06:00"     # heure locale de declenchement quotidien (HH:MM)
+  # Fiabilite reseau : les retries couvrent les erreurs de connexion/timeout
+  # (httpx.TransportError) ET les statuts HTTP transitoires (429, 5xx...).
+  network:
+    timeout_seconds: 60            # timeout de lecture des requetes texte (scraping, API)
+    download_timeout_seconds: 120  # timeout de lecture par bloc des telechargements de fichiers
+    retries: 3                     # tentatives supplementaires apres un echec transitoire
+    backoff_seconds: 3             # attente entre tentatives (lineaire : 3s, 6s, 9s...)
+    user_agent: "Mozilla/5.0 (compatible; Fiskr-Compliance/2.4; +https://github.com/fongkhan/Fiskr)"
   ofac:
     enabled: true
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
@@ -101,6 +109,13 @@ adverse_media:
 narrative:
   llm_enabled: false            # true = reformulation en prose via l'API Claude
   llm_model: "claude-opus-4-8"  # necessite ANTHROPIC_API_KEY et `pip install anthropic`
+
+# Regles anti-faux positifs : generation d'un brouillon de regle depuis une
+# instruction en langage naturel (API Claude). Le brouillon suit ensuite le
+# circuit normal : tests unitaires, soumission, validation 4-yeux.
+fprules:
+  llm_enabled: false            # true = bouton "Générer par IA" dans l'éditeur de règles
+  llm_model: "claude-sonnet-5"  # necessite ANTHROPIC_API_KEY et `pip install anthropic`
 
 # Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
 # Les selecteurs de balises pivots sont surchargables lors de chaque import.
