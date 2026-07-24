@@ -78,7 +78,8 @@ from fiskr.settings import (
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     digest_settings, SETTING_DIGEST,
-    retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS
+    retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
+    score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS
 )
 from fiskr.retention import preview_retention, run_retention
 
@@ -935,6 +936,10 @@ async def list_users(
             "roles": parse_roles(u.role),
             "created_at": u.created_at.isoformat() if u.created_at else None,
             "totp_enabled": bool(u.totp_enabled),
+            "absent_until": u.absent_until.isoformat()
+                if (u.absent_until and u.absent_until > datetime.utcnow()) else None,
+            "delegate_to": u.delegate_to
+                if (u.absent_until and u.absent_until > datetime.utcnow()) else None,
         }
         for u in users
     ]
@@ -1045,6 +1050,165 @@ async def update_retention_settings(
     return {"message": "Politique de rétention mise à jour.",
             "policy": retention_policy(db), "preview": preview_retention(db)}
 
+# ------------------ DELEGATION D'ABSENCE ------------------
+
+class AbsenceRequest(BaseModel):
+    absent_until: Optional[str] = None   # ISO AAAA-MM-JJ[THH:MM] ; vide/None = fin d'absence
+    delegate_to: Optional[str] = None
+    reassign_open: bool = True
+
+def resolve_delegate(db: Session, assignee: str):
+    """Redirige une assignation vers le delegue si l'assigne est absent.
+    Retourne (assigne_effectif, assigne_initial_si_redirige). Un seul saut :
+    pas de chaine de delegations."""
+    user = db.query(User).filter(User.username == assignee).first()
+    if (user and user.absent_until and user.absent_until > datetime.utcnow()
+            and (user.delegate_to or "").strip()):
+        return user.delegate_to.strip(), assignee
+    return assignee, None
+
+def _apply_absence(db: Session, user: User, payload: AbsenceRequest, actor: str) -> Dict[str, Any]:
+    if not payload.absent_until:
+        # Fin d'absence
+        user.absent_until = None
+        user.delegate_to = None
+        log_admin_action(db, actor, "ABSENCE_CLEARED", target=user.username)
+        db.commit()
+        return {"message": f"Absence de @{user.username} terminée.", "reassigned": 0}
+    try:
+        until = datetime.fromisoformat(payload.absent_until)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date de fin d'absence invalide (format ISO attendu).")
+    if until <= datetime.utcnow():
+        raise HTTPException(status_code=400, detail="La fin d'absence doit être dans le futur.")
+    delegate_name = (payload.delegate_to or "").strip()
+    if not delegate_name:
+        raise HTTPException(status_code=400, detail="Un délégué est requis pendant l'absence.")
+    if delegate_name == user.username:
+        raise HTTPException(status_code=400, detail="Le délégué doit être un autre utilisateur.")
+    delegate = db.query(User).filter(User.username == delegate_name).first()
+    if not delegate:
+        raise HTTPException(status_code=404, detail=f"Délégué introuvable : {delegate_name}.")
+    if "auditor" in parse_roles(delegate.role):
+        raise HTTPException(status_code=400, detail="Un auditeur (lecture seule) ne peut pas être délégué.")
+
+    user.absent_until = until
+    user.delegate_to = delegate_name
+    reassigned = 0
+    if payload.reassign_open:
+        open_alerts = db.query(Alert).filter(
+            Alert.assigned_to == user.username,
+            Alert.status.in_(ALERT_OPEN_STATUSES)).all()
+        for alert in open_alerts:
+            alert.assigned_to = delegate_name
+            _log_alert_event(db, alert.id, actor, "ASSIGNED",
+                             f"Réassignée à {delegate_name} (délégation d'absence de @{user.username}).")
+            reassigned += 1
+    log_admin_action(db, actor, "ABSENCE_SET", target=user.username,
+                     after={"absent_until": until.isoformat(), "delegate_to": delegate_name,
+                            "reassigned_open_alerts": reassigned})
+    db.commit()
+    return {"message": f"Absence de @{user.username} enregistrée jusqu'au "
+                       f"{until.strftime('%d/%m/%Y %H:%M')} — délégué : @{delegate_name}"
+                       + (f", {reassigned} alerte(s) réassignée(s)." if reassigned else "."),
+            "reassigned": reassigned}
+
+@app.put("/api/users/me/absence")
+async def set_own_absence(
+    payload: AbsenceRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Declare sa propre absence (delegue obligatoire) ou y met fin."""
+    if current_user.get("is_api_key"):
+        raise HTTPException(status_code=400, detail="Les clés d'API n'ont pas d'absence.")
+    user = db.query(User).filter(User.username == current_user["username"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    return _apply_absence(db, user, payload, current_user["username"])
+
+@app.put("/api/users/{user_id}/absence")
+async def set_user_absence(
+    user_id: int,
+    payload: AbsenceRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Declare ou termine l'absence d'un collaborateur (Admin)."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    return _apply_absence(db, user, payload, admin_user["username"])
+
+@app.get("/api/users/directory")
+async def get_users_directory(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Annuaire minimal (nom d'utilisateur + nom complet + absence) accessible
+    a tout utilisateur connecte : choix d'un delegue, assignations."""
+    now = datetime.utcnow()
+    users = db.query(User).order_by(User.username.asc()).all()
+    return {"items": [
+        {"username": u.username, "full_name": u.full_name,
+         "roles": parse_roles(u.role),
+         "absent": bool(u.absent_until and u.absent_until > now),
+         "delegate_to": u.delegate_to if (u.absent_until and u.absent_until > now) else None}
+        for u in users
+    ]}
+
+# ------------------ SEUILS DE SCORE (a chaud) ------------------
+
+class ScoringSettingsUpdate(BaseModel):
+    cut_off_threshold: Optional[float] = None
+    cut_off_overrides: Optional[Dict[str, Optional[float]]] = None
+
+@app.get("/api/settings/scoring")
+async def get_scoring_settings(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Seuils de cut-off effectifs (global + surcharges par type de liste)."""
+    return score_thresholds(db)
+
+@app.put("/api/settings/scoring")
+async def update_scoring_settings(
+    payload: ScoringSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Regle a chaud le seuil global et les surcharges par liste (0-100 ;
+    surcharge a None/vide = retour au seuil global). Effet immediat sur le
+    criblage ET le filtrage transactionnel, sans redemarrage.
+    """
+    before = score_thresholds(db)
+    merged = {"cut_off_threshold": before["cut_off_threshold"],
+              "cut_off_overrides": dict(before["cut_off_overrides"])}
+    if payload.cut_off_threshold is not None:
+        if not (0 <= payload.cut_off_threshold <= 100):
+            raise HTTPException(status_code=400, detail="Le seuil global doit être entre 0 et 100.")
+        merged["cut_off_threshold"] = float(payload.cut_off_threshold)
+    if payload.cut_off_overrides is not None:
+        for list_type, threshold in payload.cut_off_overrides.items():
+            key = str(list_type).strip().upper()
+            if threshold is None:
+                merged["cut_off_overrides"].pop(key, None)
+                continue
+            if not (0 <= float(threshold) <= 100):
+                raise HTTPException(status_code=400, detail=f"Seuil invalide pour {key} (0-100).")
+            merged["cut_off_overrides"][key] = float(threshold)
+    if payload.cut_off_threshold is None and payload.cut_off_overrides is None:
+        raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
+    set_setting(db, SETTING_SCORE_THRESHOLDS, merged, updated_by=admin_user["username"])
+    after = score_thresholds(db)
+    delta = {k: after[k] for k in ("cut_off_threshold", "cut_off_overrides") if before.get(k) != after.get(k)}
+    if delta:
+        log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="scoring",
+                         before={k: before.get(k) for k in delta}, after=delta)
+        db.commit()
+    return {"message": "Seuils de score mis à jour (effet immédiat).", **after}
+
 # ------------------ IMPORT / EXPORT DE LA CONFIGURATION ------------------
 
 # Seuls les reglages a chaud connus sont portables : jamais de secrets
@@ -1056,7 +1220,7 @@ _PORTABLE_SETTINGS = {
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
-    SETTING_DIGEST, SETTING_RETENTION,
+    SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
 }
 
 class ConfigImportRequest(BaseModel):
@@ -1389,7 +1553,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     
     # Generate blocking keys — meme layout que celui de l'index en memoire
     client_keys = generate_blocking_keys(cleansed_client, blocking_config_for(watchlist_index_layout))
-    
+
     # Retrieve candidates matching blocking keys
     candidates = {}
     for key in client_keys:
@@ -1397,14 +1561,15 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
             if requested_lists and item.get("_list_type") not in requested_lists:
                 continue
             candidates[item["entity_id"]] = item
-            
-    # Scoring
+
+    # Scoring — seuils de cut-off a chaud (reglage > config.yaml)
+    scoring_config = scoring_config_with_thresholds(db)
     matches = []
     best_match = None
     best_score = -1.0
-    
+
     for item_id, candidate in candidates.items():
-        score_res = match_entities(cleansed_client, candidate, config)
+        score_res = match_entities(cleansed_client, candidate, scoring_config)
         score_res["watchlist_entity"] = candidate
         
         matches.append(score_res)
@@ -1480,7 +1645,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                 "gender": {"score": 0.0, "description": "N/A"},
                 "geography": {"score": 0.0, "description": "N/A"}
             },
-            "cut_off_applied": config.get("scoring", {}).get("cut_off_threshold", 75.0),
+            "cut_off_applied": scoring_config.get("scoring", {}).get("cut_off_threshold", 75.0),
             "screening_lists_restriction": requested_lists or "ALL"
         }
         dummy_wl = {"entity_id": "NONE", "primary_name": "Aucun match"}
@@ -5414,17 +5579,23 @@ async def assign_alert(
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """S'assigner une alerte (ou l'assigner a un autre analyste : admin uniquement)."""
+    """S'assigner une alerte (ou l'assigner a un autre analyste : admin uniquement).
+    Si l'assigne est absent, l'alerte va a son delegue (delegation d'absence)."""
     alert = _get_open_alert(db, alert_id)
     assignee = (payload.assignee or "").strip() or current_user["username"]
     if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
         raise HTTPException(status_code=403, detail="Seul un administrateur peut assigner une alerte à un autre analyste.")
+    assignee, redirected_from = resolve_delegate(db, assignee)
     alert.assigned_to = assignee
     if alert.status == "OPEN":
         alert.status = "IN_PROGRESS"
-    _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED", f"Assignée à {assignee}.")
+    _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED",
+                     f"Assignée à {assignee}."
+                     + (f" (au lieu de @{redirected_from}, absent — délégation)" if redirected_from else ""))
     db.commit()
-    return {"message": f"Alerte assignée à {assignee}.", **_alert_summary(alert)}
+    return {"message": f"Alerte assignée à {assignee}"
+                       + (f" (délégué de @{redirected_from}, absent)." if redirected_from else "."),
+            **_alert_summary(alert)}
 
 @app.post("/api/alerts/{alert_id}/comment")
 async def comment_alert(
@@ -5609,6 +5780,7 @@ async def bulk_alert_action(
         if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
             raise HTTPException(status_code=403,
                                 detail="Seul un administrateur peut assigner des alertes à un autre analyste.")
+        assignee, _redirected = resolve_delegate(db, assignee)
     else:
         new_priority = (payload.priority or "").strip().upper()
         if new_priority not in ALERT_PRIORITIES:

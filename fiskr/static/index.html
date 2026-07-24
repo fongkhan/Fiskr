@@ -10,7 +10,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Stylesheet -->
-    <link rel="stylesheet" href="/static/styles.css?v=3.1">
+    <link rel="stylesheet" href="/static/styles.css?v=3.2">
+    <!-- Internationalisation (FR/EN/DE/ES/ZH/AR) : langue + RTL avant le rendu -->
+    <script src="/static/i18n.js?v=1.0"></script>
     <!-- Thème appliqué avant le premier rendu (pas de flash) -->
     <script>
         (function () {
@@ -113,6 +115,14 @@
                         </div>
                     </div>
                     <button class="icon-btn" onclick="openCommandPalette()" aria-label="Recherche globale (Ctrl+K)" title="Recherche globale (Ctrl+K)">🔍</button>
+                    <select id="lang-select" class="lang-select" onchange="fiskrI18n.setLang(this.value)" title="Langue / Language" aria-label="Langue / Language">
+                        <option value="fr">🇫🇷 FR</option>
+                        <option value="en">🇬🇧 EN</option>
+                        <option value="de">🇩🇪 DE</option>
+                        <option value="es">🇪🇸 ES</option>
+                        <option value="zh">🇨🇳 中文</option>
+                        <option value="ar">🇸🇦 عربي</option>
+                    </select>
                     <button id="theme-toggle-btn" class="icon-btn" onclick="toggleTheme()" aria-label="Basculer le thème clair/sombre" title="Thème clair / sombre">🌙</button>
                     <div class="system-status">
                         <span class="status-indicator online"></span>
@@ -1773,6 +1783,47 @@
                         </div>
                     </div>
 
+                    <!-- Absence & délégation (tous les utilisateurs) -->
+                    <div class="card form-card" id="absence-card">
+                        <h2>🌴 Absence & Délégation</h2>
+                        <p class="section-desc">Pendant votre absence, toute alerte qui vous serait assignée ira à votre délégué, et vos alertes ouvertes peuvent lui être réassignées immédiatement (chaque réassignation est tracée dans l'historique de l'alerte).</p>
+                        <div id="absence-status" style="margin-bottom: 1rem;"></div>
+                        <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 560px;">
+                            <div class="form-group">
+                                <label for="absence-until">Absent jusqu'au</label>
+                                <input type="datetime-local" id="absence-until">
+                            </div>
+                            <div class="form-group">
+                                <label for="absence-delegate">Délégué</label>
+                                <select id="absence-delegate"><option value="">Choisir…</option></select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="absence-reassign" checked style="width: 18px; height: 18px;">
+                                Réassigner immédiatement mes alertes ouvertes au délégué
+                            </label>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="saveAbsence()">Déclarer l'absence</button>
+                            <button class="btn btn-secondary" onclick="clearAbsence()">Mettre fin à l'absence</button>
+                        </div>
+                    </div>
+
+                    <!-- Seuils de score (admin) -->
+                    <div class="card form-card hidden" id="scoring-card">
+                        <h2>🎯 Seuils de Score du Criblage (Admin)</h2>
+                        <p class="section-desc">Seuil de cut-off global et surcharges par type de liste, appliqués <strong>à chaud</strong> au criblage clients et au filtrage transactionnel (prioritaires sur <code>config.yaml</code>). Surcharge vide = seuil global. Toute modification est journalisée.</p>
+                        <div class="form-group" style="max-width: 260px;">
+                            <label for="scoring-global">Seuil global (0-100)</label>
+                            <input type="number" id="scoring-global" min="0" max="100" step="0.5">
+                        </div>
+                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;" id="scoring-overrides-row">
+                            <!-- Rempli dynamiquement par liste -->
+                        </div>
+                        <button class="btn btn-primary" onclick="saveScoringSettings()" style="margin-top: 0.5rem;">Enregistrer les seuils</button>
+                    </div>
+
                     <!-- Portabilité de la configuration (admin) -->
                     <div class="card form-card hidden" id="config-portability-card">
                         <h2>💼 Portabilité de la Configuration (Admin)</h2>
@@ -1891,6 +1942,7 @@
                         <option value="blocking,user">Utilisateur + Paramétrage Blocking</option>
                         <option value="rules,user">Utilisateur + Règles Faux Positifs (équipe criblage)</option>
                         <option value="blocking,rules,user">Utilisateur + Blocking + Règles</option>
+                        <option value="auditor">Auditeur (Lecture seule intégrale)</option>
                         <option value="admin">Administrateur (Accès Complet)</option>
                     </select>
                 </div>
@@ -2064,7 +2116,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6.7"></script>
+    <script src="/static/app.js?v=6.8"></script>
 
 
 

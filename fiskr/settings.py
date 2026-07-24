@@ -43,6 +43,9 @@ SETTING_DIGEST = "notifications.digest"
 # Retention des donnees : duree de conservation (jours) par famille, 0 = illimite.
 # Le journal des actions d'administration n'est JAMAIS purge (append-only).
 SETTING_RETENTION = "retention.policy"
+# Seuils de score du criblage : seuil global + surcharges par type de liste,
+# modifiables a chaud (prioritaires sur config.yaml scoring.*)
+SETTING_SCORE_THRESHOLDS = "scoring.thresholds"
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
@@ -234,6 +237,51 @@ def digest_settings(db) -> Dict[str, Any]:
         if cron_expr:
             out["cron"] = cron_expr
     return out
+
+
+def score_thresholds(db) -> Dict[str, Any]:
+    """
+    Seuils de cut-off effectifs : reglage a chaud (base) prioritaire sur
+    config.yaml (scoring.cut_off_threshold / cut_off_overrides).
+    """
+    scoring_cfg = config.get("scoring", {}) or {}
+    out = {
+        "cut_off_threshold": float(scoring_cfg.get("cut_off_threshold", 75.0)),
+        "cut_off_overrides": {
+            str(k): float(v) for k, v in (scoring_cfg.get("cut_off_overrides") or {}).items()
+            if isinstance(v, (int, float))
+        },
+        "source": "config",
+    }
+    value = get_setting(db, SETTING_SCORE_THRESHOLDS, None)
+    if isinstance(value, dict):
+        out["source"] = "database"
+        try:
+            out["cut_off_threshold"] = float(value.get("cut_off_threshold", out["cut_off_threshold"]))
+        except (TypeError, ValueError):
+            pass
+        overrides = value.get("cut_off_overrides")
+        if isinstance(overrides, dict):
+            cleaned = {}
+            for list_type, threshold in overrides.items():
+                try:
+                    cleaned[str(list_type).upper()] = float(threshold)
+                except (TypeError, ValueError):
+                    continue
+            out["cut_off_overrides"] = cleaned
+    return out
+
+
+def scoring_config_with_thresholds(db) -> Dict[str, Any]:
+    """Copie de la config globale avec les seuils a chaud injectes — a passer
+    au moteur de scoring pour que le reglage prenne effet sans redemarrage."""
+    thresholds = score_thresholds(db)
+    cfg = dict(config)
+    scoring_cfg = dict(config.get("scoring", {}) or {})
+    scoring_cfg["cut_off_threshold"] = thresholds["cut_off_threshold"]
+    scoring_cfg["cut_off_overrides"] = dict(thresholds["cut_off_overrides"])
+    cfg["scoring"] = scoring_cfg
+    return cfg
 
 
 def retention_policy(db) -> Dict[str, Any]:
