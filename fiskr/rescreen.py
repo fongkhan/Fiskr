@@ -7,7 +7,7 @@ en liste blanche sont supprimees de facon tracee (statut WHITELISTED dans le
 journal d'audit). Fournit aussi le lookback manuel (guidance Wolfsberg).
 """
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fiskr.config import config
 from fiskr.database import (
@@ -20,6 +20,9 @@ from fiskr.alerts import open_or_redetect_alert, is_whitelisted
 logger = logging.getLogger("fiskr.rescreen")
 
 RESCREEN_USERNAME = "rescreen-auto"
+
+# Cadence des remontees de progression (un tick tous les N clients criblés)
+_PROGRESS_EVERY = 500
 
 
 def _entity_dicts(db, snapshot_ids: List[str]) -> List[Dict[str, Any]]:
@@ -55,10 +58,15 @@ def _client_dicts(db) -> List[Dict[str, Any]]:
 
 
 def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
-                            trigger_detail: str) -> Dict[str, int]:
+                            trigger_detail: str,
+                            progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, int]:
     """
     Crible le referentiel clients contre un ensemble borne d'entites (index de
     blocking local). Retourne les compteurs du run.
+
+    `progress(traites, total)` est appele tous les 500 clients : le re-criblage
+    qui suit une approbation d'homologation peut durer plusieurs minutes sur un
+    gros referentiel. Jamais bloquant.
     """
     result = {
         "changed_entities": len(changed_entities),
@@ -80,8 +88,17 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
 
     from fiskr.api import watchlist_version, watchlist_hash  # valeurs de version du cache actif
 
-    for client in _client_dicts(db):
+    clients = _client_dicts(db)
+    total_clients = len(clients)
+
+    for client in clients:
         result["clients_screened"] += 1
+        done = result["clients_screened"]
+        if progress and (done % _PROGRESS_EVERY == 0 or done == total_clients):
+            try:
+                progress(done, total_clients)
+            except Exception:
+                pass  # une progression cassee n'interrompt jamais un re-criblage
         candidates: Dict[str, Dict[str, Any]] = {}
         for key in generate_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
@@ -136,7 +153,8 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
 
 
 def rescreen_after_snapshot_change(db, file_type: str, new_snapshot_id: str,
-                                   previous_snapshot_id: Optional[str] = None) -> Dict[str, int]:
+                                   previous_snapshot_id: Optional[str] = None,
+                                   progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, int]:
     """
     Re-crible le referentiel clients contre les entites du nouveau snapshot
     qui sont nouvelles ou modifiees par rapport au precedent (comparaison des
@@ -154,7 +172,8 @@ def rescreen_after_snapshot_change(db, file_type: str, new_snapshot_id: str,
         changed = new_entities
     return _screen_clients_against(
         db, changed,
-        trigger_detail=f"[Re-criblage automatique après mise à jour {file_type}]"
+        trigger_detail=f"[Re-criblage automatique après mise à jour {file_type}]",
+        progress=progress,
     )
 
 

@@ -56,7 +56,8 @@ from fiskr.fprules import (
 )
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.backtest import (
-    run_backtest, generate_test_panel, TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
+    run_backtest, validate_candidate_rule, generate_test_panel,
+    TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
 )
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
@@ -340,7 +341,20 @@ _SYNC_RUNNERS = {
 _running_syncs: set = set()
 
 def _run_source_sync(source: str) -> None:
-    """Synchronise UNE source (declenchement cron), avec re-criblage post-delta."""
+    """
+    Synchronise UNE source (declenchement cron), avec re-criblage post-delta.
+
+    L'operation est inscrite au registre de progression sous `sync:<source>` :
+    une synchronisation planifiee devient visible dans la pastille et le centre
+    de notifications, au meme titre qu'un import lance a la main. Le cycle
+    generique (`_run_generic_sync`) affine ensuite les phases sur ce meme jeton
+    ; les sources a implementation propre (OFAC, DGT) restent au moins
+    signalees comme en cours.
+    """
+    token = f"sync:{source.lower()}"
+    progress_registry.update(token, phase="DOWNLOAD", kind="sync",
+                             label=f"Synchronisation {source.upper()}",
+                             started_by="système")
     db = next(get_db())
     try:
         report = _SYNC_RUNNERS[source](db, trigger="SCHEDULED",
@@ -348,8 +362,19 @@ def _run_source_sync(source: str) -> None:
         if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
             snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
             if snap:
-                rescreen_after_snapshot_change(db, snap.file_type, report.snapshot_id,
-                                               report.previous_snapshot_id)
+                # Le cycle de sync a deja marque le jeton termine : cet update
+                # le remet en cours pour couvrir aussi le re-criblage
+                rescreen_after_snapshot_change(
+                    db, snap.file_type, report.snapshot_id, report.previous_snapshot_id,
+                    progress=lambda done, total: progress_registry.update(
+                        token, phase="RESCREEN", processed=done, total=total,
+                        snapshot_id=report.snapshot_id),
+                )
+    except Exception as e:
+        progress_registry.finish(token, status="ERROR", error=str(e)[:500])
+        raise
+    else:
+        progress_registry.finish(token)
     finally:
         db.close()
 
@@ -2088,6 +2113,35 @@ def adverse_media_lookup(
 
 _INGEST_COMMIT_EVERY = 1000
 
+
+def _start_job(token: str, kind: str, label: str, target, args: tuple = (),
+               started_by: str = "système") -> str:
+    """
+    Lance une operation longue en tache de fond et l'inscrit au registre de
+    progression (elle apparait alors dans GET /api/progress/active, donc dans
+    la pastille et le centre de notifications du dashboard).
+
+    `target(job_token)` recoit le jeton pour publier ses propres etapes ; il
+    ouvre SA session (les sessions SQLAlchemy ne se partagent pas entre
+    threads). Toute exception est capturee et marquee ERROR dans le registre :
+    un job qui casse ne casse jamais l'appelant, et son echec reste visible.
+    """
+    progress_registry.update(token, phase="PARSE", kind=kind, label=label,
+                             started_by=started_by)
+
+    def _runner():
+        try:
+            target(token, *args)
+        except Exception as e:
+            logger.error(f"Job {kind} « {label} » en erreur : {e}")
+            progress_registry.finish(token, status="ERROR", error=str(e)[:500])
+        else:
+            progress_registry.finish(token)
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return token
+
+
 def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
                           progress_id: Optional[str]) -> Snapshot:
     """
@@ -2147,7 +2201,9 @@ def ingest_snapshot(
         # 1+2. Copie du televersement ET empreinte SHA-256 en une seule passe
         # streamee (jamais le fichier entier en memoire — 750k fiches PEP
         # representent plusieurs centaines de Mo)
-        progress_registry.update(progress_id, phase="UPLOAD")
+        progress_registry.update(progress_id, phase="UPLOAD", kind="import",
+                                 label=f"Import {file_type} — {file.filename}",
+                                 started_by=current_user.get("username") or "?")
         hasher = hashlib.sha256()
         bytes_received = 0
         with open(temp_file_path, "wb") as buffer:
@@ -4438,6 +4494,12 @@ def run_source_sync(
     """
     source = (request.source or "").strip().upper()
     reload_cache = lambda: load_watchlist_cache(db)
+    # Identite de l'operation posee AVANT le cycle de sync : `started_by`
+    # n'etant jamais ecrase, la pastille affiche le demandeur reel et non
+    # « système » (valeur par defaut des declenchements planifies)
+    progress_registry.update(f"sync:{source.lower()}", phase="DOWNLOAD", kind="sync",
+                             label=f"Synchronisation {source}",
+                             started_by=current_user.get("username") or "?")
 
     if source == "OFAC":
         report = run_ofac_sync(db, trigger="MANUAL", reload_cache=reload_cache)
@@ -4547,6 +4609,71 @@ async def get_operation_progress(
             "updated_at": None,
         }
     raise HTTPException(status_code=404, detail="Operation inconnue ou expiree")
+
+
+# Lien profond du dashboard par nature d'operation (cf. applyHashRoute)
+_OPERATION_LINKS = {
+    "import": "#watchlist-mgmt/watchlist-snapshots",
+    "sync": "#watchlist-mgmt/watchlist-sources",
+    "backtest": "#watchlist-mgmt/watchlist-review",
+    "approve": "#watchlist-mgmt/watchlist-review",
+    "batch": "#batch",
+    "quality": "#kpi",
+}
+
+
+@app.get("/api/progress/active")
+async def list_active_operations(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Tout ce qui tourne en tache de fond, en une seule charge utile : imports
+    manuels et planifies, cahier de tests, mise en production, campagnes batch
+    et controle qualite. Alimente la pastille d'en-tete et le centre de
+    notifications du dashboard — la progression ne depend plus de l'ecran
+    ouvert ni de qui a lance l'operation.
+
+    Les operations terminees restent listees deux minutes (statut DONE/ERROR)
+    pour que le front annonce la fin. Aucune donnee metier n'y transite :
+    libelles et compteurs uniquement.
+    """
+    items = []
+    for state in progress_registry.list_active():
+        kind = state.get("kind") or "import"
+        items.append({
+            **state,
+            "kind": kind,
+            "label": state.get("label") or state.get("token"),
+            "link": _OPERATION_LINKS.get(kind, ""),
+        })
+
+    # Campagnes batch : deja persistees avec leur progression, on les fusionne
+    # ici pour que le front n'ait qu'une seule source a interroger
+    for campaign in db.query(BatchCampaign).filter(BatchCampaign.status == "RUNNING").all():
+        total = campaign.total_clients or 0
+        done = campaign.processed_clients or 0
+        items.append({
+            "token": f"batch:{campaign.id}",
+            "kind": "batch",
+            "label": f"Campagne batch — {campaign.name}",
+            "started_by": campaign.created_by,
+            "phase": "PERSIST",
+            "processed": done,
+            "total": total or None,
+            "pct": round(100.0 * done / total, 1) if total and done <= total else None,
+            "snapshot_id": None,
+            "status": "RUNNING",
+            "error": None,
+            "started_at": campaign.created_at.timestamp() if campaign.created_at else None,
+            "updated_at": None,
+            "link": _OPERATION_LINKS["batch"],
+        })
+
+    items.sort(key=lambda item: item.get("started_at") or 0)
+    running = [i for i in items if i["status"] == "RUNNING"]
+    return {"items": items, "running": len(running)}
+
 
 class SyncSchedulesUpdate(BaseModel):
     # source -> expression cron 5 champs ; chaine vide = retour au defaut
@@ -5537,7 +5664,51 @@ class BacktestRequest(BaseModel):
     # l'ecart chiffre montre l'effet de la regle avant sa validation 4-yeux
     candidate_rule_id: Optional[int] = None
 
-@app.post("/api/review/snapshots/{snapshot_id}/backtest")
+def _run_backtest_job(job_token: str, snapshot_id: str, panel_snapshot_id: str,
+                      candidate_rule_id: Optional[int], username: str) -> None:
+    """
+    Corps du cahier de tests, execute en tache de fond (session dediee : une
+    session SQLAlchemy ne se partage pas entre threads). Publie sa progression
+    sur `job_token` et persiste le rapport sur le snapshot — le front le
+    recupere ensuite par GET /api/review/snapshots/{id}, y compris apres un
+    rechargement de page.
+    """
+    from fiskr.database import SessionLocal
+    session = SessionLocal()
+    try:
+        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+        if snap is None:
+            raise ValueError("Snapshot introuvable.")
+
+        def _tick(phase: str, done: int, total: int) -> None:
+            progress_registry.update(job_token, phase=phase, processed=done,
+                                     total=total, snapshot_id=snapshot_id)
+
+        report = run_backtest(session, snap, panel_snapshot_id,
+                              threshold_pct=backtest_max_gap_pct(session),
+                              executed_by=username,
+                              candidate_rule_id=candidate_rule_id,
+                              progress=_tick)
+        snap.backtest_report = report
+        snap.backtest_at = datetime.utcnow()
+        snap.backtest_by = username
+        session.commit()
+        # Un ecart eleve doit remonter tout de suite (il bloque l'approbation) ;
+        # un verdict OK part dans le recapitulatif periodique
+        emit(session, "backtest_completed", {
+            "Snapshot": snap.snapshot_id, "Liste": snap.file_type,
+            "Verdict": report.get("verdict"),
+            "Écart": f"{report.get('gap_pct')} % (seuil {report.get('threshold_pct')} %)",
+            "Alertes production": (report.get("current") or {}).get("alerts"),
+            "Alertes candidate": (report.get("candidate") or {}).get("alerts"),
+            "Nouvelles paires": report.get("new_pairs_count"),
+            "Exécuté par": username,
+        }, urgency_override="immediate" if report.get("verdict") != "OK" else None)
+    finally:
+        session.close()
+
+
+@app.post("/api/review/snapshots/{snapshot_id}/backtest", status_code=status.HTTP_202_ACCEPTED)
 async def run_review_backtest(
     snapshot_id: str,
     payload: BacktestRequest,
@@ -5551,6 +5722,13 @@ async def run_review_backtest(
     d'interception, liste les nouvelles alertes et les alertes resolues.
     Aucune alerte ni ligne d'audit n'est creee. Le rapport est archive avec le
     snapshot (auditable apres promotion).
+
+    Repond **202** avec un jeton : deux criblages A/B d'une vraie base clients
+    durent plusieurs minutes et gelaient l'application entiere quand ils
+    tournaient dans la requete. La progression se suit par
+    GET /api/progress?id=<jeton> (ou la pastille du dashboard) et le rapport
+    se relit par GET /api/review/snapshots/{id} une fois le job termine.
+    Les refus restent SYNCHRONES (400) : rien ne part si la demande est invalide.
     """
     snap = _get_pending_snapshot(db, snapshot_id)
     panel = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.panel_snapshot_id).first()
@@ -5561,30 +5739,25 @@ async def run_review_backtest(
         )
     if not (panel.record_count or 0):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le panel choisi est vide.")
-
     try:
-        report = run_backtest(db, snap, panel.snapshot_id,
-                              threshold_pct=backtest_max_gap_pct(db),
-                              executed_by=reviewer["username"],
-                              candidate_rule_id=payload.candidate_rule_id)
+        validate_candidate_rule(db, payload.candidate_rule_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    snap.backtest_report = report
-    snap.backtest_at = datetime.utcnow()
-    snap.backtest_by = reviewer["username"]
-    db.commit()
-    # Un ecart eleve doit remonter tout de suite (il bloque l'approbation) ;
-    # un verdict OK part dans le recapitulatif periodique
-    emit(db, "backtest_completed", {
-        "Snapshot": snap.snapshot_id, "Liste": snap.file_type,
-        "Verdict": report.get("verdict"),
-        "Écart": f"{report.get('gap_pct')} % (seuil {report.get('threshold_pct')} %)",
-        "Alertes production": (report.get("current") or {}).get("alerts"),
-        "Alertes candidate": (report.get("candidate") or {}).get("alerts"),
-        "Nouvelles paires": report.get("new_pairs_count"),
-        "Exécuté par": reviewer["username"],
-    }, urgency_override="immediate" if report.get("verdict") != "OK" else None)
-    return report
+
+    job_token = f"backtest:{snap.snapshot_id}"
+    _start_job(job_token, "backtest",
+               f"Cahier de tests — {snap.file_type}",
+               _run_backtest_job,
+               (snap.snapshot_id, panel.snapshot_id, payload.candidate_rule_id,
+                reviewer["username"]),
+               started_by=reviewer["username"])
+    return {
+        "message": "Cahier de tests lancé. La progression est suivie dans les opérations en cours.",
+        "job_token": job_token,
+        "snapshot_id": snap.snapshot_id,
+        "panel_snapshot_id": panel.snapshot_id,
+        "panel_size": panel.record_count,
+    }
 
 @app.get("/api/testpanels")
 async def list_test_panels(
@@ -5822,7 +5995,48 @@ async def download_exclusion_evidence(
         raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
     return FileResponse(str(file_path), filename=row.exclusion_file_name or file_path.name)
 
-@app.post("/api/review/snapshots/{snapshot_id}/approve")
+def _run_approval_job(job_token: str, snapshot_id: str, previous_snapshot_id: Optional[str],
+                      excluded_count: int, username: str) -> None:
+    """
+    Suites d'une approbation, en tache de fond : rechargement du cache de
+    production puis re-criblage post-delta du referentiel clients (plusieurs
+    minutes sur un gros referentiel — il gelait l'application entiere quand il
+    tournait dans la requete). La promotion elle-meme, acte de gouvernance, a
+    deja ete commitee de facon synchrone par l'endpoint.
+    """
+    from fiskr.database import SessionLocal
+    session = SessionLocal()
+    try:
+        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+        if snap is None:
+            raise ValueError("Snapshot introuvable.")
+
+        progress_registry.update(job_token, phase="RELOAD", snapshot_id=snapshot_id)
+        load_watchlist_cache(session)
+
+        rescreen_result = None
+        if auto_rescreen_enabled(session):
+            rescreen_result = rescreen_after_snapshot_change(
+                session, snap.file_type, snap.snapshot_id, previous_snapshot_id,
+                progress=lambda done, total: progress_registry.update(
+                    job_token, phase="RESCREEN", processed=done, total=total,
+                    snapshot_id=snapshot_id),
+            )
+        # Étape structurante de la production des listes : mail immédiat
+        report = snap.backtest_report or {}
+        emit(session, "snapshot_approved", {
+            "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
+            "Fiches": snap.record_count, "Exclusions": excluded_count,
+            "Approuvé par": username,
+            "Commentaire": snap.review_comment or "—",
+            "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
+            "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
+        })
+    finally:
+        session.close()
+
+
+@app.post("/api/review/snapshots/{snapshot_id}/approve", status_code=status.HTTP_202_ACCEPTED)
 async def approve_pending_snapshot(
     snapshot_id: str,
     payload: ReviewDecisionRequest,
@@ -5833,6 +6047,12 @@ async def approve_pending_snapshot(
     Approuve un snapshot en attente : promotion en production (READY), les
     anciens snapshots du meme type passent en SUPERSEDED et le cache de
     criblage est recharge sans les entites exclues.
+
+    La promotion (controles + bascule READY + SUPERSEDED des anciens) est
+    SYNCHRONE : c'est l'acte de gouvernance, il est rapide et ses refus restent
+    des 400 immediats. Le rechargement du cache et le re-criblage post-delta,
+    eux, partent en tache de fond et repondent **202** avec un jeton suivi par
+    GET /api/progress?id= (et par la pastille du dashboard).
     """
     snap = _get_pending_snapshot(db, snapshot_id)
 
@@ -5876,30 +6096,20 @@ async def approve_pending_snapshot(
     snap.review_comment = (payload.comment or "").strip() or None
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     db.commit()
-    load_watchlist_cache(db)
 
-    rescreen_result = None
-    if auto_rescreen_enabled(db):
-        rescreen_result = rescreen_after_snapshot_change(
-            db, snap.file_type, snap.snapshot_id,
-            previous_prod.snapshot_id if previous_prod else None
-        )
-    # Étape structurante de la production des listes : mail immédiat
-    report = snap.backtest_report or {}
-    emit(db, "snapshot_approved", {
-        "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
-        "Fiches": snap.record_count, "Exclusions": len(excluded_rows),
-        "Approuvé par": reviewer["username"],
-        "Commentaire": snap.review_comment or "—",
-        "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
-        "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
-    })
+    job_token = f"approve:{snap.snapshot_id}"
+    _start_job(job_token, "approve",
+               f"Mise en production — {snap.file_type}",
+               _run_approval_job,
+               (snap.snapshot_id, previous_prod.snapshot_id if previous_prod else None,
+                len(excluded_rows), reviewer["username"]),
+               started_by=reviewer["username"])
     return {
-        "message": "Snapshot approuvé et promu en production.",
+        "message": "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours.",
         "snapshot_id": snapshot_id,
         "status": snap.status,
         "excluded_count": len(excluded_rows),
-        "rescreen": rescreen_result,
+        "job_token": job_token,
     }
 
 @app.post("/api/review/snapshots/{snapshot_id}/reject")
@@ -6826,11 +7036,16 @@ def _client_quality_post_import(snapshot_id: str) -> None:
     d'exception : un controle de qualite ne casse pas un import.
     """
     from fiskr.database import SessionLocal
+    token = f"quality:{snapshot_id}"
     session = SessionLocal()
     try:
         snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
         if snap is None:
             return
+        progress_registry.update(token, phase="QUALITY", kind="quality",
+                                 label=f"Contrôle qualité — {snap.file_name}",
+                                 started_by="système", snapshot_id=snapshot_id,
+                                 total=snap.record_count or None)
         report = _compute_client_quality(session, snap)
         score = report.get("global_score_pct")
         set_setting(session, SETTING_QUALITY_LAST, {
@@ -6857,6 +7072,9 @@ def _client_quality_post_import(snapshot_id: str) -> None:
         })
     except Exception as e:
         logger.error(f"Contrôle de qualité post-import impossible ({snapshot_id}) : {e}")
+        progress_registry.finish(token, status="ERROR", error=str(e)[:500])
+    else:
+        progress_registry.finish(token)
     finally:
         session.close()
 

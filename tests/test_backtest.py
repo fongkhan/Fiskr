@@ -26,6 +26,7 @@ from fiskr.settings import (
     SETTING_EXCLUSION_FILE_REQUIRED, SETTING_BACKTEST_REQUIRED,
     SETTING_BACKTEST_MAX_GAP_PCT, SETTING_WHITELIST_JUSTIFICATION_REQUIRED,
 )
+from tests.conftest import wait_for_job, post_and_wait
 
 ALL_SETTING_KEYS = [
     SETTING_REQUIRE_APPROVAL, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
@@ -34,6 +35,23 @@ ALL_SETTING_KEYS = [
 ]
 
 WL_JUSTIF_MARKER = "test_bt Good Guy (cahier de tests)"
+
+
+def _run_backtest(client, snapshot_id, **payload):
+    """
+    Lance le cahier de tests (202 + jeton), attend la fin du job et retourne le
+    rapport persiste sur le snapshot — c'est desormais la seule source du
+    rapport, la reponse du POST ne le porte plus.
+    """
+    response = client.post(f"/api/review/snapshots/{snapshot_id}/backtest", json=payload)
+    assert response.status_code == 202, response.text
+    state = wait_for_job(client, response.json()["job_token"])
+    assert state["status"] == "DONE", state
+    detail = client.get(f"/api/review/snapshots/{snapshot_id}")
+    assert detail.status_code == 200, detail.text
+    report = detail.json()["backtest_report"]
+    assert report is not None, "le job s'est terminé sans rapport persisté"
+    return report
 
 
 def _override_user(role: str):
@@ -135,12 +153,8 @@ def test_backtest_detects_gap_and_is_dry_run(client, ab_setup):
     finally:
         db.close()
 
-    response = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    )
-    assert response.status_code == 200, response.text
-    report = response.json()
+    report = _run_backtest(client, ab_setup["pending_id"],
+                           panel_snapshot_id=ab_setup["panel_id"])
 
     # L'ajout d'Igor dans la candidate cree une nouvelle alerte sur le panel
     assert report["candidate"]["alerts"] == report["current"]["alerts"] + 1
@@ -171,10 +185,7 @@ def test_backtest_detects_gap_and_is_dry_run(client, ab_setup):
 def test_good_guys_bulk_then_backtest_ok(client, ab_setup):
     # Seuil bas pour forcer le verdict WARN au premier passage
     assert client.put("/api/settings/ingestion", json={"backtest_max_gap_pct": 5}).status_code == 200
-    first = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    ).json()
+    first = _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
     assert first["verdict"] == "WARN"
 
     # Good Guy en masse sur les nouvelles paires (justification commune)
@@ -200,10 +211,7 @@ def test_good_guys_bulk_then_backtest_ok(client, ab_setup):
     assert all(s["reason"] == "paire déjà active" for s in again["skipped"])
 
     # Re-backtest : la paire est supprimee par la liste blanche -> verdict OK
-    second = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    ).json()
+    second = _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
     assert second["candidate"]["whitelisted_suppressed"] >= 1
     assert second["candidate"]["alerts"] == second["current"]["alerts"]
     assert second["gap_pct"] == 0
@@ -224,29 +232,23 @@ def test_backtest_required_gates_approval(client, ab_setup):
                       json={"backtest_required": True, "backtest_max_gap_pct": 5}).status_code == 200
 
     # Sans rapport -> refus
-    response = client.post(f"/api/review/snapshots/{ab_setup['pending_id']}/approve", json={"comment": "x"})
+    response = post_and_wait(client, f"/api/review/snapshots/{ab_setup['pending_id']}/approve", json={"comment": "x"})
     assert response.status_code == 400
     assert "cahier de tests" in response.json()["detail"].lower()
 
     # Rapport WARN -> refus
-    warn = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    ).json()
+    warn = _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
     assert warn["verdict"] == "WARN"
-    response = client.post(f"/api/review/snapshots/{ab_setup['pending_id']}/approve", json={"comment": "x"})
+    response = post_and_wait(client, f"/api/review/snapshots/{ab_setup['pending_id']}/approve", json={"comment": "x"})
     assert response.status_code == 400
     assert "écart" in response.json()["detail"].lower()
 
     # Seuil releve + re-test -> verdict OK -> approbation acceptee
     assert client.put("/api/settings/ingestion", json={"backtest_max_gap_pct": 500}).status_code == 200
-    ok = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    ).json()
+    ok = _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
     assert ok["verdict"] == "OK"
-    response = client.post(f"/api/review/snapshots/{ab_setup['pending_id']}/approve", json={"comment": "ok"})
-    assert response.status_code == 200, response.text
+    response = post_and_wait(client, f"/api/review/snapshots/{ab_setup['pending_id']}/approve", json={"comment": "ok"})
+    assert response.status_code == 202, response.text
 
 
 def test_backtest_rejects_bad_panel_and_non_pending(client, ab_setup):
@@ -286,10 +288,8 @@ def test_generate_panel_isolated_from_real_client_base(client, ab_setup):
     assert generated["generated"] is True
 
     # Utilisable par le cahier de tests (les hits copies interceptent)
-    report = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": data["snapshot_id"]},
-    ).json()
+    report = _run_backtest(client, ab_setup["pending_id"],
+                           panel_snapshot_id=data["snapshot_id"])
     assert report["panel_size"] == 60
     assert report["candidate"]["alerts"] >= 1  # copies exactes -> interceptions attendues
 
@@ -369,12 +369,8 @@ def _suppress_tag_code(tag):
 
 
 def test_backtest_report_has_additive_rules_key(client, ab_setup):
-    response = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    )
-    assert response.status_code == 200, response.text
-    report = response.json()
+    report = _run_backtest(client, ab_setup["pending_id"],
+                           panel_snapshot_id=ab_setup["panel_id"])
     rules = report["rules"]
     assert rules["candidate_rule"] is None
     assert rules["current_suppressed"] == 0
@@ -389,19 +385,13 @@ def test_backtest_candidate_draft_rule_shows_delta(client, ab_setup, bt_rule_fac
     rule_id = bt_rule_factory(tag, status="DRAFT", code=_suppress_tag_code(f"Nouveauov{tag}"))
 
     # Sans la regle : l'ajout d'Igor cree une nouvelle alerte
-    base = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    ).json()
+    base = _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
     assert base["candidate"]["alerts"] == base["current"]["alerts"] + 1
 
     # Avec la regle candidate : l'alerte d'Igor est supprimee cote candidat SEULEMENT
-    response = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"], "candidate_rule_id": rule_id},
-    )
-    assert response.status_code == 200, response.text
-    report = response.json()
+    report = _run_backtest(client, ab_setup["pending_id"],
+                           panel_snapshot_id=ab_setup["panel_id"],
+                           candidate_rule_id=rule_id)
     rules = report["rules"]
     assert rules["candidate_rule"]["id"] == rule_id
     assert rules["candidate_rule"]["status"] == "DRAFT"
@@ -423,12 +413,8 @@ def test_backtest_active_rule_applies_to_both_sides(client, ab_setup, bt_rule_fa
     bt_rule_factory(tag, status="ACTIVE", enabled=True,
                     code=_suppress_tag_code(f"Nouveauov{tag}"))
 
-    response = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
-        json={"panel_snapshot_id": ab_setup["panel_id"]},
-    )
-    assert response.status_code == 200, response.text
-    report = response.json()
+    report = _run_backtest(client, ab_setup["pending_id"],
+                           panel_snapshot_id=ab_setup["panel_id"])
     rules = report["rules"]
     assert rules["active_count"] >= 1
     # La regle active supprime l'alerte d'Igor cote candidat (comme en prod le ferait)
@@ -476,8 +462,8 @@ def test_approve_gate_accepts_legacy_report_without_rules_key(client, ab_setup):
     assert client.put("/api/settings/ingestion", json={
         "require_approval": True, "backtest_required": True}).status_code == 200
 
-    response = client.post(
-        f"/api/review/snapshots/{ab_setup['pending_id']}/approve",
+    response = post_and_wait(
+        client, f"/api/review/snapshots/{ab_setup['pending_id']}/approve",
         json={"comment": "test_bt approbation rapport legacy"},
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
