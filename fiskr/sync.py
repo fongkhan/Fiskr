@@ -500,24 +500,28 @@ def _finalize_report(db, **kwargs) -> SyncReport:
     if send_report_email(report):
         report.email_sent = True
         db.commit()
-    # Notifications metier (fire-and-forget) : echec de sync, snapshot a homologuer
-    try:
-        from fiskr.notify import notify_event
-        from fiskr.settings import notification_events
-        events = notification_events(db)
-        if report.status == "ERROR" and events.get("sync_error"):
-            notify_event("sync_error", {
-                "source": report.source, "message": report.message or "-",
-                "declencheur": report.trigger,
-            })
-        elif report.status == "PENDING_REVIEW" and events.get("snapshot_pending_review"):
-            notify_event("snapshot_pending_review", {
-                "source": report.source, "snapshot_id": report.snapshot_id,
-                "ajouts": report.added_count, "modifications": report.modified_count,
-                "suppressions": report.removed_count,
-            })
-    except Exception as e:
-        logger.error(f"Notification de rapport de sync impossible : {e}")
+    # Notification metier de l'etape : chaque fin de synchronisation est
+    # notifiee — panne reseau et snapshot a homologuer immediatement, fins
+    # nominales dans le recapitulatif periodique.
+    from fiskr.notifier import emit
+    delta = {"Ajouts": report.added_count, "Modifications": report.modified_count,
+             "Suppressions": report.removed_count}
+    if report.status == "ERROR":
+        emit(db, "sync_error", {
+            "Source": report.source, "Message": report.message or "—",
+            "Déclencheur": report.trigger,
+        })
+    elif report.status == "PENDING_REVIEW":
+        emit(db, "snapshot_pending_review", {
+            "Source": report.source, "Snapshot": report.snapshot_id,
+            "Déclencheur": report.trigger, **delta,
+        })
+    else:
+        emit(db, "sync_completed", {
+            "Source": report.source, "Statut": report.status,
+            "Message": report.message or "—", "Déclencheur": report.trigger,
+            "Snapshot": report.snapshot_id or "—", **delta,
+        })
     return report
 
 

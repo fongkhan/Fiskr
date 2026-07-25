@@ -151,6 +151,9 @@ ssie:
 # les webhooks recoivent un POST JSON {event, label, at, data}.
 notifications:
   webhooks: []                  # ex. ["https://hooks.example.com/fiskr"]
+  # URL publique de l'application : active le bouton « Ouvrir dans Fiskr » des
+  # mails d'etape (lien direct vers l'ecran concerne). Vide = mails sans bouton.
+  public_url: "${FISKR_PUBLIC_URL}"
 
 # Criblage batch (campagnes persistees) + inbox CFT
 # inbox_dir : repertoire ou le moniteur de transfert (CFT/SFTP) depose les

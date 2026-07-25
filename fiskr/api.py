@@ -34,10 +34,19 @@ from fiskr.database import (
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
-    BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting, HookDelivery
+    BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting, HookDelivery,
+    NotificationDelivery
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
-from fiskr.notify import notify_event
+from fiskr.notify import (
+    notify_event,
+    smtp_configured as notify_smtp_configured,
+    public_url as notify_public_url,
+    default_recipients as notify_default_recipients,
+    send_email as notify_send_email,
+    render_event_email as notify_render_event_email,
+)
+from fiskr.notifier import emit, flush_digest, purge_deliveries
 from fiskr.fprules import (
     evaluate_fp_rules, build_screening_ctx, annotate_suppression, compile_rule,
     run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE, validate_rule_code,
@@ -80,6 +89,8 @@ from fiskr.settings import (
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     digest_settings, SETTING_DIGEST,
+    notification_batch_settings, SETTING_NOTIFICATION_BATCH, DEFAULT_NOTIFICATION_BATCH,
+    SETTING_WHITELIST_EXPIRY_NOTIFIED, get_setting,
     retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
     score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
     investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST
@@ -450,6 +461,125 @@ async def _digest_scheduler():
         except Exception as e:
             logger.error(f"Digest KPI en échec sur ce tick : {e}")
 
+def _detect_overdue_alerts(db) -> int:
+    """
+    Detecte les alertes dont l'echeance SLA vient d'etre depassee et met en
+    file une notification pour l'analyste assigne (et son delegue). Le
+    marquage se fait par un evenement d'alerte SLA_OVERDUE : une meme alerte
+    n'est jamais signalee deux fois.
+    """
+    now = datetime.utcnow()
+    overdue = db.query(Alert).filter(
+        Alert.status.in_(ALERT_OPEN_STATUSES),
+        Alert.due_at.isnot(None),
+        Alert.due_at < now,
+    ).all()
+    if not overdue:
+        return 0
+    already = {
+        row.alert_id for row in db.query(AlertEvent).filter(
+            AlertEvent.alert_id.in_([a.id for a in overdue]),
+            AlertEvent.action == "SLA_OVERDUE",
+        ).all()
+    }
+    signaled = 0
+    for alert in overdue:
+        if alert.id in already:
+            continue
+        _log_alert_event(db, alert.id, "systeme", "SLA_OVERDUE",
+                         f"Échéance SLA dépassée ({alert.due_at.strftime('%d/%m/%Y %H:%M')} UTC).")
+        db.commit()
+        emit(db, "alert_overdue_sla", {
+            "_assignee": alert.assigned_to,
+            "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
+            "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
+            "Priorité": alert.priority, "Statut": alert.status,
+            "Échéance dépassée": alert.due_at.strftime("%d/%m/%Y %H:%M") + " UTC",
+            "Assignée à": alert.assigned_to or "non assignée",
+        })
+        signaled += 1
+    return signaled
+
+
+def _detect_expiring_whitelist(db, horizon_days: int = 7) -> int:
+    """
+    Signale les paires de liste blanche dont l'echeance de revue approche :
+    sans ce rappel, une paire expire en silence et les alertes reprennent
+    sans que personne ne l'ait decide. Marquage par AppSetting pour ne
+    signaler chaque paire qu'une fois.
+    """
+    now = datetime.utcnow()
+    horizon = now + timedelta(days=horizon_days)
+    pairs = db.query(WhitelistPair).filter(
+        WhitelistPair.revoked_at.is_(None),
+        WhitelistPair.expires_at.isnot(None),
+        WhitelistPair.expires_at > now,
+        WhitelistPair.expires_at <= horizon,
+    ).all()
+    if not pairs:
+        return 0
+    already = set(get_setting(db, SETTING_WHITELIST_EXPIRY_NOTIFIED, []) or [])
+    signaled = []
+    for pair in pairs:
+        if pair.id in already:
+            continue
+        emit(db, "whitelist_expiring", {
+            "Paire": f"#{pair.id}", "Client": pair.client_name or pair.client_id,
+            "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
+            "Liste": pair.list_type or "—",
+            "Échéance de revue": pair.expires_at.strftime("%d/%m/%Y"),
+            "Posée par": pair.created_by or "—",
+            "Justification": pair.justification or "—",
+        })
+        signaled.append(pair.id)
+    if signaled:
+        # Conserve uniquement les paires encore pertinentes (borne la taille)
+        keep = [p.id for p in pairs] + list(already)
+        set_setting(db, SETTING_WHITELIST_EXPIRY_NOTIFIED,
+                    sorted(set(signaled) | set(keep))[-500:], updated_by="systeme")
+        db.commit()
+    return len(signaled)
+
+
+async def _notification_batch_scheduler():
+    """
+    Recapitulatif periodique des etapes a fort volume : chaque minute, si le
+    cron du regroupement matche, les evenements en file partent en UN SEUL
+    mail par destinataire. Detecte au passage les echeances SLA depassees et
+    les paires de liste blanche arrivant a revue, puis purge le journal.
+    """
+    from fiskr.cron import cron_matches, CronError
+
+    while True:
+        now = datetime.now()
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        tick = datetime.now()
+        try:
+            db = next(get_db())
+            try:
+                batch_cfg = notification_batch_settings(db)
+                if not batch_cfg["enabled"]:
+                    continue
+                try:
+                    if not cron_matches(batch_cfg["cron"], tick):
+                        continue
+                except CronError as bad:
+                    logger.error(f"Cron du récapitulatif invalide ({batch_cfg['cron']}) : {bad}")
+                    continue
+                # Detections avant l'envoi : leurs evenements partent dans ce recap
+                await asyncio.to_thread(_detect_overdue_alerts, db)
+                await asyncio.to_thread(_detect_expiring_whitelist, db)
+                report = await asyncio.to_thread(flush_digest, db)
+                if report["events"]:
+                    logger.info(f"Récapitulatif des notifications : {report['events']} évènement(s) "
+                                f"vers {report['recipients']} destinataire(s).")
+                await asyncio.to_thread(purge_deliveries, db)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Récapitulatif des notifications en échec sur ce tick : {e}")
+
+
 async def _retention_scheduler():
     """
     Purge de retention quotidienne : chaque minute, si au moins une famille a
@@ -477,6 +607,10 @@ async def _retention_scheduler():
                 deleted = await asyncio.to_thread(run_retention, db)
                 if any(deleted.values()):
                     logger.info(f"Purge de rétention planifiée : {deleted}")
+                    emit(db, "retention_purge_done", {
+                        "Lignes purgées": sum(int(v or 0) for v in deleted.values()),
+                        **{f"Famille {k}": v for k, v in deleted.items() if v},
+                    })
             finally:
                 db.close()
         except Exception as e:
@@ -500,6 +634,8 @@ async def lifespan(app: FastAPI):
     digest_task = asyncio.create_task(_digest_scheduler())
     # Purge de retention quotidienne (reglage a chaud retention.policy)
     retention_task = asyncio.create_task(_retention_scheduler())
+    # Recapitulatif des notifications groupees + detection SLA/echeances
+    notif_task = asyncio.create_task(_notification_batch_scheduler())
     yield
     # Shutdown
     if scheduler_task:
@@ -507,6 +643,7 @@ async def lifespan(app: FastAPI):
     inbox_task.cancel()
     digest_task.cancel()
     retention_task.cancel()
+    notif_task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -870,6 +1007,17 @@ async def totp_admin_reset(
     db.commit()
     return {"message": f"MFA réinitialisée pour {user.username}."}
 
+def _validated_email(value: Optional[str]) -> Optional[str]:
+    """Adresse de notification d'un compte : chaine vide = aucune adresse
+    (le compte retombe alors sur les destinataires globaux)."""
+    address = (value or "").strip()
+    if not address:
+        return None
+    if "@" not in address or len(address) > 255 or " " in address:
+        raise HTTPException(status_code=400, detail="Adresse email invalide.")
+    return address
+
+
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str
@@ -877,17 +1025,22 @@ class ChangePasswordRequest(BaseModel):
 class UpdateSelfProfileRequest(BaseModel):
     username: Optional[str] = None
     full_name: Optional[str] = None
+    email: Optional[str] = None
 
 class CreateUserRequest(BaseModel):
     username: str
     password: str
     full_name: Optional[str] = None
+    # Adresse de notification : sans elle, le compte ne recoit aucun mail
+    # d'etape (repli sur les destinataires globaux NOTIFY_EMAIL_TO)
+    email: Optional[str] = None
     role: str = "user"
 
 class UpdateUserAdminRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     full_name: Optional[str] = None
+    email: Optional[str] = None
     role: Optional[str] = None
 
 @app.get("/api/auth/me")
@@ -941,7 +1094,10 @@ async def update_own_profile(
         
     if payload.full_name is not None:
         user.full_name = payload.full_name.strip()
-        
+
+    if payload.email is not None:
+        user.email = _validated_email(payload.email)
+
     db.commit()
     db.refresh(user)
     return {
@@ -950,6 +1106,7 @@ async def update_own_profile(
             "id": user.id,
             "username": user.username,
             "full_name": user.full_name,
+            "email": user.email,
             "role": user.role
         }
     }
@@ -966,6 +1123,7 @@ async def list_users(
             "id": u.id,
             "username": u.username,
             "full_name": u.full_name,
+            "email": u.email,
             "role": u.role,
             "roles": parse_roles(u.role),
             "created_at": u.created_at.isoformat() if u.created_at else None,
@@ -1446,11 +1604,13 @@ async def create_user(
         hashed_password=h_pass,
         salt=salt_str,
         full_name=(payload.full_name or "").strip(),
+        email=_validated_email(payload.email),
         role=canonical_role
     )
     db.add(new_user)
     log_admin_action(db, admin_user["username"], "USER_CREATED", target=username,
-                     after={"username": username, "full_name": new_user.full_name, "role": canonical_role})
+                     after={"username": username, "full_name": new_user.full_name,
+                            "email": new_user.email, "role": canonical_role})
     db.commit()
     db.refresh(new_user)
 
@@ -1460,6 +1620,7 @@ async def create_user(
             "id": new_user.id,
             "username": new_user.username,
             "full_name": new_user.full_name,
+            "email": new_user.email,
             "role": new_user.role
         }
     }
@@ -1476,7 +1637,7 @@ async def update_user_admin(
     if not target_user:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
     before_state = {"username": target_user.username, "full_name": target_user.full_name,
-                    "role": target_user.role}
+                    "email": target_user.email, "role": target_user.role}
 
     if payload.username and payload.username.strip() != target_user.username:
         new_uname = payload.username.strip()
@@ -1487,7 +1648,10 @@ async def update_user_admin(
         
     if payload.full_name is not None:
         target_user.full_name = payload.full_name.strip()
-        
+
+    if payload.email is not None:
+        target_user.email = _validated_email(payload.email)
+
     if payload.role:
         try:
             target_user.role = normalize_roles(payload.role)
@@ -1507,7 +1671,7 @@ async def update_user_admin(
         db, admin_user["username"], "USER_UPDATED", target=target_user.username,
         before=before_state,
         after={"username": target_user.username, "full_name": target_user.full_name,
-               "role": target_user.role},
+               "email": target_user.email, "role": target_user.role},
         detail="Mot de passe réinitialisé." if (payload.password and payload.password.strip()) else None,
     )
     db.commit()
@@ -1519,6 +1683,7 @@ async def update_user_admin(
             "id": target_user.id,
             "username": target_user.username,
             "full_name": target_user.full_name,
+            "email": target_user.email,
             "role": target_user.role
         }
     }
@@ -1856,6 +2021,19 @@ async def screen_transaction_message(
         db, parsed, watchlist_index, watchlist_version, watchlist_hash,
         current_user["username"], screening_lists=requested_lists
     )
+    if result.get("verdict") == "HIT":
+        hits = [p for p in (result.get("parties") or []) if p.get("status") == "ALERT"]
+        emit(db, "filtering_hit", {
+            "Fichier": file.filename, "Type de message": parsed.get("message_type"),
+            "Identifiant du message": parsed.get("msg_id"),
+            "Parties en alerte": result.get("hits_count"),
+            "Parties criblées": len(result.get("parties") or []),
+            "Détail": ", ".join(
+                f"{h.get('name')} → {h.get('best_watchlist_name')} ({h.get('final_score')})"
+                for h in hits[:5]
+            ) or "—",
+            "Criblé par": current_user["username"],
+        })
     return result
 
 
@@ -2294,13 +2472,24 @@ def ingest_snapshot(
                 f"{record_count} fiches importées, snapshot en attente d'homologation "
                 "(pointage humain requis avant mise en production)."
             )
-            if notification_events(db).get("snapshot_pending_review"):
-                notify_event("snapshot_pending_review", {
-                    "snapshot_id": snap_id, "liste": file_type, "fichier": file.filename,
-                    "fiches": record_count,
-                })
+            emit(db, "snapshot_pending_review", {
+                "Liste": file_type, "Fichier": file.filename, "Fiches": record_count,
+                "Importé par": current_user["username"], "Snapshot": snap_id,
+            })
         else:
             message = f"Successfully imported {record_count} items."
+            emit(db, "list_import_done", {
+                "Liste": file_type, "Fichier": file.filename, "Fiches": record_count,
+                "Importé par": current_user["username"], "Snapshot": snap_id,
+            })
+        if rescreen_result and rescreen_result.get("new_alerts"):
+            # Le re-criblage a produit des alertes : etape structurante, mail immediat
+            emit(db, "rescreen_completed", {
+                "Liste": file_type, "Snapshot": snap_id,
+                "Fiches modifiées": rescreen_result.get("changed_entities"),
+                "Clients re-criblés": rescreen_result.get("clients_screened"),
+                "Nouvelles alertes": rescreen_result.get("new_alerts"),
+            }, urgency_override="immediate")
         progress_registry.finish(progress_id)
         return {
             "message": message,
@@ -2319,6 +2508,11 @@ def ingest_snapshot(
             if error_snap:
                 error_snap.status = "ERROR"
                 db.commit()
+        emit(db, "list_import_failed", {
+            "Liste": file_type, "Fichier": getattr(file, "filename", "—"),
+            "Erreur": str(e)[:500], "Importé par": current_user.get("username"),
+            "Snapshot": locals().get("snap_id") or "—",
+        })
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ingestion failed: {str(e)}"
@@ -3191,6 +3385,14 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         db.commit()
         logger.info(f"Campagne batch #{campaign_id} terminée : {campaign.alert_count} alerte(s) "
                     f"sur {campaign.processed_clients} client(s).")
+        emit(db, "batch_campaign_done", {
+            "_actor": campaign.created_by,
+            "Campagne": f"#{campaign.id} {campaign.name}",
+            "Déclencheur": campaign.trigger, "Clients criblés": campaign.processed_clients,
+            "Alertes": campaign.alert_count, "Sans correspondance": campaign.no_match_count,
+            "Fiches rejetées": campaign.rejected_count,
+            "Lancée par": campaign.created_by,
+        })
     except Exception as e:
         db.rollback()
         campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
@@ -3199,6 +3401,13 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
             campaign.error_message = str(e)
             campaign.finished_at = datetime.utcnow()
             db.commit()
+            emit(db, "batch_campaign_failed", {
+                "_actor": campaign.created_by,
+                "Campagne": f"#{campaign.id} {campaign.name}",
+                "Déclencheur": campaign.trigger, "Erreur": str(e)[:500],
+                "Clients traités": campaign.processed_clients,
+                "Lancée par": campaign.created_by,
+            })
         logger.error(f"Campagne batch #{campaign_id} en erreur : {e}")
     finally:
         db.close()
@@ -3358,9 +3567,23 @@ def _process_inbox_once() -> int:
             logger.info(f"Inbox CFT : campagne lancée pour {candidate.name} ({len(profiles)} client(s)).")
         except HTTPException as bad_file:
             logger.error(f"Inbox CFT : fichier {candidate.name} refusé — {bad_file.detail}")
+            _notify_inbox_rejection(candidate.name, str(bad_file.detail))
         except Exception as e:
             logger.error(f"Inbox CFT : échec sur {candidate.name} — {e}")
+            _notify_inbox_rejection(candidate.name, str(e))
     return launched
+
+def _notify_inbox_rejection(file_name: str, reason: str) -> None:
+    """Alerte l'exploitation qu'un fichier depose par le CFT n'a pas pu etre
+    traite : sans mail, ces refus ne vivaient que dans les logs serveur."""
+    from fiskr.database import SessionLocal
+    session = SessionLocal()
+    try:
+        emit(session, "inbox_file_rejected", {
+            "Fichier": file_name, "Motif": str(reason)[:500],
+        })
+    finally:
+        session.close()
 
 async def _inbox_poller():
     """Boucle de scrutation de l'inbox CFT (desactivee si batch.inbox_dir vide)."""
@@ -4920,6 +5143,12 @@ async def submit_fp_rule(
     _log_rule_change(db, rule, "SUBMITTED", param_user["username"])
     db.commit()
     db.refresh(rule)
+    emit(db, "fprule_submitted", {
+        "Règle": f"#{rule.id} {rule.name}", "Canal": rule.channel,
+        "Version": rule.version, "Soumise par": param_user["username"],
+        "Tests verts": f"{test_report['passed']}/{test_report['total']}",
+        "Description": rule.description or "—",
+    })
     return {"message": "Règle soumise en validation.", "test_report": test_report,
             **_fp_rule_summary(rule, with_code=True)}
 
@@ -4962,9 +5191,17 @@ async def validate_fp_rule(
     rule.validated_by = param_user["username"]
     rule.validated_at = datetime.utcnow()
     rule.validation_comment = (payload.comment or "").strip() or None
+    submitter = rule.submitted_by
     _log_rule_change(db, rule, "VALIDATED", param_user["username"], comment=payload.comment)
     db.commit()
     db.refresh(rule)
+    emit(db, "fprule_activated", {
+        "_actor": submitter,
+        "Règle": f"#{rule.id} {rule.name}", "Canal": rule.channel,
+        "Version": rule.version, "Soumise par": submitter or "—",
+        "Validée par": param_user["username"],
+        "Commentaire": rule.validation_comment or "—",
+    })
     return {"message": "Règle validée et mise en production.", **_fp_rule_summary(rule, with_code=True)}
 
 
@@ -4983,12 +5220,19 @@ async def reject_fp_rule(
         raise HTTPException(status_code=409, detail="Cette règle n'est pas en attente de validation.")
     if not (payload.comment or "").strip():
         raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour renvoyer une règle en brouillon.")
+    submitter = rule.submitted_by
     rule.status = "DRAFT"
     rule.submitted_by = None
     rule.submitted_at = None
     _log_rule_change(db, rule, "REJECTED", param_user["username"], comment=payload.comment)
     db.commit()
     db.refresh(rule)
+    emit(db, "fprule_rejected", {
+        "_actor": submitter,
+        "Règle": f"#{rule.id} {rule.name}", "Canal": rule.channel,
+        "Version": rule.version, "Soumise par": submitter or "—",
+        "Renvoyée par": param_user["username"], "Motif": (payload.comment or "").strip(),
+    })
     return {"message": "Règle renvoyée en brouillon.", **_fp_rule_summary(rule, with_code=True)}
 
 
@@ -5289,6 +5533,17 @@ async def run_review_backtest(
     snap.backtest_at = datetime.utcnow()
     snap.backtest_by = reviewer["username"]
     db.commit()
+    # Un ecart eleve doit remonter tout de suite (il bloque l'approbation) ;
+    # un verdict OK part dans le recapitulatif periodique
+    emit(db, "backtest_completed", {
+        "Snapshot": snap.snapshot_id, "Liste": snap.file_type,
+        "Verdict": report.get("verdict"),
+        "Écart": f"{report.get('gap_pct')} % (seuil {report.get('threshold_pct')} %)",
+        "Alertes production": (report.get("current") or {}).get("alerts"),
+        "Alertes candidate": (report.get("candidate") or {}).get("alerts"),
+        "Nouvelles paires": report.get("new_pairs_count"),
+        "Exécuté par": reviewer["username"],
+    }, urgency_override="immediate" if report.get("verdict") != "OK" else None)
     return report
 
 @app.get("/api/testpanels")
@@ -5357,6 +5612,10 @@ async def generate_test_panel_endpoint(
                                    seed=payload.seed, created_by=reviewer["username"])
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    emit(db, "test_panel_generated", {
+        "Panel": snap.file_name, "Pseudo-clients": snap.record_count,
+        "Snapshot": snap.snapshot_id, "Généré par": reviewer["username"],
+    })
     return {
         "message": f"Panel de {snap.record_count} pseudo-clients généré.",
         "snapshot_id": snap.snapshot_id,
@@ -5464,6 +5723,12 @@ async def set_review_exclusions(
         row.excluded_by = reviewer["username"]
         row.excluded_at = now
     db.commit()
+    emit(db, "review_exclusions_changed", {
+        "Action": "exclusions posées", "Snapshot": snapshot_id,
+        "Entités": len(rows), "Par": reviewer["username"],
+        "Justification": justification or "—",
+        "Pièce jointe": evidence_name or "—",
+    })
     return {
         "message": f"{len(rows)} entité(s) exclue(s) du snapshot.",
         "snapshot_id": snapshot_id,
@@ -5495,6 +5760,10 @@ async def remove_review_exclusions(
         row.excluded_by = None
         row.excluded_at = None
     db.commit()
+    emit(db, "review_exclusions_changed", {
+        "Action": "exclusions retirées", "Snapshot": snapshot_id,
+        "Entités": len(rows), "Par": reviewer["username"],
+    })
     return {"message": f"{len(rows)} exclusion(s) annulée(s).", "snapshot_id": snapshot_id}
 
 @app.get("/api/review/exclusion-evidence/{entity_pk}")
@@ -5575,6 +5844,16 @@ async def approve_pending_snapshot(
             db, snap.file_type, snap.snapshot_id,
             previous_prod.snapshot_id if previous_prod else None
         )
+    # Étape structurante de la production des listes : mail immédiat
+    report = snap.backtest_report or {}
+    emit(db, "snapshot_approved", {
+        "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
+        "Fiches": snap.record_count, "Exclusions": len(excluded_rows),
+        "Approuvé par": reviewer["username"],
+        "Commentaire": snap.review_comment or "—",
+        "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
+        "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
+    })
     return {
         "message": "Snapshot approuvé et promu en production.",
         "snapshot_id": snapshot_id,
@@ -5603,6 +5882,11 @@ async def reject_pending_snapshot(
     snap.reviewed_at = datetime.utcnow()
     snap.review_comment = comment
     db.commit()
+    emit(db, "snapshot_rejected", {
+        "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
+        "Fiches": snap.record_count, "Rejeté par": reviewer["username"],
+        "Motif": comment,
+    })
     return {
         "message": "Snapshot rejeté. Il ne sera pas mis en production.",
         "snapshot_id": snapshot_id,
@@ -5789,6 +6073,160 @@ async def toggle_checklist_item(
     return {"message": "Point de contrôle mis à jour.",
             "done": done_count, "total": len(items),
             "checklist": _checklist_payload(db, alert)}
+
+# ------------------ NOTIFICATIONS : CATALOGUE, RÉGLAGES, JOURNAL ------------------
+
+class NotificationBatchUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    cron: Optional[str] = None
+    # categorie -> liste d'adresses supplementaires (boite du service conformite)
+    extra_recipients: Optional[Dict[str, List[str]]] = None
+
+
+@app.get("/api/settings/notifications/catalog")
+async def get_notifications_catalog(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Catalogue des etapes notifiables : l'ecran de reglages est genere depuis
+    cette reponse (aucune liste d'evenements codee en dur cote front).
+    """
+    from fiskr.events import catalog_payload, event_categories
+    return {
+        "categories": event_categories(),
+        "events": catalog_payload(),
+        "enabled": notification_events(db),
+        "batch": notification_batch_settings(db),
+        "smtp_configured": notify_smtp_configured(),
+        "public_url_configured": bool(notify_public_url()),
+        "default_recipients": notify_default_recipients(),
+    }
+
+
+@app.put("/api/settings/notifications")
+async def update_notification_batch_settings(
+    payload: NotificationBatchUpdate,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Reglage du recapitulatif groupe : activation, frequence (cron) et
+    adresses supplementaires par categorie. L'activation evenement par
+    evenement reste dans PUT /api/settings/ingestion."""
+    from fiskr.cron import parse_cron, CronError
+    from fiskr.events import CATEGORY_LABELS
+    before = notification_batch_settings(db)
+    merged = {"enabled": before["enabled"], "cron": before["cron"],
+              "extra_recipients": dict(before["extra_recipients"])}
+    if payload.enabled is not None:
+        merged["enabled"] = bool(payload.enabled)
+    if payload.cron is not None:
+        expr = payload.cron.strip()
+        try:
+            parse_cron(expr)
+        except CronError as bad:
+            raise HTTPException(status_code=400, detail=f"Expression cron invalide : {bad}")
+        merged["cron"] = expr
+    if payload.extra_recipients is not None:
+        cleaned: Dict[str, List[str]] = {}
+        for category, addresses in payload.extra_recipients.items():
+            if category not in CATEGORY_LABELS:
+                raise HTTPException(status_code=400, detail=f"Catégorie inconnue : {category}")
+            valid = [a.strip() for a in (addresses or []) if a and "@" in a and a.strip()]
+            if len(valid) != len([a for a in (addresses or []) if a and a.strip()]):
+                raise HTTPException(status_code=400, detail="Adresse email invalide dans les destinataires supplémentaires.")
+            if valid:
+                cleaned[category] = valid
+        merged["extra_recipients"] = cleaned
+    set_setting(db, SETTING_NOTIFICATION_BATCH, merged, updated_by=admin_user["username"])
+    after = notification_batch_settings(db)
+    if before != after:
+        log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="notifications",
+                         before=before, after=after)
+        db.commit()
+    return {"message": "Réglages de notification mis à jour.", **after}
+
+
+@app.post("/api/settings/notifications/test")
+async def send_notification_test(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Envoi d'un mail de test a l'administrateur (ou aux destinataires globaux) :
+    seule facon de diagnostiquer une configuration SMTP sans fouiller les logs.
+    Erreurs EXPLICITES — c'est une action au clic.
+    """
+    if not notify_smtp_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="SMTP non configuré (variable d'environnement SMTP_HOST absente) : aucun mail ne peut partir."
+        )
+    me = db.query(User).filter(User.username == admin_user["username"]).first()
+    recipients = [me.email.strip()] if (me and (me.email or "").strip()) else notify_default_recipients()
+    if not recipients:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucun destinataire : renseignez l'email de votre compte ou la variable NOTIFY_EMAIL_TO."
+        )
+    text, html = notify_render_event_email(
+        "Test de configuration des notifications",
+        {"Demandé par": admin_user["username"],
+         "Destinataires": ", ".join(recipients),
+         "URL publique": notify_public_url() or "non configurée"},
+        link_url=notify_public_url(),
+        intro="Si vous lisez ce message, la configuration SMTP de Fiskr est fonctionnelle.",
+        accent_alert=False,
+    )
+    try:
+        notify_send_email(recipients, "[Fiskr] Test de configuration des notifications", text, html_body=html)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Échec de l'envoi SMTP : {e}")
+    return {"message": f"Mail de test envoyé à {', '.join(recipients)}.", "recipients": recipients}
+
+
+@app.get("/api/notifications/log")
+async def list_notification_log(
+    limit: int = Query(30, ge=1, le=200),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Journal des envois : repond a « le mail est-il parti ? » sans fouiller
+    les logs serveur (statut, destinataires, erreur eventuelle)."""
+    from fiskr.events import EVENT_CATALOG
+    rows = db.query(NotificationDelivery).order_by(
+        NotificationDelivery.created_at.desc(), NotificationDelivery.id.desc()
+    ).limit(limit).all()
+    queued = db.query(NotificationDelivery).filter(NotificationDelivery.status == "QUEUED").count()
+    return {
+        "queued": queued,
+        "items": [
+            {
+                "id": r.id, "event_key": r.event_key,
+                "label": EVENT_CATALOG[r.event_key].label if r.event_key in EVENT_CATALOG else r.event_key,
+                "category": r.category, "urgency": r.urgency, "status": r.status,
+                "recipients": r.recipients, "error": r.error,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/notifications/flush")
+async def flush_notification_digest(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Force l'envoi immediat du recapitulatif en attente (sans attendre le
+    prochain passage du planificateur)."""
+    _detect_overdue_alerts(db)
+    _detect_expiring_whitelist(db)
+    report = flush_digest(db)
+    return {"message": f"{report['events']} évènement(s) envoyé(s) à {report['recipients']} destinataire(s).",
+            **report}
+
 
 @app.get("/api/settings/checklist")
 async def get_checklist_settings(
@@ -6620,6 +7058,15 @@ async def assign_alert(
                      f"Assignée à {assignee}."
                      + (f" (au lieu de @{redirected_from}, absent — délégation)" if redirected_from else ""))
     db.commit()
+    emit(db, "alert_assigned", {
+        "_assignee": assignee,
+        "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
+        "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
+        "Score": alert.final_score, "Priorité": alert.priority,
+        "Assignée par": current_user["username"],
+        "Délégation": f"au lieu de @{redirected_from} (absent)" if redirected_from else "—",
+        "Échéance": alert.due_at.isoformat() if alert.due_at else "—",
+    })
     return {"message": f"Alerte assignée à {assignee}"
                        + (f" (délégué de @{redirected_from}, absent)." if redirected_from else "."),
             **_alert_summary(alert)}
@@ -6655,6 +7102,12 @@ async def escalate_alert(
     alert.status = "ESCALATED"
     _log_alert_event(db, alert.id, current_user["username"], "ESCALATED", comment)
     db.commit()
+    emit(db, "alert_escalated", {
+        "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
+        "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
+        "Score": alert.final_score, "Priorité": alert.priority,
+        "Escaladée par": current_user["username"], "Motif": comment,
+    })
     return {"message": "Alerte escaladée.", **_alert_summary(alert)}
 
 def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
@@ -6692,21 +7145,27 @@ async def propose_alert_decision(
     alert.proposal_comment = comment
     label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
 
-    if alert_four_eyes_required(db):
+    four_eyes = alert_four_eyes_required(db)
+    if four_eyes:
         alert.status = "PENDING_VALIDATION"
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
         message = "Décision proposée, en attente de validation 4-yeux."
-        if notification_events(db).get("alert_pending_validation"):
-            notify_event("alert_pending_validation", {
-                "alert_id": alert.id, "proposee_par": username, "decision": label,
-                "client": alert.client_name, "fiche_listee": alert.watchlist_name,
-            })
     else:
         _close_alert(alert, decision, username, comment)
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
         _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
         message = "Alerte clôturée (validation 4-yeux désactivée)."
     db.commit()
+    common = {
+        "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
+        "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
+        "Score": alert.final_score, "Décision": label, "Commentaire": comment,
+    }
+    if four_eyes:
+        emit(db, "alert_pending_validation", {**common, "Proposée par": username})
+    else:
+        emit(db, "alert_closed_direct", {**common, "Clôturée par": username,
+                                         "Statut": alert.status})
     return {"message": message, **_alert_summary(alert)}
 
 @app.post("/api/alerts/{alert_id}/validate")
@@ -6731,10 +7190,22 @@ async def validate_alert_decision(
             detail="Validation 4-yeux : le validateur doit être différent du proposeur."
         )
     comment = (payload.comment or "").strip()
+    # Le proposeur est efface en cas de renvoi : on le retient pour le notifier
+    proposer = alert.proposed_by
+    common = {
+        "_actor": proposer,
+        "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
+        "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
+        "Proposée par": proposer,
+    }
     if payload.approve:
         _close_alert(alert, alert.proposed_decision, username, comment or alert.proposal_comment)
         _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
         message = f"Décision validée, alerte clôturée ({alert.status})."
+        event_key, extra = "alert_decision_validated", {
+            "Validée par": username, "Statut": alert.status,
+            "Commentaire": comment or "—",
+        }
     else:
         if not comment:
             raise HTTPException(status_code=400, detail="Un commentaire est requis pour refuser une décision.")
@@ -6745,7 +7216,11 @@ async def validate_alert_decision(
         alert.proposal_comment = None
         _log_alert_event(db, alert.id, username, "RETURNED", comment)
         message = "Décision refusée, alerte renvoyée en analyse."
+        event_key, extra = "alert_decision_returned", {
+            "Renvoyée par": username, "Motif": comment,
+        }
     db.commit()
+    emit(db, event_key, {**common, **extra})
     return {"message": message, **_alert_summary(alert)}
 
 class AlertPriorityRequest(BaseModel):
@@ -6834,6 +7309,15 @@ async def bulk_alert_action(
                              f"Priorité {old_priority} → {new_priority} (action en masse).")
         updated.append(alert_id)
     db.commit()
+    if updated and action == "assign":
+        # Une seule notification pour tout le lot (jamais N mails d'affilée)
+        emit(db, "alert_assigned", {
+            "_assignee": assignee,
+            "Alertes assignées": len(updated), "Action": "assignation en masse",
+            "Identifiants": ", ".join(str(i) for i in updated[:20])
+                            + (" …" if len(updated) > 20 else ""),
+            "Assignées par": current_user["username"],
+        })
     return {"updated": updated, "skipped": skipped,
             "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."}
 
@@ -7200,6 +7684,13 @@ async def create_whitelist_pair(
     db.add(pair)
     db.commit()
     db.refresh(pair)
+    emit(db, "whitelist_changed", {
+        "Action": "paire créée", "Client": pair.client_name or pair.client_id,
+        "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
+        "Liste": pair.list_type or "—", "Par": reviewer["username"],
+        "Justification": pair.justification or "—",
+        "Échéance de revue": pair.expires_at.strftime("%d/%m/%Y") if pair.expires_at else "—",
+    })
     return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
 
 class WhitelistBulkPair(BaseModel):
@@ -7264,6 +7755,10 @@ async def create_whitelist_pairs_bulk(
         db.add(pair)
         created.append({"client_id": client_id, "watchlist_entity_id": entity_id})
     db.commit()
+    emit(db, "whitelist_bulk_created", {
+        "Paires créées": len(created), "Paires sautées": len(skipped),
+        "Justification": justification or "—", "Par": reviewer["username"],
+    })
     return {
         "message": f"{len(created)} paire(s) mise(s) en liste blanche, {len(skipped)} sautée(s).",
         "created": created,
@@ -7317,6 +7812,11 @@ async def revoke_whitelist_pair(
                      target=f"{pair.client_id} × {pair.watchlist_entity_id}",
                      detail=comment)
     db.commit()
+    emit(db, "whitelist_changed", {
+        "Action": "paire révoquée", "Client": pair.client_name or pair.client_id,
+        "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
+        "Liste": pair.list_type or "—", "Par": reviewer["username"], "Motif": comment,
+    })
     return {"message": "Paire révoquée : les alertes de ce couple reprendront.", **_whitelist_summary(pair)}
 
 @app.get("/api/whitelist/evidence/{pair_id}")

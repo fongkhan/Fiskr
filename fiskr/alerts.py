@@ -9,8 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from fiskr.database import Alert, AlertEvent, ALERT_OPEN_STATUSES, AuditTrail, WhitelistPair
-from fiskr.settings import alert_sla_hours, notification_events
-from fiskr.notify import notify_event
+from fiskr.settings import alert_sla_hours
 
 logger = logging.getLogger("fiskr.alerts")
 
@@ -137,12 +136,15 @@ def open_or_redetect_alert(db, audit_record: AuditTrail, client_id: Optional[str
                     f"(#{suppressed_by_rule.id} v{suppressed_by_rule.version}).")
         ))
     db.commit()
-    # Notification metier (fire-and-forget, jamais bloquante) — pas de
-    # notification pour les alertes auto-cloturees par regle
-    if not suppressed and notification_events(db).get("alert_created"):
-        notify_event("alert_created", {
-            "alert_id": alert.id, "canal": channel, "priorite": priority,
-            "client": alert.client_name, "fiche_listee": alert.watchlist_name,
-            "liste": alert.list_type, "score": f"{alert.final_score:.1f}",
+    # Notification metier (jamais bloquante) — pas de notification pour les
+    # alertes auto-cloturees par regle anti-faux positifs
+    if not suppressed:
+        from fiskr.notifier import emit
+        emit(db, "alert_created", {
+            "_assignee": alert.assigned_to,
+            "Alerte": alert.id, "Canal": channel, "Priorité": priority,
+            "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
+            "Liste": alert.list_type, "Score": f"{alert.final_score:.1f}",
+            "Échéance": alert.due_at.isoformat() if alert.due_at else "—",
         })
     return alert.id

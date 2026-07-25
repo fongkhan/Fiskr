@@ -1733,31 +1733,26 @@
                             <div class="form-group"><label for="setting-sla-low">Basse</label><input type="number" id="setting-sla-low" min="0" step="1"></div>
                         </div>
                         <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">🔔 Notifications métier (email / webhooks)</h3>
-                        <p class="section-desc" style="margin-bottom: 0.75rem;">Envoi par email (variables SMTP) et vers les webhooks de <code>config.yaml notifications.webhooks</code>. Jamais bloquant pour le criblage.</p>
-                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Un mail à chaque étape de la production des listes, du criblage et du filtrage. Les étapes structurantes partent immédiatement ; les étapes à fort volume sont regroupées dans un récapitulatif périodique. Les destinataires sont déduits des rôles (adresse email du compte), avec repli sur les variables SMTP globales.</p>
+                        <div id="notif-status" style="margin-bottom: 0.75rem; font-size: 0.85rem;"></div>
+                        <div id="notif-catalog"></div>
+                        <div class="form-group" style="margin: 1rem 0 0.5rem;">
                             <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                <input type="checkbox" id="setting-notify-alert-created" style="width: 18px; height: 18px;">
-                                Nouvelle alerte créée
+                                <input type="checkbox" id="setting-notif-batch-enabled" style="width: 18px; height: 18px;">
+                                Activer le récapitulatif groupé des étapes à fort volume
                             </label>
                         </div>
-                        <div class="form-group" style="margin-bottom: 0.5rem;">
-                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                <input type="checkbox" id="setting-notify-pending-validation" style="width: 18px; height: 18px;">
-                                Décision d'alerte en attente de validation 4-yeux
-                            </label>
+                        <div class="form-group" style="margin-bottom: 0.75rem; max-width: 420px;">
+                            <label for="setting-notif-batch-cron">Fréquence du récapitulatif (cron 5 champs, ex. <code>0 * * * *</code> = toutes les heures)</label>
+                            <input type="text" id="setting-notif-batch-cron" placeholder="0 * * * *">
                         </div>
-                        <div class="form-group" style="margin-bottom: 0.5rem;">
-                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                <input type="checkbox" id="setting-notify-pending-review" style="width: 18px; height: 18px;">
-                                Snapshot en attente d'homologation
-                            </label>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="saveNotificationBatchSettings()">💾 Enregistrer le récapitulatif</button>
+                            <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="sendNotificationTest()">✉ Envoyer un mail de test</button>
+                            <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="flushNotificationDigest()">⏩ Envoyer le récapitulatif maintenant</button>
+                            <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchNotificationLog()">🧾 Journal des envois</button>
                         </div>
-                        <div class="form-group" style="margin-bottom: 1rem;">
-                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                <input type="checkbox" id="setting-notify-sync-error" style="width: 18px; height: 18px;">
-                                Échec de synchronisation d'une source
-                            </label>
-                        </div>
+                        <div id="notif-log"></div>
                         <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">📈 Digest conformité périodique</h3>
                         <p class="section-desc" style="margin-bottom: 0.75rem;">Synthèse envoyée par email/webhooks à heure fixe (expression cron 5 champs) : files ouvertes par canal, retards SLA, 4-yeux en attente, homologations, volumétrie 24 h et santé des synchronisations.</p>
                         <div class="form-group" style="margin-bottom: 0.5rem;">
@@ -1928,6 +1923,7 @@
                                     <th>ID</th>
                                     <th>Nom d'utilisateur</th>
                                     <th>Nom Complet</th>
+                                    <th>Email</th>
                                     <th>Rôle</th>
                                     <th>MFA</th>
                                     <th>Date de Création</th>
@@ -1981,6 +1977,11 @@
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="user-input-fullname">Nom Complet</label>
                     <input type="text" id="user-input-fullname" placeholder="Ex: Jean Dupont" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
+                </div>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label for="user-input-email">Email de notification</label>
+                    <input type="email" id="user-input-email" placeholder="jean.dupont@banque.fr" style="width: 100%; padding: 0.65rem; border-radius: 6px; background: var(--panel-inset-strong); border: 1px solid var(--border-color); color: white;">
+                    <small style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.35rem; display: block;">Adresse destinataire des mails d'étape correspondant aux rôles du compte. Sans adresse, les notifications retombent sur les destinataires globaux (NOTIFY_EMAIL_TO).</small>
                 </div>
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label for="user-input-role">Rôle / Privilèges</label>

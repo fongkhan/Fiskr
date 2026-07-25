@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from fiskr.config import config
 from fiskr.database import AppSetting
+from fiskr.events import EVENT_CATALOG
 
 logger = logging.getLogger("fiskr.settings")
 
@@ -63,12 +64,20 @@ RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_cam
 RETENTION_MIN_DAYS = 30  # garde-fou : jamais moins de 30 jours quand une purge est activee
 DEFAULT_RETENTION = {"audit_trail": 0, "closed_alerts": 0, "sync_reports": 0,
                      "batch_campaigns": 0, "cron": "30 2 * * *", "archive": True}
+# Activation par defaut de CHAQUE etape notifiable, derivee du catalogue
+# (fiskr/events.py) : declarer une nouvelle etape la-bas suffit a la rendre
+# activable ici, traduisible dans les mails et affichable dans les reglages.
 DEFAULT_NOTIFICATION_EVENTS = {
-    "alert_created": False,
-    "alert_pending_validation": False,
-    "snapshot_pending_review": False,
-    "sync_error": True,
+    key: event.default_enabled for key, event in EVENT_CATALOG.items()
 }
+
+# Recapitulatif periodique des etapes a fort volume (urgence DIGEST) :
+# un seul mail par destinataire et par periode, jamais d'inondation.
+SETTING_NOTIFICATION_BATCH = "notifications.batch"
+DEFAULT_NOTIFICATION_BATCH = {"enabled": True, "cron": "0 * * * *", "extra_recipients": {}}
+# Marqueur interne : paires de liste blanche dont l'echeance de revue a deja
+# ete signalee (evite de rappeler la meme paire a chaque passage de la boucle)
+SETTING_WHITELIST_EXPIRY_NOTIFIED = "notifications.whitelist_expiry_notified"
 
 BLOCKING_COMPONENTS = ("COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST")
 DEFAULT_FILTERING_LAYOUT = ["PHONETIC_FIRST"]
@@ -233,6 +242,32 @@ def notification_events(db) -> Dict[str, bool]:
         for event, enabled in value.items():
             if event in out:
                 out[event] = bool(enabled)
+    return out
+
+
+def notification_batch_settings(db) -> Dict[str, Any]:
+    """
+    Reglage du recapitulatif des evenements groupes : activation, expression
+    cron (defaut horaire) et adresses supplementaires par categorie (boite du
+    service conformite en copie, en plus du routage par role).
+    """
+    value = get_setting_with_source(db, SETTING_NOTIFICATION_BATCH,
+                                    dict(DEFAULT_NOTIFICATION_BATCH))["value"]
+    out = {"enabled": DEFAULT_NOTIFICATION_BATCH["enabled"],
+           "cron": DEFAULT_NOTIFICATION_BATCH["cron"],
+           "extra_recipients": {}}
+    if isinstance(value, dict):
+        out["enabled"] = bool(value.get("enabled", out["enabled"]))
+        cron_expr = str(value.get("cron") or "").strip()
+        if cron_expr:
+            out["cron"] = cron_expr
+        extras = value.get("extra_recipients")
+        if isinstance(extras, dict):
+            for category, addresses in extras.items():
+                if isinstance(addresses, list):
+                    clean = [str(a).strip() for a in addresses if str(a).strip()]
+                    if clean:
+                        out["extra_recipients"][str(category)] = clean
     return out
 
 

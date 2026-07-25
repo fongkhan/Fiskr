@@ -200,7 +200,7 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Case management** : priorité explicite par alerte (CRITIQUE sur hard match, modifiable et journalisée), **échéances SLA** par priorité (réglage à chaud, badge « ⏰ En retard »), pièces jointes justificatives, **rapport d'alerte imprimable** (`GET /api/alerts/{id}/report`, prêt ACPR/FED).
 * **Exports CSV** (Excel FR : `;` + BOM) : alertes, journal d'audit et vue base des listes, avec les filtres de l'écran (`/api/export/*.csv`).
 * **Journal des actions d'administration** (`admin_audit_log`, append-only) : comptes, réglages (avant → après), purges, révocations — sous-onglet dédié de l'Audit.
-* **Notifications métier** : email (SMTP) + webhooks génériques (`notifications.webhooks`), par événement (nouvelle alerte, 4-yeux en attente, snapshot à homologuer, échec de sync), fire-and-forget — jamais bloquant.
+* **Notifications par étape** : un mail à **chaque étape** de la production des listes, du criblage et du filtrage (voir la section dédiée ci-dessous) — email HTML avec lien direct + webhooks génériques (`notifications.webhooks`), fire-and-forget : jamais bloquant.
 * **Graphe de relations & règle des 50 % (OFAC)** : les `ProfileRelationships` du SDN_ADVANCED sont extraits (détenu par, agit pour, associé, famille, dirigeant, soutien) et rafraîchis à chaque sync ; relations manuelles avec % de détention (reviewer/admin). Le **risque hérité par détention majoritaire** (≥ 50 %, transitif, présomption sur les liens OFAC sans %) est affiché dans la fiche et annoté dans le decision tree de chaque criblage. **Visualisation réseau** : modale « 🕸 Graphe » (SVG natif, rendu radial, flèches rouges = détention majoritaire, clic sur un nœud pour recentrer, profondeur 1-3).
 * **Planification cron par source** (`fiskr/cron.py`, sans dépendance) : chaque source de synchronisation suit sa propre expression cron 5 champs, modifiable à chaud (`PUT /api/settings/sync`, admin) avec repli sur `config.yaml` puis sur l'horaire quotidien global ; prochaine exécution affichée par source, aucun chevauchement d'une même source.
 * **Campagnes de criblage batch persistées** : un CSV de clients (upload ou **dépôt CFT dans l'inbox surveillée** `batch.inbox_dir`) est criblé côté serveur en tâche de fond avec les mêmes garanties que le temps réel (quality gate, liste blanche, règles, audit immuable, alertes) — progression en direct, résultats filtrables, export CSV, rejets quality gate conservés avec motif.
@@ -265,6 +265,42 @@ curl -X POST https://fiskr.example/api/hooks/client-upsert \
 * **Liens profonds** : chaque onglet/sous-onglet est adressable par l'URL (`#alerts/subtab-filtering-queue`, …) — écran restauré au chargement, navigation arrière/avant du navigateur respectée, liens partageables entre analystes.
 * **Cloche de notifications** : badge du nombre d'éléments à traiter et panneau déroulant (alertes ouvertes par canal, 4-yeux en attente, alertes en retard SLA, snapshots à homologuer) avec accès direct en un clic.
 * **Pagination serveur** des files d'alertes et de la liste blanche (100 par page) ; **glisser-déposer** des fichiers sur les zones d'import (listes, batch, transactions).
+
+---
+
+## 📬 Notifications par étape (email)
+
+Fiskr envoie un mail à **chaque étape** de la production des listes, du criblage et du filtrage — **31 étapes notifiables** déclarées dans un catalogue unique (`fiskr/events.py`) dont dérivent les réglages, les libellés des mails et l'écran d'administration : ajouter une étape se fait à un seul endroit.
+
+**Étapes couvertes**
+
+| Domaine | Étapes |
+|---|---|
+| **Production des listes** | liste en attente d'homologation · **liste approuvée et mise en production** · **liste rejetée (avec motif)** · import mis en production · import en échec · synchronisation terminée · échec de synchronisation · exclusions posées/retirées · panel de test généré · cahier de tests exécuté · Good Guys en masse · re-criblage post-delta |
+| **Criblage clients** | alerte créée · alerte assignée (unitaire et en masse) · alerte escaladée · décision en attente de validation 4-yeux · décision validée · proposition renvoyée · clôture directe (4-yeux désactivé) · **échéance SLA dépassée** · liste blanche créée/révoquée · **paire de liste blanche arrivant à revue** · règle anti-FP soumise/activée/renvoyée |
+| **Filtrage transactionnel** | verdict HIT sur un message ISO 20022 · campagne batch terminée · campagne batch en échec · fichier de l'inbox CFT refusé |
+| **Gouvernance** | synthèse conformité périodique · purge de rétention exécutée |
+
+**Destinataires par rôle** — chaque compte porte une adresse (champ *Email* de la fiche utilisateur). L'homologation part vers les `reviewer`/`admin`, une alerte assignée vers l'analyste **et son délégué si une absence est déclarée**, les règles vers le rôle `rules`, les incidents techniques vers les `admin`, les décisions vers le proposeur d'origine. Sans adresse renseignée, tout retombe sur la liste globale historique (`NOTIFY_EMAIL_TO`, sinon `SYNC_EMAIL_TO`) : un déploiement existant garde exactement son comportement actuel.
+
+**Immédiat ou récapitulatif** — les étapes structurantes partent tout de suite ; les étapes à fort volume sont mises en file et regroupées en **un seul mail par destinataire** (fréquence cron réglable à chaud, horaire par défaut). La même boucle détecte les **dépassements de SLA** (une alerte signalée une seule fois, tracée `SLA_OVERDUE` dans son historique) et les **paires de liste blanche arrivant à échéance de revue**.
+
+**Configuration**
+
+```bash
+# .env — mêmes variables que les rapports de synchronisation
+SMTP_HOST=smtp.banque.fr
+SMTP_PORT=587
+SMTP_USER=fiskr@banque.fr
+SMTP_PASSWORD=…
+SMTP_FROM=fiskr@banque.fr
+NOTIFY_EMAIL_TO=conformite@banque.fr      # repli quand aucun compte ne correspond
+FISKR_PUBLIC_URL=https://fiskr.banque.fr  # active le bouton « Ouvrir dans Fiskr » des mails
+```
+
+Écran **Paramètres → 🔔 Notifications métier** : activation étape par étape (regroupée en 4 catégories, badge « immédiat »/« récap » et audience affichés), fréquence du récapitulatif, adresses supplémentaires par catégorie, **journal des envois** (`GET /api/notifications/log` — statut, destinataires, erreur SMTP éventuelle) et bouton **« Envoyer un mail de test »** qui remonte l'erreur SMTP exacte. Sans `FISKR_PUBLIC_URL`, les mails partent sans bouton (jamais de lien cassé) ; sans SMTP, rien ne part et le journal l'indique (`SKIPPED`).
+
+> Garantie de conception : **une notification ne bloque jamais et ne fait jamais échouer une opération métier**. Un envoi en erreur est journalisé (`FAILED`) et l'import, l'approbation ou la décision d'alerte se termine normalement.
 
 ---
 

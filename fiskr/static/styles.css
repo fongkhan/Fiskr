@@ -1767,3 +1767,23 @@ th.sortable.sort-desc::after {
 .fp-ac-item:hover, .fp-ac-item.selected { background: var(--surface-hover); color: var(--color-primary); }
 .fp-form-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.4rem; }
 .fp-form-row select, .fp-form-row input { max-width: 240px; }
+
+/* ------------------ Notifications metier (catalogue genere) ------------------ */
+.notif-group { margin-bottom: 0.6rem; }
+.notif-group > summary {
+    cursor: pointer; padding: 0.35rem 0; font-size: 0.92rem;
+    border-bottom: 1px solid var(--border-color);
+}
+.notif-row {
+    display: flex; align-items: center; gap: 0.55rem;
+    padding: 0.3rem 0 0.3rem 0.6rem; cursor: pointer; font-size: 0.87rem;
+}
+.notif-row input[type="checkbox"] { width: 16px; height: 16px; flex: none; }
+.notif-label { flex: 1; min-width: 180px; }
+.notif-audience { color: var(--text-muted); font-size: 0.75rem; }
+.notif-badge {
+    font-size: 0.68rem; padding: 0.1rem 0.45rem; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; flex: none;
+}
+.notif-badge-now { background: rgba(239, 68, 68, 0.15); color: var(--danger-soft-text); }
+.notif-badge-digest { background: var(--surface-hover); color: var(--text-muted); }
