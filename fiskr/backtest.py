@@ -15,7 +15,7 @@ import logging
 import random
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fiskr.config import config
 from fiskr.database import Snapshot, ClientEntity, compute_checksum
@@ -87,9 +87,14 @@ def _client_label(client: Dict[str, Any]) -> str:
 
 # ------------------ CRIBLAGE A BLANC (DRY-RUN) ------------------
 
+# Cadence des remontees de progression : un tick tous les N clients criblés
+_PROGRESS_EVERY = 500
+
+
 def _dry_run_screen(db, clients: List[Dict[str, Any]],
                     entities: List[Dict[str, Any]],
-                    rule_set: Optional[List[Any]] = None) -> Dict[str, Any]:
+                    rule_set: Optional[List[Any]] = None,
+                    progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
     """
     Crible le panel contre un univers d'entites via un index de blocking local.
     Memes seuils par liste, meme liste blanche, meme layout de blocking et
@@ -97,6 +102,10 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     is_whitelisted + rule_set), mais AUCUNE ecriture. Les regles sont
     appliquees en boucle locale fail-open (pas evaluate_fp_rules : pas
     d'increment de hit_count en dry-run, et une regle candidate injectable).
+
+    `progress(traites, total)` est appele tous les 500 clients : un cahier de
+    tests sur une vraie base clients dure plusieurs minutes, l'utilisateur doit
+    voir ou il en est. Jamais bloquant (meme motif que persist_pivot_items).
     """
     from fiskr.settings import blocking_layout, blocking_config_for
     from fiskr.fprules import build_screening_ctx, run_rule
@@ -112,8 +121,14 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     alerts_before_rules = 0
     rule_suppressed = 0
     rule_suppressed_pairs: List[Dict[str, Any]] = []
+    total_clients = len(clients)
 
-    for client in clients:
+    for done, client in enumerate(clients, start=1):
+        if progress and (done % _PROGRESS_EVERY == 0 or done == total_clients):
+            try:
+                progress(done, total_clients)
+            except Exception:
+                pass  # une progression cassee n'interrompt jamais un criblage
         candidates: Dict[str, Dict[str, Any]] = {}
         for key in generate_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
@@ -182,9 +197,33 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     }
 
 
+def validate_candidate_rule(db, candidate_rule_id: Optional[int]):
+    """
+    Verifie qu'une regle candidate est evaluable au cahier de tests et la
+    retourne (None si aucune n'est demandee). Leve ValueError sinon.
+
+    Extraite de run_backtest pour que l'endpoint valide AVANT de lancer le job
+    de fond : un identifiant invalide doit rester un 400 immediat, pas un job
+    qui part puis echoue silencieusement.
+    """
+    from fiskr.database import FpRule
+
+    if not candidate_rule_id:
+        return None
+    rule = db.query(FpRule).filter(FpRule.id == candidate_rule_id).first()
+    if not rule:
+        raise ValueError("Règle candidate introuvable.")
+    if rule.channel != "SCREENING":
+        raise ValueError("Seules les règles du canal criblage peuvent être évaluées au cahier de tests.")
+    if rule.status not in ("DRAFT", "PENDING_VALIDATION", "ACTIVE"):
+        raise ValueError("Statut de règle non évaluable : brouillon, en validation ou active attendus.")
+    return rule
+
+
 def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
                  threshold_pct: float, executed_by: str,
-                 candidate_rule_id: Optional[int] = None) -> Dict[str, Any]:
+                 candidate_rule_id: Optional[int] = None,
+                 progress: Optional[Callable[[str, int, int], None]] = None) -> Dict[str, Any]:
     """
     Execute le cahier de tests A/B et retourne le rapport (non persiste ici).
 
@@ -192,11 +231,16 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     cotes (le cahier de tests reflete la production). Avec candidate_rule_id,
     la regle candidate (DRAFT/PENDING_VALIDATION/ACTIVE, canal SCREENING) est
     ajoutee cote candidat UNIQUEMENT : l'ecart chiffre montre l'effet de la
-    regle avant de la soumettre a validation. Leve ValueError si la regle
-    candidate est invalide (l'endpoint repond 400).
+    regle avant de la soumettre a validation.
+
+    `progress(phase, traites, total)` est relaye par les deux passes, avec les
+    phases SCREEN_CURRENT puis SCREEN_CANDIDATE : la barre avance sur toute la
+    duree du cahier de tests, pas seulement sur sa seconde moitie.
+
+    Leve ValueError si la regle candidate est invalide (l'endpoint valide en
+    amont pour repondre 400 avant de lancer le job).
     """
     from fiskr.fprules import active_rules
-    from fiskr.database import FpRule
 
     clients = _panel_clients(db, panel_snapshot_id)
     current_ids, candidate_ids = _universe_snapshot_ids(db, pending_snap)
@@ -205,21 +249,21 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
 
     current_rules = active_rules(db, "SCREENING")
     candidate_rules = list(current_rules)
-    candidate_rule = None
-    if candidate_rule_id:
-        candidate_rule = db.query(FpRule).filter(FpRule.id == candidate_rule_id).first()
-        if not candidate_rule:
-            raise ValueError("Règle candidate introuvable.")
-        if candidate_rule.channel != "SCREENING":
-            raise ValueError("Seules les règles du canal criblage peuvent être évaluées au cahier de tests.")
-        if candidate_rule.status not in ("DRAFT", "PENDING_VALIDATION", "ACTIVE"):
-            raise ValueError("Statut de règle non évaluable : brouillon, en validation ou active attendus.")
+    candidate_rule = validate_candidate_rule(db, candidate_rule_id)
+    if candidate_rule is not None:
         if not any(r.id == candidate_rule.id for r in candidate_rules):
             candidate_rules.append(candidate_rule)
             candidate_rules.sort(key=lambda r: ((r.run_order if r.run_order is not None else 100), r.id))
 
-    current = _dry_run_screen(db, clients, current_entities, rule_set=current_rules)
-    candidate = _dry_run_screen(db, clients, candidate_entities, rule_set=candidate_rules)
+    def _phase_progress(phase: str):
+        if not progress:
+            return None
+        return lambda done, total: progress(phase, done, total)
+
+    current = _dry_run_screen(db, clients, current_entities, rule_set=current_rules,
+                              progress=_phase_progress("SCREEN_CURRENT"))
+    candidate = _dry_run_screen(db, clients, candidate_entities, rule_set=candidate_rules,
+                                progress=_phase_progress("SCREEN_CANDIDATE"))
 
     panel_size = len(clients)
 

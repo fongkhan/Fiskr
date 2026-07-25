@@ -510,6 +510,10 @@ document.addEventListener("DOMContentLoaded", () => {
     refreshSidebarCounters();
     // Badges vivants : compteurs légers rafraîchis toutes les 60 s
     setInterval(refreshSidebarCounters, 60_000);
+    // Opérations de fond : cadence adaptative (2 s en activité, 8 s au repos).
+    // Repeuple aussi la pastille au chargement — une opération lancée avant le
+    // rechargement de la page reste suivie.
+    startOperationsPolling();
 });
 
 // Check current logged-in user profile
@@ -1066,7 +1070,18 @@ const PROGRESS_PHASE_LABELS = {
     PERSIST: "Enregistrement des fiches…",
     DELTA: "Calcul du delta…",
     RELOAD: "Rechargement du cache de production…",
+    INDEX: "Construction de l'index de blocking…",
+    SCREEN_CURRENT: "Criblage à blanc — listes en production…",
+    SCREEN_CANDIDATE: "Criblage à blanc — listes candidates…",
+    RESCREEN: "Re-criblage du référentiel clients…",
+    QUALITY: "Contrôle de qualité du référentiel…",
     DONE: "Terminé",
+};
+
+// Icône par nature d'opération (GET /api/progress/active)
+const OPERATION_KIND_ICONS = {
+    import: "📥", sync: "🔄", backtest: "🧪",
+    approve: "✅", batch: "📦", quality: "🩺",
 };
 
 // Démarre l'interrogation périodique de GET /api/progress?id=<token> et
@@ -3438,6 +3453,17 @@ async function openReviewDetail(snapshotId) {
         fetchTestPanels();
         fetchBacktestCandidateRules();
         renderBacktestReport(data.backtest_report);
+        // Reprise d'état : un cahier de tests lancé avant un rechargement de
+        // page (ou depuis un autre poste) reverrouille le bouton et se
+        // reconnecte à sa fin — la progression ne se perd jamais
+        const runningBacktest = runningOperationFor("backtest", snapshotId);
+        setBacktestButtonRunning(!!runningBacktest);
+        if (runningBacktest) {
+            onOperationDone(runningBacktest.token, (op) => {
+                setBacktestButtonRunning(false);
+                if (op.status !== "ERROR") loadBacktestReportFor(snapshotId);
+            });
+        }
         await loadReviewEntitiesPage(1);
         document.getElementById("review-detail-card").scrollIntoView({ behavior: "smooth" });
     } catch (e) {
@@ -3564,34 +3590,63 @@ async function runReviewBacktest() {
         return;
     }
     const btn = document.getElementById("run-backtest-btn");
-    btn.disabled = true;
-    btn.textContent = "Criblage à blanc en cours...";
+    const snapshotId = reviewCurrentSnapshotId;
+    setBacktestButtonRunning(true);
     try {
         const candidateRuleSel = document.getElementById("backtest-candidate-rule");
         const payload = { panel_snapshot_id: panelId };
         if (candidateRuleSel && candidateRuleSel.value) {
             payload.candidate_rule_id = parseInt(candidateRuleSel.value, 10);
         }
-        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(reviewCurrentSnapshotId)}/backtest`, {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}/backtest`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
         const data = await response.json();
         if (!response.ok) {
+            setBacktestButtonRunning(false);
             showToast("Erreur : " + (data.detail || "Échec du cahier de tests."), "error");
             return;
         }
-        renderBacktestReport(data);
-        showToast(data.verdict === "OK"
-            ? "Cahier de tests terminé : écart dans le seuil toléré."
-            : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes.", data.verdict === "OK" ? "success" : "warning", 7000);
+        // Le criblage A/B tourne en tâche de fond : sa progression s'affiche
+        // dans la pastille ⚙ et le rapport est relu à la fin du job. On peut
+        // changer d'onglet, ou même recharger la page, sans rien perdre.
+        showToast(data.message || "Cahier de tests lancé.", "info", 6000);
+        onOperationDone(data.job_token, (op) => {
+            setBacktestButtonRunning(false);
+            if (op.status !== "ERROR") loadBacktestReportFor(snapshotId);
+        });
     } catch (e) {
         console.error("Error running backtest:", e);
+        setBacktestButtonRunning(false);
         showToast("Erreur réseau de communication.", "error");
-    } finally {
-        btn.disabled = false;
-        btn.textContent = "▶ Lancer le cahier de tests";
+    }
+}
+
+function setBacktestButtonRunning(running) {
+    const btn = document.getElementById("run-backtest-btn");
+    if (!btn) return;
+    btn.disabled = running;
+    btn.textContent = running ? "Criblage à blanc en cours..." : "▶ Lancer le cahier de tests";
+}
+
+// Rapport persisté sur le snapshot : relu à la fin du job (et après un
+// rechargement de page, où la réponse du POST n'existe plus)
+async function loadBacktestReportFor(snapshotId) {
+    try {
+        const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
+        if (!response.ok) return;
+        const detail = await response.json();
+        const report = detail.backtest_report;
+        if (!report) return;
+        if (reviewCurrentSnapshotId === snapshotId) renderBacktestReport(report);
+        showToast(report.verdict === "OK"
+            ? "Cahier de tests terminé : écart dans le seuil toléré."
+            : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes.",
+            report.verdict === "OK" ? "success" : "warning", 7000);
+    } catch (e) {
+        console.error("Error loading backtest report:", e);
     }
 }
 
@@ -3930,13 +3985,19 @@ async function approvePendingSnapshot() {
             showToast("Erreur : " + (data.detail || "Échec de l'approbation."), "error");
             return;
         }
-        showToast(`${data.message} (${data.excluded_count} entité(s) exclue(s))`, "success");
+        // La promotion elle-même est déjà actée (statut READY commité) ; le
+        // rechargement du cache et le re-criblage post-delta suivent en fond.
+        showToast(`${data.message} (${data.excluded_count} entité(s) exclue(s))`, "success", 7000);
         document.getElementById("review-detail-card").classList.add("hidden");
         reviewCurrentSnapshotId = null;
         fetchPendingReviews();
         fetchSnapshots();
-        fetchWatchlist();
-        fetchWatchlistHash();
+        onOperationDone(data.job_token, () => {
+            fetchSnapshots();
+            fetchWatchlist();
+            fetchWatchlistHash();
+            refreshSidebarCounters();
+        });
     } catch (e) {
         console.error("Error approving snapshot:", e);
         showToast("Erreur réseau de communication.", "error");
@@ -6297,6 +6358,147 @@ function initHashRouting() {
     applyHashRoute(); // route initiale si l'URL porte déjà un ancrage
 }
 
+// ------------------ OPÉRATIONS EN COURS (pastille ⚙ + panneau) ------------------
+// Tout ce qui tourne en tâche de fond — imports manuels et planifiés, cahier
+// de tests, mise en production, campagnes batch, contrôle qualité — remonte
+// par GET /api/progress/active. La progression ne dépend donc plus de l'écran
+// ouvert ni de qui a lancé l'opération.
+
+let _activeOps = [];
+let _seenRunningOps = new Set();   // jetons vus en cours (détection de la fin)
+let _opCallbacks = {};             // jeton -> callback de l'écran qui l'a lancé
+let _opsPollTimer = null;
+let _opsPollDelay = 0;
+
+const OPS_POLL_BUSY_MS = 2000;     // quelque chose tourne : suivi fluide
+const OPS_POLL_IDLE_MS = 8000;     // au repos : inutile de marteler le serveur
+
+// Enregistre un rappel déclenché quand l'opération se termine (succès ou échec)
+function onOperationDone(token, callback) {
+    if (token && typeof callback === "function") _opCallbacks[token] = callback;
+}
+
+async function fetchActiveOperations() {
+    try {
+        const response = await apiFetch("/api/progress/active", { silent: true });
+        if (!response.ok) return;
+        const data = await response.json();
+        _activeOps = data.items || [];
+        handleOperationTransitions(_activeOps);
+        renderOpsPill();
+        if (!document.getElementById("notif-panel")?.classList.contains("hidden")) {
+            renderOpsSection();
+        }
+        scheduleOpsPoll(data.running > 0 ? OPS_POLL_BUSY_MS : OPS_POLL_IDLE_MS);
+    } catch (e) {
+        scheduleOpsPoll(OPS_POLL_IDLE_MS);  // une panne de suivi ne stoppe pas le suivi
+    }
+}
+
+// Cadence adaptative : on ne reprogramme que si le rythme change
+function scheduleOpsPoll(delayMs) {
+    if (_opsPollTimer && _opsPollDelay === delayMs) return;
+    if (_opsPollTimer) clearTimeout(_opsPollTimer);
+    _opsPollDelay = delayMs;
+    _opsPollTimer = setTimeout(() => {
+        _opsPollTimer = null;
+        fetchActiveOperations();
+    }, delayMs);
+}
+
+function startOperationsPolling() {
+    fetchActiveOperations();
+}
+
+// Passage EN COURS -> TERMINÉ : toast de fin et rappel de l'écran concerné
+function handleOperationTransitions(items) {
+    const stillRunning = new Set();
+    for (const op of items) {
+        if (op.status === "RUNNING") { stillRunning.add(op.token); continue; }
+        if (!_seenRunningOps.has(op.token)) continue;  // fin déjà traitée
+        _seenRunningOps.delete(op.token);
+        if (op.status === "ERROR") {
+            showToast(`${op.label} : échec — ${op.error || "erreur inconnue"}`, "error", 9000);
+        } else {
+            showToast(`${op.label} : terminé.`, "success");
+        }
+        const callback = _opCallbacks[op.token];
+        if (callback) {
+            delete _opCallbacks[op.token];
+            try { callback(op); } catch (e) { console.error("Callback d'opération :", e); }
+        }
+    }
+    for (const token of stillRunning) _seenRunningOps.add(token);
+}
+
+function renderOpsPill() {
+    const pill = document.getElementById("ops-pill");
+    if (!pill) return;
+    const running = _activeOps.filter(op => op.status === "RUNNING");
+    if (!running.length) {
+        pill.classList.add("hidden");
+        pill.textContent = "";
+        return;
+    }
+    // Pourcentage de l'opération la plus ancienne : celle qu'on attend vraiment
+    const lead = running[0];
+    const pct = (lead.pct !== null && lead.pct !== undefined) ? ` · ${lead.pct} %` : "";
+    const count = running.length > 1 ? `${running.length} en cours` : (lead.label || "en cours");
+    pill.innerHTML = `<span class="ops-pill-spin">⚙</span> ${escapeHtml(count)}${escapeHtml(pct)}`;
+    pill.classList.remove("hidden");
+}
+
+function renderOpsSection() {
+    const section = document.getElementById("notif-ops-section");
+    const list = document.getElementById("notif-ops-list");
+    if (!section || !list) return;
+    if (!_activeOps.length) {
+        section.classList.add("hidden");
+        list.innerHTML = "";
+        return;
+    }
+    section.classList.remove("hidden");
+    list.innerHTML = _activeOps.map(op => {
+        const icon = OPERATION_KIND_ICONS[op.kind] || "⚙";
+        const done = op.status !== "RUNNING";
+        const phase = done
+            ? (op.status === "ERROR" ? `Échec : ${op.error || "erreur inconnue"}` : "Terminé")
+            : (PROGRESS_PHASE_LABELS[op.phase] || op.phase || "En cours…");
+        const pctText = (op.pct !== null && op.pct !== undefined) ? `${op.pct} %` : "";
+        const counts = op.processed
+            ? (op.total
+                ? `${op.processed.toLocaleString(uiLocale())} / ${op.total.toLocaleString(uiLocale())}`
+                : op.processed.toLocaleString(uiLocale()))
+            : "";
+        const fillStyle = done
+            ? (op.status === "ERROR"
+                ? 'width: 100%; background: var(--color-alert);'
+                : 'width: 100%;')
+            : ((op.pct !== null && op.pct !== undefined)
+                ? `width: ${Math.min(100, op.pct)}%;`
+                : "");
+        const fillClass = (!done && (op.pct === null || op.pct === undefined))
+            ? "progress-tracker-fill indeterminate" : "progress-tracker-fill";
+        const onClick = op.link
+            ? ` class="ops-row clickable" onclick="location.hash='${op.link}'; toggleNotifCenter(false);"`
+            : ' class="ops-row"';
+        return `<div${onClick}>
+            <div class="ops-row-head">
+                <span>${icon} ${escapeHtml(op.label || op.token)}</span>
+                <span style="color: var(--text-muted);">${escapeHtml(pctText)}</span>
+            </div>
+            <div class="progress-tracker-bar"><div class="${fillClass}" style="${fillStyle}"></div></div>
+            <div class="ops-row-meta">${escapeHtml(phase)}${counts ? ` · ${escapeHtml(counts)}` : ""}${op.started_by ? ` · @${escapeHtml(op.started_by)}` : ""}</div>
+        </div>`;
+    }).join("");
+}
+
+// Opération en cours portant ce snapshot (reprise d'état après rechargement)
+function runningOperationFor(kind, snapshotId) {
+    return _activeOps.find(op => op.status === "RUNNING" && op.kind === kind
+        && op.snapshot_id === snapshotId) || null;
+}
+
 // ------------------ CENTRE DE NOTIFICATIONS (🔔) ------------------
 
 let _lastCounters = {};
@@ -6329,13 +6531,14 @@ function toggleNotifCenter(force) {
     if (!panel) return;
     const open = force !== undefined ? force : panel.classList.contains("hidden");
     panel.classList.toggle("hidden", !open);
-    if (open) renderNotifCenter();
+    if (open) { renderOpsSection(); renderNotifCenter(); }
 }
 
 document.addEventListener("click", (e) => {
     const panel = document.getElementById("notif-panel");
     if (panel && !panel.classList.contains("hidden")
-        && !e.target.closest("#notif-panel") && !e.target.closest("#bell-btn")) {
+        && !e.target.closest("#notif-panel") && !e.target.closest("#bell-btn")
+        && !e.target.closest("#ops-pill")) {
         panel.classList.add("hidden");
     }
 });

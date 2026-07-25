@@ -775,7 +775,13 @@ def _run_list_replacement_sync(
     snap_id = None
     try:
         logger.info(f"Sync {source}: telechargement de {url}")
-        progress_registry.update(progress_token, phase="DOWNLOAD")
+        # Identite de l'operation : elle apparait des lors dans la pastille et
+        # le centre de notifications, y compris quand c'est le cron qui la lance
+        # `started_by` n'ecrase jamais une valeur deja posee : un declenchement
+        # manuel inscrit le nom de l'utilisateur avant d'appeler ce cycle
+        progress_registry.update(progress_token, phase="DOWNLOAD", kind="sync",
+                                 label=f"Synchronisation {source}",
+                                 started_by="système")
         if fetcher is None:
             # Telechargement instrumente : octets recus / taille annoncee
             download_to_file(url, temp_file, progress=lambda done, total: progress_registry.update(

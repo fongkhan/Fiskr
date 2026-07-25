@@ -10,6 +10,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import post_and_wait
 from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.database import get_db, Snapshot, WatchlistEntity, AppSetting
@@ -147,9 +148,9 @@ def test_superseded_versions_remain_browsable(client):
 
     _set_approval(client, True)
     result = _upload_watchlist(client, [("I", new_marker)])
-    assert client.post(
-        f"/api/review/snapshots/{result['snapshot_id']}/approve", json={"comment": "ok"}
-    ).status_code == 200
+    assert post_and_wait(
+        client, f"/api/review/snapshots/{result['snapshot_id']}/approve", json={"comment": "ok"}
+    ).status_code == 202
 
     # L'ancienne version est sortie de production mais reste consultable
     assert _browse(client, search=old_marker)["total"] == 0
@@ -172,7 +173,8 @@ def test_excluded_entities_scope(client):
         f"/api/review/snapshots/{snap_id}/exclusions",
         data={"entity_ids": json.dumps([to_exclude["id"]])},
     ).status_code == 200
-    assert client.post(f"/api/review/snapshots/{snap_id}/approve", json={"comment": "ok"}).status_code == 200
+    assert post_and_wait(client, f"/api/review/snapshots/{snap_id}/approve",
+                         json={"comment": "ok"}).status_code == 202
 
     # L'entite exclue est absente de la production mais visible en scope EXCLUDED
     assert _browse(client, search=excluded)["total"] == 0

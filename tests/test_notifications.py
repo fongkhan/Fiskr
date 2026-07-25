@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fiskr import notifier, notify
+from tests.conftest import post_and_wait
 from fiskr.api import app
 from fiskr.auth import VALID_ROLES, get_current_user
 from fiskr.database import (
@@ -324,9 +325,9 @@ def test_snapshot_approval_and_rejection_emit_events(client, monkeypatch):
     assert pending["status"] == "PENDING_REVIEW"
 
     calls = _spy_emit(monkeypatch)
-    approved = client.post(f"/api/review/snapshots/{pending['snapshot_id']}/approve",
-                           json={"comment": "test notif"})
-    assert approved.status_code == 200, approved.text
+    approved = post_and_wait(client, f"/api/review/snapshots/{pending['snapshot_id']}/approve",
+                             json={"comment": "test notif"})
+    assert approved.status_code == 202, approved.text
     key, payload, _ = next(c for c in calls if c[0] == "snapshot_approved")
     assert payload["Liste"] == "WATCHLIST_EU"
     assert payload["Approuvé par"] == "notif_admin"

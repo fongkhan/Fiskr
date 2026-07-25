@@ -20,6 +20,7 @@ from fiskr.settings import (
     SETTING_EXCLUSION_JUSTIFICATION_REQUIRED,
     SETTING_EXCLUSION_FILE_REQUIRED,
 )
+from tests.conftest import post_and_wait
 
 ALL_SETTING_KEYS = [
     SETTING_REQUIRE_APPROVAL,
@@ -163,9 +164,10 @@ def test_approve_promotes_supersedes_and_excludes(client):
     )
     assert response.status_code == 200, response.text
 
-    # Approbation avec commentaire
-    response = client.post(f"/api/review/snapshots/{snap_id}/approve", json={"comment": "Pointage conforme"})
-    assert response.status_code == 200, response.text
+    # Approbation avec commentaire (202 : le re-criblage post-delta suit en fond)
+    response = post_and_wait(client, f"/api/review/snapshots/{snap_id}/approve",
+                             json={"comment": "Pointage conforme"})
+    assert response.status_code == 202, response.text
     assert response.json()["excluded_count"] == 1
 
     db = next(get_db())
@@ -217,8 +219,9 @@ def test_pending_survives_mode_disable(client):
     # Toujours en attente, et toujours approuvable
     pending = client.get("/api/review/pending").json()["pending"]
     assert any(p["snapshot_id"] == result["snapshot_id"] for p in pending)
-    response = client.post(f"/api/review/snapshots/{result['snapshot_id']}/approve", json={"comment": None})
-    assert response.status_code == 200
+    response = post_and_wait(client, f"/api/review/snapshots/{result['snapshot_id']}/approve",
+                             json={"comment": None})
+    assert response.status_code == 202
 
 
 # ------------------ JUSTIFICATION MODULAIRE ------------------
@@ -309,8 +312,8 @@ def test_review_role_enforcement(client):
 
     # 'user,reviewer' (roles empiles) : peut approuver
     _override_user("user,reviewer")
-    response = client.post(f"/api/review/snapshots/{snap_id}/approve", json={"comment": "ok"})
-    assert response.status_code == 200
+    response = post_and_wait(client, f"/api/review/snapshots/{snap_id}/approve", json={"comment": "ok"})
+    assert response.status_code == 202
 
     _override_user("admin")
 

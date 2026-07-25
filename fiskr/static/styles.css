@@ -1735,6 +1735,33 @@ th.sortable.sort-desc::after {
     to { background-position: 34px 0; }
 }
 
+/* Pastille d'en-tete : ce qui tourne en fond, visible depuis tout ecran */
+.ops-pill {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.3rem 0.7rem; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    color: var(--text-primary); font-size: 0.8rem; font-weight: 600;
+    white-space: nowrap;
+}
+.ops-pill:hover { background: color-mix(in srgb, var(--color-primary) 22%, transparent); }
+.ops-pill .ops-pill-spin { display: inline-block; animation: ops-spin 2s linear infinite; }
+@keyframes ops-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .ops-pill .ops-pill-spin { animation: none; }
+    .progress-tracker-fill.indeterminate { animation: none; }
+}
+
+/* Lignes du panneau de notifications */
+.ops-row { padding: 0.4rem 0; border-bottom: 1px solid var(--border-color); }
+.ops-row:last-child { border-bottom: none; }
+.ops-row-head {
+    display: flex; justify-content: space-between; gap: 0.5rem;
+    font-size: 0.82rem; margin-bottom: 0.25rem;
+}
+.ops-row-meta { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.2rem; }
+.ops-row.clickable { cursor: pointer; }
+
 /* ------------------ Atelier de regles anti-FP ------------------ */
 .fp-nl-section {
     border: 1px dashed var(--border-color); border-radius: 8px;

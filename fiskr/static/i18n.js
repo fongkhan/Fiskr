@@ -433,6 +433,16 @@
         "Calcul du delta…": { en: "Computing delta…", de: "Delta wird berechnet…", es: "Calculando el delta…", zh: "正在计算增量…", ar: "جارٍ حساب الفروق…" },
         "Rechargement du cache de production…": { en: "Reloading production cache…", de: "Produktions-Cache wird neu geladen…", es: "Recargando la caché de producción…", zh: "正在重载生产缓存…", ar: "جارٍ إعادة تحميل ذاكرة الإنتاج…" },
         "Terminé": { en: "Done", de: "Fertig", es: "Terminado", zh: "已完成", ar: "منتهٍ" },
+        "Construction de l'index de blocking…": { en: "Building the blocking index…", de: "Blocking-Index wird aufgebaut…", es: "Construyendo el índice de blocking…", zh: "正在构建分块索引…", ar: "جارٍ بناء فهرس التقسيم…" },
+        "Criblage à blanc — listes en production…": { en: "Dry-run screening — production lists…", de: "Trockenlauf-Screening – Produktionslisten…", es: "Cribado en blanco — listas en producción…", zh: "空跑筛查——在产名单…", ar: "فحص تجريبي — القوائم المنشورة…" },
+        "Criblage à blanc — listes candidates…": { en: "Dry-run screening — candidate lists…", de: "Trockenlauf-Screening – Kandidatenlisten…", es: "Cribado en blanco — listas candidatas…", zh: "空跑筛查——候选名单…", ar: "فحص تجريبي — القوائم المرشحة…" },
+        "Re-criblage du référentiel clients…": { en: "Re-screening the client repository…", de: "Kundenbestand wird erneut gescreent…", es: "Recribado del repositorio de clientes…", zh: "正在重新筛查客户库…", ar: "إعادة فحص مستودع العملاء…" },
+        "Contrôle de qualité du référentiel…": { en: "Checking repository quality…", de: "Qualitätsprüfung des Bestands…", es: "Control de calidad del repositorio…", zh: "正在检查客户库质量…", ar: "فحص جودة المستودع…" },
+        // Operations de fond : pastille d'en-tete et panneau de notifications
+        "Opérations en cours": { en: "Operations in progress", de: "Laufende Vorgänge", es: "Operaciones en curso", zh: "进行中的操作", ar: "عمليات جارية" },
+        "Opérations en cours — cliquez pour le détail": { en: "Operations in progress — click for details", de: "Laufende Vorgänge – für Details klicken", es: "Operaciones en curso — haga clic para ver el detalle", zh: "进行中的操作——点击查看详情", ar: "عمليات جارية — انقر للتفاصيل" },
+        "en cours": { en: "in progress", de: "laufend", es: "en curso", zh: "进行中", ar: "جارٍ" },
+        "Cahier de tests lancé.": { en: "Test book started.", de: "Testbuch gestartet.", es: "Cuaderno de pruebas iniciado.", zh: "测试簿已启动。", ar: "بدأ دفتر الاختبارات." },
         // Atelier de regles anti-FP (aides a l'edition + langage naturel)
         "🗣️ Décrire la règle en langage naturel": { en: "🗣️ Describe the rule in natural language", de: "🗣️ Regel in natürlicher Sprache beschreiben", es: "🗣️ Describir la regla en lenguaje natural", zh: "🗣️ 用自然语言描述规则", ar: "🗣️ صف القاعدة بلغة طبيعية" },
         "✨ Générer par IA": { en: "✨ Generate with AI", de: "✨ Mit KI generieren", es: "✨ Generar con IA", zh: "✨ AI 生成", ar: "✨ توليد بالذكاء الاصطناعي" },
