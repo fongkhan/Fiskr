@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import shutil
+import threading
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -91,6 +92,7 @@ from fiskr.settings import (
     digest_settings, SETTING_DIGEST,
     notification_batch_settings, SETTING_NOTIFICATION_BATCH, DEFAULT_NOTIFICATION_BATCH,
     SETTING_WHITELIST_EXPIRY_NOTIFIED, get_setting,
+    quality_min_score_pct, SETTING_QUALITY_MIN_SCORE, SETTING_QUALITY_LAST,
     retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
     score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
     investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST
@@ -426,7 +428,29 @@ def build_kpi_digest(db) -> Dict[str, Any]:
             Alert.decided_at.isnot(None), Alert.decided_at >= day_ago).count(),
         "Dernières synchronisations": "; ".join(
             f"{s} : {st}" for s, st in sorted(last_sync_by_source.items())) or "aucune",
+        # Lecture du cache écrit au dernier import : jamais de scan complet du
+        # référentiel dans le planificateur
+        "Qualité des données clients": _quality_digest_line(db),
     }
+
+
+def _quality_digest_line(db) -> str:
+    """Ligne « qualité » du digest, depuis le cache du dernier contrôle. Le
+    cache n'est retenu que s'il porte sur le référentiel actuellement en
+    production (sinon l'indicateur serait trompeur)."""
+    cached = get_setting(db, SETTING_QUALITY_LAST, None) or {}
+    snap = _latest_client_base(db)
+    if not snap:
+        return "aucune base clients en production"
+    if not isinstance(cached, dict) or cached.get("snapshot_id") != snap.snapshot_id:
+        return "non calculée depuis le dernier import"
+    score = cached.get("global_score_pct")
+    if score is None:
+        return "non calculée depuis le dernier import"
+    threshold = quality_min_score_pct(db)
+    suffix = f" (seuil {threshold} %)" if threshold else " (aucun seuil configuré)"
+    warning = " ⚠" if threshold and score < threshold else ""
+    return f"{score} %{suffix}{warning}"
 
 async def _digest_scheduler():
     """
@@ -2482,6 +2506,11 @@ def ingest_snapshot(
                 "Liste": file_type, "Fichier": file.filename, "Fiches": record_count,
                 "Importé par": current_user["username"], "Snapshot": snap_id,
             })
+        if file_type == "CLIENT_BASE" and snap.status == "READY":
+            # Contrôle de complétude en tâche de fond : hors de la requête
+            # (un référentiel volumineux doublerait le temps d'import perçu)
+            threading.Thread(target=_client_quality_post_import,
+                             args=(snap_id,), daemon=True).start()
         if rescreen_result and rescreen_result.get("new_alerts"):
             # Le re-criblage a produit des alertes : etape structurante, mail immediat
             emit(db, "rescreen_completed", {
@@ -4594,6 +4623,8 @@ class IngestionSettingsUpdate(BaseModel):
     auto_rescreen: Optional[bool] = None
     backtest_required: Optional[bool] = None
     backtest_max_gap_pct: Optional[float] = None
+    # Score minimal de qualite du referentiel clients (0 = pas de seuil)
+    quality_min_score_pct: Optional[float] = None
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
     alert_sla_hours: Optional[Dict[str, int]] = None
     notification_events: Optional[Dict[str, bool]] = None
@@ -4620,6 +4651,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         bt_gap_value = float(bt_gap["value"])
     except (TypeError, ValueError):
         bt_gap_value = 20.0
+    quality_min = get_setting_with_source(db, SETTING_QUALITY_MIN_SCORE, 0.0)
     return {
         "require_approval": bool(approval["value"]),
         "exclusion_justification_required": bool(justif["value"]),
@@ -4630,6 +4662,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_rescreen": bool(rescreen["value"]),
         "backtest_required": bool(bt_required["value"]),
         "backtest_max_gap_pct": bt_gap_value,
+        "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
@@ -4643,6 +4676,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
             "auto_rescreen": rescreen["source"],
             "backtest_required": bt_required["source"],
             "backtest_max_gap_pct": bt_gap["source"],
+            "quality_min_score_pct": quality_min["source"],
         },
     }
 
@@ -4673,6 +4707,7 @@ async def update_ingestion_settings(
     }
     changed = {k: v for k, v in updates.items() if v is not None}
     if (not changed and payload.backtest_max_gap_pct is None
+            and payload.quality_min_score_pct is None
             and payload.alert_sla_hours is None and payload.notification_events is None
             and payload.digest is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
@@ -4684,6 +4719,11 @@ async def update_ingestion_settings(
         if not (0 <= payload.backtest_max_gap_pct <= 1000):
             raise HTTPException(status_code=400, detail="backtest_max_gap_pct doit être entre 0 et 1000.")
         set_setting(db, SETTING_BACKTEST_MAX_GAP_PCT, float(payload.backtest_max_gap_pct),
+                    updated_by=admin_user["username"])
+    if payload.quality_min_score_pct is not None:
+        if not (0 <= payload.quality_min_score_pct <= 100):
+            raise HTTPException(status_code=400, detail="quality_min_score_pct doit être entre 0 et 100.")
+        set_setting(db, SETTING_QUALITY_MIN_SCORE, float(payload.quality_min_score_pct),
                     updated_by=admin_user["username"])
     if payload.alert_sla_hours is not None:
         sla = {}
@@ -6478,22 +6518,13 @@ async def get_alert_str_draft(
     return draft
 
 
-@app.get("/api/alerts/{alert_id}/str-draft/print")
-async def print_alert_str_draft(
-    alert_id: int,
-    db: Session = Depends(get_db),
-    reviewer: Dict[str, Any] = Depends(require_reviewer)
-):
-    """Projet de declaration de soupcon en HTML autonome imprimable, avec
-    bandeau « projet a valider par le correspondant TRACFIN »."""
+def _render_str_draft_html(alert: Alert, draft: Dict[str, Any], generated_by: str) -> str:
+    """
+    Rend le projet de declaration en HTML autonome (impression -> PDF ou corps
+    d'email au correspondant) : aucune ressource externe, bandeau rappelant
+    qu'il s'agit d'un PROJET a valider avant toute teledeclaration ERMES.
+    """
     from html import escape
-    alert = db.query(Alert).filter(Alert.id == alert_id).first()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alerte introuvable.")
-    draft = _build_str_draft(db, alert, reviewer["username"])
-    _log_alert_event(db, alert.id, reviewer["username"], "STR_DRAFT_GENERATED",
-                     "Projet de déclaration de soupçon généré (format imprimable)")
-    db.commit()
 
     def esc(value):
         return escape(str(value)) if value not in (None, "", []) else "—"
@@ -6546,7 +6577,7 @@ th {{ background: #f0f0f0; width: 220px; }}
 </style></head><body>
 <button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
 <h1>Projet de déclaration de soupçon (TRACFIN) — Alerte #{alert.id}</h1>
-<p class="sub">Généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC par @{esc(reviewer['username'])} — support de préparation à la télédéclaration ERMES.</p>
+<p class="sub">Généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC par @{esc(generated_by)} — support de préparation à la télédéclaration ERMES.</p>
 <div class="banner">⚠ {escape(STR_DISCLAIMER)}</div>
 <h2>1. Déclarant (établissement)</h2>
 <table><tbody>{rows(declarant, {"name": "Établissement", "siren": "SIREN",
@@ -6576,7 +6607,80 @@ th {{ background: #f0f0f0; width: 220px; }}
 <table><thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
 <tbody>{chrono_html}</tbody></table>
 </body></html>"""
-    return HTMLResponse(content=html)
+    return html
+
+
+@app.get("/api/alerts/{alert_id}/str-draft/print")
+async def print_alert_str_draft(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Projet de declaration de soupcon en HTML autonome imprimable, avec
+    bandeau « projet a valider par le correspondant TRACFIN »."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    draft = _build_str_draft(db, alert, reviewer["username"])
+    _log_alert_event(db, alert.id, reviewer["username"], "STR_DRAFT_GENERATED",
+                     "Projet de déclaration de soupçon généré (format imprimable)")
+    db.commit()
+    return HTMLResponse(content=_render_str_draft_html(alert, draft, reviewer["username"]))
+
+
+@app.post("/api/alerts/{alert_id}/str-draft/send")
+def send_alert_str_draft(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Envoie le projet de declaration de soupcon au correspondant TRACFIN
+    designe (config.yaml institution.correspondent_email).
+
+    Fonction SYNCHRONE a dessein : l'envoi SMTP est bloquant (FastAPI
+    l'execute dans son threadpool) et les erreurs doivent etre EXPLICITES —
+    c'est un clic utilisateur, pas une notification de fond : 400 sans
+    correspondant configure, 503 sans SMTP, 502 si le serveur refuse le mail.
+    Aucune transmission a TRACFIN : le correspondant reste le seul a decider
+    de teledeclarer sur ERMES.
+    """
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    correspondent = _institution_config()["correspondent_email"]
+    if not correspondent:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucun correspondant TRACFIN configuré (config.yaml, institution.correspondent_email)."
+        )
+    if not notify_smtp_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Envoi impossible : SMTP non configuré (variable d'environnement SMTP_HOST absente)."
+        )
+
+    draft = _build_str_draft(db, alert, reviewer["username"])
+    html = _render_str_draft_html(alert, draft, reviewer["username"])
+    subject = f"[Fiskr] Projet de déclaration de soupçon — Alerte #{alert.id}"
+    text = (
+        f"{STR_DISCLAIMER}\n\n"
+        f"Alerte #{alert.id} — {alert.client_name} × {alert.watchlist_name} "
+        f"(score {float(alert.final_score or 0):.1f} %).\n"
+        f"Projet généré par @{reviewer['username']} le "
+        f"{datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC.\n"
+        "Le détail complet figure dans la version HTML de ce message."
+    )
+    try:
+        notify_send_email([correspondent], subject, text, html_body=html)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Échec de l'envoi SMTP : {e}")
+
+    _log_alert_event(db, alert.id, reviewer["username"], "STR_DRAFT_SENT",
+                     f"Projet de déclaration envoyé au correspondant TRACFIN ({correspondent}).")
+    db.commit()
+    return {"message": f"Projet de déclaration envoyé à {correspondent}.",
+            "recipient": correspondent, "alert_id": alert.id}
 
 
 # ------------------ QUALITE DES DONNEES CLIENTS ------------------
@@ -6618,14 +6722,37 @@ async def get_client_data_quality(
     Tableau de bord qualite des donnees du referentiel clients (dernier
     snapshot CLIENT_BASE en production) : taux de completude par champ KYC,
     ventilation par segment, fiches a risque pour le criblage (DOB manquante,
-    pays manquant, PP sans prenom) et score global. Lecture seule.
+    pays manquant, PP sans prenom), score global et seuil d'alerte configure.
+    Lecture seule.
     """
-    snap = db.query(Snapshot).filter(
-        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY"
-    ).order_by(Snapshot.uploaded_at.desc()).first()
+    snap = _latest_client_base(db)
     if not snap:
         return {"snapshot": None, "message": "Aucune base clients en production."}
+    report = _compute_client_quality(db, snap)
+    threshold = quality_min_score_pct(db)
+    score = report.get("global_score_pct")
+    report["threshold"] = {
+        "min_score_pct": threshold,
+        # Un seuil a 0 desactive le controle : jamais de drapeau rouge
+        "below": bool(threshold > 0 and score is not None and score < threshold),
+    }
+    return report
 
+
+def _latest_client_base(db: Session) -> Optional[Snapshot]:
+    """Dernier referentiel clients en production (celui que crible le moteur)."""
+    return db.query(Snapshot).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY"
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+
+
+def _compute_client_quality(db: Session, snap: Snapshot) -> Dict[str, Any]:
+    """
+    Parcourt le referentiel (lecture en flux, yield_per) et calcule la
+    completude par champ, par segment, les fiches a risque et le score global.
+    Extrait de l'endpoint pour etre reutilisable hors requete (verification
+    post-import en tache de fond).
+    """
     fields = {attr: {"label": label, "pp_only": pp_only, "filled": 0, "total": 0}
               for attr, label, pp_only in _QUALITY_FIELDS}
     segments: Dict[str, Dict[str, int]] = {}
@@ -6689,9 +6816,57 @@ async def get_client_data_quality(
     }
 
 
+def _client_quality_post_import(snapshot_id: str) -> None:
+    """
+    Controle de qualite apres un import CLIENT_BASE reussi, execute en tache
+    de fond (JAMAIS dans la requete : un referentiel de 750 000 fiches
+    doublerait le temps d'import percu). Met le resultat en cache — le digest
+    KPI et le tableau de bord le lisent sans jamais rescanner la base — et
+    notifie quand le score passe sous le seuil configure. N'emet jamais
+    d'exception : un controle de qualite ne casse pas un import.
+    """
+    from fiskr.database import SessionLocal
+    session = SessionLocal()
+    try:
+        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+        if snap is None:
+            return
+        report = _compute_client_quality(session, snap)
+        score = report.get("global_score_pct")
+        set_setting(session, SETTING_QUALITY_LAST, {
+            "snapshot_id": snap.snapshot_id, "file_name": snap.file_name,
+            "global_score_pct": score, "record_count": report["snapshot"]["record_count"],
+            "computed_at": datetime.utcnow().isoformat() + "Z",
+        }, updated_by="systeme")
+        session.commit()
+
+        threshold = quality_min_score_pct(session)
+        if not threshold or score is None or score >= threshold:
+            return
+        worst = sorted((f for f in report["fields"] if f["total"] and f["pct"] is not None),
+                       key=lambda f: f["pct"])[:3]
+        risky = report["risky_records"]
+        emit(session, "client_quality_low", {
+            "Référentiel": snap.file_name,
+            "Fiches": report["snapshot"]["record_count"],
+            "Score global": f"{score} % (seuil {threshold} %)",
+            "Champs les moins complets": ", ".join(f"{f['label']} {f['pct']} %" for f in worst) or "—",
+            "PP sans date de naissance": risky.get("dob_missing_pp", 0),
+            "Fiches sans pays": risky.get("country_missing", 0),
+            "PP sans prénom": risky.get("pp_without_first_name", 0),
+        })
+    except Exception as e:
+        logger.error(f"Contrôle de qualité post-import impossible ({snapshot_id}) : {e}")
+    finally:
+        session.close()
+
+
 # ------------------ WEBHOOKS ENTRANTS (SI AMONT) ------------------
 
 _HOOK_DELIVERY_TTL_DAYS = 90
+# Les livraisons sans cle d'idempotence n'existent que pour la supervision :
+# horizon plus court (celui du graphique du tableau de bord)
+_HOOK_AUTO_TTL_DAYS = 30
 
 
 def _hooks_secret() -> str:
@@ -6721,16 +6896,30 @@ async def _verify_hook_request(request: Request, current_user: Dict[str, Any]) -
     return body
 
 
+def _hook_purge_expired(db: Session) -> None:
+    """
+    Purge des livraisons : 90 jours pour les cles fournies par l'appelant
+    (elles portent la reponse a rejouer), 30 jours pour les cles serveur
+    « auto: » qui n'existent que pour la supervision (horizon du graphique).
+    """
+    now = datetime.utcnow()
+    db.query(HookDelivery).filter(
+        HookDelivery.created_at < now - timedelta(days=_HOOK_DELIVERY_TTL_DAYS)
+    ).delete(synchronize_session=False)
+    db.query(HookDelivery).filter(
+        HookDelivery.created_at < now - timedelta(days=_HOOK_AUTO_TTL_DAYS),
+        HookDelivery.idempotency_key.like("auto:%"),
+    ).delete(synchronize_session=False)
+
+
 def _hook_idempotency_replay(db: Session, request: Request) -> Tuple[Optional[str], Optional[JSONResponse]]:
     """Si X-Idempotency-Key correspond a une livraison connue, rejoue la
-    reponse d'origine. Purge opportuniste des livraisons expirees."""
+    reponse d'origine a l'identique."""
     key = (request.headers.get("X-Idempotency-Key") or "").strip()
     if not key:
         return None, None
     if len(key) > 200:
         raise HTTPException(status_code=400, detail="X-Idempotency-Key : 200 caractères maximum.")
-    cutoff = datetime.utcnow() - timedelta(days=_HOOK_DELIVERY_TTL_DAYS)
-    db.query(HookDelivery).filter(HookDelivery.created_at < cutoff).delete(synchronize_session=False)
     existing = db.query(HookDelivery).filter(HookDelivery.idempotency_key == key).first()
     if existing:
         return key, JSONResponse(
@@ -6742,12 +6931,35 @@ def _hook_idempotency_replay(db: Session, request: Request) -> Tuple[Optional[st
 
 
 def _hook_store_delivery(db: Session, key: Optional[str], endpoint: str,
-                         caller: str, status_code: int, response: Dict[str, Any]) -> None:
-    if not key:
-        return
-    db.add(HookDelivery(idempotency_key=key, endpoint=endpoint, caller=caller,
-                        status_code=status_code, response_json=response))
+                         caller: str, status_code: int,
+                         response: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Trace TOUTE livraison de webhook — le tableau de bord a besoin des appels
+    sans en-tete d'idempotence, qui sont la majorite. Sans cle appelant, une
+    cle serveur « auto:<uuid> » est generee : elle n'est jamais retransmise,
+    donc jamais rejouee par erreur. La reponse n'est stockee que pour les cles
+    appelant (seule raison d'etre du champ : le rejeu ; un arbre de decision
+    de criblage pese plusieurs Ko).
+    """
+    auto = not key
+    db.add(HookDelivery(
+        idempotency_key=key or f"auto:{uuid.uuid4()}",
+        endpoint=endpoint, caller=caller, status_code=status_code,
+        response_json=None if auto else response,
+    ))
+    _hook_purge_expired(db)
     db.commit()
+
+
+def _hook_record_failure(db: Session, endpoint: str, caller: str, status_code: int) -> None:
+    """Trace un appel rejete APRES authentification (signature invalide,
+    charge utile illisible, conflit metier) : sans cela, ces echecs ne vivent
+    que dans les logs serveur et le SI amont n'a aucun moyen de les voir."""
+    try:
+        db.rollback()
+        _hook_store_delivery(db, None, endpoint, caller, status_code)
+    except Exception as e:  # la supervision ne doit jamais masquer l'erreur d'origine
+        logger.error(f"Trace de l'échec de webhook impossible ({endpoint}) : {e}")
 
 
 @app.post("/api/hooks/screening")
@@ -6763,20 +6975,28 @@ async def hook_screening(
     (la reponse d'origine est rejouee a la retransmission). Meme cœur de
     criblage que le temps reel : audit immuable et alerte crees a l'identique.
     """
-    body = await _verify_hook_request(request, current_user)
-    key, replay = _hook_idempotency_replay(db, request)
-    if replay is not None:
-        return replay
     try:
-        payload = ScreenClientRequest.model_validate_json(body)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
-    client_dict = payload.model_dump()
-    client_dict.pop("screening_lists", None)
-    requested_lists = _validate_screening_lists(payload.screening_lists)
-    result = screen_client_profile(db, client_dict, current_user["username"], requested_lists)
-    _hook_store_delivery(db, key, "screening", current_user["username"], 200, result)
-    return result
+        body = await _verify_hook_request(request, current_user)
+        key, replay = _hook_idempotency_replay(db, request)
+        if replay is not None:
+            return replay
+        try:
+            payload = ScreenClientRequest.model_validate_json(body)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
+        client_dict = payload.model_dump()
+        client_dict.pop("screening_lists", None)
+        requested_lists = _validate_screening_lists(payload.screening_lists)
+        result = screen_client_profile(db, client_dict, current_user["username"], requested_lists)
+        _hook_store_delivery(db, key, "screening", current_user["username"], 200, result)
+        return result
+    except HTTPException as exc:
+        # Les refus post-authentification sont traces (signature, charge utile,
+        # metier) ; le 403 « pas une cle d'API » ne l'est pas : appelant non
+        # identifiable, et c'est du bruit d'attaque potentiel.
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            _hook_record_failure(db, "screening", current_user.get("username") or "?", exc.status_code)
+        raise
 
 
 class HookClientUpsert(BaseModel):
@@ -6818,61 +7038,124 @@ async def hook_client_upsert(
     ou creation. Trace au journal des actions d'administration
     (CLIENT_UPSERT_HOOK), idempotent par X-Idempotency-Key.
     """
-    body = await _verify_hook_request(request, current_user)
-    key, replay = _hook_idempotency_replay(db, request)
-    if replay is not None:
-        return replay
     try:
-        payload = HookClientUpsert.model_validate_json(body)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
-    if payload.client_type not in ("PP", "PM"):
-        raise HTTPException(status_code=400, detail="client_type doit valoir PP ou PM.")
+        body = await _verify_hook_request(request, current_user)
+        key, replay = _hook_idempotency_replay(db, request)
+        if replay is not None:
+            return replay
+        try:
+            payload = HookClientUpsert.model_validate_json(body)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
+        if payload.client_type not in ("PP", "PM"):
+            raise HTTPException(status_code=400, detail="client_type doit valoir PP ou PM.")
 
-    snap = db.query(Snapshot).filter(
-        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY"
-    ).order_by(Snapshot.uploaded_at.desc()).first()
-    if not snap:
-        raise HTTPException(
-            status_code=409,
-            detail="Aucune base clients en production : importez d'abord un référentiel CLIENT_BASE."
-        )
+        snap = db.query(Snapshot).filter(
+            Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY"
+        ).order_by(Snapshot.uploaded_at.desc()).first()
+        if not snap:
+            raise HTTPException(
+                status_code=409,
+                detail="Aucune base clients en production : importez d'abord un référentiel CLIENT_BASE."
+            )
 
-    values = payload.model_dump()
-    existing = db.query(ClientEntity).filter(
-        ClientEntity.snapshot_id == snap.snapshot_id,
-        ClientEntity.client_id == payload.client_id,
-    ).first()
-    if existing:
-        before = {k: getattr(existing, k) for k, v in values.items()
-                  if k != "client_id" and getattr(existing, k) != v}
-        for field_name, value in values.items():
-            if field_name != "client_id":
-                setattr(existing, field_name, value)
-        existing.entity_checksum = compute_checksum(values)
-        action_detail = "updated"
-        changed_fields = sorted(before.keys())
-    else:
-        db.add(ClientEntity(snapshot_id=snap.snapshot_id,
-                            entity_checksum=compute_checksum(values), **values))
-        snap.record_count = (snap.record_count or 0) + 1
-        action_detail = "created"
-        changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
+        values = payload.model_dump()
+        existing = db.query(ClientEntity).filter(
+            ClientEntity.snapshot_id == snap.snapshot_id,
+            ClientEntity.client_id == payload.client_id,
+        ).first()
+        if existing:
+            before = {k: getattr(existing, k) for k, v in values.items()
+                      if k != "client_id" and getattr(existing, k) != v}
+            for field_name, value in values.items():
+                if field_name != "client_id":
+                    setattr(existing, field_name, value)
+            existing.entity_checksum = compute_checksum(values)
+            action_detail = "updated"
+            changed_fields = sorted(before.keys())
+        else:
+            db.add(ClientEntity(snapshot_id=snap.snapshot_id,
+                                entity_checksum=compute_checksum(values), **values))
+            snap.record_count = (snap.record_count or 0) + 1
+            action_detail = "created"
+            changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
 
-    log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
-                     target=payload.client_id,
-                     after={"operation": action_detail, "fields": changed_fields,
-                            "snapshot_id": snap.snapshot_id})
-    db.commit()
-    result = {
-        "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} dans le référentiel en production.",
-        "operation": action_detail,
-        "client_id": payload.client_id,
-        "snapshot_id": snap.snapshot_id,
-        "changed_fields": changed_fields,
+        log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
+                         target=payload.client_id,
+                         after={"operation": action_detail, "fields": changed_fields,
+                                "snapshot_id": snap.snapshot_id})
+        db.commit()
+        result = {
+            "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} dans le référentiel en production.",
+            "operation": action_detail,
+            "client_id": payload.client_id,
+            "snapshot_id": snap.snapshot_id,
+            "changed_fields": changed_fields,
+        }
+        _hook_store_delivery(db, key, "client-upsert", current_user["username"], 200, result)
+        return result
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            _hook_record_failure(db, "client-upsert", current_user.get("username") or "?", exc.status_code)
+        raise
+
+
+@app.get("/api/hooks/stats")
+async def get_hook_stats(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Supervision des webhooks entrants : volumes par endpoint et par appelant,
+    erreurs, serie des 30 derniers jours et dernieres livraisons. Ni la charge
+    utile de reponse ni la cle d'idempotence ne sont exposees (la cle est
+    choisie par l'appelant : elle peut porter une reference metier sensible).
+    """
+    from sqlalchemy import func
+
+    since = datetime.utcnow() - timedelta(days=30)
+    rows = db.query(HookDelivery).filter(HookDelivery.created_at >= since).all()
+    by_endpoint: Dict[str, Dict[str, int]] = {}
+    by_caller: Dict[str, Dict[str, int]] = {}
+    daily: Dict[str, Dict[str, int]] = {}
+    errors = 0
+    for row in rows:
+        failed = int(row.status_code or 200) >= 400
+        errors += 1 if failed else 0
+        for bucket, key in ((by_endpoint, row.endpoint or "?"), (by_caller, row.caller or "?")):
+            entry = bucket.setdefault(key, {"count": 0, "errors": 0})
+            entry["count"] += 1
+            entry["errors"] += 1 if failed else 0
+        day = (row.created_at or datetime.utcnow()).strftime("%Y-%m-%d")
+        slot = daily.setdefault(day, {"count": 0, "errors": 0})
+        slot["count"] += 1
+        slot["errors"] += 1 if failed else 0
+
+    recent = db.query(HookDelivery).order_by(
+        HookDelivery.created_at.desc(), HookDelivery.id.desc()).limit(20).all()
+    return {
+        "window_days": 30,
+        "totals": {
+            "deliveries": len(rows),
+            "errors": errors,
+            "callers": len(by_caller),
+            "all_time": db.query(func.count(HookDelivery.id)).scalar() or 0,
+        },
+        "by_endpoint": [{"endpoint": k, **v} for k, v in
+                        sorted(by_endpoint.items(), key=lambda kv: -kv[1]["count"])],
+        "by_caller": [{"caller": k, **v} for k, v in
+                      sorted(by_caller.items(), key=lambda kv: -kv[1]["count"])],
+        "daily": [{"date": day, **daily[day]} for day in sorted(daily)],
+        "recent": [
+            {
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "endpoint": r.endpoint, "caller": r.caller,
+                "status_code": r.status_code,
+                "idempotent": not str(r.idempotency_key or "").startswith("auto:"),
+            }
+            for r in recent
+        ],
     }
-    _hook_store_delivery(db, key, "client-upsert", current_user["username"], 200, result)
-    return result
 
 
 @app.get("/api/alerts/workload")

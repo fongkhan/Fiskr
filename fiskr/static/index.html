@@ -1554,7 +1554,8 @@
                     <!-- Qualité des données du référentiel clients -->
                     <div class="card result-card" id="quality-card">
                         <h2>🧪 Qualité des Données Clients</h2>
-                        <p class="section-desc">Complétude des champs KYC du référentiel clients en production : un dossier incomplet (date de naissance ou pays manquants) dégrade la précision du criblage et augmente les faux positifs. Barres vertes ≥ 95 %, orange ≥ 80 %, rouges en dessous.</p>
+                        <p class="section-desc">Complétude des champs KYC du référentiel clients en production : un dossier incomplet (date de naissance ou pays manquants) dégrade la précision du criblage et augmente les faux positifs. Barres vertes ≥ 95 %, orange ≥ 80 %, rouges en dessous. Un score minimal peut être exigé dans les réglages de gouvernance : chaque import qui passe sous ce seuil déclenche une notification.</p>
+                        <div id="quality-threshold" style="margin-bottom: 0.5rem; font-size: 0.9rem;"></div>
                         <div id="quality-summary" style="margin-bottom: 0.75rem; color: var(--text-muted); font-size: 0.9rem;"></div>
                         <div id="quality-fields"></div>
                         <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; margin-top: 1rem;">
@@ -1723,6 +1724,10 @@
                         <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
                             <label for="setting-backtest-gap">Seuil d'écart toléré du taux d'interception (%)</label>
                             <input type="number" id="setting-backtest-gap" min="0" max="1000" step="1" value="20">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
+                            <label for="setting-quality-min">Score minimal de qualité du référentiel clients (%, 0 = pas de seuil)</label>
+                            <input type="number" id="setting-quality-min" min="0" max="100" step="1" value="0">
                         </div>
                         <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">⏱ SLA de traitement des alertes</h3>
                         <p class="section-desc" style="margin-bottom: 0.75rem;">Délai de traitement (heures) par priorité — l'échéance est calculée à la création de l'alerte, le retard est signalé dans la file. 0 = pas d'échéance.</p>
@@ -1898,6 +1903,16 @@
                                 <tbody><!-- Populated dynamically --></tbody>
                             </table>
                         </div>
+                    </div>
+
+                    <!-- Supervision des webhooks entrants (Admin) -->
+                    <div class="card form-card hidden" id="hookstats-card">
+                        <h2>📡 Webhooks Entrants (Admin)</h2>
+                        <p class="section-desc">Trafic reçu sur les points d'entrée <code>/api/hooks/screening</code> et <code>/api/hooks/client-upsert</code> : volumes, appelants et erreurs (signature refusée, charge invalide). Toute livraison est tracée, même sans en-tête <code>X-Idempotency-Key</code>. Ni la clé d'idempotence ni la réponse ne sont affichées ici.</p>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="fetchHookStats()">🔄 Actualiser</button>
+                        </div>
+                        <div id="hookstats-body"></div>
                     </div>
                 </div>
             </section>

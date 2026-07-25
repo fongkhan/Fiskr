@@ -552,6 +552,8 @@ async function checkAuthUser() {
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
             const apiKeysCard = document.getElementById("apikeys-card");
             if (apiKeysCard) apiKeysCard.classList.toggle("hidden", !isAdmin);
+            const hookStatsCard = document.getElementById("hookstats-card");
+            if (hookStatsCard) hookStatsCard.classList.toggle("hidden", !isAdmin);
             const retentionCard = document.getElementById("retention-card");
             if (retentionCard) retentionCard.classList.toggle("hidden", !isAdmin);
             const portabilityCard = document.getElementById("config-portability-card");
@@ -643,6 +645,7 @@ function switchTab(tabId) {
     if (tabId === "settings") {
         fetchIngestionSettings();
         fetchApiKeys();
+        fetchHookStats();
         refreshMfaCard();
         fetchRetentionSettings();
         fetchAbsenceCard();
@@ -3109,6 +3112,8 @@ async function fetchIngestionSettings() {
         if (rescreenEl) rescreenEl.checked = ingestionSettings.auto_rescreen;
         if (btRequiredEl) btRequiredEl.checked = ingestionSettings.backtest_required;
         if (btGapEl) btGapEl.value = ingestionSettings.backtest_max_gap_pct ?? 20;
+        const qualityMinEl = document.getElementById("setting-quality-min");
+        if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
         // SLA par priorité + notifications métier
         const sla = ingestionSettings.alert_sla_hours || {};
         for (const [prio, id] of [["CRITICAL", "setting-sla-critical"], ["HIGH", "setting-sla-high"],
@@ -3148,6 +3153,8 @@ async function saveIngestionSettings() {
         auto_rescreen: document.getElementById("setting-auto-rescreen").checked,
         backtest_required: document.getElementById("setting-backtest-required").checked,
         backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20,
+        // 0 = pas de seuil : `|| 0` conserve bien la desactivation
+        quality_min_score_pct: parseFloat(document.getElementById("setting-quality-min")?.value) || 0,
         alert_sla_hours: {
             CRITICAL: parseInt(document.getElementById("setting-sla-critical")?.value, 10) || 0,
             HIGH: parseInt(document.getElementById("setting-sla-high")?.value, 10) || 0,
@@ -6174,6 +6181,86 @@ async function revokeApiKey(keyId, name) {
     } catch (e) { console.error("API key revoke error:", e); }
 }
 
+// ------------------ SUPERVISION DES WEBHOOKS ENTRANTS (Admin) ------------------
+
+async function fetchHookStats() {
+    const container = document.getElementById("hookstats-body");
+    if (!container || document.getElementById("hookstats-card")?.classList.contains("hidden")) return;
+    container.innerHTML = '<small style="color: var(--text-muted);">Chargement du trafic…</small>';
+    try {
+        const response = await apiFetch("/api/hooks/stats", { silent: true });
+        if (!response.ok) { container.innerHTML = ""; return; }
+        const data = await response.json();
+        const totals = data.totals || {};
+        const nb = (v) => (v || 0).toLocaleString(uiLocale());
+        const errColor = (totals.errors || 0) > 0 ? "var(--color-alert)" : "var(--color-safe, #22c55e)";
+
+        // Mini-histogramme des 30 derniers jours : divs + CSS (aucune lib externe,
+        // la CSP du dashboard interdit tout script tiers)
+        const daily = data.daily || [];
+        const peak = daily.reduce((max, d) => Math.max(max, d.count || 0), 0) || 1;
+        const bars = daily.map(d => {
+            const height = Math.max(2, Math.round(((d.count || 0) / peak) * 46));
+            const failed = (d.errors || 0) > 0;
+            return `<div title="${escapeHtml(d.date)} : ${nb(d.count)} appel(s), ${nb(d.errors)} erreur(s)"
+                style="flex: 1; min-width: 4px; height: ${height}px; border-radius: 2px 2px 0 0;
+                background: ${failed ? "var(--color-alert)" : "var(--color-safe, #22c55e)"};"></div>`;
+        }).join("");
+
+        const listBlock = (rows, key, title) => `
+            <div style="flex: 1; min-width: 240px;">
+                <h4 style="margin: 0 0 0.4rem;">${title}</h4>
+                <table style="width: 100%;">
+                    <thead><tr><th>${key === "endpoint" ? "Point d'entrée" : "Appelant"}</th><th>Appels</th><th>Erreurs</th></tr></thead>
+                    <tbody>${rows.map(r => `
+                        <tr><td><code>${escapeHtml(r[key] || "?")}</code></td><td>${nb(r.count)}</td>
+                        <td style="color: ${(r.errors || 0) > 0 ? "var(--color-alert)" : "var(--text-muted)"};">${nb(r.errors)}</td></tr>`).join("")
+                        || '<tr><td colspan="3" style="color: var(--text-muted);">Aucun appel.</td></tr>'}</tbody>
+                </table>
+            </div>`;
+
+        const recent = (data.recent || []).map(r => {
+            const code = r.status_code || 0;
+            const codeColor = code >= 400 ? "var(--color-alert)" : "var(--color-safe, #22c55e)";
+            return `<tr>
+                <td>${r.created_at ? formatDateTime(r.created_at) : "—"}</td>
+                <td><code>${escapeHtml(r.endpoint || "?")}</code></td>
+                <td>${escapeHtml(r.caller || "?")}</td>
+                <td style="color: ${codeColor}; font-weight: 600;">${code || "—"}</td>
+                <td>${r.idempotent
+                    ? '<span title="Clé X-Idempotency-Key fournie par l\'appelant">🔁 idempotent</span>'
+                    : '<span style="color: var(--text-muted);" title="Sans en-tête X-Idempotency-Key : tracé mais jamais rejoué">— sans clé</span>'}</td>
+            </tr>`;
+        }).join("");
+
+        container.innerHTML = `
+            <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.9rem;">
+                <div><strong style="font-size: 1.4rem;">${nb(totals.deliveries)}</strong><br>
+                    <small style="color: var(--text-muted);">livraisons sur ${data.window_days || 30} j</small></div>
+                <div><strong style="font-size: 1.4rem; color: ${errColor};">${nb(totals.errors)}</strong><br>
+                    <small style="color: var(--text-muted);">erreurs (HTTP ≥ 400)</small></div>
+                <div><strong style="font-size: 1.4rem;">${nb(totals.callers)}</strong><br>
+                    <small style="color: var(--text-muted);">appelant(s) distinct(s)</small></div>
+                <div><strong style="font-size: 1.4rem;">${nb(totals.all_time)}</strong><br>
+                    <small style="color: var(--text-muted);">total conservé</small></div>
+            </div>
+            <div style="display: flex; align-items: flex-end; gap: 2px; height: 50px; margin-bottom: 1rem;">
+                ${bars || '<small style="color: var(--text-muted);">Aucun appel sur la période.</small>'}
+            </div>
+            <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                ${listBlock(data.by_endpoint || [], "endpoint", "Par point d'entrée")}
+                ${listBlock(data.by_caller || [], "caller", "Par appelant")}
+            </div>
+            <h4 style="margin: 0 0 0.4rem;">20 dernières livraisons</h4>
+            <div class="table-container" style="max-height: 280px; overflow-y: auto;">
+                <table><thead><tr><th>Date</th><th>Point d'entrée</th><th>Appelant</th><th>Code</th><th>Idempotence</th></tr></thead>
+                <tbody>${recent || '<tr><td colspan="5" style="color: var(--text-muted); text-align: center;">Aucune livraison enregistrée.</td></tr>'}</tbody></table>
+            </div>`;
+    } catch (e) {
+        container.innerHTML = "";
+    }
+}
+
 // ------------------ NAVIGATION PAR URL (deep links #onglet/sous-onglet) ------------------
 
 let _applyingHashRoute = false;
@@ -6815,12 +6902,14 @@ async function fetchWorkload() {
 async function fetchClientQuality() {
     const fieldsEl = document.getElementById("quality-fields");
     const summaryEl = document.getElementById("quality-summary");
+    const thresholdEl = document.getElementById("quality-threshold");
     if (!fieldsEl) return;
     fieldsEl.innerHTML = '<small style="color: var(--text-muted);">Analyse du référentiel…</small>';
     try {
         const response = await apiFetch("/api/quality/clients");
         if (!response.ok) { fieldsEl.innerHTML = ""; return; }
         const data = await response.json();
+        renderQualityThreshold(thresholdEl, data);
         if (!data.snapshot) {
             if (summaryEl) summaryEl.textContent = "";
             fieldsEl.innerHTML = '<p style="color: var(--text-muted);">Aucune base clients en production — importez un référentiel CLIENT_BASE.</p>';
@@ -6864,6 +6953,21 @@ async function fetchClientQuality() {
         console.error("Quality error:", e);
         fieldsEl.innerHTML = "";
     }
+}
+
+// Badge du seuil minimal exige : le meme verdict que celui qui declenche la
+// notification `client_quality_low` a chaque import de referentiel clients.
+function renderQualityThreshold(el, data) {
+    if (!el) return;
+    const th = (data && data.threshold) || {};
+    const min = Number(th.min_score_pct || 0);
+    if (!min) {
+        el.innerHTML = '<span style="color: var(--text-muted);">Aucun seuil de qualité exigé — définissez-en un dans Paramètres › Gouvernance pour être alerté à chaque import dégradant.</span>';
+        return;
+    }
+    const color = th.below ? "var(--color-alert)" : "var(--color-safe, #22c55e)";
+    el.innerHTML = `<span style="color: ${color}; font-weight: 600;">${th.below ? "⚠" : "✓"} Seuil exigé : ${min} %</span>` +
+        (th.below ? ' <span style="color: var(--text-muted);">— le référentiel en production est sous le seuil, une notification a été émise à l\'import.</span>' : "");
 }
 
 // --- Portabilité de la configuration (admin) ---
@@ -7094,7 +7198,8 @@ function renderCasefile(cf) {
             <span style="margin-left: auto;"></span>
             <a class="btn btn-sm btn-secondary" href="/api/alerts/${cf.id}/casefile/print" target="_blank">🖨 Imprimer le dossier</a>
             ${(userRoles(currentUser).includes("admin") || userRoles(currentUser).includes("reviewer"))
-                ? `<a class="btn btn-sm btn-secondary" href="/api/alerts/${cf.id}/str-draft/print" target="_blank" title="Projet de déclaration de soupçon TRACFIN pré-rempli — à relire et valider par le correspondant avant télédéclaration ERMES">🇫🇷 Projet de déclaration</a>` : ""}
+                ? `<a class="btn btn-sm btn-secondary" href="/api/alerts/${cf.id}/str-draft/print" target="_blank" title="Projet de déclaration de soupçon TRACFIN pré-rempli — à relire et valider par le correspondant avant télédéclaration ERMES">🇫🇷 Projet de déclaration</a>
+                   <button class="btn btn-sm btn-secondary" onclick="sendStrDraft(${cf.id})" title="Transmet le projet par email au correspondant TRACFIN déclaré (institution.correspondent_email). L'envoi est tracé dans l'historique de l'alerte.">✉ Envoyer au correspondant</button>` : ""}
             <button class="btn btn-sm btn-secondary" onclick="document.getElementById('casefile-modal').classList.add('hidden'); openAlertModal(${cf.id});">🔎 Instruire</button>
         </div>
         <div class="c360-section">
@@ -7105,6 +7210,26 @@ function renderCasefile(cf) {
         <div class="c360-section"><h4>Relations de la fiche listée</h4>${relationsHtml}</div>
         <div class="c360-section"><h4>Pièces jointes</h4><ul style="list-style: none;">${attachmentsHtml}</ul></div>
         <div class="c360-section"><h4>Dernières actions</h4>${eventsHtml || '<p style="color: var(--text-muted);">Aucune action.</p>'}</div>`;
+}
+
+// Transmission du projet de declaration au correspondant TRACFIN : jamais
+// silencieuse (le detail du refus serveur est remonte tel quel a l'ecran).
+async function sendStrDraft(alertId) {
+    if (!await confirmDialog(
+        `Envoyer le projet de déclaration de soupçon de l'alerte #${alertId} au correspondant TRACFIN ?\n\n` +
+        "Le correspondant reste seul décisionnaire de la télédéclaration ERMES. L'envoi est tracé dans l'historique de l'alerte.")) return;
+    try {
+        const response = await apiFetch(`/api/alerts/${alertId}/str-draft/send`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Envoi impossible : " + (data.detail || "erreur serveur."), "error"); return; }
+        showToast(data.message, "success");
+        if (typeof openCasefileModal === "function" && document.getElementById("casefile-modal")
+            && !document.getElementById("casefile-modal").classList.contains("hidden")) {
+            openCasefileModal(alertId);
+        }
+    } catch (e) {
+        showToast("Envoi impossible : le serveur n'a pas répondu.", "error");
+    }
 }
 
 async function toggleCasefileCheck(index, done) {

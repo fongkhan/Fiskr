@@ -233,6 +233,13 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_GOVERNANCE, audience=("admin",),
         urgency=DIGEST, link="#settings",
     ),
+    "client_quality_low": Event(
+        label="Qualité des données clients sous le seuil",
+        category=CATEGORY_GOVERNANCE, audience=("admin", "reviewer"),
+        # Un referentiel incomplet degrade la precision du criblage : l'alerte
+        # part des l'import qui fait passer le score sous le seuil configure
+        urgency=IMMEDIATE, link="#kpi",
+    ),
 }
 
 

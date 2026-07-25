@@ -78,6 +78,11 @@ DEFAULT_NOTIFICATION_BATCH = {"enabled": True, "cron": "0 * * * *", "extra_recip
 # Marqueur interne : paires de liste blanche dont l'echeance de revue a deja
 # ete signalee (evite de rappeler la meme paire a chaque passage de la boucle)
 SETTING_WHITELIST_EXPIRY_NOTIFIED = "notifications.whitelist_expiry_notified"
+# Qualite des donnees clients : score global minimal attendu (%, 0 = controle
+# desactive) et cache du dernier calcul post-import (evite tout scan complet
+# du referentiel dans le digest ou le tableau de bord)
+SETTING_QUALITY_MIN_SCORE = "quality.min_score_pct"
+SETTING_QUALITY_LAST = "quality.last_report"
 
 BLOCKING_COMPONENTS = ("COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST")
 DEFAULT_FILTERING_LAYOUT = ["PHONETIC_FIRST"]
@@ -243,6 +248,16 @@ def notification_events(db) -> Dict[str, bool]:
             if event in out:
                 out[event] = bool(enabled)
     return out
+
+
+def quality_min_score_pct(db) -> float:
+    """Score global minimal attendu du referentiel clients (%, 0 = controle
+    desactive : aucune alerte de qualite n'est emise)."""
+    value = get_setting_with_source(db, SETTING_QUALITY_MIN_SCORE, 0.0)["value"]
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def notification_batch_settings(db) -> Dict[str, Any]:
