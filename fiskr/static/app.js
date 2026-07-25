@@ -726,6 +726,7 @@ function switchSubTab(sectionId, subTabId) {
         fetchWhitelist();
     } else if (subTabId === "alerts-blocking") {
         fetchBlockingSettings();
+        fetchResources();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
     } else if (subTabId === "screening-batch") {
@@ -1998,6 +1999,8 @@ function renderScreeningResult(data) {
         document.getElementById("best-match-cname").textContent = report.cleansed_name || "-";
         document.getElementById("best-match-wname").textContent = "Aucune fiche correspondante";
         document.getElementById("best-match-wid").textContent = "NONE";
+        const emptyEq = document.getElementById("screen-equivalences");
+        if (emptyEq) emptyEq.innerHTML = "";
         return;
     }
     
@@ -2021,6 +2024,8 @@ function renderScreeningResult(data) {
         formatAdjustment("adj-gender-val", "adj-gender-desc", gender.score, gender.description);
         formatAdjustment("adj-geo-val", "adj-geo-desc", geo.score, geo.description);
     }
+    const eqBox = document.getElementById("screen-equivalences");
+    if (eqBox) eqBox.innerHTML = best.hard_match_triggered ? "" : resourceEquivalencesHtml(best);
 }
 
 function formatAdjustment(valId, descId, score, desc) {
@@ -2263,6 +2268,7 @@ function viewAuditLogDetail(logId) {
             </ul>
         `;
     }
+    adjHtml += resourceEquivalencesHtml(tree);
     
     content.innerHTML = `
         <div class="modal-section">
@@ -4312,6 +4318,7 @@ async function openAlertModal(alertId) {
             <div class="table-container" style="max-height: 160px;">
                 <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
             </div>
+            ${resourceEquivalencesHtml(a.decision_tree)}
             <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
             <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
             <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Pièces jointes</h3>
@@ -5014,6 +5021,161 @@ async function saveBlocking(channel) {
     } catch (e) {
         console.error("Error saving blocking:", e);
         showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+// Trace des equivalences linguistiques appliquees a un decision_tree.
+// Sans elle, un analyste voit « Harry Dupont » alerter a 100 sur « Henri
+// DUPOND » sans aucune explication lisible.
+function resourceEquivalencesHtml(tree) {
+    const eqs = ((tree || {}).resource_equivalences) || [];
+    if (!eqs.length) return "";
+    return `
+        <div style="margin-top: 0.75rem; padding: 0.6rem 0.8rem; border-left: 3px solid var(--border-color); background: var(--surface-2);">
+            <strong style="font-size: 0.85rem;">📚 Équivalences linguistiques appliquées</strong>
+            <ul style="margin: 0.35rem 0 0; font-size: 0.85rem;">
+                ${eqs.map(e => `<li>${escapeHtml(e.field_label || e.field)} : <code>${escapeHtml(e.source)}</code> ≡ <code>${escapeHtml(e.target)}</code> <small style="color: var(--text-muted);">(classe ${escapeHtml(e["class"])})</small></li>`).join("")}
+            </ul>
+        </div>`;
+}
+
+// ------------------ RESSOURCES LINGUISTIQUES ------------------
+
+let resourcesState = null;
+let resourceFieldsDraft = {};
+
+async function fetchResources() {
+    try {
+        const response = await apiFetch("/api/resources");
+        if (!response.ok) return;
+        resourcesState = await response.json();
+        resourceFieldsDraft = { ...(resourcesState.enabled_fields || {}) };
+        renderResources();
+    } catch (e) {
+        console.error("Error fetching resources:", e);
+    }
+}
+
+function renderResources() {
+    const data = resourcesState;
+    if (!data) return;
+    const summary = document.getElementById("resources-summary");
+    if (summary) {
+        const collisions = data.collisions || [];
+        summary.innerHTML = `
+            <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center;">
+                <div><strong style="font-size: 1.15rem;">${data.total_terms}</strong> <small style="color: var(--text-muted);">terme(s) chargé(s)</small></div>
+                <div><small style="color: var(--text-muted);">Empreinte :</small> <code>${escapeHtml(data.content_hash || "-")}</code></div>
+                <div><small style="color: var(--text-muted);">Répertoire :</small> <code>${escapeHtml(data.directory || "-")}</code></div>
+                <div>${data.active
+                    ? '<span class="status-badge" style="background: var(--success-soft-bg); color: var(--success-soft-text);">ACTIVES</span>'
+                    : '<span class="status-badge" style="background: var(--surface-3); color: var(--text-muted);">INACTIVES</span>'}</div>
+            </div>
+            ${collisions.length ? `
+                <div style="margin-top: 0.75rem; padding: 0.6rem 0.8rem; border-left: 3px solid var(--color-warning); background: rgba(245,158,11,0.08);">
+                    <strong style="color: var(--color-warning);">${collisions.length} terme(s) en collision de classe</strong>
+                    <div style="margin-top: 0.35rem;">${collisions.slice(0, 10).map(c => `
+                        <div><small><code>${escapeHtml(c.term)}</code> — ${escapeHtml(c.classes)} <span style="color: var(--text-muted);">(${escapeHtml(c.file)})</span></small></div>
+                    `).join("")}</div>
+                    <small style="color: var(--text-muted);">Le premier déclarant l'emporte. Un terme rattaché à deux classes rend le criblage ambigu : corrigez le fichier puis rechargez.</small>
+                </div>` : ""}
+        `;
+    }
+    const fields = document.getElementById("resources-fields");
+    if (fields) {
+        fields.innerHTML = (data.field_types || []).map(f => {
+            const stats = (data.by_field || {})[f] || {};
+            const empty = !(stats.terms > 0);
+            return `
+                <label style="display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; border: 1px solid var(--border-color); border-radius: 6px; margin-bottom: 0.4rem;">
+                    <input type="checkbox" id="resource-field-${f}" ${resourceFieldsDraft[f] ? "checked" : ""} ${empty ? "disabled" : ""}
+                           onchange="resourceFieldsDraft['${f}'] = this.checked;">
+                    <strong style="flex: 1;">${escapeHtml((data.field_labels || {})[f] || f)}</strong>
+                    <small style="color: var(--text-muted);">${stats.classes || 0} classe(s), ${stats.terms || 0} terme(s)${empty ? " — aucun fichier" : ""}</small>
+                </label>`;
+        }).join("");
+    }
+    const files = document.getElementById("resources-files");
+    if (files) {
+        const list = data.files || [];
+        files.innerHTML = list.length ? `
+            <div class="table-container" style="max-height: 260px; overflow-y: auto;">
+                <table>
+                    <thead><tr><th>Fichier</th><th>Type</th><th>Classes</th><th>Termes</th><th>Provenance</th></tr></thead>
+                    <tbody>${list.map(f => `
+                        <tr>
+                            <td><code>${escapeHtml(f.file)}</code></td>
+                            <td>${escapeHtml((data.field_labels || {})[f.field] || f.field)}</td>
+                            <td>${f.classes}</td>
+                            <td>${f.terms}</td>
+                            <td><small style="color: var(--text-muted);">${escapeHtml(f.source || "-")}</small></td>
+                        </tr>`).join("")}</tbody>
+                </table>
+            </div>` : '<small style="color: var(--text-muted);">Aucun fichier de ressources chargé.</small>';
+    }
+}
+
+async function saveResourceFields() {
+    const enabling = Object.keys(resourceFieldsDraft).filter(
+        f => resourceFieldsDraft[f] && !((resourcesState || {}).enabled_fields || {})[f]);
+    if (enabling.length) {
+        const ok = await confirmDialog(
+            "Activer des équivalences élargit le périmètre des alertes : des rapprochements aujourd'hui impossibles deviendront des alertes. Mesurez l'écart au cahier de tests avant la mise en production. Continuer ?",
+            { title: "Ressources linguistiques" });
+        if (!ok) return;
+    }
+    try {
+        const response = await apiFetch("/api/settings/ingestion", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ resource_fields: resourceFieldsDraft }),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast("Types d'équivalences mis à jour.", "success");
+        fetchResources();
+    } catch (e) {
+        console.error("Error saving resource fields:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function reloadResources() {
+    try {
+        const response = await apiFetch("/api/resources/reload", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message, "success");
+        fetchResources();
+    } catch (e) {
+        console.error("Error reloading resources:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function lookupResource() {
+    const input = document.getElementById("resources-lookup-input");
+    const box = document.getElementById("resources-lookup-result");
+    if (!input || !box) return;
+    const term = (input.value || "").trim();
+    if (!term) { box.innerHTML = ""; return; }
+    try {
+        const response = await apiFetch(`/api/resources/lookup?term=${encodeURIComponent(term)}`);
+        const data = await response.json();
+        if (!response.ok) { box.innerHTML = `<small style="color: var(--color-alert);">${escapeHtml(data.detail || "Échec.")}</small>`; return; }
+        if (!data.found) {
+            box.innerHTML = `<small style="color: var(--text-muted);">« ${escapeHtml(data.term)} » (normalisé : <code>${escapeHtml(data.normalized)}</code>) n'appartient à aucune classe d'équivalence.</small>`;
+            return;
+        }
+        box.innerHTML = data.results.map(r => `
+            <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-bottom: 0.4rem;">
+                <strong>${escapeHtml(r.field_label)}</strong> — classe <code>${escapeHtml(r["class"])}</code>
+                ${r.enabled ? '<span class="status-badge" style="background: var(--success-soft-bg); color: var(--success-soft-text);">appliquée</span>'
+                            : '<span class="status-badge" style="background: var(--surface-3); color: var(--text-muted);">type inactif</span>'}
+                <div><small>${r.variants.map(v => escapeHtml(v)).join(" · ")}</small></div>
+            </div>`).join("");
+    } catch (e) {
+        console.error("Error looking up resource:", e);
+        box.innerHTML = '<small style="color: var(--color-alert);">Erreur réseau de communication.</small>';
     }
 }
 

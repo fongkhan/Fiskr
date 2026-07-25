@@ -96,8 +96,10 @@ from fiskr.settings import (
     quality_min_score_pct, SETTING_QUALITY_MIN_SCORE, SETTING_QUALITY_LAST,
     retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
     score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
-    investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST
+    investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST,
+    resource_fields, resources_active, SETTING_RESOURCE_FIELDS, DEFAULT_RESOURCE_FIELDS
 )
+from fiskr import resources as resource_tables
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
@@ -4824,6 +4826,9 @@ class IngestionSettingsUpdate(BaseModel):
     notification_events: Optional[Dict[str, bool]] = None
     # Digest KPI periodique : {"enabled": bool, "cron": "0 8 * * 1-5"}
     digest: Optional[Dict[str, Any]] = None
+    # Equivalences linguistiques actives, par type de champ
+    # {"given_name": true, "country": false, ...}
+    resource_fields: Optional[Dict[str, bool]] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -4860,6 +4865,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "alert_sla_hours": alert_sla_hours(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
+        "resource_fields": resource_fields(db),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -4903,7 +4909,7 @@ async def update_ingestion_settings(
     if (not changed and payload.backtest_max_gap_pct is None
             and payload.quality_min_score_pct is None
             and payload.alert_sla_hours is None and payload.notification_events is None
-            and payload.digest is None):
+            and payload.digest is None and payload.resource_fields is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     before_state = _settings_payload(db)
     before_state.pop("sources", None)
@@ -4953,6 +4959,24 @@ async def update_ingestion_settings(
                     raise HTTPException(status_code=400, detail=f"Expression cron du digest invalide : {bad}")
                 merged_digest["cron"] = cron_expr
         set_setting(db, SETTING_DIGEST, merged_digest, updated_by=admin_user["username"])
+    if payload.resource_fields is not None:
+        unknown = [f for f in payload.resource_fields if f not in DEFAULT_RESOURCE_FIELDS]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"Type de champ de ressources inconnu : {', '.join(unknown)}.")
+        before_fields = dict(resource_fields(db))
+        merged_fields = dict(before_fields)
+        merged_fields.update({f: bool(v) for f, v in payload.resource_fields.items()})
+        set_setting(db, SETTING_RESOURCE_FIELDS, merged_fields, updated_by=admin_user["username"])
+        # Le criblage lit ce reglage depuis un cache : sans invalidation, les
+        # equivalences resteraient inactives (ou actives) jusqu'au redemarrage
+        resource_tables.invalidate_context()
+        if merged_fields != before_fields:
+            # L'index des fiches listees fige ses cles de blocking au
+            # chargement. Sans rechargement, seule la sonde du client
+            # gagnerait ses cles d'equivalence : les deux cotes ne se
+            # rencontreraient jamais et le reglage serait sans aucun effet.
+            load_watchlist_cache(db)
     after_state = _settings_payload(db)
     after_state.pop("sources", None)
     delta = {k: v for k, v in after_state.items() if before_state.get(k) != v}
@@ -5036,6 +5060,107 @@ async def update_blocking_settings(
         "message": "Blocking keys mises à jour." + (" Cache de criblage rechargé." if reloaded else ""),
         "cache_reloaded": reloaded,
         **_blocking_payload(db),
+    }
+
+# ------------------ RESSOURCES LINGUISTIQUES (equivalences) ------------------
+
+def _resources_payload(db: Session) -> Dict[str, Any]:
+    index = resource_tables.get_index()
+    stats = index.stats()
+    active = resource_fields(db)
+    return {
+        "directory": str(resource_tables.default_directory()),
+        "content_hash": stats["content_hash"],
+        "files": stats["files"],
+        "collisions": stats["collisions"],
+        "by_field": stats["by_field"],
+        "total_terms": stats["total_terms"],
+        "field_types": list(resource_tables.FIELD_TYPES),
+        "field_labels": dict(resource_tables.FIELD_LABELS),
+        "enabled_fields": active,
+        "active": any(active.values()),
+    }
+
+@app.get("/api/resources")
+async def get_resources(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Etat des ressources linguistiques chargees : fichiers, empreinte,
+    compteurs par type, collisions, types actives.
+    """
+    return _resources_payload(db)
+
+@app.post("/api/resources/reload")
+async def reload_resources(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Recharge les fichiers de ressources a chaud (Admin), trace au journal
+    d'administration : modifier une table d'equivalences change le perimetre
+    des alertes, l'operation doit rester attribuable.
+    """
+    before = resource_tables.get_index().content_hash
+    try:
+        index = resource_tables.reload_index()
+    except resource_tables.ResourceError as e:
+        raise HTTPException(status_code=400, detail=f"Ressources invalides : {e}")
+    reloaded_cache = False
+    if index.content_hash != before and resources_active(db):
+        # Les classes ont change : les cles d'equivalence de l'index des
+        # fiches listees sont perimees, il faut les recalculer
+        load_watchlist_cache(db)
+        reloaded_cache = True
+    log_admin_action(db, admin_user["username"], "RESOURCES_RELOADED", target="resources",
+                     before={"content_hash": before},
+                     after={"content_hash": index.content_hash,
+                            "total_terms": index.stats()["total_terms"],
+                            "collisions": len(index.collisions)})
+    db.commit()
+    payload = _resources_payload(db)
+    return {"message": f"Ressources rechargées : {payload['total_terms']} terme(s), "
+                       f"empreinte {payload['content_hash']}."
+                       + (" Cache de criblage rechargé." if reloaded_cache else ""),
+            "cache_reloaded": reloaded_cache, **payload}
+
+@app.get("/api/resources/lookup")
+async def lookup_resource(
+    term: str,
+    field: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Classe et equivalents d'un terme — l'outil qu'un analyste ouvre pour
+    comprendre pourquoi deux noms dissemblables ont matche.
+    """
+    if not (term or "").strip():
+        raise HTTPException(status_code=400, detail="Terme requis.")
+    fields = [field] if field else list(resource_tables.FIELD_TYPES)
+    unknown = [f for f in fields if f not in resource_tables.FIELD_TYPES]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Type de champ inconnu : {', '.join(unknown)}.")
+    index = resource_tables.get_index()
+    active = resource_fields(db)
+    results = []
+    for f in fields:
+        cls = index.canonical(term, f)
+        if not cls:
+            continue
+        results.append({
+            "field": f,
+            "field_label": resource_tables.FIELD_LABELS[f],
+            "class": cls,
+            "variants": index.variants(term, f),
+            "enabled": bool(active.get(f)),
+        })
+    return {
+        "term": term,
+        "normalized": resource_tables.normalize_term(term),
+        "results": results,
+        "found": bool(results),
     }
 
 # ------------------ REGLES ANTI-FAUX POSITIFS (Python, mode DEV) ------------------

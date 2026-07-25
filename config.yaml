@@ -138,6 +138,14 @@ hooks:
 # Regles anti-faux positifs : generation d'un brouillon de regle depuis une
 # instruction en langage naturel (API Claude). Le brouillon suit ensuite le
 # circuit normal : tests unitaires, soumission, validation 4-yeux.
+# Ressources linguistiques : tables d'equivalences (homonymes, translitterations,
+# variantes multilingues) appliquees au blocking et au scoring.
+# L'ACTIVATION se fait par type de champ dans Parametres (a chaud, desactivee par
+# defaut) : une table d'equivalences elargit le perimetre des alertes, elle doit
+# etre mesuree au cahier de tests avant mise en production.
+resources:
+  directory: ""                 # vide = repertoire `resources/` du projet
+
 fprules:
   llm_enabled: false            # true = bouton "Générer par IA" dans l'éditeur de règles
   llm_model: "claude-sonnet-5"  # necessite ANTHROPIC_API_KEY et `pip install anthropic`

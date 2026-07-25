@@ -1157,6 +1157,7 @@
                                                 <div id="adj-geo-desc" class="adj-desc">-</div>
                                             </li>
                                         </ul>
+                                        <div id="screen-equivalences"></div>
                                     </div>
                                 </div>
                             </div>
@@ -1416,6 +1417,25 @@
                             <p class="section-desc">Clé propre au filtrage des paiements. Par défaut réduite à la phonétique (les données de paiement sont pauvres) ; le type PP/PM est testé dans les deux variantes.</p>
                             <div id="blocking-filtering-editor"></div>
                             <button class="btn btn-primary" onclick="saveBlocking('FILTERING')" style="margin-top: 1rem;">Enregistrer</button>
+                        </div>
+                    </div>
+                    <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+                        <div class="card result-card">
+                            <h2>📚 Ressources Linguistiques — Équivalences</h2>
+                            <p class="section-desc">Tables d'équivalences déclarées : homonymes et variantes de translittération (Mohammad / Mohammed / Muhammad), équivalents entre langues (Henri / Harry / Heinrich), exonymes de villes et de pays (Londres / London, Allemagne / Germany / DE). Aucune métrique de chaîne ne peut déduire ces rapprochements : ils se déclarent. Les équivalences agissent au <strong>blocking</strong> (les termes équivalents deviennent candidats) <strong>et</strong> au <strong>scoring</strong>. Elles élargissent mécaniquement le périmètre des alertes : elles sont <strong>désactivées par défaut</strong> et doivent être mesurées au cahier de tests avant mise en production.</p>
+                            <div id="resources-summary"></div>
+                            <div id="resources-fields" style="margin-top: 1rem;"></div>
+                            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 1rem;">
+                                <button class="btn btn-primary" id="resources-save-btn" onclick="saveResourceFields()">Enregistrer les types actifs</button>
+                                <button class="btn btn-secondary" id="resources-reload-btn" onclick="reloadResources()">↻ Recharger les fichiers</button>
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 1.25rem;">
+                                <label for="resources-lookup-input">Diagnostic d'un terme :</label>
+                                <input type="text" id="resources-lookup-input" placeholder="Harry, Londres, DE…" style="min-width: 200px;" onkeydown="if (event.key === 'Enter') lookupResource();">
+                                <button class="btn btn-sm btn-secondary" onclick="lookupResource()">Rechercher</button>
+                            </div>
+                            <div id="resources-lookup-result" style="margin-top: 0.75rem;"></div>
+                            <div id="resources-files" style="margin-top: 1.25rem;"></div>
                         </div>
                     </div>
                 </div>
