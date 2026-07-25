@@ -582,6 +582,9 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     salt = Column(String(64), nullable=False)
     full_name = Column(String(255), nullable=True)
+    # Adresse de notification : les mails d'etape sont routes par ROLE vers les
+    # comptes qui ont une adresse renseignee (repli sur NOTIFY_EMAIL_TO sinon)
+    email = Column(String(255), nullable=True)
     role = Column(String(50), default="admin")
     created_at = Column(DateTime, default=datetime.utcnow)
     # Anti-brute-force : compteur d'echecs consecutifs + verrouillage temporaire
@@ -615,6 +618,31 @@ class ApiKey(Base):
     last_used_at = Column(DateTime, nullable=True)
     revoked_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
+
+
+class NotificationDelivery(Base):
+    """
+    Journal des notifications d'etape ET file d'attente du recapitulatif.
+
+    - urgence IMMEDIATE : la ligne est ecrite avec le resultat de l'envoi
+      (SENT / FAILED) — le journal repond a « le mail est-il parti ? » sans
+      fouiller les logs serveur ;
+    - urgence DIGEST : la ligne est creee en QUEUED, puis passee a SENT par la
+      boucle de regroupement qui compose un seul mail par destinataire.
+    Purge TTL 90 jours par la meme boucle.
+    """
+    __tablename__ = "notification_deliveries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_key = Column(String(60), nullable=False, index=True)
+    category = Column(String(40), nullable=True)
+    urgency = Column(String(20), nullable=True)          # immediate | digest
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    payload = Column(JSON, nullable=True)
+    recipients = Column(Text, nullable=True)             # adresses, separees par des virgules
+    status = Column(String(20), default="QUEUED", index=True)  # QUEUED|SENT|FAILED|SKIPPED
+    sent_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
 
 
 class HookDelivery(Base):
@@ -799,6 +827,7 @@ def init_db():
                 ("totp_enabled", "BOOLEAN"),
                 ("absent_until", "TIMESTAMP"),
                 ("delegate_to", "VARCHAR(100)"),
+                ("email", "VARCHAR(255)"),
             ],
         }
         inspector = inspect(engine)

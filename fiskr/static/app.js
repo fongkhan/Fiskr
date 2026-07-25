@@ -2821,7 +2821,7 @@ function renderUsersTable(users) {
     if (!tbody) return;
     
     if (!users || users.length === 0) {
-        tableEmpty(tbody, 7, "Aucun utilisateur trouvé.", "👥");
+        tableEmpty(tbody, 8, "Aucun utilisateur trouvé.", "👥");
         return;
     }
 
@@ -2845,6 +2845,9 @@ function renderUsersTable(users) {
                 <td style="font-weight: bold; color: var(--text-secondary);">#${u.id}</td>
                 <td><strong style="color: var(--text-primary);">@${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.7rem; background: rgba(34, 197, 94, 0.2); color: var(--success-soft-text); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">VOUS</span>' : ''}${u.absent_until ? `<span title="Absent jusqu'au ${formatDateTime(u.absent_until)} — délégué : @${escapeHtml(u.delegate_to || "?")}" style="font-size: 0.7rem; background: rgba(245, 158, 11, 0.2); color: var(--color-warning); padding: 2px 6px; border-radius: 4px; margin-left: 4px;">🌴 ABSENT → @${escapeHtml(u.delegate_to || "?")}</span>` : ''}</td>
                 <td>${escapeHtml(u.full_name || "—")}</td>
+                <td style="font-size: 0.85rem;">${u.email
+                    ? escapeHtml(u.email)
+                    : '<span style="color: var(--color-warning);" title="Sans adresse, ce compte ne reçoit aucune notification d\'étape">— non renseigné</span>'}</td>
                 <td>${roleBadge}</td>
                 <td>${u.totp_enabled
                     ? `<span title="Double authentification active" style="color: var(--success-soft-text); font-weight: 600; font-size: 0.8rem;">🛡 Active</span>
@@ -2866,6 +2869,7 @@ function openCreateUserModal() {
     document.getElementById("user-input-username").value = "";
     document.getElementById("user-input-username").disabled = false;
     document.getElementById("user-input-fullname").value = "";
+    document.getElementById("user-input-email").value = "";
     document.getElementById("user-input-role").value = "user";
     document.getElementById("user-input-password").value = "";
     document.getElementById("user-input-password").required = true;
@@ -2883,6 +2887,7 @@ function openEditUserModal(userId) {
     document.getElementById("user-input-username").value = user.username;
     document.getElementById("user-input-username").disabled = false;
     document.getElementById("user-input-fullname").value = user.full_name || "";
+    document.getElementById("user-input-email").value = user.email || "";
     const roleSelect = document.getElementById("user-input-role");
     roleSelect.value = user.role;
     if (roleSelect.value !== user.role) {
@@ -2906,6 +2911,7 @@ async function handleSaveUser(event) {
     const editId = document.getElementById("user-edit-id").value;
     const username = document.getElementById("user-input-username").value.trim();
     const fullName = document.getElementById("user-input-fullname").value.trim();
+    const email = document.getElementById("user-input-email").value.trim();
     const role = document.getElementById("user-input-role").value;
     const password = document.getElementById("user-input-password").value;
 
@@ -2919,6 +2925,7 @@ async function handleSaveUser(event) {
                 body: JSON.stringify({
                     username,
                     full_name: fullName,
+                    email,
                     role,
                     password: password || undefined
                 })
@@ -2931,6 +2938,7 @@ async function handleSaveUser(event) {
                 body: JSON.stringify({
                     username,
                     full_name: fullName,
+                    email,
                     role,
                     password
                 })
@@ -3108,14 +3116,8 @@ async function fetchIngestionSettings() {
             const el = document.getElementById(id);
             if (el) el.value = sla[prio] ?? 0;
         }
-        const notif = ingestionSettings.notification_events || {};
-        for (const [event, id] of [["alert_created", "setting-notify-alert-created"],
-                                   ["alert_pending_validation", "setting-notify-pending-validation"],
-                                   ["snapshot_pending_review", "setting-notify-pending-review"],
-                                   ["sync_error", "setting-notify-sync-error"]]) {
-            const el = document.getElementById(id);
-            if (el) el.checked = !!notif[event];
-        }
+        // Notifications : l'écran est généré depuis le catalogue du serveur
+        fetchNotificationsCatalog();
         // Digest KPI périodique
         const digest = ingestionSettings.digest || {};
         const digestEnabledEl = document.getElementById("setting-digest-enabled");
@@ -3152,12 +3154,8 @@ async function saveIngestionSettings() {
             MEDIUM: parseInt(document.getElementById("setting-sla-medium")?.value, 10) || 0,
             LOW: parseInt(document.getElementById("setting-sla-low")?.value, 10) || 0,
         },
-        notification_events: {
-            alert_created: !!document.getElementById("setting-notify-alert-created")?.checked,
-            alert_pending_validation: !!document.getElementById("setting-notify-pending-validation")?.checked,
-            snapshot_pending_review: !!document.getElementById("setting-notify-pending-review")?.checked,
-            sync_error: !!document.getElementById("setting-notify-sync-error")?.checked,
-        },
+        // Activation étape par étape : cases générées depuis le catalogue serveur
+        notification_events: collectNotificationEvents(),
         digest: {
             enabled: !!document.getElementById("setting-digest-enabled")?.checked,
             cron: (document.getElementById("setting-digest-cron")?.value || "").trim(),
@@ -3179,6 +3177,168 @@ async function saveIngestionSettings() {
     } catch (e) {
         console.error("Error saving ingestion settings:", e);
         showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+// ------------------ NOTIFICATIONS MÉTIER (catalogue généré) ------------------
+
+let notificationsCatalog = null;
+
+// Écran de réglages construit depuis le catalogue du serveur : ajouter une
+// étape notifiable côté back suffit à la faire apparaître ici.
+async function fetchNotificationsCatalog() {
+    const container = document.getElementById("notif-catalog");
+    if (!container) return;
+    try {
+        const response = await apiFetch("/api/settings/notifications/catalog", { silent: true });
+        if (!response.ok) return;
+        notificationsCatalog = await response.json();
+        renderNotificationsCatalog();
+        const batch = notificationsCatalog.batch || {};
+        const enabledEl = document.getElementById("setting-notif-batch-enabled");
+        const cronEl = document.getElementById("setting-notif-batch-cron");
+        if (enabledEl) enabledEl.checked = batch.enabled !== false;
+        if (cronEl) cronEl.value = batch.cron || "0 * * * *";
+        const statusEl = document.getElementById("notif-status");
+        if (statusEl) {
+            const smtp = notificationsCatalog.smtp_configured
+                ? '<span style="color: var(--success-soft-text);">✓ SMTP configuré</span>'
+                : '<span style="color: var(--color-warning);">⚠ SMTP non configuré (aucun mail ne partira)</span>';
+            const link = notificationsCatalog.public_url_configured
+                ? '<span style="color: var(--success-soft-text);">✓ lien direct actif</span>'
+                : '<span style="color: var(--text-muted);">lien direct inactif (notifications.public_url)</span>';
+            const fallback = (notificationsCatalog.default_recipients || []).length
+                ? `repli : ${escapeHtml(notificationsCatalog.default_recipients.join(", "))}`
+                : "aucun destinataire de repli (NOTIFY_EMAIL_TO)";
+            statusEl.innerHTML = `${smtp} · ${link} · <span style="color: var(--text-muted);">${escapeHtml(fallback)}</span>`;
+        }
+    } catch (e) {
+        console.error("Notifications catalog error:", e);
+    }
+}
+
+function renderNotificationsCatalog() {
+    const container = document.getElementById("notif-catalog");
+    if (!container || !notificationsCatalog) return;
+    const categories = notificationsCatalog.categories || {};
+    const enabled = notificationsCatalog.enabled || {};
+    const byCategory = {};
+    (notificationsCatalog.events || []).forEach(ev => {
+        (byCategory[ev.category] = byCategory[ev.category] || []).push(ev);
+    });
+    container.innerHTML = Object.entries(categories).map(([key, label]) => {
+        const events = byCategory[key] || [];
+        if (!events.length) return "";
+        const rows = events.map(ev => {
+            const badge = ev.urgency === "immediate"
+                ? '<span class="notif-badge notif-badge-now">immédiat</span>'
+                : '<span class="notif-badge notif-badge-digest">récap</span>';
+            const audience = (ev.audience || []).map(a => ({
+                assignee: "analyste assigné", actor: "auteur de l'action",
+                admin: "admin", reviewer: "reviewer", rules: "rôle règles", user: "analystes",
+            }[a] || a)).join(", ");
+            return `
+                <label class="notif-row">
+                    <input type="checkbox" class="notif-event" data-event="${escapeHtml(ev.key)}" ${enabled[ev.key] ? "checked" : ""}>
+                    <span class="notif-label">${escapeHtml(ev.label)}</span>
+                    ${badge}
+                    <small class="notif-audience">${escapeHtml(audience)}</small>
+                </label>`;
+        }).join("");
+        return `
+            <details class="notif-group" open>
+                <summary><strong>${escapeHtml(label)}</strong> <small style="color: var(--text-muted);">(${events.length})</small></summary>
+                ${rows}
+            </details>`;
+    }).join("");
+}
+
+// Payload d'activation envoyé avec les réglages d'ingestion (une clé par étape)
+function collectNotificationEvents() {
+    const out = {};
+    document.querySelectorAll("#notif-catalog .notif-event").forEach(cb => {
+        out[cb.dataset.event] = cb.checked;
+    });
+    return out;
+}
+
+async function saveNotificationBatchSettings() {
+    const payload = {
+        enabled: !!document.getElementById("setting-notif-batch-enabled")?.checked,
+        cron: (document.getElementById("setting-notif-batch-cron")?.value || "").trim(),
+    };
+    try {
+        const response = await apiFetch("/api/settings/notifications", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message || "Réglages du récapitulatif mis à jour.", "success");
+        fetchNotificationsCatalog();
+    } catch (e) {
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function sendNotificationTest() {
+    try {
+        const response = await apiFetch("/api/settings/notifications/test", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) {
+            // Erreurs explicites : SMTP absent (503), envoi refusé (502), pas de destinataire (400)
+            showToast("Envoi impossible : " + (data.detail || "échec."), "error", 9000);
+            return;
+        }
+        showToast(data.message, "success", 7000);
+        fetchNotificationLog();
+    } catch (e) {
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function flushNotificationDigest() {
+    try {
+        const response = await apiFetch("/api/notifications/flush", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message, data.events ? "success" : "info");
+        fetchNotificationLog();
+    } catch (e) {
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function fetchNotificationLog() {
+    const container = document.getElementById("notif-log");
+    if (!container) return;
+    container.innerHTML = '<small style="color: var(--text-muted);">Chargement du journal…</small>';
+    try {
+        const response = await apiFetch("/api/notifications/log?limit=30");
+        if (!response.ok) { container.innerHTML = ""; return; }
+        const data = await response.json();
+        const badge = (status) => ({
+            SENT: '<span class="status-badge no_match">ENVOYÉ</span>',
+            QUEUED: '<span class="status-badge warning">EN FILE</span>',
+            FAILED: '<span class="status-badge alert">ÉCHEC</span>',
+            SKIPPED: '<span class="status-badge warning">IGNORÉ</span>',
+        }[status] || escapeHtml(status || ""));
+        const rows = (data.items || []).map(item => `
+            <tr>
+                <td>${item.created_at ? formatDateTime(item.created_at) : "—"}</td>
+                <td>${escapeHtml(item.label || item.event_key)}</td>
+                <td>${badge(item.status)}</td>
+                <td><small>${escapeHtml(item.recipients || "—")}</small>
+                    ${item.error ? `<br><small style="color: var(--color-alert);">${escapeHtml(item.error)}</small>` : ""}</td>
+            </tr>`).join("");
+        container.innerHTML = `
+            <p class="section-desc" style="margin: 0.5rem 0;">${data.queued} évènement(s) en file pour le prochain récapitulatif.</p>
+            <div class="table-container" style="max-height: 280px; overflow-y: auto;">
+                <table><thead><tr><th>Date</th><th>Étape</th><th>Statut</th><th>Destinataires</th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="4" style="color: var(--text-muted); text-align:center;">Aucun envoi enregistré.</td></tr>'}</tbody></table>
+            </div>`;
+    } catch (e) {
+        container.innerHTML = "";
     }
 }
 
