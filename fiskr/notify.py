@@ -138,8 +138,11 @@ _ALERT_HINTS = ("erreur", "echec", "échec", "error", "warn", "dépassé", "depa
 
 def _humanize(key: str) -> str:
     """`snapshot_id` -> `Snapshot id` (les cles de payload sont deja en francais
-    la plupart du temps ; cette normalisation ne fait que rendre lisible)."""
-    return re.sub(r"[_\-]+", " ", str(key)).strip().capitalize()
+    la plupart du temps ; cette normalisation ne fait que rendre lisible).
+    Seule la premiere lettre est forcee en majuscule : `.capitalize()` mettrait
+    en minuscules les acronymes metier du reste de la cle (PP, PM, SLA, KYC)."""
+    label = re.sub(r"[_\-]+", " ", str(key)).strip()
+    return label[:1].upper() + label[1:]
 
 
 def _format_value(value: Any) -> str:

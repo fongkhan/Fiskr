@@ -172,6 +172,29 @@ MESSAGES: Dict[str, Dict[str, str]] = {
     "Configuration importée.": {
         "en": "Configuration imported.", "de": "Konfiguration importiert.",
         "es": "Configuración importada.", "zh": "配置已导入。", "ar": "تم استيراد الإعدادات."},
+    # Transmission du projet de declaration de soupcon (TRACFIN)
+    "Alerte introuvable.": {
+        "en": "Alert not found.", "de": "Alarm nicht gefunden.",
+        "es": "Alerta no encontrada.", "zh": "未找到警报。", "ar": "التنبيه غير موجود."},
+    "Aucun correspondant TRACFIN configuré (config.yaml, institution.correspondent_email).": {
+        "en": "No TRACFIN correspondent configured (config.yaml, institution.correspondent_email).",
+        "de": "Kein TRACFIN-Ansprechpartner konfiguriert (config.yaml, institution.correspondent_email).",
+        "es": "Ningún corresponsal TRACFIN configurado (config.yaml, institution.correspondent_email).",
+        "zh": "未配置 TRACFIN 联系人（config.yaml，institution.correspondent_email）。",
+        "ar": "لا يوجد مراسل TRACFIN مُعرَّف (config.yaml، institution.correspondent_email)."},
+    "Envoi impossible : SMTP non configuré (variable d'environnement SMTP_HOST absente).": {
+        "en": "Cannot send: SMTP is not configured (SMTP_HOST environment variable missing).",
+        "de": "Senden nicht möglich: SMTP ist nicht konfiguriert (Umgebungsvariable SMTP_HOST fehlt).",
+        "es": "Envío imposible: SMTP no configurado (falta la variable de entorno SMTP_HOST).",
+        "zh": "无法发送：未配置 SMTP（缺少环境变量 SMTP_HOST）。",
+        "ar": "تعذّر الإرسال: SMTP غير مُعدّ (متغير البيئة SMTP_HOST مفقود)."},
+    # Reglages de gouvernance
+    "quality_min_score_pct doit être entre 0 et 100.": {
+        "en": "quality_min_score_pct must be between 0 and 100.",
+        "de": "quality_min_score_pct muss zwischen 0 und 100 liegen.",
+        "es": "quality_min_score_pct debe estar entre 0 y 100.",
+        "zh": "quality_min_score_pct 必须介于 0 和 100 之间。",
+        "ar": "يجب أن تكون quality_min_score_pct بين 0 و100."},
 }
 
 # ---- Gabarits regex pour les messages a variables ----
