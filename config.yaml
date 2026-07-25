@@ -58,6 +58,15 @@ sync:
     retries: 3                     # tentatives supplementaires apres un echec transitoire
     backoff_seconds: 3             # attente entre tentatives (lineaire : 3s, 6s, 9s...)
     user_agent: "Mozilla/5.0 (compatible; Fiskr-Compliance/2.4; +https://github.com/fongkhan/Fiskr)"
+  # Chaque source peut surcharger ces valeurs par un bloc `network` qui lui est
+  # propre (sync.<source>.network) : une source lente ne ralentit pas les
+  # autres. EUR-Lex sert une page d'attente anti-robot (HTTP 202) et recoit
+  # d'office un budget plus patient : 6 reprises, backoff 5 s (~105 s au
+  # total). A augmenter si le portail reste inaccessible.
+  #   eurlex:
+  #     network:
+  #       retries: 10
+  #       backoff_seconds: 8
   ofac:
     enabled: true
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"

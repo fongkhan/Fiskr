@@ -1404,9 +1404,15 @@ async function fetchSyncConfig() {
 
 // ------------------ PLANIFICATION CRON PAR SOURCE ------------------
 
+// Dernière configuration reçue : permet de re-rendre le tableau à chaque tick
+// des opérations de fond sans redemander /api/sync/config
+let _lastSyncConfig = null;
+
 function renderCronSchedules(cfg) {
+    if (cfg) _lastSyncConfig = cfg;
+    cfg = _lastSyncConfig;
     const tbody = document.querySelector("#cron-schedules-table tbody");
-    if (!tbody) return;
+    if (!tbody || !cfg) return;
     const isAdmin = currentUser && userRoles(currentUser).includes("admin");
     const schedules = cfg.schedules || {};
     const nextRuns = cfg.next_runs || {};
@@ -1419,10 +1425,42 @@ function renderCronSchedules(cfg) {
                        style="font-family: monospace; max-width: 200px;" ${isAdmin ? "" : "disabled"}
                        title="Expression cron 5 champs : minute heure jour mois jour-de-semaine"></td>
             <td>${nextRuns[source] ? formatDateTime(nextRuns[source]) : "—"}</td>
+            <td>${sourceStateCell(source)}</td>
         </tr>`;
     }).join("");
     const saveBtn = document.getElementById("cron-save-btn");
     if (saveBtn) saveBtn.classList.toggle("hidden", !isAdmin);
+}
+
+// État vivant d'une source, lu dans les opérations de fond déjà collectées
+// (aucune requête supplémentaire) : une synchronisation lancée par le cron est
+// donc visible ici comme celle qu'on déclenche soi-même.
+function sourceStateCell(source) {
+    const op = (_activeOps || []).find(o => o.token === `sync:${source}`);
+    if (!op) return '<small style="color: var(--text-muted);">—</small>';
+    if (op.status === "ERROR") {
+        return `<small style="color: var(--color-alert);">⚠ échec${op.error ? " — " + escapeHtml(String(op.error).slice(0, 80)) : ""}</small>`;
+    }
+    if (op.status !== "RUNNING") {
+        return '<small style="color: var(--color-safe, #22c55e);">✓ terminée</small>';
+    }
+    const phase = PROGRESS_PHASE_LABELS[op.phase] || op.phase || "En cours…";
+    const pct = (op.pct !== null && op.pct !== undefined) ? `${op.pct} %` : "";
+    const counts = op.processed
+        ? (op.total
+            ? `${op.processed.toLocaleString(uiLocale())} / ${op.total.toLocaleString(uiLocale())}`
+            : op.processed.toLocaleString(uiLocale()))
+        : "";
+    const fillClass = (op.pct === null || op.pct === undefined)
+        ? "progress-tracker-fill indeterminate" : "progress-tracker-fill";
+    const width = (op.pct !== null && op.pct !== undefined) ? `width: ${Math.min(100, op.pct)}%;` : "";
+    return `<div style="min-width: 180px;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.78rem;">
+            <span>${escapeHtml(phase)}</span><span>${escapeHtml(pct)}</span>
+        </div>
+        <div class="progress-tracker-bar" style="margin: 0.2rem 0;"><div class="${fillClass}" style="${width}"></div></div>
+        <small style="color: var(--text-muted);">${escapeHtml(counts)}${op.started_by ? ` · @${escapeHtml(op.started_by)}` : ""}</small>
+    </div>`;
 }
 
 async function saveCronSchedules() {
@@ -6388,6 +6426,10 @@ async function fetchActiveOperations() {
         renderOpsPill();
         if (!document.getElementById("notif-panel")?.classList.contains("hidden")) {
             renderOpsSection();
+        }
+        // État vivant par source, si l'écran de planification est affiché
+        if (document.querySelector("#cron-schedules-table tbody")?.children.length) {
+            renderCronSchedules();
         }
         scheduleOpsPoll(data.running > 0 ? OPS_POLL_BUSY_MS : OPS_POLL_IDLE_MS);
     } catch (e) {

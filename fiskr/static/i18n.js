@@ -440,6 +440,7 @@
         "Contrôle de qualité du référentiel…": { en: "Checking repository quality…", de: "Qualitätsprüfung des Bestands…", es: "Control de calidad del repositorio…", zh: "正在检查客户库质量…", ar: "فحص جودة المستودع…" },
         // Operations de fond : pastille d'en-tete et panneau de notifications
         "Opérations en cours": { en: "Operations in progress", de: "Laufende Vorgänge", es: "Operaciones en curso", zh: "进行中的操作", ar: "عمليات جارية" },
+        "✓ terminée": {"en": "✓ finished", "de": "✓ abgeschlossen", "es": "✓ finalizada", "zh": "✓ 已完成", "ar": "✓ منتهية"},
         "Opérations en cours — cliquez pour le détail": { en: "Operations in progress — click for details", de: "Laufende Vorgänge – für Details klicken", es: "Operaciones en curso — haga clic para ver el detalle", zh: "进行中的操作——点击查看详情", ar: "عمليات جارية — انقر للتفاصيل" },
         "en cours": { en: "in progress", de: "laufend", es: "en curso", zh: "进行中", ar: "جارٍ" },
         "Cahier de tests lancé.": { en: "Test book started.", de: "Testbuch gestartet.", es: "Cuaderno de pruebas iniciado.", zh: "测试簿已启动。", ar: "بدأ دفتر الاختبارات." },
