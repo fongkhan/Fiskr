@@ -161,7 +161,10 @@ def test_sync_response_carries_rescreen_counts(client, monkeypatch):
     }
     monkeypatch.setattr(
         "fiskr.sync.download_to_file",
-        lambda url, dest, timeout=300.0: Path(dest).write_text(jsonlib.dumps(sample), encoding="utf-8")
+        # Le double doit refleter la vraie signature de download_to_file
+        # (elle accepte `progress` : la source publie sa progression)
+        lambda url, dest, timeout=300.0, retries=None, progress=None:
+            Path(dest).write_text(jsonlib.dumps(sample), encoding="utf-8")
     )
     response = client.post("/api/sync/run", json={"source": "DGT"})
     assert response.status_code == 200

@@ -665,6 +665,69 @@ async def _retention_scheduler():
         except Exception as e:
             logger.error(f"Purge de rétention en échec sur ce tick : {e}")
 
+_STUCK_SNAPSHOT_AFTER_HOURS = 1
+
+
+def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
+    """
+    Repare les snapshots restes en PROCESSING.
+
+    Un defaut de session (les commits periodiques detachaient le snapshot de
+    l'appelant, ses ecritures n'etaient donc plus persistees) pouvait laisser
+    un import termine avec le statut PROCESSING et record_count = 0 : la liste
+    etait bien en base mais n'entrait JAMAIS en production, sans erreur
+    visible. La cause est corrigee ; cette reparation remet d'aplomb les
+    installations deja touchees, au demarrage.
+
+    Chaque snapshot ancien est recompte depuis ses entites REELLES puis
+    rebascule (READY / PENDING_REVIEW s'il en contient, ERROR sinon), et la
+    correction est tracee au journal d'administration. N'echoue jamais : un
+    demarrage ne doit pas tomber sur une reparation.
+    """
+    summary = {"repaired": 0, "failed": 0}
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=_STUCK_SNAPSHOT_AFTER_HOURS)
+        stuck = db.query(Snapshot).filter(
+            Snapshot.status == "PROCESSING",
+            Snapshot.uploaded_at < cutoff,
+        ).all()
+        if not stuck:
+            return summary
+        staging = require_approval_enabled(db)
+        for snap in stuck:
+            model = ClientEntity if snap.file_type == "CLIENT_BASE" else WatchlistEntity
+            real_count = db.query(model).filter(model.snapshot_id == snap.snapshot_id).count()
+            before = {"status": snap.status, "record_count": snap.record_count}
+            if real_count:
+                # Les fiches sont la : l'import avait bien abouti
+                snap.record_count = real_count
+                snap.processed_count = real_count
+                snap.phase = "DONE"
+                snap.status = "PENDING_REVIEW" if (
+                    staging and snap.file_type != "CLIENT_BASE") else "READY"
+                summary["repaired"] += 1
+            else:
+                snap.status = "ERROR"
+                snap.phase = None
+                summary["failed"] += 1
+            log_admin_action(
+                db, "systeme", "SNAPSHOT_REPAIRED", target=snap.snapshot_id,
+                before=before,
+                after={"status": snap.status, "record_count": snap.record_count},
+                detail=("Import resté en PROCESSING (défaut de session corrigé) : "
+                        f"{real_count} fiche(s) réellement présentes."),
+            )
+        db.commit()
+        logger.warning(
+            f"Snapshots réparés au démarrage : {summary['repaired']} remis en production, "
+            f"{summary['failed']} marqués en erreur (aucune fiche)."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Réparation des snapshots impossible : {e}")
+    return summary
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -672,6 +735,10 @@ async def lifespan(app: FastAPI):
     init_db()
     # Populate the cache from database
     db = next(get_db())
+    # Avant tout chargement : remettre d'aplomb les imports laisses en
+    # PROCESSING par le defaut de session (sinon leurs listes restent hors
+    # production alors que leurs fiches sont en base)
+    _repair_stuck_snapshots(db)
     load_watchlist_cache(db)
     # Start the per-source cron synchronization scheduler if enabled
     scheduler_task = None

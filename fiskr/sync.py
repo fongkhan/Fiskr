@@ -80,6 +80,49 @@ MANUAL_SNAPSHOT_ID = "manual-watchlist"
 MAX_REPORT_DETAILS = 100
 
 
+# Budget reseau par defaut d'une source qui en demande davantage. EUR-Lex
+# repond HTTP 202 « page en preparation » (anti-robot) : 4 tentatives sur 18 s
+# ne suffisent pas a franchir son interstitiel.
+_SOURCE_NETWORK_DEFAULTS = {
+    "eurlex": {"retries": 6, "backoff_seconds": 5},
+}
+
+
+# Hote -> source, pour appliquer le bon budget reseau sans que chaque appelant
+# ait a le preciser (les requetes par acte EUR-Lex en beneficient aussi)
+_HOST_TO_SOURCE = {"eur-lex.europa.eu": "eurlex"}
+
+
+def network_for_url(url: str) -> Dict[str, Any]:
+    """Parametres reseau applicables a une URL, deduits de son hote."""
+    from urllib.parse import urlsplit
+    host = urlsplit(url).netloc.lower()
+    source = _HOST_TO_SOURCE.get(host)
+    return source_network_config(source) if source else get_sync_config()["network"]
+
+
+def source_network_config(source: str) -> Dict[str, Any]:
+    """
+    Parametres reseau applicables a UNE source : `sync.network` surcharge par
+    `sync.<source>.network`, elle-meme surchargee par le defaut plus patient
+    de la source si l'exploitant n'a rien precise. Une source lente ne
+    ralentit ainsi jamais les autres.
+    """
+    sync_cfg = config.get("sync", {}) or {}
+    network = dict(get_sync_config()["network"])
+    key = source.lower()
+    network.update(_SOURCE_NETWORK_DEFAULTS.get(key, {}))
+    override = (sync_cfg.get(key) or {}).get("network") or {}
+    for field in ("timeout_seconds", "download_timeout_seconds", "backoff_seconds"):
+        if override.get(field) is not None:
+            network[field] = float(override[field])
+    if override.get("retries") is not None:
+        network["retries"] = int(override["retries"])
+    if override.get("user_agent"):
+        network["user_agent"] = str(override["user_agent"])
+    return network
+
+
 def get_sync_config() -> Dict[str, Any]:
     """Configuration de synchronisation (config.yaml, section sync) avec defauts."""
     sync_cfg = config.get("sync", {}) or {}
@@ -190,7 +233,15 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
             logger.warning(f"{url}: {e} — tentative {attempt + 1}/{retries + 1}")
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
-    raise RuntimeError(f"Echec apres {retries + 1} tentatives sur {url}: {last_error}")
+    hint = ""
+    if isinstance(last_error, _RetryableHTTP) and "HTTP 202" in str(last_error):
+        # 202 persistant = interstitiel anti-robot jamais franchi : l'exploitant
+        # doit savoir quoi regler plutot que de lire un simple compte d'echecs
+        hint = (" — le portail sert sa page d'attente anti-robot : augmentez "
+                "sync.<source>.network.retries / backoff_seconds, ou relancez "
+                "la source plus tard")
+    raise RuntimeError(
+        f"Echec apres {retries + 1} tentatives sur {url}: {last_error}{hint}")
 
 
 def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
@@ -240,15 +291,42 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
     _with_retries(_attempt, url, max_retries, network["backoff_seconds"])
 
 
-def http_get_text(url: str, timeout: Optional[float] = None, retries: Optional[int] = None) -> str:
+def _portal_root(url: str) -> str:
+    """Racine du portail (schema + hote) d'une URL, pour le prechauffage."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
+def warm_up_session(base_url: str) -> None:
+    """
+    Requete de prechauffage : recupere la page d'accueil du portail avec le
+    client partage (qui conserve ses cookies) avant d'attaquer la page utile.
+
+    EUR-Lex sert un interstitiel HTTP 202 aux clients sans cookie de session ;
+    passer d'abord par l'accueil donne au client de quoi etre reconnu. Un
+    echec de prechauffage n'est jamais bloquant : la requete utile suivra.
+    """
+    try:
+        _get_shared_client().get(base_url, timeout=get_sync_config()["network"]["timeout_seconds"])
+    except Exception as e:
+        logger.debug(f"Prechauffage de session ignore sur {base_url}: {e}")
+
+
+def http_get_text(url: str, timeout: Optional[float] = None,
+                  retries: Optional[int] = None) -> str:
     """
     Recupere le contenu textuel d'une page web avec reprises couvrant les
     erreurs de transport ET les reponses transitoires. EUR-Lex repond parfois
     HTTP 202 avec un corps vide (anti-robot) : on reessaie apres un delai, et
     on echoue franchement plutot que de traiter une page vide comme un
     Journal Officiel sans publication.
+
+    Le budget de reprises est deduit de l'hote : EUR-Lex est plus patient que
+    les autres sources (cf. network_for_url / source_network_config), sans que
+    l'appelant ait a le savoir.
     """
-    network = get_sync_config()["network"]
+    network = network_for_url(url)
     page_timeout = timeout if timeout is not None else network["timeout_seconds"]
     max_retries = retries if retries is not None else network["retries"]
 
@@ -325,13 +403,82 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
     )))
 
 
+class SyncProgress:
+    """
+    Publication de la progression d'une synchronisation de source.
+
+    Partage par les QUATRE implementations (OFAC, DGT, EUR-Lex et le cycle
+    generique) : avant, seul le cycle generique publiait ses phases et les
+    autres sources n'apparaissaient qu'en barre indeterminee. Le jeton
+    `sync:<source>` est le meme que celui interroge par le tableau de bord.
+    """
+
+    def __init__(self, source: str, started_by: str = "système"):
+        from fiskr import progress as progress_registry
+        self._registry = progress_registry
+        self.token = f"sync:{source.lower()}"
+        self.source = source
+        # `started_by` n'ecrase jamais une valeur deja posee : un declenchement
+        # manuel inscrit le nom de l'utilisateur avant d'appeler le cycle
+        self._registry.update(self.token, phase="DOWNLOAD", kind="sync",
+                              label=f"Synchronisation {source}",
+                              started_by=started_by)
+
+    def phase(self, phase: str, processed: int = 0, total: Optional[int] = None,
+              snapshot_id: Optional[str] = None) -> None:
+        self._registry.update(self.token, phase=phase, processed=processed,
+                              total=total, snapshot_id=snapshot_id)
+
+    def downloading(self):
+        """Callback octets recus / taille annoncee pour download_to_file."""
+        return lambda done, total: self.phase("DOWNLOAD", processed=done, total=total)
+
+    def persisting(self, db, snap_id: str):
+        """
+        Callback de `persist_pivot_items` : publie le compteur ET persiste la
+        progression sur le snapshot (le suivi survit a un redemarrage).
+        """
+        def _tick(count: int) -> None:
+            self.phase("PERSIST", processed=count, snapshot_id=snap_id)
+            row = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+            if row:
+                row.processed_count = count
+                row.phase = "PERSIST"
+                db.commit()
+        return _tick
+
+    def done(self) -> None:
+        self._registry.finish(self.token)
+
+    def failed(self, error: Exception) -> None:
+        self._registry.finish(self.token, status="ERROR", error=str(error))
+
+
+def _release_persisted_entities(db) -> None:
+    """
+    Libere de l'identity map les SEULES entites de liste ecrites par la boucle
+    de persistance.
+
+    `db.expunge_all()` bornait bien la RAM mais detachait AUSSI les objets que
+    l'appelant garde en main pendant toute la boucle — le snapshot en cours et
+    le snapshot precedent. Lire ensuite `previous.snapshot_id` levait alors
+    « Instance <Snapshot> is not bound to a Session », et les ecritures sur le
+    snapshot n'etaient plus persistees du tout (liste jamais mise en
+    production, sans erreur visible). On n'expulse donc que ce qui s'accumule.
+    """
+    for obj in list(db.identity_map.values()):
+        if isinstance(obj, WatchlistEntity):
+            db.expunge(obj)
+
+
 def persist_pivot_items(db, snap_id: str, items, commit_every: int = 1000,
                         progress: Optional[Callable[[int], None]] = None) -> int:
     """
     Valide (Quality Gate) et persiste des enregistrements pivots. Retourne le
     nombre insere. Commits periodiques : la progression devient visible par
-    polling ET l'identity map SQLAlchemy est videe regulierement (un dataset
-    PEP de 750 000 fiches n'accumule plus les objets en RAM).
+    polling ET les entites deja ecrites sont liberees de l'identity map (un
+    dataset PEP de 750 000 fiches n'accumule plus les objets en RAM), sans
+    jamais detacher les objets de l'appelant.
     """
     count = 0
     for item in items:
@@ -349,7 +496,7 @@ def persist_pivot_items(db, snap_id: str, items, commit_every: int = 1000,
         count += 1
         if commit_every and count % commit_every == 0:
             db.commit()
-            db.expunge_all()
+            _release_persisted_entities(db)
             if progress:
                 try:
                     progress(count)
@@ -546,13 +693,24 @@ def run_ofac_sync(
     temp_file = temp_dir / f"ofac_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.xml"
 
     previous = _latest_ready_snapshot(db, "WATCHLIST_OFAC")
+    # Scalaire capture AVANT la boucle de persistance : le code ne depend plus
+    # de la survie d'un objet ORM a un traitement long (cf. panne detachement)
+    previous_id = previous.snapshot_id if previous else None
     snap_id = None
+    tracker = SyncProgress("OFAC")
     try:
         logger.info(f"Sync OFAC: telechargement de {url}")
-        fetch(url, temp_file)
+        if fetcher is None:
+            download_to_file(url, temp_file, progress=tracker.downloading())
+        else:
+            fetch(url, temp_file)
 
+        tracker.phase("HASH")
+        hasher = hashlib.sha256()
         with open(temp_file, "rb") as f:
-            fhash = hashlib.sha256(f.read()).hexdigest()
+            while chunk := f.read(1024 * 1024):
+                hasher.update(chunk)
+        fhash = hasher.hexdigest()
 
         duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_OFAC", fhash)
         if duplicate:
@@ -581,12 +739,17 @@ def run_ofac_sync(
 
         ofac_relations: list = []
         record_count = persist_pivot_items(
-            db, snap_id, parse_ofac_advanced_xml(str(temp_file), relations_out=ofac_relations)
+            db, snap_id, parse_ofac_advanced_xml(str(temp_file), relations_out=ofac_relations),
+            progress=tracker.persisting(db, snap_id),
         )
         # Graphe de relations entre profils (ownership) rafraichi avec la liste
         if ofac_relations:
             from fiskr.database import refresh_source_relationships
             refresh_source_relationships(db, "OFAC", ofac_relations)
+        # Le snapshot a pu etre expire par les commits periodiques : on le
+        # relit avant d'ecrire, sinon statut et compteur ne seraient pas
+        # persistes (liste jamais mise en production, sans erreur visible)
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         # Mode homologation : le snapshot attend un pointage humain, l'ancienne
         # liste READY reste en production jusqu'a l'approbation.
         staging = require_approval_enabled(db)
@@ -595,7 +758,8 @@ def run_ofac_sync(
         db.commit()
 
         # Delta par rapport a la liste active (= production, non supersedee)
-        old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
+        tracker.phase("DELTA", processed=record_count, snapshot_id=snap_id)
+        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
@@ -604,6 +768,7 @@ def run_ofac_sync(
             _supersede_previous_snapshots(db, "WATCHLIST_OFAC", snap_id)
             db.commit()
             if reload_cache:
+                tracker.phase("RELOAD", processed=record_count, snapshot_id=snap_id)
                 reload_cache()
 
         summary = delta["summary"]
@@ -618,7 +783,7 @@ def run_ofac_sync(
             db, source="OFAC", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
             message=message,
             snapshot_id=snap_id,
-            previous_snapshot_id=previous.snapshot_id if previous else None,
+            previous_snapshot_id=previous_id,
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
             removed_count=summary["removed_count"],
@@ -626,6 +791,7 @@ def run_ofac_sync(
         )
     except Exception as e:
         db.rollback()
+        tracker.failed(e)
         logger.error(f"Echec de la synchronisation OFAC: {e}")
         if snap_id:
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
@@ -637,6 +803,7 @@ def run_ofac_sync(
             message=f"Echec: {e}"
         )
     finally:
+        tracker.done()
         if temp_file.exists():
             os.remove(temp_file)
 
@@ -661,13 +828,22 @@ def run_dgt_sync(
     temp_file = temp_dir / f"dgt_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
 
     previous = _latest_ready_snapshot(db, "WATCHLIST_DGT")
+    previous_id = previous.snapshot_id if previous else None
     snap_id = None
+    tracker = SyncProgress("DGT")
     try:
         logger.info(f"Sync DGT: telechargement de {url}")
-        fetch(url, temp_file)
+        if fetcher is None:
+            download_to_file(url, temp_file, progress=tracker.downloading())
+        else:
+            fetch(url, temp_file)
 
+        tracker.phase("HASH")
+        hasher = hashlib.sha256()
         with open(temp_file, "rb") as f:
-            fhash = hashlib.sha256(f.read()).hexdigest()
+            while chunk := f.read(1024 * 1024):
+                hasher.update(chunk)
+        fhash = hasher.hexdigest()
 
         duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_DGT", fhash)
         if duplicate:
@@ -693,14 +869,18 @@ def run_dgt_sync(
         db.add(snap)
         db.commit()
 
-        record_count = persist_pivot_items(db, snap_id, parse_dgt_gels_json(str(temp_file)))
+        record_count = persist_pivot_items(db, snap_id, parse_dgt_gels_json(str(temp_file)),
+                                           progress=tracker.persisting(db, snap_id))
+        # Relecture avant ecriture (cf. commentaire OFAC)
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         staging = require_approval_enabled(db)
         snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
         db.commit()
 
         # Delta par rapport a la liste active (= production, non supersedee)
-        old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
+        tracker.phase("DELTA", processed=record_count, snapshot_id=snap_id)
+        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
@@ -708,6 +888,7 @@ def run_dgt_sync(
             _supersede_previous_snapshots(db, "WATCHLIST_DGT", snap_id)
             db.commit()
             if reload_cache:
+                tracker.phase("RELOAD", processed=record_count, snapshot_id=snap_id)
                 reload_cache()
 
         summary = delta["summary"]
@@ -722,7 +903,7 @@ def run_dgt_sync(
             db, source="DGT", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
             message=message,
             snapshot_id=snap_id,
-            previous_snapshot_id=previous.snapshot_id if previous else None,
+            previous_snapshot_id=previous_id,
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
             removed_count=summary["removed_count"],
@@ -730,6 +911,7 @@ def run_dgt_sync(
         )
     except Exception as e:
         db.rollback()
+        tracker.failed(e)
         logger.error(f"Echec de la synchronisation DGT: {e}")
         if snap_id:
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
@@ -741,6 +923,7 @@ def run_dgt_sync(
             message=f"Echec: {e}"
         )
     finally:
+        tracker.done()
         if temp_file.exists():
             os.remove(temp_file)
 
@@ -764,32 +947,24 @@ def _run_list_replacement_sync(
     puis application (supersede + rechargement du cache) ou attente de
     pointage humain si le mode homologation est actif.
     """
-    from fiskr import progress as progress_registry
-    progress_token = f"sync:{source.lower()}"
+    tracker = SyncProgress(source)
     fetch = fetcher or download_to_file
     temp_dir = PROJECT_ROOT / "temp_ingestion"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_file = temp_dir / f"{source.lower()}_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{temp_suffix}"
 
     previous = _latest_ready_snapshot(db, file_type)
+    previous_id = previous.snapshot_id if previous else None
     snap_id = None
     try:
         logger.info(f"Sync {source}: telechargement de {url}")
-        # Identite de l'operation : elle apparait des lors dans la pastille et
-        # le centre de notifications, y compris quand c'est le cron qui la lance
-        # `started_by` n'ecrase jamais une valeur deja posee : un declenchement
-        # manuel inscrit le nom de l'utilisateur avant d'appeler ce cycle
-        progress_registry.update(progress_token, phase="DOWNLOAD", kind="sync",
-                                 label=f"Synchronisation {source}",
-                                 started_by="système")
         if fetcher is None:
             # Telechargement instrumente : octets recus / taille annoncee
-            download_to_file(url, temp_file, progress=lambda done, total: progress_registry.update(
-                progress_token, phase="DOWNLOAD", processed=done, total=total))
+            download_to_file(url, temp_file, progress=tracker.downloading())
         else:
             fetch(url, temp_file)
 
-        progress_registry.update(progress_token, phase="HASH")
+        tracker.phase("HASH")
         hasher = hashlib.sha256()
         with open(temp_file, "rb") as f:
             while chunk := f.read(1024 * 1024):
@@ -820,17 +995,8 @@ def _run_list_replacement_sync(
         db.add(snap)
         db.commit()
 
-        def _persist_progress(count: int) -> None:
-            progress_registry.update(progress_token, phase="PERSIST", processed=count,
-                                     snapshot_id=snap_id)
-            row = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
-            if row:
-                row.processed_count = count
-                row.phase = "PERSIST"
-                db.commit()
-
         record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)),
-                                           progress=_persist_progress)
+                                           progress=tracker.persisting(db, snap_id))
         # Le snapshot a pu etre detache par les commits periodiques
         snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         staging = require_approval_enabled(db)
@@ -840,9 +1006,8 @@ def _run_list_replacement_sync(
         snap.phase = "DELTA"
         db.commit()
 
-        progress_registry.update(progress_token, phase="DELTA", processed=record_count,
-                                 snapshot_id=snap_id)
-        old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
+        tracker.phase("DELTA", processed=record_count, snapshot_id=snap_id)
+        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
@@ -850,8 +1015,7 @@ def _run_list_replacement_sync(
             _supersede_previous_snapshots(db, file_type, snap_id)
             db.commit()
             if reload_cache:
-                progress_registry.update(progress_token, phase="RELOAD",
-                                         processed=record_count, snapshot_id=snap_id)
+                tracker.phase("RELOAD", processed=record_count, snapshot_id=snap_id)
                 reload_cache()
         snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         if snap:
@@ -866,7 +1030,7 @@ def _run_list_replacement_sync(
             db, source=source, trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
             message=message,
             snapshot_id=snap_id,
-            previous_snapshot_id=previous.snapshot_id if previous else None,
+            previous_snapshot_id=previous_id,
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
             removed_count=summary["removed_count"],
@@ -875,7 +1039,7 @@ def _run_list_replacement_sync(
     except Exception as e:
         db.rollback()
         logger.error(f"Echec de la synchronisation {source}: {e}")
-        progress_registry.finish(progress_token, status="ERROR", error=str(e))
+        tracker.failed(e)
         if snap_id:
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
             if error_snap:
@@ -886,7 +1050,7 @@ def _run_list_replacement_sync(
             message=f"Echec: {e}"
         )
     finally:
-        progress_registry.finish(progress_token)
+        tracker.done()
         if temp_file.exists():
             os.remove(temp_file)
 
@@ -1333,21 +1497,35 @@ def fetch_eurlex_entities(
     http_get: Callable[[str], str],
     daily_url_template: str,
     keyword: str,
+    progress: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
     """
     Recupere le JO du jour, filtre les actes "mesures restrictives" et scrape
     chacun d'eux. Retourne (actes retenus, entites extraites, actes en echec
     reseau) — les echecs ne sont plus avales : ils remontent au rapport de
     sync pour ne jamais presenter une liste amputee comme complete.
+
+    `progress(actes_traites, total)` suit le scraping acte par acte : c'est la
+    ou passe le temps d'une synchronisation EUR-Lex (une requete par acte),
+    donc la seule progression qui ait du sens ici — un scraping n'annonce
+    aucune taille de fichier.
     """
     daily_url = daily_url_template.format(date=for_date.strftime("%d%m%Y"))
     logger.info(f"Sync EUR-Lex: lecture du Journal Officiel {daily_url}")
+    # Cookie de session avant la page du jour : sans lui, EUR-Lex sert son
+    # interstitiel HTTP 202 et le scraping n'aboutit jamais
+    warm_up_session(_portal_root(daily_url))
     daily_html = http_get(daily_url)
     acts = extract_daily_acts(daily_html, daily_url, keyword)
 
     all_entities: Dict[str, Dict[str, Any]] = {}
     failed_acts: List[Dict[str, str]] = []
-    for act in acts:
+    for done, act in enumerate(acts, start=1):
+        if progress:
+            try:
+                progress(done, len(acts))
+            except Exception:
+                pass  # la progression n'interrompt jamais un scraping
         try:
             act_html = http_get(act["url"])
         except Exception as e:
@@ -1384,10 +1562,13 @@ def run_eurlex_sync(
     # Base de fusion : inclut un eventuel snapshot en attente d'homologation pour
     # que les amendements de jours successifs s'enchainent sans perte.
     previous = _latest_reviewable_snapshot(db, "WATCHLIST_EU")
+    previous_id = previous.snapshot_id if previous else None
     snap_id = None
+    tracker = SyncProgress("EURLEX")
     try:
         acts, scraped, failed_acts = fetch_eurlex_entities(
-            for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
+            for_date, getter, cfg["daily_journal_url"], cfg["keyword"],
+            progress=lambda done, total: tracker.phase("DOWNLOAD", processed=done, total=total))
 
         # Archivage probant : le PDF officiel de chaque acte retenu fait foi.
         # Les echecs de telechargement sont restitues au rapport (piece
@@ -1401,7 +1582,7 @@ def run_eurlex_sync(
             return _finalize_report(
                 db, source="EURLEX", trigger=trigger, status="NO_PUBLICATION",
                 message=f"Aucun acte mentionnant \"{cfg['keyword']}\" au JO du {for_date.strftime('%d/%m/%Y')}.",
-                previous_snapshot_id=previous.snapshot_id if previous else None
+                previous_snapshot_id=previous_id
             )
         if failed_acts and not scraped:
             # Tous les actes retenus sont inaccessibles : c'est une PANNE
@@ -1412,14 +1593,14 @@ def run_eurlex_sync(
                         f"{for_date.strftime('%d/%m/%Y')} (erreurs de connexion) : "
                         + " ; ".join(f["url"] for f in failed_acts[:3])
                         + (" …" if len(failed_acts) > 3 else ""),
-                previous_snapshot_id=previous.snapshot_id if previous else None,
+                previous_snapshot_id=previous_id,
                 delta_report={"acts": acts, "fetch_failures": failed_acts}
             )
         if not scraped:
             return _finalize_report(
                 db, source="EURLEX", trigger=trigger, status="NO_CHANGE",
                 message=f"{len(acts)} acte(s) trouve(s) au JO du {for_date.strftime('%d/%m/%Y')} mais aucun liste extrait.",
-                previous_snapshot_id=previous.snapshot_id if previous else None,
+                previous_snapshot_id=previous_id,
                 delta_report={"acts": acts}
             )
 
@@ -1453,24 +1634,27 @@ def run_eurlex_sync(
         db.add(snap)
         db.commit()
 
-        record_count = persist_pivot_items(db, snap_id, scraped)
+        record_count = persist_pivot_items(db, snap_id, scraped,
+                                           progress=tracker.persisting(db, snap_id))
         carried = 0
-        if previous:
+        if previous_id:
             # Les entites exclues lors d'une revue ne sont pas reconduites
             prev_rows = db.query(WatchlistEntity).filter(
-                WatchlistEntity.snapshot_id == previous.snapshot_id,
+                WatchlistEntity.snapshot_id == previous_id,
                 WatchlistEntity.excluded.isnot(True)
             ).all()
             for row in prev_rows:
                 if row.entity_id not in scraped_ids:
                     db.add(_clone_entity_row(snap_id, row))
                     carried += 1
+        # Relecture avant ecriture (cf. commentaire OFAC)
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         staging = require_approval_enabled(db)
         snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count + carried
         db.commit()
 
-        old_entities = _snapshot_entity_dicts(db, previous.snapshot_id) if previous else []
+        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
@@ -1496,7 +1680,7 @@ def run_eurlex_sync(
             db, source="EURLEX", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
             message=message,
             snapshot_id=snap_id,
-            previous_snapshot_id=previous.snapshot_id if previous else None,
+            previous_snapshot_id=previous_id,
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
             removed_count=summary["removed_count"],
@@ -1504,6 +1688,7 @@ def run_eurlex_sync(
         )
     except Exception as e:
         db.rollback()
+        tracker.failed(e)
         logger.error(f"Echec de la synchronisation EUR-Lex: {e}")
         if snap_id:
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
@@ -1514,3 +1699,5 @@ def run_eurlex_sync(
             db, source="EURLEX", trigger=trigger, status="ERROR",
             message=f"Echec: {e}"
         )
+    finally:
+        tracker.done()
