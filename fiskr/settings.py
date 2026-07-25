@@ -47,6 +47,19 @@ SETTING_RETENTION = "retention.policy"
 # Seuils de score du criblage : seuil global + surcharges par type de liste,
 # modifiables a chaud (prioritaires sur config.yaml scoring.*)
 SETTING_SCORE_THRESHOLDS = "scoring.thresholds"
+# Ressources linguistiques : activation par type de champ. Une table
+# d'equivalences augmente le rappel AU PRIX de la precision — chaque classe
+# cree des matches qui n'existaient pas. Le defaut est donc DESACTIVE partout :
+# une installation existante ne change pas de comportement, et l'activation
+# passe par le cahier de tests qui chiffre l'ecart avant mise en production.
+SETTING_RESOURCE_FIELDS = "resources.enabled_fields"
+DEFAULT_RESOURCE_FIELDS: Dict[str, bool] = {
+    "given_name": False,
+    "surname": False,
+    "city": False,
+    "country": False,
+    "state": False,
+}
 # Checklist d'instruction des alertes (dossier d'investigation)
 SETTING_CHECKLIST = "investigation.checklist"
 DEFAULT_CHECKLIST = [
@@ -381,3 +394,25 @@ def exclusion_requirements(db) -> Dict[str, bool]:
             get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)["value"]
         ),
     }
+
+
+def resource_fields(db) -> Dict[str, bool]:
+    """
+    Types de champ pour lesquels les equivalences linguistiques s'appliquent.
+
+    Tout est desactive par defaut : une table d'equivalences change le
+    perimetre des alertes, elle doit etre activee sciemment et mesuree au
+    cahier de tests avant mise en production.
+    """
+    out = dict(DEFAULT_RESOURCE_FIELDS)
+    value = get_setting(db, SETTING_RESOURCE_FIELDS, None)
+    if isinstance(value, dict):
+        for field in DEFAULT_RESOURCE_FIELDS:
+            if field in value:
+                out[field] = bool(value[field])
+    return out
+
+
+def resources_active(db) -> bool:
+    """Vrai si au moins un type de champ est active."""
+    return any(resource_fields(db).values())

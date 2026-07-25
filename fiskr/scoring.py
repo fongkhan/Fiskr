@@ -126,14 +126,63 @@ def resolve_cut_off(config: dict, watchlist_entry: dict = None) -> float:
     return float(cut_off)
 
 
+def apply_name_equivalences(s1: str, s2: str) -> Tuple[str, str]:
+    """
+    Applique les equivalences linguistiques aux deux noms compares.
+
+    Chaque token connu est remplace par sa classe canonique : « Harry Dupont »
+    et « Henri Dupont » deviennent tous deux « HENRY DUPONT », et les metriques
+    de chaine — inchangees — retournent alors 100. Sans cette table, aucune
+    metrique ne peut rapprocher Harry de Henri : ce n'est pas une question de
+    distance d'edition, c'est une connaissance.
+
+    Un token n'est remplace que si la classe correspondante est presente DES
+    DEUX COTES. Canonicaliser chaque nom independamment serait une faute :
+    « Henri Dupont » deviendrait « HENRY DUPONT » meme face a « Sofia
+    Marchetti », et la distance a ce nom sans rapport changerait — activer la
+    table deplacerait alors des scores qu'elle n'a aucune raison de toucher.
+    Avec la regle du croisement, toute paire sans classe commune ressort
+    caractere pour caractere identique : le seul effet possible de la table est
+    de rapprocher deux termes declares equivalents.
+
+    Les types `given_name` et `surname` sont appliques successivement : un nom
+    complet contient les deux. Sans ressource active, les chaines sortent
+    inchangees.
+    """
+    from fiskr import resources
+
+    ctx = resources.current_context()
+    index = ctx["index"]
+    if index is None or not ctx["fields"]:
+        return s1, s2
+    left = s1.split()
+    right = s2.split()
+    for field in (resources.FIELD_GIVEN_NAME, resources.FIELD_SURNAME):
+        if field not in ctx["fields"]:
+            continue
+        left_classes = [index.canonical(t, field) for t in left]
+        right_classes = [index.canonical(t, field) for t in right]
+        shared = {c for c in left_classes if c and c in right_classes}
+        if not shared:
+            continue
+        left = [cls if cls in shared else tok for tok, cls in zip(left, left_classes)]
+        right = [cls if cls in shared else tok for tok, cls in zip(right, right_classes)]
+    return " ".join(left), " ".join(right)
+
+
 def compute_base_score(s1: str, s2: str, config: dict) -> float:
     """
     Computes S_base = (w_jw * JW) + (w_dl * DL) + (w_ts * TS)
+
+    Les equivalences linguistiques (fiskr/resources.py) sont appliquees en
+    amont quand elles sont activees : elles ne modifient pas les metriques,
+    elles ramenent les variantes connues d'un meme nom a une forme commune.
     """
     from fiskr.quality import strip_accents
     s1_norm = strip_accents(s1.upper().strip())
     s2_norm = strip_accents(s2.upper().strip())
-    
+    s1_norm, s2_norm = apply_name_equivalences(s1_norm, s2_norm)
+
     weights = config.get("scoring", {}).get("weights", {})
     w_jw = weights.get("jaro_winkler", 0.4)
     w_dl = weights.get("damerau_levenshtein", 0.4)
@@ -370,20 +419,74 @@ def calculate_gender_adjustment(client_gender: str, watchlist_genders: List[str]
         return float(conflict_malus), f"Genre contradictoire (Client: {cg} vs Fiche: {wgs})"
 
 
+def collect_name_equivalences(left: str, right: str) -> List[Dict[str, str]]:
+    """
+    Equivalences linguistiques ayant rapproche deux noms.
+
+    Inscrite au decision_tree : un analyste doit pouvoir lire POURQUOI deux
+    noms dissemblables ont matche. Sans cette trace, « Harry Dupont » alerte
+    sur « Henri DUPONT » a 100 sans aucune explication lisible — inacceptable
+    en revue comme en contrôle.
+    """
+    from fiskr import resources
+
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for field in (resources.FIELD_GIVEN_NAME, resources.FIELD_SURNAME):
+        for eq in resources.equivalences_for(left, right, field):
+            key = (eq["field"], eq["source"], eq["target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({**eq, "field_label": resources.FIELD_LABELS.get(eq["field"], eq["field"])})
+    return out
+
+
+def _country_key(value: str) -> str:
+    """
+    Cle de comparaison d'un pays.
+
+    Quand le type `country` est active dans les ressources, « Allemagne »,
+    « Germany », « Deutschland » et « DE » se ramenent a une meme classe et se
+    rejoignent donc. Sinon on retourne la valeur brute en majuscules :
+    comportement d'origine, a la lettre pres.
+    """
+    from fiskr import resources
+
+    raw = str(value).upper().strip()
+    ctx = resources.current_context()
+    if ctx["index"] is None or resources.FIELD_COUNTRY not in ctx["fields"]:
+        return raw
+    return ctx["index"].canonical(raw, resources.FIELD_COUNTRY) or raw
+
+
 def calculate_geography_adjustment(client_countries: List[str], watchlist_countries: List[str], config: dict) -> Tuple[float, str]:
     rules = config.get("scoring", {}).get("contextual_rules", {})
     match_bonus = rules.get("geography_match_bonus", 10)
     no_match_malus = rules.get("geography_no_match_malus", -10)
-    
-    cc = set(c.upper().strip() for c in (client_countries or []) if c and c.strip())
-    wc = set(c.upper().strip() for c in (watchlist_countries or []) if c and c.strip())
-    
+
+    # cle de comparaison -> libelle d'origine, pour que la description reste
+    # lisible par un analyste (on lui montre ce qui est ecrit dans les fiches,
+    # pas l'identifiant interne de la classe d'equivalence)
+    cc: Dict[str, str] = {}
+    for c in (client_countries or []):
+        if c and str(c).strip():
+            cc.setdefault(_country_key(c), str(c).upper().strip())
+    wc: Dict[str, str] = {}
+    for c in (watchlist_countries or []):
+        if c and str(c).strip():
+            wc.setdefault(_country_key(c), str(c).upper().strip())
+
     if not cc or not wc:
         return float(no_match_malus), "Aucun point de contact géographique (pays manquant)"
-        
-    intersection = cc.intersection(wc)
+
+    intersection = set(cc).intersection(set(wc))
     if intersection:
-        return float(match_bonus), f"Correspondance géographique trouvée ({', '.join(intersection)})"
+        labels = []
+        for key in sorted(intersection):
+            left, right = cc[key], wc[key]
+            labels.append(left if left == right else f"{left} ≡ {right}")
+        return float(match_bonus), f"Correspondance géographique trouvée ({', '.join(labels)})"
     else:
         return float(no_match_malus), "Aucun point de contact géographique"
 
@@ -551,8 +654,10 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     
     cut_off = resolve_cut_off(config, watchlist_entry)
     status = "ALERT" if final_score >= cut_off else "NO_MATCH"
-    
-    return {
+
+    equivalences = collect_name_equivalences(best_c_name, best_w_name)
+
+    result = {
         "status": status,
         "base_score": round(best_base_score, 2),
         "final_score": round(final_score, 2),
@@ -575,3 +680,8 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
         "hard_match_triggered": False,
         "cut_off_applied": cut_off
     }
+    # Cle absente quand aucune equivalence n'a joue : le decision_tree des
+    # criblages existants garde exactement sa forme actuelle
+    if equivalences:
+        result["resource_equivalences"] = equivalences
+    return result

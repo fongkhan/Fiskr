@@ -1,0 +1,119 @@
+# Fiskr — ressource linguistique : équivalences de PAYS
+#
+# Un référentiel clients porte souvent le nom du pays en clair ou en français
+# (« Allemagne »), là où les listes officielles portent un code ISO (« DE »)
+# ou le nom anglais (« Germany »). Sans cette table, l'ajustement géographique
+# du scoring conclut à une divergence de pays et abaisse le score — ou pire,
+# le blocking par pays place les deux fiches dans des seaux différents.
+#
+# Chaque groupe rassemble : code ISO 3166-1 alpha-2, alpha-3, nom courant
+# anglais et français, nom officiel et exonymes fréquents.
+type: country
+label: "Pays — codes ISO, noms courants, exonymes"
+source: "ISO 3166-1 + exonymes usuels FR/EN/DE/ES."
+
+groups:
+  - id: FR
+    terms: [FR, FRA, France, Frankreich, Francia, French Republic, Republique francaise]
+  - id: DE
+    terms: [DE, DEU, Germany, Allemagne, Deutschland, Alemania, Germania, Federal Republic of Germany]
+  - id: RU
+    terms: [RU, RUS, Russia, Russie, Russland, Rusia, Russian Federation, Federation de Russie, Rossiya, Rossiyskaya Federatsiya]
+  - id: CN
+    terms: [CN, CHN, China, Chine, Volksrepublik China, Zhongguo, People's Republic of China, Republique populaire de Chine]
+  - id: US
+    terms: [US, USA, United States, United States of America, Etats-Unis, Etats Unis, Vereinigte Staaten, Estados Unidos, Amerique]
+  - id: GB
+    terms: [GB, GBR, UK, United Kingdom, Royaume-Uni, Royaume Uni, Great Britain, Grande-Bretagne, Grossbritannien, Reino Unido, Angleterre, England]
+  - id: IR
+    terms: [IR, IRN, Iran, Islamic Republic of Iran, Republique islamique d'Iran, Perse, Persia]
+  - id: SY
+    terms: [SY, SYR, Syria, Syrie, Syrien, Siria, Syrian Arab Republic, Republique arabe syrienne]
+  - id: KP
+    terms: [KP, PRK, North Korea, Coree du Nord, Nordkorea, DPRK, Democratic People's Republic of Korea, Corea del Norte]
+  - id: KR
+    terms: [KR, KOR, South Korea, Coree du Sud, Sudkorea, Republic of Korea, Republique de Coree]
+  - id: IQ
+    terms: [IQ, IRQ, Iraq, Irak, Republic of Iraq]
+  - id: LY
+    terms: [LY, LBY, Libya, Libye, Libyen, Libia, State of Libya]
+  - id: BY
+    terms: [BY, BLR, Belarus, Bielorussie, Belarus, Weissrussland, Byelorussia]
+  - id: UA
+    terms: [UA, UKR, Ukraine, Ucrania, Ukraina]
+  - id: VE
+    terms: [VE, VEN, Venezuela, Bolivarian Republic of Venezuela]
+  - id: CU
+    terms: [CU, CUB, Cuba, Republic of Cuba]
+  - id: MM
+    terms: [MM, MMR, Myanmar, Birmanie, Burma, Birmania]
+  - id: AF
+    terms: [AF, AFG, Afghanistan, Afghanistan, Islamic Emirate of Afghanistan]
+  - id: SD
+    terms: [SD, SDN, Sudan, Soudan, Republic of the Sudan]
+  - id: SS
+    terms: [SS, SSD, South Sudan, Soudan du Sud]
+  - id: SO
+    terms: [SO, SOM, Somalia, Somalie, Federal Republic of Somalia]
+  - id: YE
+    terms: [YE, YEM, Yemen, Yemen, Republic of Yemen]
+  - id: LB
+    terms: [LB, LBN, Lebanon, Liban, Libanon, Libano]
+  - id: TR
+    terms: [TR, TUR, Turkey, Turquie, Turkei, Turkiye, Turquia]
+  - id: EG
+    terms: [EG, EGY, Egypt, Egypte, Agypten, Egipto, Arab Republic of Egypt]
+  - id: SA
+    terms: [SA, SAU, Saudi Arabia, Arabie saoudite, Saudi-Arabien, Arabia Saudita, Kingdom of Saudi Arabia]
+  - id: AE
+    terms: [AE, ARE, United Arab Emirates, Emirats arabes unis, UAE, Vereinigte Arabische Emirate]
+  - id: CH
+    terms: [CH, CHE, Switzerland, Suisse, Schweiz, Svizzera, Suiza, Swiss Confederation]
+  - id: BE
+    terms: [BE, BEL, Belgium, Belgique, Belgien, Belgica]
+  - id: IT
+    terms: [IT, ITA, Italy, Italie, Italien, Italia]
+  - id: ES
+    terms: [ES, ESP, Spain, Espagne, Spanien, Espana]
+  - id: NL
+    terms: [NL, NLD, Netherlands, Pays-Bas, Niederlande, Paises Bajos, Holland, Hollande]
+  - id: LU
+    terms: [LU, LUX, Luxembourg, Luxemburg, Luxemburgo]
+  - id: PL
+    terms: [PL, POL, Poland, Pologne, Polen, Polonia, Polska]
+  - id: PT
+    terms: [PT, PRT, Portugal, Portugal]
+  - id: MA
+    terms: [MA, MAR, Morocco, Maroc, Marokko, Marruecos, Kingdom of Morocco]
+  - id: DZ
+    terms: [DZ, DZA, Algeria, Algerie, Algerien, Argelia]
+  - id: TN
+    terms: [TN, TUN, Tunisia, Tunisie, Tunesien, Tunez]
+  - id: NG
+    terms: [NG, NGA, Nigeria, Nigeria, Federal Republic of Nigeria]
+  - id: ZA
+    terms: [ZA, ZAF, South Africa, Afrique du Sud, Sudafrika, Sudafrica]
+  - id: IN
+    terms: [IN, IND, India, Inde, Indien, Bharat]
+  - id: PK
+    terms: [PK, PAK, Pakistan, Islamic Republic of Pakistan]
+  - id: JP
+    terms: [JP, JPN, Japan, Japon, Nippon, Nihon]
+  - id: BR
+    terms: [BR, BRA, Brazil, Bresil, Brasilien, Brasil]
+  - id: MX
+    terms: [MX, MEX, Mexico, Mexique, Mexiko, Estados Unidos Mexicanos]
+  - id: PA
+    terms: [PA, PAN, Panama, Republic of Panama]
+  - id: KY
+    terms: [KY, CYM, Cayman Islands, Iles Caimans, Caimanes]
+  - id: VG
+    terms: [VG, VGB, British Virgin Islands, Iles Vierges britanniques]
+  - id: HK
+    terms: [HK, HKG, Hong Kong, Hongkong]
+  - id: SG
+    terms: [SG, SGP, Singapore, Singapour, Singapur]
+  - id: CY
+    terms: [CY, CYP, Cyprus, Chypre, Zypern, Chipre]
+  - id: MT
+    terms: [MT, MLT, Malta, Malte]

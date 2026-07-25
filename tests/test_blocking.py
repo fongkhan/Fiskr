@@ -2,6 +2,18 @@ import pytest
 from fiskr.blocking import generate_blocking_keys
 from fiskr.phonetics import double_metaphone
 
+
+def phonetic_keys(keys):
+    """
+    Cles issues des seules composantes du layout, hors equivalences.
+
+    Les ressources linguistiques ajoutent des cles `EQ<classe>` en plus des
+    cles phonetiques (elles n'en retirent jamais aucune). Ces tests portent sur
+    le produit cartesien du layout : ils comptent donc les cles phonetiques,
+    et restent vrais que les ressources soient actives ou non.
+    """
+    return {k for k in keys if "_EQ" not in f"_{k}"}
+
 def test_double_metaphone():
     # Test phonetic matching basics
     p1, s1 = double_metaphone("Müller")
@@ -36,7 +48,7 @@ def test_blocking_key_generation_watchlist():
     # Expected: FR_PP_JN, DE_PP_JN, FR_PP_AN, DE_PP_AN
     assert "FR_PP_JN" in keys
     assert "DE_PP_JN" in keys
-    assert len(keys) == 4
+    assert len(phonetic_keys(keys)) == 4
 
 def test_blocking_key_generation_client():
     # Test generating standard blocking key for Client entity
@@ -61,7 +73,7 @@ def test_blocking_key_generation_client():
     # Expected combinations with PP, FR/DE and JN/AN/MLR phonetics
     assert "FR_PP_JN" in keys
     assert "DE_PP_JN" in keys
-    assert len(keys) == 6
+    assert len(phonetic_keys(keys)) == 6
 
 def test_blocking_key_fallback():
     config = {
@@ -79,4 +91,4 @@ def test_blocking_key_fallback():
     
     keys = generate_blocking_keys(entity, config)
     assert "XX_PP_MLR" in keys
-    assert len(keys) == 1
+    assert len(phonetic_keys(keys)) == 1

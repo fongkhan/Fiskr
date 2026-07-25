@@ -2,6 +2,52 @@ import re
 from typing import Set, List
 from fiskr.phonetics import double_metaphone
 
+
+def _country_equivalence_values(countries: List[str]) -> Set[str]:
+    """
+    Classes d'equivalence des pays, a AJOUTER aux valeurs brutes.
+
+    Sans elles, un client dont la nationalite est saisie « Allemagne » et une
+    fiche listee portant « DE » ne partagent aucune cle : ils ne sont jamais
+    candidats, et la canonicalisation des pays au scoring ne sert a rien.
+    """
+    from fiskr import resources
+
+    ctx = resources.current_context()
+    if ctx["index"] is None or resources.FIELD_COUNTRY not in ctx["fields"]:
+        return set()
+    values = set()
+    for country in countries:
+        cls = ctx["index"].canonical(country, resources.FIELD_COUNTRY)
+        if cls:
+            values.add(cls)
+    return values
+
+
+def _equivalence_keys(word: str) -> Set[str]:
+    """
+    Cles de blocking issues des equivalences linguistiques declarees.
+
+    Retourne un ensemble VIDE tant qu'aucun type de champ n'est active : le
+    blocking retrouve alors exactement son comportement d'origine, cle pour
+    cle. Le prefixe « EQ » evite toute collision avec une cle metaphone.
+    """
+    if not word:
+        return set()
+    from fiskr import resources
+
+    ctx = resources.current_context()
+    if ctx["index"] is None or not ctx["fields"]:
+        return set()
+    keys: Set[str] = set()
+    for field in (resources.FIELD_GIVEN_NAME, resources.FIELD_SURNAME):
+        if field in ctx["fields"]:
+            cls = ctx["index"].canonical(word, field)
+            if cls:
+                keys.add(f"EQ{cls}")
+    return keys
+
+
 def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
     """
     Generates a set of blocking keys for an entity based on the configured layout.
@@ -37,7 +83,10 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
             if not all_countries:
                 components_values[item] = ["XX"]
             else:
-                components_values[item] = all_countries
+                # Les classes d'equivalence viennent EN PLUS des valeurs
+                # brutes : aucune paire aujourd'hui candidate ne cesse de l'etre
+                components_values[item] = sorted(
+                    set(all_countries) | _country_equivalence_values(all_countries))
                 
         elif item == "ENTITY_TYPE":
             if is_client:
@@ -123,6 +172,14 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                         phonetics.add(p_key)
                     if s_key:
                         phonetics.add(s_key)
+                    # Equivalences linguistiques : sans cette cle, « Henri » et
+                    # « Harry » n'atterrissent jamais dans le meme seau et ne
+                    # sont donc JAMAIS compares — la table de ressources serait
+                    # sans effet. La cle est ADDITIVE : les cles phonetiques
+                    # ci-dessus restent produites, aucune paire aujourd'hui
+                    # candidate ne cesse de l'etre.
+                    for eq_key in _equivalence_keys(first_word):
+                        phonetics.add(eq_key)
                         
             if not phonetics:
                 components_values[item] = ["XX"]

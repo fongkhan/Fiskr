@@ -1,0 +1,104 @@
+# Fiskr — ressource linguistique : équivalences de NOMS DE FAMILLE
+#
+# Principalement des romanisations concurrentes : un même nom chinois, russe
+# ou arabe est écrit différemment selon la source (pinyin, Wade-Giles,
+# cantonais, translittération française ou anglaise). Aucune métrique de
+# chaîne ne rapproche « Zhang » de « Chang » ni « Ng » de « Wu ».
+type: surname
+label: "Noms de famille — romanisations concurrentes et variantes"
+source: "Fiskr, jeu de départ (romanisations usuelles). À compléter selon le portefeuille."
+
+groups:
+  # ---------- Romanisations chinoises (pinyin / Wade-Giles / cantonais) ----------
+  - id: LI
+    terms: [Li, Lee, Ly, Lei]
+  # « Wong » et « Ng » sont des romanisations cantonaises AMBIGUËS : Wong
+  # transcrit aussi bien 王 (Wang) que 黃 (Huang), Ng aussi bien 黃 que 吳 (Wu).
+  # Les rattacher à deux classes rendrait le criblage non déterministe (le
+  # détecteur de collisions du chargeur le refuse). Arbitrage retenu :
+  # Wong → WANG et Ng → WU, leurs lectures les plus fréquentes. Conséquence
+  # assumée : un Huang écrit « Wong » ne sera pas rapproché par cette table —
+  # les métriques de chaîne et le phonétique restent seuls sur ce cas.
+  - id: WANG
+    terms: [Wang, Wong, Vang, Ong]
+  - id: ZHANG
+    terms: [Zhang, Chang, Cheung, Teoh]
+  - id: LIU
+    terms: [Liu, Lau, Lieu, Low]
+  - id: CHEN
+    terms: [Chen, Chan, Chin, Tan, Tran]
+  - id: YANG
+    terms: [Yang, Yeung, Yeong]
+  # Wong et Ng retirés d'ici : voir l'arbitrage d'ambiguïté déclaré plus haut
+  - id: HUANG
+    terms: [Huang, Hwang, Hoang]
+  - id: ZHAO
+    terms: [Zhao, Chao, Chiu, Chew]
+  - id: WU
+    terms: [Wu, Ng, Woo, Ngo]
+  - id: XU
+    terms: [Xu, Hsu, Tsui, Chui]
+  - id: SUN
+    terms: [Sun, Suen, Soon]
+  - id: ZHOU
+    terms: [Zhou, Chou, Chow, Jou]
+  - id: XIE
+    terms: [Xie, Hsieh, Tse, Sia]
+  - id: HE
+    terms: [He, Ho, Hoh]
+  - id: GUO
+    terms: [Guo, Kuo, Kwok, Kok]
+  - id: LIN
+    terms: [Lin, Lam, Lim, Him]
+  - id: ZHENG
+    terms: [Zheng, Cheng, Chung, Tay]
+
+  # ---------- Romanisations russes / slaves ----------
+  - id: IVANOV
+    terms: [Ivanov, Ivanoff, Iwanow, Ivanova]
+  - id: PETROV
+    terms: [Petrov, Petroff, Petrow, Petrova]
+  - id: SMIRNOV
+    terms: [Smirnov, Smirnoff, Smirnow, Smirnova]
+  - id: KUZNETSOV
+    terms: [Kuznetsov, Kouznetsov, Kuznetzov, Kuznetsova]
+  - id: SOKOLOV
+    terms: [Sokolov, Sokoloff, Sokolow, Sokolova]
+  - id: POPOV
+    terms: [Popov, Popoff, Popow, Popova]
+  - id: VOLKOV
+    terms: [Volkov, Wolkow, Volkoff, Volkova]
+  - id: MIKHAILOV
+    terms: [Mikhailov, Michailow, Mihailov, Mikhaylov]
+  - id: KHODORKOVSKY
+    terms: [Khodorkovsky, Khodorkovskiy, Chodorkowski, Hodorkovski]
+  - id: TCHAIKOVSKY
+    terms: [Tchaikovsky, Chaikovsky, Tschaikowski, Czajkowski]
+
+  # ---------- Romanisations arabes ----------
+  - id: ALASSAD
+    terms: [Al Assad, Al-Assad, Assad, Al Asad, El Assad]
+  - id: ALSAID
+    terms: [Al Said, Al-Said, El Said, Alsaid]
+  - id: BINLADEN
+    terms: [Bin Laden, Bin Ladin, Ben Laden, Binladen]
+  - id: ELSHEIKH
+    terms: [El Sheikh, Al Sheikh, Alshaikh, El Cheikh, Al-Shaykh]
+  - id: HADDAD
+    terms: [Haddad, Hadad, El Haddad, Al Haddad]
+  - id: NASSER
+    terms: [Nasser, Nasir, Naser, Nassir]
+
+  # ---------- Variantes européennes fréquentes ----------
+  - id: MUELLER
+    terms: [Muller, Mueller, Moller, Moeller]
+  - id: SCHMIDT
+    terms: [Schmidt, Schmitt, Schmit, Smit, Smith, Schmied]
+  - id: DUPONT
+    terms: [Dupont, Du Pont, Dupond]
+  - id: JANSSEN
+    terms: [Janssen, Jansen, Janssens, Hansen, Hanssen]
+  - id: KOWALSKI
+    terms: [Kowalski, Kowalsky, Kovalski, Kovalsky]
+  - id: NOVAK
+    terms: [Novak, Novac, Nowak, Novack]
