@@ -76,12 +76,22 @@ def update(token: Optional[str], *, phase: str, processed: int = 0,
                 entry[field] = value
 
 
-def _snapshot_entry(token: str, entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Vue publique d'une entree (pourcentage calcule, cles internes retirees)."""
+def _snapshot_entry(token: str, entry: Dict[str, Any],
+                    include_result: bool = False) -> Dict[str, Any]:
+    """
+    Vue publique d'une entree (pourcentage calcule, cles internes retirees).
+
+    `include_result` n'est vrai que sur l'interrogation par JETON : le
+    resultat d'une mesure contient des noms de clients et de fiches listees,
+    il n'a rien a faire dans la liste globale des operations en cours, que le
+    tableau de bord de CHAQUE utilisateur interroge en boucle.
+    """
     total = entry.get("total")
     processed = entry.get("processed", 0)
     pct = round(100.0 * processed / total, 1) if total and processed <= total else None
+    payload = {"result": entry.get("result")} if include_result else {}
     return {
+        **payload,
         "token": token,
         "kind": entry.get("kind"),
         "label": entry.get("label"),
@@ -105,7 +115,7 @@ def get(token: str) -> Optional[Dict[str, Any]]:
         entry = _registry.get(token)
         if entry is None:
             return None
-        state = _snapshot_entry(token, entry)
+        state = _snapshot_entry(token, entry, include_result=True)
     state.pop("token", None)  # contrat historique de GET /api/progress?id=
     return state
 
@@ -127,8 +137,15 @@ def list_active(finished_window: int = _FINISHED_WINDOW_SECONDS) -> List[Dict[st
     return items
 
 
-def finish(token: Optional[str], status: str = "DONE", error: Optional[str] = None) -> None:
-    """Marque l'operation terminee (l'entree reste lisible jusqu'au TTL)."""
+def finish(token: Optional[str], status: str = "DONE", error: Optional[str] = None,
+           result: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Marque l'operation terminee (l'entree reste lisible jusqu'au TTL).
+
+    `result` porte le rendu d'une operation qui n'ecrit rien en base — une
+    mesure a blanc n'a pas d'objet ou s'accrocher. Il expire avec l'entree :
+    c'est un tampon de restitution, pas un stockage.
+    """
     if not token:
         return
     with _lock:
@@ -136,6 +153,8 @@ def finish(token: Optional[str], status: str = "DONE", error: Optional[str] = No
         if entry is not None:
             entry.update({"phase": "DONE" if status == "DONE" else entry.get("phase"),
                           "status": status, "error": error, "_touched": time.time()})
+            if result is not None:
+                entry["result"] = result
 
 
 def clear() -> None:

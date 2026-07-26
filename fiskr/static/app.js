@@ -728,6 +728,7 @@ function switchSubTab(sectionId, subTabId) {
         fetchBlockingSettings();
         fetchResources();
         fetchLearnedEquivalences();
+        loadSimulationPanels();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
     } else if (subTabId === "screening-batch") {
@@ -5178,6 +5179,119 @@ async function lookupResource() {
         console.error("Error looking up resource:", e);
         box.innerHTML = '<small style="color: var(--color-alert);">Erreur réseau de communication.</small>';
     }
+}
+
+// ------------------ MESURE D'IMPACT DES ÉQUIVALENCES ------------------
+
+async function loadSimulationPanels() {
+    const select = document.getElementById("resources-sim-panel");
+    if (!select) return;
+    try {
+        const response = await apiFetch("/api/testpanels");
+        if (!response.ok) return;
+        const data = await response.json();
+        const panels = data.items || data.panels || [];
+        select.innerHTML = panels.length
+            ? panels.map(p => `<option value="${escapeHtml(p.snapshot_id)}">${escapeHtml(p.file_name || p.snapshot_id)} — ${p.record_count} pseudo-clients</option>`).join("")
+            : '<option value="">Aucun panel — générez-en un depuis Homologation</option>';
+    } catch (e) {
+        console.error("Error loading panels:", e);
+    }
+}
+
+function renderImpactReport(containerId, report) {
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    if (!report) { box.innerHTML = ""; return; }
+    const sign = report.delta > 0 ? "+" : "";
+    const color = report.delta > 0 ? "var(--color-warning)" : "var(--text-muted)";
+    const rows = Object.entries(report.by_list || {}).map(([list, b]) =>
+        `<tr><td>${escapeHtml(listTypeLabel ? listTypeLabel(list) : list)}</td><td>${b.before}</td><td>${b.after}</td><td><strong>${b.delta > 0 ? "+" : ""}${b.delta}</strong></td></tr>`
+    ).join("");
+    const gained = (report.gained_examples || []).map(g => {
+        const eq = (g.equivalences || []).map(e => `${escapeHtml(e.source)} ≡ ${escapeHtml(e.target)}`).join(", ");
+        return `<li><strong>${escapeHtml(g.client_name)}</strong> × ${escapeHtml(g.entity_name)} — score ${g.score}${eq ? ` <small style="color: var(--text-muted);">(${eq})</small>` : ""}</li>`;
+    }).join("");
+    const lost = (report.lost_examples || []).map(l =>
+        `<li><strong>${escapeHtml(l.client_name)}</strong> × ${escapeHtml(l.entity_name)} — score ${l.score}</li>`
+    ).join("");
+    box.innerHTML = `
+        <div style="border-left: 3px solid ${color}; padding: 0.75rem 1rem; background: var(--surface-2);">
+            <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center;">
+                <div><strong style="font-size: 1.25rem;">${report.alerts_before} → ${report.alerts_after}</strong>
+                     <small style="color: var(--text-muted);">alertes</small></div>
+                <div><strong style="font-size: 1.25rem; color: ${color};">${sign}${report.delta}</strong>
+                     ${report.delta_pct !== null && report.delta_pct !== undefined ? `<small style="color: var(--text-muted);">(${sign}${report.delta_pct} %)</small>` : ""}</div>
+                <div><small style="color: var(--text-muted);">Interception :</small> ${report.interception_before_pct} % → ${report.interception_after_pct} %</div>
+                <div><small style="color: var(--text-muted);">${report.panel_size} pseudo-clients × ${report.universe_size} fiches</small></div>
+            </div>
+            ${rows ? `<table style="margin-top: 0.75rem; font-size: 0.85rem;">
+                <thead><tr><th>Liste</th><th>Avant</th><th>Après</th><th>Écart</th></tr></thead>
+                <tbody>${rows}</tbody></table>` : ""}
+            ${gained ? `<div style="margin-top: 0.75rem;"><strong style="font-size: 0.85rem;">Alertes gagnées (${report.gained_count})</strong>
+                <ul style="font-size: 0.85rem; margin: 0.35rem 0 0 1rem;">${gained}</ul></div>` : ""}
+            ${lost ? `<div style="margin-top: 0.75rem;"><strong style="font-size: 0.85rem; color: var(--color-alert);">Alertes perdues (${report.lost_count})</strong>
+                <ul style="font-size: 0.85rem; margin: 0.35rem 0 0 1rem;">${lost}</ul></div>` : ""}
+            <small style="display: block; margin-top: 0.75rem; color: var(--text-muted);">${escapeHtml(report.caveat || "")}</small>
+        </div>`;
+}
+
+async function launchImpactSimulation(payload, containerId, buttonId) {
+    const button = document.getElementById(buttonId);
+    const box = document.getElementById(containerId);
+    if (box) box.innerHTML = '<small style="color: var(--text-muted);">Mesure en cours…</small>';
+    if (button) button.disabled = true;
+    try {
+        const response = await apiFetch("/api/resources/simulate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "échec."), "error");
+            if (box) box.innerHTML = "";
+            if (button) button.disabled = false;
+            return;
+        }
+        onOperationDone(data.job_token, async () => {
+            if (button) button.disabled = false;
+            const state = await apiFetch(`/api/progress?id=${data.job_token}`, { silent: true });
+            if (!state.ok) return;
+            const payloadState = await state.json();
+            if (payloadState.status === "ERROR") {
+                if (box) box.innerHTML = `<small style="color: var(--color-alert);">${escapeHtml(payloadState.error || "Mesure en échec.")}</small>`;
+                return;
+            }
+            renderImpactReport(containerId, payloadState.result);
+        });
+    } catch (e) {
+        console.error("Error launching impact simulation:", e);
+        showToast("Erreur réseau de communication.", "error");
+        if (button) button.disabled = false;
+        if (box) box.innerHTML = "";
+    }
+}
+
+function simulateResourceImpact() {
+    const panel = (document.getElementById("resources-sim-panel") || {}).value;
+    if (!panel) { showToast("Aucun panel de test disponible.", "warning"); return; }
+    // Le candidat est l'état des cases telles qu'elles sont cochées maintenant,
+    // même non enregistrées : on mesure avant d'activer, c'est tout l'objet.
+    const candidate = Object.keys(resourceFieldsDraft).filter(f => resourceFieldsDraft[f]);
+    launchImpactSimulation({ panel_snapshot_id: panel, candidate_fields: candidate },
+                           "resources-sim-result", "resources-sim-btn");
+}
+
+function simulatePendingImpact() {
+    const panel = (document.getElementById("resources-sim-panel") || {}).value;
+    if (!panel) { showToast("Aucun panel de test disponible.", "warning"); return; }
+    const pending = ((miningState || {}).items || [])
+        .filter(i => i.status === "PROPOSED").map(i => i.id);
+    if (!pending.length) { showToast("Aucune proposition à mesurer.", "warning"); return; }
+    // Même paramétrage des deux côtés : seul l'ajout des propositions varie,
+    // l'écart mesuré est donc bien le leur et rien d'autre
+    launchImpactSimulation({ panel_snapshot_id: panel, include_pending_ids: pending },
+                           "mining-sim-result", "mining-sim-btn");
 }
 
 // ------------------ FOUILLE D'HOMONYMES ------------------

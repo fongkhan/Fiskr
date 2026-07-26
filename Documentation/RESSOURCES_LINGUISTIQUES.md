@@ -131,9 +131,15 @@ recherché, mais il se mesure avant la production.
   de criblage (sans quoi seule la sonde du client porterait les clés
   d'équivalence, et les deux côtés ne se rencontreraient jamais).
 - **Mesurez avant de produire** : activer les ressources est un changement de
-  paramétrage de criblage au même titre qu'un seuil. Passez-le au **cahier de
-  tests** (`fiskr/backtest.py`), qui chiffre l'écart de taux d'interception
-  avant/après.
+  paramétrage de criblage au même titre qu'un seuil. `POST /api/resources/simulate`
+  (bouton *Mesurer avant d'activer*) crible **deux fois le même panel contre les
+  mêmes listes** — une passe sous le paramétrage en vigueur, une sous le
+  paramétrage candidat — et chiffre l'écart. Voir « Mesurer l'impact » plus bas.
+
+  À ne pas confondre avec le **cahier de tests** (`fiskr/backtest.py`), qui
+  compare deux univers de **listes** sous un paramétrage constant : il répond à
+  « que change ce nouveau snapshot ? », pas à « que change ce nouveau
+  paramétrage ? ».
 
 ## API
 
@@ -236,6 +242,8 @@ automatique réunirait des univers que quelqu'un a délibérément séparés
 - **Planification** : `resources.mining` — activation, cron (3 h 15 par défaut,
   après les synchronisations nocturnes donc sur des listes fraîches),
   occurrences et similarité minimales, seuil d'auto-application, sources.
+- **Mesure préalable** : `POST /api/resources/simulate` avec
+  `include_pending_ids` chiffre l'effet des propositions **sans les approuver**.
 - **Auto-application** : `auto_approve_confidence`. À `0`, la fouille se
   contente de proposer et toute découverte passe par une décision humaine. Le
   défaut (`0.85`) applique les découvertes très sûres — mais **une équivalence
@@ -275,3 +283,79 @@ prénom, dernier = nom). Sur un nom en ordre asiatique (« Zhang Wei »), cette
 déduction est inversée. Sans conséquence pratique : au blocking comme au
 scoring, les tables prénom et nom sont interrogées toutes les deux sur chaque
 mot — le classement ne sert qu'à la lisibilité et à la gouvernance.
+
+---
+
+# Mesurer l'impact avant d'activer
+
+## Le trou que ce dispositif comble
+
+Les deux sections précédentes répètent qu'une table d'équivalences **élargit
+mécaniquement le périmètre des alertes** et qu'il faut donc le chiffrer avant
+la production. Encore faut-il en avoir le moyen — et ni le cahier de tests ni
+le simulateur de seuils ne savaient le faire :
+
+| Outil | Ce qu'il compare | Pourquoi il ne répond pas |
+|---|---|---|
+| **Cahier de tests** (`fiskr/backtest.py`) | Deux univers de **listes** : production actuelle contre snapshot candidat | Le paramétrage de scoring est **identique des deux côtés** — il ne varie pas |
+| **Simulateur de seuils** (`/api/settings/scoring/simulate`) | Des `final_score` **déjà stockés** contre des seuils candidats | Les équivalences changent les scores eux-mêmes *et* l'ensemble des candidats retenus au blocking : rejouer un score figé n'a aucun sens |
+
+`POST /api/resources/simulate` fait ce qu'aucun des deux ne fait : **même
+panel, même univers de listes, deux passes de criblage à blanc sous deux
+paramétrages d'équivalences différents.**
+
+## Ce qu'on mesure
+
+```
+POST /api/resources/simulate
+{
+  "panel_snapshot_id": "…",          # base clients réelle ou panel généré
+  "candidate_fields": ["given_name", "surname"],
+  "baseline_fields": null,            # null = le paramétrage en vigueur
+  "include_pending_ids": [12, 17]     # équivalences découvertes, non approuvées
+}
+```
+
+Répond **202** avec un jeton ; le rapport se lit sur
+`GET /api/progress?id=<jeton>`, dans le champ `result` :
+
+- alertes avant / après, écart absolu et en pourcentage ;
+- **taux d'interception** des deux côtés (part du panel qui déclenche) ;
+- ventilation **par liste** ;
+- les **paires gagnées**, chacune avec l'équivalence qui l'a produite — c'est
+  ce qui permet de juger la qualité du gain, pas seulement son volume ;
+- les **paires perdues**. Elles devraient être nulles (les clés de blocking
+  sont additives et la règle du croisement ne touche pas les paires sans
+  classe commune), mais c'est **mesuré, pas supposé**.
+
+`baseline_fields` à `null` compare au paramétrage **en vigueur** : la question
+posée est « qu'est-ce que mon changement ajoute à ce que je fais déjà ? », pas
+« qu'est-ce que les ressources ajoutent au néant ».
+
+`include_pending_ids` répond à « que se passerait-il si j'approuvais ces
+propositions ? » — **sans rien approuver** : l'index candidat est construit à
+part, les lignes concernées restent `PROPOSED`.
+
+## Ce que la mesure ne dit pas
+
+Elle donne le **volume** d'alertes gagnées, pas leur **qualité** : savoir
+combien d'entre elles sont des faux positifs suppose une vérité terrain
+qu'aucune simulation ne possède. Le chiffre à lire est « voilà combien
+d'alertes en plus vos analystes traiteront » ; les exemples nommés servent à en
+juger à la main. Ce constat est inscrit dans le rapport lui-même, pas relégué
+en note de bas de page.
+
+## Isolation
+
+Les deux passes tournent sous une **surcharge de contexte limitée au thread
+courant** (`resources.use_context`). La mesure s'exécute en tâche de fond
+pendant que l'API sert des criblages réels sur d'autres threads : une
+surcharge globale aurait fait sortir des décisions de production sous un
+paramétrage que personne n'a demandé — et les aurait inscrites au journal
+d'audit immuable. Aucune écriture non plus : ni alerte, ni ligne d'audit, ni
+modification du réglage.
+
+Le rapport contient des noms de clients et de fiches listées. Il n'est donc
+**jamais** exposé par `GET /api/progress/active`, que le tableau de bord de
+chaque utilisateur interroge en boucle : il ne sort que sur le jeton nominatif
+de l'opération.

@@ -5276,6 +5276,78 @@ async def lookup_resource(
         "found": bool(results),
     }
 
+class ResourceSimulateRequest(BaseModel):
+    panel_snapshot_id: str
+    # Types de champ du parametrage candidat. Absent = les types actuellement
+    # actifs (utile pour mesurer le seul effet d'equivalences en attente).
+    candidate_fields: Optional[List[str]] = None
+    # Reference de comparaison. Absent = le parametrage en vigueur : la question
+    # posee est « qu'est-ce que mon changement ajoute a ce que je fais deja ? »
+    baseline_fields: Optional[List[str]] = None
+    # Equivalences decouvertes non encore approuvees a inclure cote candidat
+    include_pending_ids: Optional[List[int]] = None
+
+@app.post("/api/resources/simulate")
+async def simulate_resource_impact_endpoint(
+    payload: ResourceSimulateRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Mesure l'impact d'un changement d'equivalences AVANT de l'appliquer.
+
+    Deux passes de criblage a blanc du meme panel contre le meme univers de
+    listes, sous deux parametrages differents. Aucune ecriture : ni alerte, ni
+    ligne d'audit, ni modification du reglage. Asynchrone — un panel reel se
+    crible en minutes, pas dans le cycle d'une requete HTTP.
+    """
+    from fiskr import resource_impact
+
+    def _check(values, label):
+        unknown = [f for f in (values or []) if f not in resource_tables.FIELD_TYPES]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"{label} : type de champ inconnu ({', '.join(unknown)}).")
+
+    _check(payload.candidate_fields, "Paramétrage candidat")
+    _check(payload.baseline_fields, "Référence")
+    panel = db.query(Snapshot).filter(
+        Snapshot.snapshot_id == payload.panel_snapshot_id).first()
+    if not panel:
+        raise HTTPException(status_code=404, detail="Panel introuvable.")
+    if panel.file_type not in PANEL_FILE_TYPES:
+        raise HTTPException(status_code=400,
+                            detail="Le panel doit être une base clients ou un panel de test.")
+
+    candidate = (set(payload.candidate_fields) if payload.candidate_fields is not None
+                 else {f for f, on in resource_fields(db).items() if on})
+    baseline = set(payload.baseline_fields) if payload.baseline_fields is not None else None
+    pending = list(payload.include_pending_ids or [])
+
+    def _job(job_token: str):
+        session = next(get_db())
+        try:
+            report = resource_impact.simulate_resource_impact(
+                session, payload.panel_snapshot_id, candidate,
+                baseline_fields=baseline, include_pending_ids=pending,
+                progress=lambda phase, done, total: progress_registry.update(
+                    job_token, phase=phase, kind="resource_simulation",
+                    label="Impact des équivalences", started_by=admin_user["username"],
+                    processed=done, total=total),
+            )
+            progress_registry.update(job_token, phase="DONE", kind="resource_simulation",
+                                     label="Impact des équivalences",
+                                     started_by=admin_user["username"])
+            progress_registry.finish(job_token, result=report)
+        finally:
+            session.close()
+
+    token = f"ressim-{uuid.uuid4().hex[:8]}"
+    _start_job(token, kind="resource_simulation", label="Impact des équivalences",
+               target=_job, started_by=admin_user["username"])
+    return JSONResponse(status_code=202, content={
+        "message": "Mesure d'impact lancée.", "job_token": token})
+
 # ------------------ FOUILLE D'HOMONYMES (equivalences apprises) ------------------
 
 def _learned_summary(row) -> Dict[str, Any]:

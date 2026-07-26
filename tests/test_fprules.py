@@ -327,9 +327,14 @@ def test_alert_channel_filter(client):
     data = client.post("/api/screen", json=_putin_payload(cid)).json()
     alert_id = data["alert_id"]
     assert alert_id is not None
-    screening = client.get("/api/alerts", params={"channel": "SCREENING", "page_size": 200}).json()
+    # Cible l'alerte par sa recherche, pas par sa position : la file de travail
+    # est triee par priorite puis echeance, une alerte neuve n'y est donc pas
+    # forcement en tete, et une base qui a vecu depasse vite une page.
+    screening = client.get("/api/alerts", params={
+        "channel": "SCREENING", "search": cid, "page_size": 200}).json()
     assert alert_id in [a["id"] for a in screening["items"]]
-    filtering = client.get("/api/alerts", params={"channel": "FILTERING", "page_size": 200}).json()
+    filtering = client.get("/api/alerts", params={
+        "channel": "FILTERING", "search": cid, "page_size": 200}).json()
     assert alert_id not in [a["id"] for a in filtering["items"]]
     assert all(a["channel"] == "SCREENING" for a in screening["items"])
 
