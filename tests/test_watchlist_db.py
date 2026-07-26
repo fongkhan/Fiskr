@@ -89,6 +89,29 @@ def _names(data):
     return {item["primary_name"] for item in data["items"]}
 
 
+def _assert_absent(data, marker):
+    """
+    Absence d'une fiche du perimetre interroge.
+
+    Cela ne se lit PAS sur `total == 0`. Quand la recherche exacte ne ramene
+    rien, l'endpoint bascule volontairement en REPLI FUZZY (tolerance aux
+    fautes de frappe) et peut retourner des voisins : le total devient alors
+    non nul sans que la fiche cherchee soit la.
+
+    Les marqueurs de ces tests partagent un prefixe et ne different que par un
+    suffixe hexadecimal ALEATOIRE — « Dbancienov 3f7c2b » et
+    « Dbpendingov 3f7a2b » marquent 87,5, au-dessus du seuil de 80. Le test
+    passait ou echouait donc selon le tirage : rouge et vert sur le meme commit
+    en integration continue.
+
+    Le critere exact est l'absence de correspondance EXACTE, que l'endpoint
+    publie lui-meme dans `match_mode`.
+    """
+    assert data["match_mode"] != "exact", (
+        f"« {marker} » ne devrait pas être trouvée ici : {sorted(_names(data))}")
+    assert marker.upper() not in _names(data)
+
+
 # ------------------ PERIMETRE PRODUCTION (defaut) ------------------
 
 def test_production_scope_reflects_ready_snapshots(client):
@@ -131,7 +154,7 @@ def test_pending_review_visible_outside_production(client):
     _upload_watchlist(client, [("I", marker)])
 
     # Absent de la production, present en attente d'homologation et en « tous »
-    assert _browse(client, search=marker)["total"] == 0
+    _assert_absent(_browse(client, search=marker), marker)
     pending = _browse(client, search=marker, scope="PENDING_REVIEW")
     assert pending["total"] == 1
     assert pending["items"][0]["snapshot_status"] == "PENDING_REVIEW"
@@ -153,7 +176,7 @@ def test_superseded_versions_remain_browsable(client):
     ).status_code == 202
 
     # L'ancienne version est sortie de production mais reste consultable
-    assert _browse(client, search=old_marker)["total"] == 0
+    _assert_absent(_browse(client, search=old_marker), old_marker)
     superseded = _browse(client, search=old_marker, scope="SUPERSEDED")
     assert superseded["total"] == 1
     assert superseded["items"][0]["snapshot_status"] == "SUPERSEDED"
@@ -177,7 +200,7 @@ def test_excluded_entities_scope(client):
                          json={"comment": "ok"}).status_code == 202
 
     # L'entite exclue est absente de la production mais visible en scope EXCLUDED
-    assert _browse(client, search=excluded)["total"] == 0
+    _assert_absent(_browse(client, search=excluded), excluded)
     assert _browse(client, search=kept)["total"] == 1
     found = _browse(client, search=excluded, scope="EXCLUDED")
     assert found["total"] == 1
@@ -198,7 +221,7 @@ def test_search_by_entity_id_and_list_type_filter(client):
 
     # Filtre par type de liste : present en UE, absent en PEP
     assert marker.upper() in _names(_browse(client, search=marker, list_type="WATCHLIST_EU"))
-    assert _browse(client, search=marker, list_type="WATCHLIST_PEP")["total"] == 0
+    _assert_absent(_browse(client, search=marker, list_type="WATCHLIST_PEP"), marker)
 
 
 def test_pagination_envelope(client):
@@ -241,7 +264,7 @@ def test_search_field_targets_specific_column(client):
 
     # Alias : trouvable via search_field=aliases (JSON), pas via la recherche indexee par defaut
     assert _browse(client, search=f"Fantome{tag}", search_field="aliases")["total"] == 1
-    assert _browse(client, search=f"Fantome{tag}")["total"] == 0
+    _assert_absent(_browse(client, search=f"Fantome{tag}"), f"Fantome{tag}")
 
     # Adresse : colonne texte ciblee
     found = _browse(client, search=f"rue Perdue {tag}", search_field="address")
@@ -249,7 +272,7 @@ def test_search_field_targets_specific_column(client):
     assert found["items"][0]["primary_name"] == f"CHAMPOV {tag}".upper()
 
     # Un champ cible ne matche pas les autres colonnes
-    assert _browse(client, search=f"Fantome{tag}", search_field="address")["total"] == 0
+    _assert_absent(_browse(client, search=f"Fantome{tag}", search_field="address"), f"Fantome{tag}")
 
 
 def test_search_field_any_covers_everything(client):
@@ -317,7 +340,7 @@ def test_fuzzy_respects_search_field(client):
     assert found["match_mode"] == "fuzzy"
     assert found["total"] >= 1
     # ...mais pas via la recherche par defaut (nom/ID/LEI/IMO uniquement)
-    assert _browse(client, search=typo_alias)["total"] == 0
+    _assert_absent(_browse(client, search=typo_alias), typo_alias)
 
 
 def test_no_search_has_no_match_mode(client):
