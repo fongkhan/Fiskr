@@ -160,13 +160,16 @@ def apply_name_equivalences(s1: str, s2: str) -> Tuple[str, str]:
     for field in (resources.FIELD_GIVEN_NAME, resources.FIELD_SURNAME):
         if field not in ctx["fields"]:
             continue
-        left_classes = [index.canonical(t, field) for t in left]
-        right_classes = [index.canonical(t, field) for t in right]
-        shared = {c for c in left_classes if c and c in right_classes}
+        # Segments, pas tokens : un terme declare peut compter plusieurs mots
+        # (« Al Assad », « Saint Petersbourg ») et serait sinon introuvable.
+        left_spans = index.match_spans(left, field)
+        right_spans = index.match_spans(right, field)
+        right_classes = {c for _, c in right_spans if c}
+        shared = {c for _, c in left_spans if c and c in right_classes}
         if not shared:
             continue
-        left = [cls if cls in shared else tok for tok, cls in zip(left, left_classes)]
-        right = [cls if cls in shared else tok for tok, cls in zip(right, right_classes)]
+        left = [cls if cls in shared else span for span, cls in left_spans]
+        right = [cls if cls in shared else span for span, cls in right_spans]
     return " ".join(left), " ".join(right)
 
 
@@ -179,8 +182,14 @@ def compute_base_score(s1: str, s2: str, config: dict) -> float:
     elles ramenent les variantes connues d'un meme nom a une forme commune.
     """
     from fiskr.quality import strip_accents
-    s1_norm = strip_accents(s1.upper().strip())
-    s2_norm = strip_accents(s2.upper().strip())
+    # Translitteration PUIS passage en majuscules — jamais l'inverse. `upper()`
+    # est sans effet sur les ecritures non latines : « 习 近平 ».upper() reste
+    # « 习 近平 », et la translitteration rendait ensuite « Xi JinPing » en
+    # casse mixte, compare a « XI JINPING » cote liste. Les metriques de chaine
+    # sont sensibles a la casse : deux graphies pourtant identiques apres
+    # translitteration ne marquaient que 64,40.
+    s1_norm = strip_accents(s1.strip()).upper()
+    s2_norm = strip_accents(s2.strip()).upper()
     s1_norm, s2_norm = apply_name_equivalences(s1_norm, s2_norm)
 
     weights = config.get("scoring", {}).get("weights", {})
@@ -532,6 +541,20 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
         fullname = f"{fname} {lname}".strip()
         if fullname:
             c_names.append(fullname)
+        # ORDRE INVERSE « NOM PRENOM ». Ce n'est pas une variante exotique :
+        # les listes officielles ecrivent les noms d'Asie de l'Est dans l'ordre
+        # d'origine, nom de famille EN TETE (« Kim Jong Un », « Xi Jinping »,
+        # « Chen Quanguo », « Park Geun-hye »), alors qu'une base clients tient
+        # prenom et nom dans des champs separes et les concatene « prenom nom ».
+        # Les deux chaines comparees sont alors systematiquement inversees.
+        # Jaro-Winkler et Damerau-Levenshtein, qui portent 80 % du poids, s'y
+        # effondrent — seul le token sort (20 %) resiste, ce qui ne suffit
+        # jamais a franchir un seuil. Mesure sur le panel de reference :
+        # « 全国 陈 » contre « Chen Quanguo » plafonnait a 42,22.
+        # Le cas depasse l'Asie (saisie inversee au guichet, formats d'echange
+        # « NOM Prenom ») et vaut donc pour toute personne physique.
+        if fname and lname:
+            c_names.append(f"{lname} {fname}".strip())
         maiden = client.get("client_maiden_name") or ""
         if maiden:
             c_names.append(maiden)

@@ -68,6 +68,15 @@ def _seed(db):
 
 
 def _cleanup(db):
+    # Ces tests raisonnent sur le comportement par defaut du produit : sur une
+    # installation ou des types ont ete actives, lire l'etat ambiant les ferait
+    # echouer sans rien apprendre sur le code. On le ramene donc au defaut.
+    from fiskr.database import AppSetting
+    from fiskr.settings import SETTING_RESOURCE_FIELDS
+
+    db.query(AppSetting).filter(
+        AppSetting.key == SETTING_RESOURCE_FIELDS).delete(synchronize_session=False)
+    resources.invalidate_context()
     db.query(ClientEntity).filter(
         ClientEntity.snapshot_id == PANEL_ID).delete(synchronize_session=False)
     db.query(WatchlistEntity).filter(
@@ -192,7 +201,10 @@ def test_simulation_leaves_the_live_setting_untouched(db):
     resource_impact.simulate_resource_impact(
         db, PANEL_ID, candidate_fields=BOTH_NAMES, baseline_fields=set())
     assert dict(resource_fields(db)) == before
-    assert resources.current_context()["fields"] == set()
+    # La surcharge de la simulation est locale au thread et retombe : le
+    # criblage servi en parallèle retrouve exactement le réglage en vigueur.
+    assert resources.current_context()["fields"] == \
+        {f for f, on in before.items() if on}
 
 
 def test_baseline_defaults_to_the_live_configuration(db):
@@ -200,9 +212,12 @@ def test_baseline_defaults_to_the_live_configuration(db):
     Sans référence explicite, la question posée est « qu'est-ce que mon
     changement ajoute à ce que je fais déjà », pas « au néant ».
     """
+    from fiskr.settings import resource_fields
+
     report = resource_impact.simulate_resource_impact(
         db, PANEL_ID, candidate_fields=BOTH_NAMES)
-    assert report["baseline_fields"] == []          # rien n'est actif par défaut
+    assert report["baseline_fields"] == \
+        sorted(f for f, on in resource_fields(db).items() if on)
 
 
 def test_report_by_list_sums_to_the_totals(db):

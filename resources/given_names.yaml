@@ -21,43 +21,43 @@ source: "Fiskr, jeu de départ (usages onomastiques courants). À compléter sel
 groups:
   # ---------- Translittérations arabes / persanes / turques ----------
   - id: MUHAMMAD
-    terms: [Mohammad, Mohammed, Muhammad, Mohamed, Mohamad, Muhammed, Mehmet, Mahomet, Muhamad]
+    terms: [Mohammad, Mohammed, Muhammad, Mohamed, Mohamad, Muhammed, Mehmet, Mahomet, Muhamad, محمد]
   - id: AHMAD
-    terms: [Ahmad, Ahmed, Ahmet, Achmed, Ahmad]
+    terms: [Ahmad, Ahmed, Ahmet, Achmed, Ahmad, أحمد]
   - id: ALI
     terms: [Ali, Aly, Alie]
   - id: HASSAN
-    terms: [Hassan, Hasan, Hassane, Hassaan]
+    terms: [Hassan, Hasan, Hassane, Hassaan, حسن]
   - id: HUSSEIN
-    terms: [Hussein, Hussain, Husayn, Husein, Hossein, Huseyin]
+    terms: [Hussein, Hussain, Husayn, Husein, Hossein, Huseyin, حسين]
   - id: ABDULLAH
-    terms: [Abdullah, Abdallah, Abdulla, Abdollah, Abdulah]
+    terms: [Abdullah, Abdallah, Abdulla, Abdollah, Abdulah, عبدالله]
   - id: ABDELAZIZ
     terms: [Abdelaziz, Abdulaziz, Abdul Aziz, Abd al Aziz]
   - id: YUSUF
-    terms: [Youssef, Yusuf, Yousef, Yousuf, Yusof, Joseph, Youssouf]
+    terms: [Youssef, Yusuf, Yousef, Yousuf, Yusof, Joseph, Youssouf, يوسف, יוסף]
   - id: IBRAHIM
-    terms: [Ibrahim, Ebrahim, Ibraheem, Abraham, Avraham]
+    terms: [Ibrahim, Ebrahim, Ibraheem, Abraham, Avraham, ابراهيم, אברהם]
   - id: OMAR
     terms: [Omar, Umar, Oumar, Omer]
   - id: KHALID
-    terms: [Khaled, Khalid, Haled, Khalad]
+    terms: [Khaled, Khalid, Haled, Khalad, خالد]
   - id: SAID
     terms: [Said, Sayed, Sayyid, Sayid, Seyed, Seyyed]
   - id: MAHMOUD
-    terms: [Mahmoud, Mahmud, Mahmood, Mehmood]
+    terms: [Mahmoud, Mahmud, Mahmood, Mehmood, محمود]
   - id: MUSTAFA
-    terms: [Mustafa, Moustafa, Mostafa, Mustapha, Moustapha]
+    terms: [Mustafa, Moustafa, Mostafa, Mustapha, Moustapha, مصطفى]
   - id: FATIMA
-    terms: [Fatima, Fatma, Fatimah, Fatemeh, Fatoumata]
+    terms: [Fatima, Fatma, Fatimah, Fatemeh, Fatoumata, فاطمة]
   - id: AISHA
     terms: [Aisha, Aicha, Ayesha, Ayshe, Aischa]
   - id: KARIM
-    terms: [Karim, Kareem, Carim]
+    terms: [Karim, Kareem, Carim, كريم]
   - id: RACHID
-    terms: [Rachid, Rashid, Rasheed, Rashed]
+    terms: [Rachid, Rashid, Rasheed, Rashed, رشيد]
   - id: TAREK
-    terms: [Tarek, Tariq, Tarik, Tareq]
+    terms: [Tarek, Tariq, Tarik, Tareq, طارق]
 
   # ---------- Translittérations russes / slaves ----------
   - id: VLADIMIR
@@ -131,7 +131,7 @@ groups:
   - id: MARGARET
     terms: [Margaret, Marguerite, Margarita, Margarethe, Margherita, Peggy, Maggie, Margit]
   - id: MARY
-    terms: [Mary, Marie, Maria, Mariya, Miriam, Maryam, Mariam, Marija, Molly, Mimi]
+    terms: [Mary, Marie, Maria, Mariya, Miriam, Maryam, Mariam, Marija, Molly, Mimi, مريم]
   - id: ANNE
     terms: [Anne, Anna, Ana, Hanna, Hannah, Annie, Anya, Ania]
   - id: JOHNATHAN
@@ -167,7 +167,7 @@ groups:
 
   # ---------- Translittérations arabes / persanes (suite) ----------
   - id: ABDELRAHMAN
-    terms: [Abdelrahman, Abdulrahman, Abd al Rahman, Abderrahmane, Abdurrahman, Abdrahman]
+    terms: [Abdelrahman, Abdulrahman, Abd al Rahman, Abderrahmane, Abdurrahman, Abdrahman, عبدالرحمن]
   - id: ABDELKADER
     terms: [Abdelkader, Abdulqadir, Abdelkadir, Abd al Qadir, Abdelkarder]
   - id: ABDELMALEK
@@ -179,67 +179,67 @@ groups:
   - id: ASSAD_GIVEN
     terms: [Asad, Assad, Azad]
   - id: AYMAN
-    terms: [Ayman, Aiman, Aymen, Eyman]
+    terms: [Ayman, Aiman, Aymen, Eyman, ايمن]
   - id: AZIZ
-    terms: [Aziz, Azeez, Aziiz]
+    terms: [Aziz, Azeez, Aziiz, عزيز]
   - id: BILAL
-    terms: [Bilal, Belal, Bilel, Bilaal]
+    terms: [Bilal, Belal, Bilel, Bilaal, بلال]
   - id: FAISAL
-    terms: [Faisal, Faysal, Fayçal, Fasal, Feisal]
+    terms: [Faisal, Faysal, Fayçal, Fasal, Feisal, فيصل]
   - id: FARID
-    terms: [Farid, Fareed, Ferid, Faride]
+    terms: [Farid, Fareed, Ferid, Faride, فريد]
   - id: GHASSAN
-    terms: [Ghassan, Gassan, Rassan]
+    terms: [Ghassan, Gassan, Rassan, غسان]
   - id: HAMZA
-    terms: [Hamza, Hamzah, Hamse, Hamsa]
+    terms: [Hamza, Hamzah, Hamse, Hamsa, حمزة]
   - id: HAROUN
-    terms: [Haroun, Harun, Haroon, Aaron, Aharon]
+    terms: [Haroun, Harun, Haroon, Aaron, Aharon, هارون]
   - id: IMAD
     terms: [Imad, Emad, Aimad, Immad]
   - id: ISMAIL
     terms: [Ismail, Ismael, Ismaïl, Ismayil, Esmail, Ishmael]
   - id: JAMAL
-    terms: [Jamal, Djamal, Djamel, Gamal, Jamel]
+    terms: [Jamal, Djamal, Djamel, Gamal, Jamel, جمال]
   - id: KAMAL
-    terms: [Kamal, Kamel, Camal, Kemal]
+    terms: [Kamal, Kamel, Camal, Kemal, كمال]
   - id: MAJID
-    terms: [Majid, Majeed, Madjid, Magid]
+    terms: [Majid, Majeed, Madjid, Magid, ماجد]
   - id: MANSOUR
-    terms: [Mansour, Mansur, Mansoor, Manssour]
+    terms: [Mansour, Mansur, Mansoor, Manssour, منصور]
   - id: MOUSSA
-    terms: [Moussa, Musa, Mousa, Moses, Mose, Mussa]
+    terms: [Moussa, Musa, Mousa, Moses, Mose, Mussa, موسى, משה]
   - id: NASSER_GIVEN
-    terms: [Nasser, Nasir, Naser, Nassir, Nassar]
+    terms: [Nasser, Nasir, Naser, Nassir, Nassar, ناصر]
   - id: NOUR
     terms: [Nour, Noor, Nur, Nor]
   - id: OSAMA
-    terms: [Osama, Ousama, Usama, Oussama, Usamah]
+    terms: [Osama, Ousama, Usama, Oussama, Usamah, أسامة]
   - id: QASSEM
-    terms: [Qassem, Kassem, Qasim, Kasim, Ghassem, Qassim]
+    terms: [Qassem, Kassem, Qasim, Kasim, Ghassem, Qassim, قاسم]
   - id: RAMI
-    terms: [Rami, Ramy, Ramee]
+    terms: [Rami, Ramy, Ramee, رامي]
   - id: SALAH
-    terms: [Salah, Salaheddine, Salahuddin, Saleh, Salih]
+    terms: [Salah, Salaheddine, Salahuddin, Saleh, Salih, صلاح]
   - id: SAMI
-    terms: [Sami, Samy, Samee, Sammy]
+    terms: [Sami, Samy, Samee, Sammy, سامي]
   - id: SULEIMAN
-    terms: [Suleiman, Sulaiman, Soliman, Solomon, Salomon, Suleyman, Sleiman]
+    terms: [Suleiman, Sulaiman, Soliman, Solomon, Salomon, Suleyman, Sleiman, سليمان]
   - id: TAHER
-    terms: [Taher, Tahir, Taheer, Thaher]
+    terms: [Taher, Tahir, Taheer, Thaher, طاهر]
   - id: WALID
-    terms: [Walid, Waleed, Oualid, Valid]
+    terms: [Walid, Waleed, Oualid, Valid, وليد]
   - id: YASSIN
-    terms: [Yassin, Yasin, Yaseen, Yacine, Yassine]
+    terms: [Yassin, Yasin, Yaseen, Yacine, Yassine, ياسين]
   - id: ZAKARIA
-    terms: [Zakaria, Zakariya, Zachary, Zacharie, Zakarya]
+    terms: [Zakaria, Zakariya, Zachary, Zacharie, Zakarya, زكريا]
   - id: ZEINAB
-    terms: [Zeinab, Zainab, Zaynab, Zeynep, Zinab]
+    terms: [Zeinab, Zainab, Zaynab, Zeynep, Zinab, زينب]
   - id: KHADIJA
-    terms: [Khadija, Khadidja, Hatice, Khadijah]
+    terms: [Khadija, Khadidja, Hatice, Khadijah, خديجة]
   - id: LEILA
-    terms: [Leila, Layla, Laila, Leyla, Lila]
+    terms: [Leila, Layla, Laila, Leyla, Lila, ليلى]
   - id: AMINA
-    terms: [Amina, Aminah, Emine, Aminata]
+    terms: [Amina, Aminah, Emine, Aminata, أمينة]
   - id: SORAYA
     terms: [Soraya, Suraya, Thoraya, Suraiya]
 
@@ -257,7 +257,7 @@ groups:
   - id: IGOR
     terms: [Igor, Ihor, Igore]
   - id: KONSTANTIN
-    terms: [Konstantin, Constantin, Kostyantyn, Constantine]
+    terms: [Konstantin, Constantin, Kostyantyn, Constantine, Κωνσταντίνος]
   - id: LEONID
     terms: [Leonid, Leonide, Leonyd]
   - id: MAXIM

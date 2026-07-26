@@ -29,7 +29,7 @@ import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("fiskr.resources")
 
@@ -90,6 +90,9 @@ class ResourceIndex:
         # diagnostic : un analyste doit savoir si une equivalence a ete
         # declaree a la main ou decouverte par le moteur
         self._learned: Dict[str, Set[str]] = {f: set() for f in FIELD_TYPES}
+        # type de champ -> longueur du plus long terme, EN TOKENS. Borne la
+        # fenetre de recherche des termes multi-mots (cf. match_spans).
+        self._max_tokens: Dict[str, int] = {f: 1 for f in FIELD_TYPES}
         self.files: List[Dict[str, Any]] = []
         self.collisions: List[Dict[str, str]] = []
         self.content_hash: str = ""
@@ -110,46 +113,74 @@ class ResourceIndex:
             return []
         return list(self._classes[field].get(cls, []))
 
+    def match_spans(self, tokens: List[str], field: str) -> List[Tuple[str, Optional[str]]]:
+        """
+        Decoupe une suite de tokens en segments, chacun accompagne de sa classe
+        canonique quand il en a une.
+
+        Le decoupage est GLOUTON, du segment le plus long au plus court. Sans
+        cela, tout terme dont la forme normalisee contient une espace serait
+        introuvable : la table est indexee sur le terme entier (« LA HAYE »)
+        alors que la recherche se faisait token par token (« LA », puis
+        « HAYE »). Un terme sur dix des fichiers livres est dans ce cas — tous
+        les exonymes composes (« The Hague », « Saint-Petersbourg »,
+        « Al Qahirah », « New York ») et les prenoms arabes dont la
+        translitteration se scinde (« معمر » -> « M MR ») etaient inertes.
+        """
+        table = self._by_field.get(field)
+        if not table:
+            return [(t, None) for t in tokens]
+        max_n = self._max_tokens.get(field, 1)
+        out: List[Tuple[str, Optional[str]]] = []
+        i = 0
+        while i < len(tokens):
+            for n in range(min(max_n, len(tokens) - i), 0, -1):
+                span = " ".join(tokens[i:i + n])
+                cls = table.get(normalize_term(span))
+                if cls:
+                    out.append((span, cls))
+                    i += n
+                    break
+            else:
+                out.append((tokens[i], None))
+                i += 1
+        return out
+
     def canonicalize_tokens(self, text: str, field: str) -> str:
         """
-        Remplace chaque token connu par sa classe. « Harry Dupont » et
+        Remplace chaque segment connu par sa classe. « Harry Dupont » et
         « Henri Dupont » donnent tous deux « HENRY DUPONT » : les metriques de
         chaine, inchangees, retournent alors 100.
         """
         if not text or field not in self._by_field:
             return text or ""
-        table = self._by_field[field]
-        out = []
-        for token in normalize_term(text).split():
-            out.append(table.get(token, token))
-        return " ".join(out)
+        spans = self.match_spans(normalize_term(text).split(), field)
+        return " ".join(cls or span for span, cls in spans)
 
     def applied_equivalences(self, left: str, right: str, field: str) -> List[Dict[str, str]]:
         """
-        Equivalences qui ont rapproche deux textes : uniquement les tokens
+        Equivalences qui ont rapproche deux textes : uniquement les segments
         DIFFERENTS ramenes a la meme classe. Sert la tracabilite du decision
         tree — un analyste doit pouvoir lire pourquoi deux noms dissemblables
         ont matche.
         """
         if field not in self._by_field:
             return []
-        table = self._by_field[field]
-        left_tokens = normalize_term(left).split()
-        right_tokens = normalize_term(right).split()
+        left_spans = self.match_spans(normalize_term(left).split(), field)
+        right_spans = self.match_spans(normalize_term(right).split(), field)
         seen: Set[str] = set()
         applied = []
-        for lt in left_tokens:
-            lc = table.get(lt)
+        for ls, lc in left_spans:
             if not lc:
                 continue
-            for rt in right_tokens:
-                if rt == lt or table.get(rt) != lc:
+            for rs, rc in right_spans:
+                if rs == ls or rc != lc:
                     continue
-                key = f"{lt}|{rt}"
+                key = f"{ls}|{rs}"
                 if key in seen:
                     continue
                 seen.add(key)
-                applied.append({"source": lt, "target": rt, "class": lc, "field": field})
+                applied.append({"source": ls, "target": rs, "class": lc, "field": field})
         return applied
 
     def is_learned(self, term: str, field: str) -> bool:
@@ -220,6 +251,9 @@ class ResourceIndex:
                 })
                 continue
             bucket[key] = class_id
+            span = key.count(" ") + 1
+            if span > self._max_tokens[field]:
+                self._max_tokens[field] = span
             added += 1
         known = self._classes[field].setdefault(class_id, [])
         for term in terms:

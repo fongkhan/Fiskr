@@ -35,12 +35,16 @@ SAMPLE = {
     },
     resources.FIELD_SURNAME: {
         "DUPONT": ["Dupont", "Dupond", "Du Pont"],
+        # Termes dont la forme NORMALISEE compte plusieurs mots : le cas des
+        # exonymes composes et des noms arabes a particule.
+        "ALASSAD": ["Al-Assad", "El Assad", "Assad"],
     },
     resources.FIELD_COUNTRY: {
         "DE": ["DE", "DEU", "Allemagne", "Germany", "Deutschland"],
     },
     resources.FIELD_CITY: {
         "LONDON": ["Londres", "London", "Londra"],
+        "THE_HAGUE": ["La Haye", "The Hague", "Den Haag"],
     },
 }
 
@@ -97,6 +101,33 @@ def test_applied_equivalences_reports_only_differing_tokens():
                         "class": "HENRY", "field": resources.FIELD_GIVEN_NAME}]
     # Deux ecritures identiques n'ont besoin d'aucune equivalence
     assert index.applied_equivalences("Henri", "Henri", resources.FIELD_GIVEN_NAME) == []
+
+
+def test_multi_word_terms_are_reachable():
+    """
+    Un terme dont la forme normalisee contient une espace doit rester
+    trouvable. La recherche se faisait token par token alors que la table est
+    indexee sur le terme entier : « La Haye » etait cherche comme « LA » puis
+    « HAYE », donc jamais trouve. Un terme sur dix des fichiers livres est
+    dans ce cas — tous les exonymes composes etaient inertes.
+    """
+    index = resources.index_from_mapping(SAMPLE)
+    assert index.canonicalize_tokens("La Haye", resources.FIELD_CITY) == "THE_HAGUE"
+    assert index.canonicalize_tokens("The Hague", resources.FIELD_CITY) == "THE_HAGUE"
+    assert index.canonicalize_tokens("Den Haag", resources.FIELD_CITY) == "THE_HAGUE"
+    # Le segment le plus long l'emporte : « EL ASSAD » n'est pas coupe en deux
+    assert index.applied_equivalences(
+        "Bachar El Assad", "Bashar Al-Assad", resources.FIELD_SURNAME) == [
+        {"source": "EL ASSAD", "target": "AL ASSAD",
+         "class": "ALASSAD", "field": resources.FIELD_SURNAME}]
+
+
+def test_multi_word_lookup_leaves_unrelated_text_untouched():
+    """Le decoupage glouton ne doit rien canonicaliser qui ne soit declare."""
+    index = resources.index_from_mapping(SAMPLE)
+    assert index.canonicalize_tokens("La Rochelle", resources.FIELD_CITY) == "LA ROCHELLE"
+    assert index.canonicalize_tokens("Haye Fouassiere", resources.FIELD_CITY) == \
+        "HAYE FOUASSIERE"
 
 
 def test_collision_is_detected_and_named(tmp_path):
@@ -161,6 +192,30 @@ def test_shipped_resources_load_without_collision():
         index.canonical("London", resources.FIELD_CITY)
 
 
+def test_shipped_resources_bridge_east_asian_romanisations():
+    """
+    Coree : la translitteration automatique produit la romanisation revisee
+    officielle (박 -> Bag, 이 -> I, 최 -> Choe) alors que les listes emploient
+    la graphie consacree (Park, Lee, Choi). Aucune metrique de chaine ne
+    franchit « Bag » ≡ « Park ».
+
+    Japon : les kanji sont lus EN CHINOIS par la translittteration (田中 donne
+    « Tianzhong », pas « Tanaka ») — la lecture japonaise doit etre declaree.
+
+    Chine : rien a declarer, le pinyin de la translittteration tombe
+    exactement sur le terme romanise deja present (陈 -> CHEN).
+    """
+    index = resources.load_index(resources.default_directory())
+    S = resources.FIELD_SURNAME
+    for native, listed in (("박", "Park"), ("이", "Lee"), ("최", "Choi"),
+                           ("김", "Kim"), ("정", "Jeong"), ("윤", "Yoon"),
+                           ("문", "Moon"), ("田中", "Tanaka"), ("安倍", "Abe"),
+                           ("佐々木", "Sasaki"), ("陈", "Chen"), ("张", "Zhang")):
+        assert index.canonical(native, S) is not None, f"{native} non déclaré"
+        assert index.canonical(native, S) == index.canonical(listed, S), \
+            f"{native} et {listed} ne partagent pas de classe"
+
+
 # ------------------ BLOCKING ------------------
 
 def _keys(entity):
@@ -183,6 +238,26 @@ def test_blocking_with_resources_creates_a_shared_key():
     shared = _keys(HENRI) & _keys(HARRY)
     assert shared, "Henri et Harry doivent devenir candidats"
     assert all(k.endswith("_EQHENRY") for k in shared)
+
+
+def test_blocking_bridges_on_the_surname_of_a_listed_record():
+    """
+    Une fiche listee porte son nom complet dans UNE chaine (« Muammar
+    Gaddafi ») la ou un client a des champs separes. Tant que le blocking ne
+    regardait que le PREMIER mot, une equivalence de NOM DE FAMILLE ne pouvait
+    jamais creer de pont : le client emettait la cle du nom, la fiche listee
+    n'emettait que celles du prenom. La table des noms de famille etait donc
+    inerte sur le cas ordinaire.
+    """
+    listed = {"entity_type": "I", "primary_name": "Bashar Al-Assad"}
+    client = {"client_type": "PP", "client_first_name": "Bachar",
+              "client_last_name": "El Assad"}
+    _activate(set())
+    assert not (_keys(listed) & _keys(client))
+    _activate({resources.FIELD_SURNAME})
+    shared = _keys(listed) & _keys(client)
+    assert shared, "le nom de famille doit rendre les deux fiches candidates"
+    assert all(k.endswith("_EQALASSAD") for k in shared)
 
 
 def test_blocking_keys_are_additive():
@@ -343,6 +418,14 @@ def _override_user(username, role):
 
 
 def _cleanup_setting():
+    """
+    Ramene le reglage d'activation a son defaut livre.
+
+    Appele AVANT et APRES : ces tests verifient le comportement par defaut du
+    produit, pas celui de l'installation qui les execute. Sur une installation
+    ou un responsable a active des types, le seul fait de lire l'etat ambiant
+    les ferait echouer — ce qui n'apprendrait rien sur le code.
+    """
     db = next(get_db())
     try:
         db.query(AppSetting).filter(AppSetting.key == SETTING_RESOURCE_FIELDS).delete(
@@ -358,6 +441,8 @@ def _cleanup_setting():
 
 @pytest.fixture
 def admin_client():
+    _cleanup_setting()
+    resources.invalidate_context()
     _override_user("res_admin", "admin")
     with TestClient(app) as c:
         yield c
@@ -380,9 +465,14 @@ def test_get_resources_reports_state(admin_client):
     assert data["total_terms"] > 0
     assert data["content_hash"]
     assert set(data["field_types"]) == set(resources.FIELD_TYPES)
-    # Livre desactive : une installation existante ne change pas de comportement
-    assert data["active"] is False
-    assert all(v is False for v in data["enabled_fields"].values())
+    # Prenoms et noms actifs a la livraison (impact mesure, cf.
+    # Documentation/MESURE_RESSOURCES.md) ; les trois autres types non.
+    assert data["active"] is True
+    assert data["enabled_fields"]["given_name"] is True
+    assert data["enabled_fields"]["surname"] is True
+    assert data["enabled_fields"]["city"] is False
+    assert data["enabled_fields"]["country"] is False
+    assert data["enabled_fields"]["state"] is False
 
 
 def test_lookup_returns_class_and_variants(admin_client):
@@ -390,7 +480,7 @@ def test_lookup_returns_class_and_variants(admin_client):
     assert data["found"] is True
     assert data["normalized"] == "HARRY"
     given = [r for r in data["results"] if r["field"] == resources.FIELD_GIVEN_NAME]
-    assert given and given[0]["enabled"] is False
+    assert given and given[0]["enabled"] is True
     assert any("Henri" in v for v in given[0]["variants"])
 
 
@@ -424,17 +514,20 @@ def test_enabling_a_field_takes_effect_immediately(admin_client):
     Le criblage lit les types actifs depuis un cache : sans invalidation, le
     reglage resterait sans effet jusqu'au redemarrage.
     """
-    assert resources.current_context()["fields"] == set()
-    response = admin_client.put("/api/settings/ingestion",
-                                json={"resource_fields": {"given_name": True}})
-    assert response.status_code == 200
-    assert response.json()["resource_fields"]["given_name"] is True
+    # On part du reglage livre : prenoms et noms actifs
     assert resources.FIELD_GIVEN_NAME in resources.current_context()["fields"]
     assert compute_base_score("Henri Dupont", "Harry Dupont", config) == 100.0
 
-    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": False}})
-    assert resources.current_context()["fields"] == set()
+    response = admin_client.put("/api/settings/ingestion",
+                                json={"resource_fields": {"given_name": False}})
+    assert response.status_code == 200
+    assert response.json()["resource_fields"]["given_name"] is False
+    assert resources.FIELD_GIVEN_NAME not in resources.current_context()["fields"]
     assert compute_base_score("Henri Dupont", "Harry Dupont", config) < 90
+
+    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": True}})
+    assert resources.FIELD_GIVEN_NAME in resources.current_context()["fields"]
+    assert compute_base_score("Henri Dupont", "Harry Dupont", config) == 100.0
 
 
 def test_changing_fields_reloads_the_screening_cache(admin_client, monkeypatch):
@@ -449,14 +542,16 @@ def test_changing_fields_reloads_the_screening_cache(admin_client, monkeypatch):
     calls = []
     monkeypatch.setattr(api, "load_watchlist_cache", lambda db: calls.append(1))
 
-    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": True}})
+    # given_name est actif a la livraison : c'est sa DESACTIVATION qui change
+    # le reglage, donc qui doit declencher le rechargement.
+    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": False}})
     assert len(calls) == 1
 
     # Reglage identique : rien ne change, aucun rechargement inutile
-    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": True}})
+    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": False}})
     assert len(calls) == 1
 
-    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": False}})
+    admin_client.put("/api/settings/ingestion", json={"resource_fields": {"given_name": True}})
     assert len(calls) == 2
 
 

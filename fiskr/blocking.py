@@ -1,6 +1,7 @@
 import re
 from typing import Set, List
 from fiskr.phonetics import double_metaphone
+from fiskr.quality import strip_accents
 
 
 def _country_equivalence_values(countries: List[str]) -> Set[str]:
@@ -164,7 +165,16 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                 name_clean = str(name).strip()
                 if not name_clean:
                     continue
-                words = re.split(r"[\s\-]+", name_clean)
+                # Translitteration AVANT la cle phonetique. Le double metaphone
+                # ne connait que l'alphabet latin : sur « 陈 », « 김 » ou
+                # « Владимир » il retourne une cle VIDE. Une fiche ecrite dans
+                # son ecriture d'origine ne produisait donc AUCUNE cle
+                # phonetique et n'etait candidate de rien — quel que soit le
+                # contenu des tables d'equivalences. Le scoring, lui,
+                # translitterait deja des deux cotes : les deux etages se
+                # contredisaient.
+                latin = strip_accents(name_clean)
+                words = re.split(r"[\s\-]+", latin) or [""]
                 first_word = words[0] if words else ""
                 if first_word:
                     p_key, s_key = double_metaphone(first_word)
@@ -172,14 +182,27 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                         phonetics.add(p_key)
                     if s_key:
                         phonetics.add(s_key)
-                    # Equivalences linguistiques : sans cette cle, « Henri » et
-                    # « Harry » n'atterrissent jamais dans le meme seau et ne
-                    # sont donc JAMAIS compares — la table de ressources serait
-                    # sans effet. La cle est ADDITIVE : les cles phonetiques
-                    # ci-dessus restent produites, aucune paire aujourd'hui
-                    # candidate ne cesse de l'etre.
-                    for eq_key in _equivalence_keys(first_word):
-                        phonetics.add(eq_key)
+                # Equivalences linguistiques : sans cette cle, « Henri » et
+                # « Harry » n'atterrissent jamais dans le meme seau et ne sont
+                # donc JAMAIS compares — la table de ressources serait sans
+                # effet. Les cles sont ADDITIVES : les cles phonetiques
+                # ci-dessus restent produites, aucune paire aujourd'hui
+                # candidate ne cesse de l'etre.
+                #
+                # PREMIER *ET* DERNIER mot. La cle phonetique, elle, ne porte
+                # que sur le premier mot : c'est le choix historique du
+                # composant. Mais une fiche listee tient son nom complet dans
+                # UNE seule chaine (« Muammar Gaddafi »), la ou un client a des
+                # champs separes. En ne regardant que le premier mot, une
+                # equivalence de NOM DE FAMILLE ne pouvait donc jamais creer de
+                # pont vers une fiche listee : le client emettait EQGADDAFI, la
+                # fiche n'emettait que les cles de « Muammar ». La table des
+                # noms de famille etait inerte sur ce cas, qui est le cas
+                # ordinaire.
+                for word in {first_word, words[-1] if words else ""}:
+                    if word:
+                        for eq_key in _equivalence_keys(word):
+                            phonetics.add(eq_key)
                         
             if not phonetics:
                 components_values[item] = ["XX"]

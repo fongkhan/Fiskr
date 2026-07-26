@@ -11,7 +11,7 @@ source: "Fiskr, jeu de départ (romanisations usuelles). À compléter selon le 
 groups:
   # ---------- Romanisations chinoises (pinyin / Wade-Giles / cantonais) ----------
   - id: LI
-    terms: [Li, Lee, Ly, Lei]
+    terms: [Li, Lee, Ly, Lei, Yi, Rhee, Ri, 이, 李]
   # « Wong » et « Ng » sont des romanisations cantonaises AMBIGUËS : Wong
   # transcrit aussi bien 王 (Wang) que 黃 (Huang), Ng aussi bien 黃 que 吳 (Wu).
   # Les rattacher à deux classes rendrait le criblage non déterministe (le
@@ -85,9 +85,9 @@ groups:
   - id: ELSHEIKH
     terms: [El Sheikh, Al Sheikh, Alshaikh, El Cheikh, Al-Shaykh]
   - id: HADDAD
-    terms: [Haddad, Hadad, El Haddad, Al Haddad]
+    terms: [Haddad, Hadad, El Haddad, Al Haddad, حداد]
   - id: NASSER
-    terms: [Nasser, Nasir, Naser, Nassir]
+    terms: [Nasser, Nasir, Naser, Nassir, ناصر]
 
   # ---------- Variantes européennes fréquentes ----------
   - id: MUELLER
@@ -131,11 +131,11 @@ groups:
   - id: XIAO_SUR
     terms: [Xiao, Hsiao, Shiu]
   - id: HAN
-    terms: [Han, Hahn, Haan]
+    terms: [Han, Hahn, Haan, 한]
   - id: KIM
-    terms: [Kim, Gim, Ghim]
+    terms: [Kim, Gim, Ghim, 김, Kym, 금]
   - id: PARK_KO
-    terms: [Park, Pak, Bak, Bahk]
+    terms: [Park, Pak, Bak, Bahk, 박, Bag, Bark]
   - id: NGUYEN
     terms: [Nguyen, Nguyên, Nguyan, Ngyen]
   - id: PHAM
@@ -213,29 +213,29 @@ groups:
   - id: ALBAGHDADI
     terms: [Al Baghdadi, Al-Baghdadi, Albaghdadi, El Baghdadi]
   - id: HAMDANI
-    terms: [Hamdani, Al Hamdani, El Hamdani, Hemdani]
+    terms: [Hamdani, Al Hamdani, El Hamdani, Hemdani, همداني]
   - id: JAAFAR
     terms: [Jaafar, Jafar, Djafar, Gaafar, Jaffar]
   - id: KHOURY
-    terms: [Khoury, Khouri, Koury, El Khoury, Al Khoury]
+    terms: [Khoury, Khouri, Koury, El Khoury, Al Khoury, خوري]
   - id: MANSOURI
-    terms: [Mansouri, Mansuri, Al Mansouri, El Mansouri]
+    terms: [Mansouri, Mansuri, Al Mansouri, El Mansouri, منصوري]
   - id: RAHMANI
-    terms: [Rahmani, Rehmani, Al Rahmani, Rachmani]
+    terms: [Rahmani, Rehmani, Al Rahmani, Rachmani, رحماني]
   - id: SALEHI
-    terms: [Salehi, Salahi, Salihi, Selehi]
+    terms: [Salehi, Salahi, Salihi, Selehi, صالحي]
   - id: ZAHEDI
     terms: [Zahedi, Zahidi, Sahedi]
   - id: KHAMENEI
     terms: [Khamenei, Khameneï, Chamenei, Hamenei]
   - id: SOLEIMANI
-    terms: [Soleimani, Suleimani, Solimani, Sulaimani]
+    terms: [Soleimani, Suleimani, Solimani, Sulaimani, سليماني]
   - id: BENALI
     terms: [Ben Ali, Benali, Bin Ali, Ben-Ali]
   - id: BOUTEFLIKA
-    terms: [Bouteflika, Boutaflika, Buteflika]
+    terms: [Bouteflika, Boutaflika, Buteflika, بوتفليقة]
   - id: GHANNOUCHI
-    terms: [Ghannouchi, Ghannoushi, Rannouchi]
+    terms: [Ghannouchi, Ghannoushi, Rannouchi, الغنوشي]
 
   # ---------- Variantes européennes (suite) ----------
   - id: SCHNEIDER
@@ -330,3 +330,133 @@ groups:
     terms: [MacDonald, McDonald, Mcdonald, Macdonald]
   - id: MURPHY
     terms: [Murphy, Murphey, Murfy]
+
+  # ---------- Écritures non latines et groupes complémentaires ----------
+  # japonais — kanji lus en chinois par la translittération
+  - id: TANAKA
+    terms: [Tanaka, 田中]
+  - id: SUZUKI
+    terms: [Suzuki, 鈴木]
+  - id: SATO
+    terms: [Sato, Satou, 佐藤]
+  - id: WATANABE
+    terms: [Watanabe, 渡辺, 渡邊]
+  - id: YAMAMOTO
+    terms: [Yamamoto, 山本]
+  # romanisations concurrentes d'un meme nom arabe
+  - id: GADDAFI
+    terms: [Gaddafi, Kadhafi, Qaddafi, Gheddafi, Kaddafi, القذافي]
+
+  # ---------- Corée : romanisation révisée (RR) vs usage établi ----------
+  # La translittération automatique produit la romanisation révisée officielle
+  # (박 -> Bag, 이 -> I, 최 -> Choe) ; les listes de sanctions emploient la
+  # graphie consacrée (Park, Lee, Choi). Aucune métrique de chaîne ne franchit
+  # Bag ≡ Park : c'est une connaissance, elle se déclare.
+  - id: CHOI_KO
+    terms: [Choi, Choe, Chwe, Choy, 최]
+  - id: JEONG_KO
+    terms: [Jeong, Jung, Cheong, Jeung, 정]
+  - id: KANG_KO
+    terms: [Kang, Gang, Kahng, 강]
+  - id: YOON_KO
+    terms: [Yoon, Yun, Youn, 윤]
+  - id: JANG_KO
+    terms: [Jang, Jhang, Zang, 장]
+  - id: IM_KO
+    terms: [Im, Yim, Ihm, 임]
+  - id: SHIN_KO
+    terms: [Shin, Sin, Shine, 신]
+  - id: SEO_KO
+    terms: [Seo, Suh, Surh, Sur, 서]
+  - id: HONG_KO
+    terms: [Hong, Houng, Hoong, 홍]
+  - id: RYU_KO
+    terms: [Ryu, Lyu, Ryoo, Yoo, 류]
+  - id: BAE_KO
+    terms: [Bae, Pae, Bai, 배]
+  - id: HEO_KO
+    terms: [Heo, Hur, Huh, Her, 허]
+  - id: KWON_KO
+    terms: [Kwon, Gwon, Kweon, 권]
+  - id: NAM_KO
+    terms: [Nam, Nahm, Narm, 남]
+  - id: BAEK_KO
+    terms: [Baek, Baeg, Paek, Back, 백]
+  - id: MOON_KO
+    terms: [Moon, Mun, Muhn, 문]
+  - id: SON_KO
+    terms: [Son, Sohn, Sohn, 손]
+  - id: JO_KO
+    terms: [Jo, Cho, Joe, Joh, 조]
+
+  # ---------- Japon : kanji lus en chinois par la translittération ----------
+  # 田中 donne « TIANZHONG » (lecture mandarine) et non « TANAKA » : la
+  # translittération ne sait pas qu'il s'agit d'un nom japonais. Chaque kanji
+  # doit donc être rattaché explicitement à sa lecture japonaise.
+  - id: TAKAHASHI
+    terms: [Takahashi, 高橋, 高桥]
+  - id: ITO_JP
+    terms: [Ito, Itou, Itoh, 伊藤]
+  - id: NAKAMURA
+    terms: [Nakamura, 中村]
+  - id: KOBAYASHI
+    terms: [Kobayashi, 小林]
+  - id: KATO_JP
+    terms: [Kato, Katou, Katoh, 加藤]
+  - id: YOSHIDA
+    terms: [Yoshida, 吉田]
+  - id: YAMADA
+    terms: [Yamada, 山田]
+  - id: SASAKI
+    terms: [Sasaki, 佐々木]
+  - id: YAMAGUCHI
+    terms: [Yamaguchi, 山口]
+  - id: MATSUMOTO
+    terms: [Matsumoto, 松本]
+  - id: INOUE
+    terms: [Inoue, 井上]
+  - id: KIMURA
+    terms: [Kimura, 木村]
+  - id: SHIMIZU
+    terms: [Shimizu, 清水]
+  - id: ABE_JP
+    terms: [Abe, Abé, 安倍]
+  - id: KISHIDA
+    terms: [Kishida, 岸田]
+  - id: SUGA
+    terms: [Suga, 菅]
+  - id: KOIZUMI
+    terms: [Koizumi, 小泉]
+  - id: FUKUDA
+    terms: [Fukuda, 福田]
+  - id: ASO_JP
+    terms: [Aso, Asou, 麻生]
+  - id: HATOYAMA
+    terms: [Hatoyama, 鳩山]
+  - id: SAITO_JP
+    terms: [Saito, Saitou, Saitoh, 斎藤, 齋藤]
+  - id: YAMAZAKI
+    terms: [Yamazaki, Yamasaki, 山崎]
+  - id: ISHIKAWA
+    terms: [Ishikawa, 石川]
+  - id: OKADA
+    terms: [Okada, 岡田]
+  - id: MAEDA
+    terms: [Maeda, 前田]
+  - id: FUJITA
+    terms: [Fujita, 藤田]
+  - id: GOTO_JP
+    terms: [Goto, Gotou, Gotoh, 後藤]
+  - id: KONDO_JP
+    terms: [Kondo, Kondou, Kondoh, 近藤]
+  - id: MURAKAMI
+    terms: [Murakami, 村上]
+  - id: HASEGAWA
+    terms: [Hasegawa, 長谷川]
+  - id: SAKAMOTO
+    terms: [Sakamoto, 坂本]
+  - id: ENDO_JP
+    terms: [Endo, Endou, Endoh, 遠藤]
+  - id: AOKI
+    terms: [Aoki, 青木]
+

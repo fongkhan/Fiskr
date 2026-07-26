@@ -53,9 +53,20 @@ SETTING_SCORE_THRESHOLDS = "scoring.thresholds"
 # une installation existante ne change pas de comportement, et l'activation
 # passe par le cahier de tests qui chiffre l'ecart avant mise en production.
 SETTING_RESOURCE_FIELDS = "resources.enabled_fields"
+# Prenoms et noms de famille sont ACTIFS par defaut, les trois autres types
+# non. Ce n'est pas un choix de confort : il est mesure. Sur un panel de 716
+# clients crible contre 124 fiches designees (cf. Documentation/
+# MESURE_RESSOURCES.md), les activer rattrape 6 vrais positifs, n'ajoute
+# AUCUNE alerte sur les 600 clients ordinaires du panel et n'en fait perdre
+# aucune ; 18 paires deja detectees voient leur score monter, aucune baisser.
+#
+# Les types city / country / state restent inactifs : ils n'ont pas ete
+# mesures sur un panel reel, et le principe reste qu'un changement de
+# parametrage de criblage se chiffre avant de s'appliquer (Ressources >
+# Mesurer l'impact).
 DEFAULT_RESOURCE_FIELDS: Dict[str, bool] = {
-    "given_name": False,
-    "surname": False,
+    "given_name": True,
+    "surname": True,
     "city": False,
     "country": False,
     "state": False,

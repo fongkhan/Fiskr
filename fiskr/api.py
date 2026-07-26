@@ -3951,7 +3951,7 @@ def _fuzzy_best_score(needle_norm: str, texts: List[str]) -> float:
     from fiskr.quality import strip_accents
     best = 0.0
     for text in texts:
-        text_norm = strip_accents(str(text).upper().strip())
+        text_norm = strip_accents(str(text).strip()).upper()
         if not text_norm:
             continue
         candidates = [text_norm]
@@ -4066,7 +4066,7 @@ async def browse_watchlist_db(
             # similarite (Jaro-Winkler, normalisation accents/casse du moteur)
             from fiskr.quality import strip_accents
             match_mode = "fuzzy"
-            needle_norm = strip_accents(search_term.upper())
+            needle_norm = strip_accents(search_term).upper()
             scored = []
             for entity, snap in query.yield_per(500):
                 score_value = _fuzzy_best_score(needle_norm, _fuzzy_candidate_texts(entity, search_field))
