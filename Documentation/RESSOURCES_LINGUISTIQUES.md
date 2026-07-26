@@ -158,3 +158,120 @@ Un fichier invalide (type inconnu, groupe à un seul terme, YAML cassé) est
 **refusé** avec le nom du fichier : mieux vaut un refus explicite qu'un
 criblage qui tourne avec une ressource à moitié chargée sans que personne ne
 le sache.
+
+---
+
+# Fouille automatique d'homonymes
+
+Les tables livrées sont un point de départ, pas un état final : chaque
+portefeuille a ses graphies, chaque nouvelle liste apporte ses variantes. Un
+moteur cherche donc chaque nuit de nouveaux homonymes et les propose — ou les
+applique — selon le paramétrage.
+
+## D'où viennent les découvertes
+
+Pas d'une source externe : de deux données que l'installation possède déjà, et
+dont la valeur probante dépasse n'importe quel dictionnaire acheté.
+
+| Source | Ce qu'elle vaut |
+|---|---|
+| `ALIAS` — le graphe d'alias des listes en production | Quand l'OFAC déclare qu'une fiche « Muhammad AL-ASSAD » porte l'alias « Mohammed AL-ASAD », **l'autorité elle-même** établit que les deux graphies désignent la même personne. En extraire la paire (MUHAMMAD, MOHAMMED) n'est pas une inférence : c'est une lecture de la donnée officielle. |
+| `ANALYST` — les alertes clôturées « vrai positif » | Un analyste a validé humainement que le nom du client et le nom listé désignent la même personne. C'est la preuve la plus forte disponible dans le système. |
+
+## Le garde-fou qui rend la fouille utilisable
+
+Le piège évident : « Ali HASSAN » alias « Abu MUHAMMAD » est un **nom de
+guerre**, pas une variante d'écriture. Aligner naïvement les mots produirait
+les paires absurdes Ali = Abu et Hassan = Muhammad, et le criblage se mettrait
+à rapprocher des gens sans aucun rapport. **Une table d'équivalences fausse est
+pire que pas de table du tout.**
+
+La règle retenue élimine ce cas par construction : **les deux noms doivent
+avoir le même nombre de mots et ne différer que sur UN SEUL**. Tout le reste
+étant identique, le mot divergent est nécessairement une autre écriture du même
+élément.
+
+| Confrontation | Verdict |
+|---|---|
+| Mohammad **Al Assad** vs Mohammed **Al Assad** | 1 divergence → paire (MOHAMMAD, MOHAMMED) retenue |
+| **Ali Hassan** vs **Abu Muhammad** | 2 divergences → écarté |
+| Youssef vs Yusuf | un seul mot, aucun élément commun → écarté |
+| Ali Hassan vs Ali Hassan Al Sayed | nombres de mots différents → écarté |
+
+S'y ajoutent :
+
+- **particules exclues** — AL, EL, BIN, IBN, ABU, DE, VAN, VON, MC… se
+  répètent dans des milliers de noms sans jamais constituer un prénom ;
+- **longueur minimale** de 3 caractères ;
+- **proximité exigée** — concordance phonétique (double métaphone) *ou*
+  similarité de chaîne ≥ seuil. Une variante d'écriture est proche
+  graphiquement ou phonétiquement ; un couple qui n'est ni l'un ni l'autre
+  n'est pas une variante ;
+- **répétition** — la paire doit apparaître dans au moins N fiches
+  **distinctes** (2 par défaut). Une coquille isolée dans un seul
+  enregistrement ne devient pas une règle de criblage ;
+- **individus seulement** — une raison sociale n'a ni prénom ni nom ; l'aligner
+  produirait des paires de mots de vocabulaire.
+
+## Confiance
+
+Trois facteurs, tous explicables devant un contrôleur :
+
+- la **répétition** (plafonnée à cinq occurrences, pour qu'un gros programme de
+  sanctions n'écrase pas le reste) ;
+- la **proximité** de chaîne, plus un bonus de concordance phonétique ;
+- la **source** : une alerte confirmée par un analyste porte une validation
+  humaine, l'alias officiel porte l'autorité de l'émetteur.
+
+## Classement et refus
+
+Une paire découverte rejoint une classe existante si l'un de ses termes y est
+déjà. Si les deux termes appartiennent à **deux classes différentes**, la
+découverte est **refusée** : fusionner deux classes sur la foi d'une trouvaille
+automatique réunirait des univers que quelqu'un a délibérément séparés
+(l'arbitrage Wong → WANG / Ng → WU, par exemple).
+
+## Gouvernance
+
+- **Planification** : `resources.mining` — activation, cron (3 h 15 par défaut,
+  après les synchronisations nocturnes donc sur des listes fraîches),
+  occurrences et similarité minimales, seuil d'auto-application, sources.
+- **Auto-application** : `auto_approve_confidence`. À `0`, la fouille se
+  contente de proposer et toute découverte passe par une décision humaine. Le
+  défaut (`0.85`) applique les découvertes très sûres — mais **une équivalence
+  appliquée n'atteint le criblage que si son type de champ est par ailleurs
+  activé**, ce qui n'est jamais le cas par défaut. La chaîne de sécurité tient
+  donc en deux verrous indépendants.
+- **Révocable à tout moment** : rejeter une équivalence appliquée la retire de
+  l'index et reconstruit le cache de criblage. C'est cette réversibilité qui
+  rend l'auto-application acceptable.
+- **Une décision humaine n'est jamais défaite** par une passe automatique : une
+  équivalence rejetée ne revient pas la nuit suivante.
+- **Notification** à chaque passe qui crée ou applique quelque chose.
+- **Traçabilité** : chaque décision est inscrite au journal d'administration
+  (`LEARNED_EQUIVALENCE_DECIDED`, `RESOURCE_MINING_RUN`), et chaque équivalence
+  conserve ses **preuves** — les fiches ou les alertes qui l'ont fait
+  apparaître. « Le moteur l'a trouvée » ne suffit pas devant un contrôleur.
+
+## API
+
+| Endpoint | Rôle |
+|---|---|
+| `GET /api/resources/learned?status=PROPOSED` | File de revue, triée par confiance décroissante, avec preuves et compteurs |
+| `POST /api/resources/mine` | Passe à la demande (Admin, asynchrone avec progression) |
+| `POST /api/resources/learned/{id}/decide` | `APPROVE` / `REJECT` (Admin, tracé, recharge l'index) |
+| `PUT /api/settings/ingestion` | `resource_mining` : planification et seuils |
+
+## Limite assumée
+
+La fouille découvre des **variantes d'écriture** : translittérations
+concurrentes, graphies proches, coquilles installées. Elle ne découvre **pas**
+les équivalents inter-langues sans proximité graphique ni phonétique — *Henri*
+≡ *Harry*, *Bill* ≡ *William* — parce que rien dans les données ne permet de
+les déduire sans risque. Ces cas relèvent de la curation manuelle des fichiers.
+
+Le type de champ est déduit de la **position** du mot divergent (premier =
+prénom, dernier = nom). Sur un nom en ordre asiatique (« Zhang Wei »), cette
+déduction est inversée. Sans conséquence pratique : au blocking comme au
+scoring, les tables prénom et nom sont interrogées toutes les deux sur chaque
+mot — le classement ne sert qu'à la lisibilité et à la gouvernance.

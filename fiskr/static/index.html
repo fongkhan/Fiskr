@@ -1438,6 +1438,37 @@
                             <div id="resources-files" style="margin-top: 1.25rem;"></div>
                         </div>
                     </div>
+                    <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+                        <div class="card result-card">
+                            <h2>🔎 Homonymes découverts — fouille quotidienne</h2>
+                            <p class="section-desc">Chaque nuit, le moteur cherche de nouveaux homonymes dans deux sources que l'installation possède déjà. Les <strong>alias déclarés par les listes officielles</strong> : quand une source affirme qu'une fiche « Mohammad AL-ASSAD » porte l'alias « Mohammed AL-ASAD », l'autorité elle-même établit que les deux graphies désignent la même personne. Les <strong>alertes confirmées en revue</strong> : un analyste a validé humainement que deux écritures désignent le même individu. Garde-fou décisif : les deux noms doivent avoir le même nombre de mots et ne différer que sur <strong>un seul</strong> — « Ali Hassan » et « Abu Muhammad » divergent sur deux mots et sont écartés, car c'est un surnom et non une variante d'écriture. Chaque découverte porte ses preuves et reste révocable.</p>
+                            <div id="mining-summary"></div>
+                            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin: 1rem 0;">
+                                <label>Statut :
+                                    <select id="mining-status-filter" onchange="fetchLearnedEquivalences()">
+                                        <option value="PROPOSED">À décider</option>
+                                        <option value="APPROVED">Appliquées</option>
+                                        <option value="REJECTED">Rejetées</option>
+                                        <option value="">Toutes</option>
+                                    </select>
+                                </label>
+                                <button class="btn btn-secondary" id="mining-run-btn" onclick="runResourceMining()">🔎 Lancer une passe maintenant</button>
+                            </div>
+                            <div id="mining-settings-editor"></div>
+                            <div class="table-container" style="max-height: 420px; overflow-y: auto; margin-top: 1rem;">
+                                <table id="mining-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Équivalence</th><th>Champ</th><th>Source</th>
+                                            <th>Occurrences</th><th>Confiance</th><th>Preuves</th>
+                                            <th>Statut</th><th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody><!-- Populated dynamically --></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- RÈGLES FAUX POSITIFS (rôle rules/admin) -->

@@ -727,6 +727,7 @@ function switchSubTab(sectionId, subTabId) {
     } else if (subTabId === "alerts-blocking") {
         fetchBlockingSettings();
         fetchResources();
+        fetchLearnedEquivalences();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
     } else if (subTabId === "screening-batch") {
@@ -5176,6 +5177,174 @@ async function lookupResource() {
     } catch (e) {
         console.error("Error looking up resource:", e);
         box.innerHTML = '<small style="color: var(--color-alert);">Erreur réseau de communication.</small>';
+    }
+}
+
+// ------------------ FOUILLE D'HOMONYMES ------------------
+
+let miningState = null;
+
+async function fetchLearnedEquivalences() {
+    const filter = document.getElementById("mining-status-filter");
+    const status = filter ? filter.value : "PROPOSED";
+    try {
+        const url = "/api/resources/learned" + (status ? `?status=${status}` : "");
+        const response = await apiFetch(url);
+        if (!response.ok) return;
+        miningState = await response.json();
+        renderMining();
+    } catch (e) {
+        console.error("Error fetching learned equivalences:", e);
+    }
+}
+
+function miningStatusBadge(status) {
+    const map = {
+        PROPOSED: ["#c084fc", "À DÉCIDER"],
+        APPROVED: ["var(--success-soft-text)", "APPLIQUÉE"],
+        REJECTED: ["#94a3b8", "REJETÉE"],
+    };
+    const [color, label] = map[status] || ["#9ca3af", status];
+    return `<span style="color: ${color}; font-weight: 600; font-size: 0.78rem;">${label}</span>`;
+}
+
+function miningEvidenceText(item) {
+    const evs = item.evidence || [];
+    if (!evs.length) return "—";
+    return evs.slice(0, 3).map(e => e.alias
+        ? `« ${e.primary_name} » ⇄ « ${e.alias} »`
+        : `alerte #${e.alert_id} : « ${e.client_name} » ⇄ « ${e.watchlist_name} »`
+    ).join(" · ");
+}
+
+function renderMining() {
+    const data = miningState;
+    if (!data) return;
+    const summary = document.getElementById("mining-summary");
+    if (summary) {
+        const c = data.counters || {};
+        const s = data.settings || {};
+        summary.innerHTML = `
+            <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center;">
+                <div><strong style="font-size: 1.15rem; color: #c084fc;">${c.PROPOSED || 0}</strong> <small style="color: var(--text-muted);">à décider</small></div>
+                <div><strong style="font-size: 1.15rem; color: var(--success-soft-text);">${c.APPROVED || 0}</strong> <small style="color: var(--text-muted);">appliquées au criblage</small></div>
+                <div><strong style="font-size: 1.15rem; color: var(--text-muted);">${c.REJECTED || 0}</strong> <small style="color: var(--text-muted);">rejetées</small></div>
+                <div>${s.enabled
+                    ? `<span class="status-badge" style="background: var(--success-soft-bg); color: var(--success-soft-text);">PLANIFIÉE</span> <small style="color: var(--text-muted);"><code>${escapeHtml(s.cron || "")}</code></small>`
+                    : '<span class="status-badge" style="background: var(--surface-3); color: var(--text-muted);">DÉSACTIVÉE</span>'}</div>
+            </div>`;
+    }
+    const editor = document.getElementById("mining-settings-editor");
+    if (editor) {
+        const s = data.settings || {};
+        const auto = Number(s.auto_approve_confidence || 0);
+        editor.innerHTML = `
+            <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end; padding: 0.75rem; border: 1px solid var(--border-color); border-radius: 6px;">
+                <label style="display: flex; align-items: center; gap: 0.4rem;">
+                    <input type="checkbox" id="mining-enabled" ${s.enabled ? "checked" : ""}> Fouille quotidienne
+                </label>
+                <label>Planification (cron)<br><input type="text" id="mining-cron" value="${escapeHtml(s.cron || "")}" style="width: 130px;"></label>
+                <label>Occurrences min.<br><input type="number" id="mining-min-occ" min="1" max="1000" value="${s.min_occurrences || 2}" style="width: 80px;"></label>
+                <label>Similarité min.<br><input type="number" id="mining-min-sim" min="0" max="1" step="0.05" value="${s.min_similarity ?? 0.75}" style="width: 80px;"></label>
+                <label title="0 = ne rien appliquer automatiquement, tout passe en revue">Auto-application ≥<br><input type="number" id="mining-auto" min="0" max="1" step="0.05" value="${auto}" style="width: 80px;"></label>
+                <button class="btn btn-sm btn-primary" onclick="saveMiningSettings()">Enregistrer</button>
+                <small style="color: var(--text-muted); flex-basis: 100%;">
+                    ${auto > 0
+                        ? `Les découvertes de confiance ≥ ${auto} sont appliquées sans revue — elles restent révocables et chaque passe est notifiée.`
+                        : "Aucune application automatique : toute découverte passe par une décision humaine."}
+                    Une équivalence appliquée n'a d'effet sur le criblage que si son type de champ est activé ci-dessus.
+                </small>
+            </div>`;
+    }
+    const tbody = document.querySelector("#mining-table tbody");
+    if (!tbody) return;
+    const items = data.items || [];
+    if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="8" style="color: var(--text-muted);">Aucune équivalence dans cet état.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = items.map(item => {
+        const pct = Math.round((item.confidence || 0) * 100);
+        const canApprove = item.status !== "APPROVED";
+        const canReject = item.status !== "REJECTED";
+        return `
+        <tr>
+            <td><code>${escapeHtml(item.term_a)}</code> ≡ <code>${escapeHtml(item.term_b)}</code>
+                <div><small style="color: var(--text-muted);">classe ${escapeHtml(item.class_id)}</small></div></td>
+            <td>${escapeHtml(item.field_label)}</td>
+            <td><small>${escapeHtml(item.source_label)}</small></td>
+            <td>${item.occurrences}</td>
+            <td><strong>${pct} %</strong>
+                <div><small style="color: var(--text-muted);">sim. ${Math.round(item.similarity * 100)} %${item.phonetic_match ? " · phonétique" : ""}</small></div></td>
+            <td><small>${escapeHtml(miningEvidenceText(item))}</small></td>
+            <td>${miningStatusBadge(item.status)}
+                ${item.decided_by ? `<div><small style="color: var(--text-muted);">@${escapeHtml(item.decided_by)}</small></div>` : ""}</td>
+            <td style="white-space: nowrap;">
+                ${canApprove ? `<button class="btn btn-sm btn-primary" style="padding: 0.1rem 0.5rem;" onclick="decideLearned(${item.id}, 'APPROVE')">✔ Appliquer</button>` : ""}
+                ${canReject ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text); padding: 0.1rem 0.5rem;" onclick="decideLearned(${item.id}, 'REJECT')">✕ Rejeter</button>` : ""}
+            </td>
+        </tr>`;
+    }).join("");
+}
+
+async function decideLearned(id, decision) {
+    if (decision === "APPROVE") {
+        const ok = await confirmDialog(
+            "Appliquer cette équivalence élargit le périmètre des alertes : des rapprochements aujourd'hui impossibles deviendront des alertes. Continuer ?",
+            { title: "Homonyme découvert" });
+        if (!ok) return;
+    }
+    try {
+        const response = await apiFetch(`/api/resources/learned/${id}/decide`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision }),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message, "success");
+        fetchLearnedEquivalences();
+        fetchResources();
+    } catch (e) {
+        console.error("Error deciding learned equivalence:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function runResourceMining() {
+    try {
+        const response = await apiFetch("/api/resources/mine", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message, "success");
+        // La passe tourne en tâche de fond : on se raccroche au suivi commun
+        onOperationDone(data.job_token, () => fetchLearnedEquivalences());
+    } catch (e) {
+        console.error("Error running mining:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+async function saveMiningSettings() {
+    const val = (id) => (document.getElementById(id) || {}).value;
+    const payload = {
+        enabled: (document.getElementById("mining-enabled") || {}).checked === true,
+        cron: val("mining-cron"),
+        min_occurrences: Number(val("mining-min-occ")),
+        min_similarity: Number(val("mining-min-sim")),
+        auto_approve_confidence: Number(val("mining-auto")),
+    };
+    try {
+        const response = await apiFetch("/api/settings/ingestion", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ resource_mining: payload }),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast("Réglages de la fouille mis à jour.", "success");
+        fetchLearnedEquivalences();
+    } catch (e) {
+        console.error("Error saving mining settings:", e);
+        showToast("Erreur réseau de communication.", "error");
     }
 }
 

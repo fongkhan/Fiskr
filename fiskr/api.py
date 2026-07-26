@@ -36,7 +36,7 @@ from fiskr.database import (
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
     BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting, HookDelivery,
-    NotificationDelivery
+    NotificationDelivery, LearnedEquivalence
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
 from fiskr.notify import (
@@ -97,7 +97,8 @@ from fiskr.settings import (
     retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
     score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
     investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST,
-    resource_fields, resources_active, SETTING_RESOURCE_FIELDS, DEFAULT_RESOURCE_FIELDS
+    resource_fields, resources_active, SETTING_RESOURCE_FIELDS, DEFAULT_RESOURCE_FIELDS,
+    mining_settings, SETTING_MINING, DEFAULT_MINING
 )
 from fiskr import resources as resource_tables
 from fiskr.retention import preview_retention, run_retention
@@ -479,6 +480,92 @@ def _quality_digest_line(db) -> str:
     warning = " ⚠" if threshold and score < threshold else ""
     return f"{score} %{suffix}{warning}"
 
+def run_resource_mining(db, started_by: str = "système",
+                        token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Passe de fouille d'homonymes, avec progression et rechargement de l'index.
+
+    Le rechargement n'a lieu QUE si des equivalences ont ete auto-approuvees :
+    recharger l'index de criblage pour rien couterait un parcours complet des
+    listes sans rien changer.
+    """
+    from fiskr import resource_mining
+
+    token = token or f"mining-{uuid.uuid4().hex[:8]}"
+    label = "Fouille d'homonymes"
+    progress_registry.update(token, phase="PARSE", kind="mining", label=label,
+                             started_by=started_by, processed=0)
+    try:
+        settings_cfg = mining_settings(db)
+        report = resource_mining.run_mining(
+            db, settings_cfg,
+            progress=lambda seen: progress_registry.update(
+                token, phase="PARSE", kind="mining", label=label,
+                started_by=started_by, processed=seen),
+        )
+        if report["auto_approved"]:
+            progress_registry.update(token, phase="RELOAD", kind="mining", label=label,
+                                     started_by=started_by)
+            resource_tables.reload_index(db=db)
+            if resources_active(db):
+                # Meme lecon que le reglage d'activation : l'index des fiches
+                # listees fige ses cles de blocking, il doit etre reconstruit
+                # pour que les nouvelles equivalences aient un effet
+                load_watchlist_cache(db)
+        progress_registry.update(token, phase="DONE", kind="mining", label=label,
+                                 started_by=started_by,
+                                 processed=report["candidates"],
+                                 total=max(1, report["candidates"]))
+        progress_registry.finish(token)
+        return report
+    except Exception:
+        # `_start_job` marque deja l'echec quand la passe vient de la ; on le
+        # fait aussi ici pour l'appel direct (planificateur), sans doublon nuisible
+        progress_registry.finish(token, status="ERROR")
+        raise
+
+async def _resource_mining_scheduler():
+    """
+    Fouille quotidienne d'homonymes : chaque minute, si le reglage est actif et
+    que son expression cron matche, une passe complete est lancee dans un
+    thread (le parcours des listes est bloquant et ne doit jamais tenir la
+    boucle d'evenements). Une passe sans rien de neuf ne notifie personne.
+    """
+    from fiskr.cron import cron_matches, CronError
+
+    while True:
+        now = datetime.now()
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        tick = datetime.now()
+        try:
+            db = next(get_db())
+            try:
+                cfg = mining_settings(db)
+                if not cfg["enabled"]:
+                    continue
+                try:
+                    if not cron_matches(cfg["cron"], tick):
+                        continue
+                except CronError as bad:
+                    logger.error(f"Cron de la fouille invalide ({cfg['cron']}) : {bad}")
+                    continue
+            finally:
+                db.close()
+            logger.info("Fouille quotidienne d'homonymes : démarrage.")
+            report = await asyncio.to_thread(_mining_pass)
+            if report and (report["created"] or report["auto_approved"]):
+                notify_event("resource_mining", report)
+        except Exception as e:
+            logger.error(f"Fouille d'homonymes en échec sur ce tick : {e}")
+
+def _mining_pass() -> Optional[Dict[str, Any]]:
+    """Passe de fouille avec sa propre session (executee hors boucle d'evenements)."""
+    db = next(get_db())
+    try:
+        return run_resource_mining(db, started_by="système")
+    finally:
+        db.close()
+
 async def _digest_scheduler():
     """
     Digest KPI periodique : chaque minute, si le reglage est actif et que son
@@ -754,6 +841,8 @@ async def lifespan(app: FastAPI):
     retention_task = asyncio.create_task(_retention_scheduler())
     # Recapitulatif des notifications groupees + detection SLA/echeances
     notif_task = asyncio.create_task(_notification_batch_scheduler())
+    # Fouille quotidienne d'homonymes (reglage a chaud resources.mining)
+    mining_task = asyncio.create_task(_resource_mining_scheduler())
     yield
     # Shutdown
     if scheduler_task:
@@ -762,6 +851,7 @@ async def lifespan(app: FastAPI):
     digest_task.cancel()
     retention_task.cancel()
     notif_task.cancel()
+    mining_task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -4829,6 +4919,9 @@ class IngestionSettingsUpdate(BaseModel):
     # Equivalences linguistiques actives, par type de champ
     # {"given_name": true, "country": false, ...}
     resource_fields: Optional[Dict[str, bool]] = None
+    # Fouille quotidienne d'homonymes : {"enabled", "cron", "min_occurrences",
+    # "min_similarity", "auto_approve_confidence", "sources"}
+    resource_mining: Optional[Dict[str, Any]] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -4866,6 +4959,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
         "resource_fields": resource_fields(db),
+        "resource_mining": mining_settings(db),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -4909,7 +5003,8 @@ async def update_ingestion_settings(
     if (not changed and payload.backtest_max_gap_pct is None
             and payload.quality_min_score_pct is None
             and payload.alert_sla_hours is None and payload.notification_events is None
-            and payload.digest is None and payload.resource_fields is None):
+            and payload.digest is None and payload.resource_fields is None
+            and payload.resource_mining is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     before_state = _settings_payload(db)
     before_state.pop("sources", None)
@@ -4977,6 +5072,24 @@ async def update_ingestion_settings(
             # gagnerait ses cles d'equivalence : les deux cotes ne se
             # rencontreraient jamais et le reglage serait sans aucun effet.
             load_watchlist_cache(db)
+    if payload.resource_mining is not None:
+        from fiskr.cron import parse_cron, CronError
+
+        merged_mining = dict(mining_settings(db))
+        merged_mining.update(payload.resource_mining)
+        cron_expr = str(merged_mining.get("cron") or "").strip()
+        if cron_expr:
+            try:
+                parse_cron(cron_expr)
+            except CronError as bad:
+                raise HTTPException(status_code=400,
+                                    detail=f"Expression cron de la fouille invalide : {bad}")
+        unknown = [s for s in (merged_mining.get("sources") or [])
+                   if s not in DEFAULT_MINING["sources"]]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"Source de fouille inconnue : {', '.join(unknown)}.")
+        set_setting(db, SETTING_MINING, merged_mining, updated_by=admin_user["username"])
     after_state = _settings_payload(db)
     after_state.pop("sources", None)
     delta = {k: v for k, v in after_state.items() if before_state.get(k) != v}
@@ -5161,6 +5274,152 @@ async def lookup_resource(
         "normalized": resource_tables.normalize_term(term),
         "results": results,
         "found": bool(results),
+    }
+
+# ------------------ FOUILLE D'HOMONYMES (equivalences apprises) ------------------
+
+def _learned_summary(row) -> Dict[str, Any]:
+    from fiskr import resource_mining
+
+    return {
+        "id": row.id,
+        "field": row.field,
+        "field_label": resource_tables.FIELD_LABELS.get(row.field, row.field),
+        "class_id": row.class_id,
+        "term_a": row.term_a,
+        "term_b": row.term_b,
+        "source": row.source,
+        "source_label": resource_mining.SOURCE_LABELS.get(row.source, row.source),
+        "occurrences": row.occurrences,
+        "similarity": round(row.similarity, 3),
+        "phonetic_match": bool(row.phonetic_match),
+        "confidence": round(row.confidence, 3),
+        "evidence": row.evidence or [],
+        "status": row.status,
+        "discovered_at": row.discovered_at.isoformat() if row.discovered_at else None,
+        "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+        "decided_by": row.decided_by,
+        "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+        "decision_comment": row.decision_comment,
+    }
+
+@app.get("/api/resources/learned")
+async def list_learned_equivalences(
+    status: Optional[str] = Query(None),
+    field: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Equivalences decouvertes par la fouille, avec leurs preuves. Triees par
+    confiance decroissante : la file de revue commence par ce qui est le plus
+    sur, donc le plus rapide a trancher.
+    """
+    from fiskr import resource_mining
+
+    query = db.query(LearnedEquivalence)
+    if status:
+        key = status.strip().upper()
+        if key not in resource_mining.STATUSES:
+            raise HTTPException(status_code=400, detail=f"Statut inconnu : {status}.")
+        query = query.filter(LearnedEquivalence.status == key)
+    if field:
+        if field not in resource_tables.FIELD_TYPES:
+            raise HTTPException(status_code=400, detail=f"Type de champ inconnu : {field}.")
+        query = query.filter(LearnedEquivalence.field == field)
+    total = query.count()
+    rows = query.order_by(
+        LearnedEquivalence.confidence.desc(), LearnedEquivalence.id.desc()
+    ).offset((page - 1) * page_size).limit(page_size).all()
+    counters = {
+        key: db.query(LearnedEquivalence).filter(LearnedEquivalence.status == key).count()
+        for key in resource_mining.STATUSES
+    }
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "counters": counters,
+        "settings": mining_settings(db),
+        "items": [_learned_summary(r) for r in rows],
+    }
+
+@app.post("/api/resources/mine")
+async def trigger_resource_mining(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Lance une passe de fouille a la demande (Admin). Asynchrone : le parcours
+    des listes se compte en dizaines de secondes sur un referentiel reel, il
+    n'a rien a faire dans le cycle d'une requete HTTP.
+    """
+    def _job(job_token: str):
+        session = next(get_db())
+        try:
+            report = run_resource_mining(session, started_by=admin_user["username"],
+                                         token=job_token)
+            log_admin_action(session, admin_user["username"], "RESOURCE_MINING_RUN",
+                             target="resources", after=report)
+            session.commit()
+        finally:
+            session.close()
+
+    token = f"mining-{uuid.uuid4().hex[:8]}"
+    _start_job(token, kind="mining", label="Fouille d'homonymes", target=_job,
+               started_by=admin_user["username"])
+    return JSONResponse(status_code=202, content={
+        "message": "Fouille d'homonymes lancée.", "job_token": token})
+
+class LearnedDecision(BaseModel):
+    decision: str                      # APPROVE | REJECT
+    comment: Optional[str] = None
+
+@app.post("/api/resources/learned/{learned_id}/decide")
+async def decide_learned_equivalence(
+    learned_id: int,
+    payload: LearnedDecision,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Approuve ou rejette une equivalence decouverte (Admin, tracé).
+
+    Approuver l'applique au criblage ; rejeter l'en retire. Les deux sens sont
+    disponibles a tout moment : une approbation automatique reste revocable, ce
+    qui est la condition pour que l'auto-approbation soit acceptable.
+    """
+    from fiskr import resource_mining
+
+    row = db.query(LearnedEquivalence).filter(LearnedEquivalence.id == learned_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Équivalence introuvable.")
+    decision = (payload.decision or "").strip().upper()
+    if decision not in ("APPROVE", "REJECT"):
+        raise HTTPException(status_code=400, detail="Décision attendue : APPROVE ou REJECT.")
+    before = row.status
+    row.status = (resource_mining.STATUS_APPROVED if decision == "APPROVE"
+                  else resource_mining.STATUS_REJECTED)
+    row.decided_by = admin_user["username"]
+    row.decided_at = datetime.utcnow()
+    row.decision_comment = (payload.comment or "").strip() or None
+    log_admin_action(db, admin_user["username"], "LEARNED_EQUIVALENCE_DECIDED",
+                     target=f"{row.field}:{row.term_a}≡{row.term_b}",
+                     before={"status": before}, after={"status": row.status})
+    db.commit()
+    reloaded = False
+    if before != row.status:
+        # L'index actif porte (ou portait) cette equivalence : il doit etre
+        # reconstruit, et le cache de criblage avec lui si un type est actif
+        resource_tables.reload_index(db=db)
+        if resources_active(db):
+            load_watchlist_cache(db)
+        reloaded = True
+    return {
+        "message": ("Équivalence appliquée au criblage." if decision == "APPROVE"
+                    else "Équivalence retirée du criblage."),
+        "cache_reloaded": reloaded,
+        **_learned_summary(row),
     }
 
 # ------------------ REGLES ANTI-FAUX POSITIFS (Python, mode DEV) ------------------

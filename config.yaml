@@ -145,6 +145,9 @@ hooks:
 # etre mesuree au cahier de tests avant mise en production.
 resources:
   directory: ""                 # vide = repertoire `resources/` du projet
+  # La fouille quotidienne d'homonymes se regle a chaud (Parametres >
+  # resources.mining) : activation, cron, occurrences minimales, similarite
+  # minimale, seuil d'auto-application (0 = ne rien appliquer sans revue).
 
 fprules:
   llm_enabled: false            # true = bouton "Générer par IA" dans l'éditeur de règles

@@ -69,9 +69,9 @@ groups:
   - id: DMITRI
     terms: [Dmitri, Dmitry, Dmitriy, Dimitri, Dimitry, Dmytro]
   - id: MIKHAIL
-    terms: [Mikhail, Michail, Mihail, Mykhailo, Michael, Michel, Miguel, Michele, Mischa]
+    terms: [Mikhail, Michail, Mihail, Mykhailo, Michael, Michel, Miguel, Michele, Mischa, Mihai, Michal, Mike, Mick, Michalis]
   - id: IVAN
-    terms: [Ivan, Iwan, John, Jean, Juan, Giovanni, Johannes, Johann, Jan, Joao, Janos, Sean, Ian]
+    terms: [Ivan, Iwan, John, Jean, Juan, Giovanni, Johannes, Johann, Jan, Joao, Janos, Sean, Ian, Ioannis, Hans, Yohan]
   - id: YURI
     terms: [Yuri, Yury, Youri, Iouri, Jurij, Yurii]
   - id: NIKOLAI
@@ -107,13 +107,13 @@ groups:
   - id: RICHARD
     terms: [Richard, Ricardo, Riccardo, Dick, Rick, Ricky, Rikard]
   - id: JAMES
-    terms: [James, Jacques, Jaime, Giacomo, Jacob, Jakob, Jim, Jimmy, Jacobo, Iago]
+    terms: [James, Jacques, Jaime, Giacomo, Jacob, Jakob, Jim, Jimmy, Jacobo, Iago, Yakov, Iakov, Jakub, Diego, Seamus]
   - id: CHARLES
     terms: [Charles, Carlos, Carlo, Karl, Carl, Charlie, Chuck, Karol, Carel]
   - id: GEORGE
-    terms: [George, Georges, Jorge, Giorgio, Georg, Jerzy, Yorgos, Gheorghe]
+    terms: [George, Georges, Jorge, Giorgio, Georg, Jerzy, Yorgos, Gheorghe, Georgios]
   - id: JOSEPH
-    terms: [Jose, Giuseppe, Josef, Jozef, Joe, Joey, Josip]
+    terms: [Jose, Giuseppe, Josef, Jozef, Joe, Joey, Josip, Jose, Pepe]
   - id: ANTHONY
     terms: [Anthony, Antoine, Antonio, Anton, Antonin, Tony, Antonius, Antun]
   - id: THOMAS
@@ -131,7 +131,7 @@ groups:
   - id: MARGARET
     terms: [Margaret, Marguerite, Margarita, Margarethe, Margherita, Peggy, Maggie, Margit]
   - id: MARY
-    terms: [Mary, Marie, Maria, Mariya, Miriam, Maryam, Mariam, Marija]
+    terms: [Mary, Marie, Maria, Mariya, Miriam, Maryam, Mariam, Marija, Molly, Mimi]
   - id: ANNE
     terms: [Anne, Anna, Ana, Hanna, Hannah, Annie, Anya, Ania]
   - id: JOHNATHAN
@@ -164,3 +164,211 @@ groups:
     terms: [Hyun, Hyeon, Hyon]
   - id: JOON
     terms: [Joon, Jun, Jung, Joong]
+
+  # ---------- Translittérations arabes / persanes (suite) ----------
+  - id: ABDELRAHMAN
+    terms: [Abdelrahman, Abdulrahman, Abd al Rahman, Abderrahmane, Abdurrahman, Abdrahman]
+  - id: ABDELKADER
+    terms: [Abdelkader, Abdulqadir, Abdelkadir, Abd al Qadir, Abdelkarder]
+  - id: ABDELMALEK
+    terms: [Abdelmalek, Abdulmalik, Abd al Malik, Abdelmalik]
+  - id: ABDELHAMID
+    terms: [Abdelhamid, Abdulhamid, Abd al Hamid, Abdulhameed]
+  - id: ANWAR
+    terms: [Anwar, Anouar, Anvar, Anwer]
+  - id: ASSAD_GIVEN
+    terms: [Asad, Assad, Azad]
+  - id: AYMAN
+    terms: [Ayman, Aiman, Aymen, Eyman]
+  - id: AZIZ
+    terms: [Aziz, Azeez, Aziiz]
+  - id: BILAL
+    terms: [Bilal, Belal, Bilel, Bilaal]
+  - id: FAISAL
+    terms: [Faisal, Faysal, Fayçal, Fasal, Feisal]
+  - id: FARID
+    terms: [Farid, Fareed, Ferid, Faride]
+  - id: GHASSAN
+    terms: [Ghassan, Gassan, Rassan]
+  - id: HAMZA
+    terms: [Hamza, Hamzah, Hamse, Hamsa]
+  - id: HAROUN
+    terms: [Haroun, Harun, Haroon, Aaron, Aharon]
+  - id: IMAD
+    terms: [Imad, Emad, Aimad, Immad]
+  - id: ISMAIL
+    terms: [Ismail, Ismael, Ismaïl, Ismayil, Esmail, Ishmael]
+  - id: JAMAL
+    terms: [Jamal, Djamal, Djamel, Gamal, Jamel]
+  - id: KAMAL
+    terms: [Kamal, Kamel, Camal, Kemal]
+  - id: MAJID
+    terms: [Majid, Majeed, Madjid, Magid]
+  - id: MANSOUR
+    terms: [Mansour, Mansur, Mansoor, Manssour]
+  - id: MOUSSA
+    terms: [Moussa, Musa, Mousa, Moses, Mose, Mussa]
+  - id: NASSER_GIVEN
+    terms: [Nasser, Nasir, Naser, Nassir, Nassar]
+  - id: NOUR
+    terms: [Nour, Noor, Nur, Nor]
+  - id: OSAMA
+    terms: [Osama, Ousama, Usama, Oussama, Usamah]
+  - id: QASSEM
+    terms: [Qassem, Kassem, Qasim, Kasim, Ghassem, Qassim]
+  - id: RAMI
+    terms: [Rami, Ramy, Ramee]
+  - id: SALAH
+    terms: [Salah, Salaheddine, Salahuddin, Saleh, Salih]
+  - id: SAMI
+    terms: [Sami, Samy, Samee, Sammy]
+  - id: SULEIMAN
+    terms: [Suleiman, Sulaiman, Soliman, Solomon, Salomon, Suleyman, Sleiman]
+  - id: TAHER
+    terms: [Taher, Tahir, Taheer, Thaher]
+  - id: WALID
+    terms: [Walid, Waleed, Oualid, Valid]
+  - id: YASSIN
+    terms: [Yassin, Yasin, Yaseen, Yacine, Yassine]
+  - id: ZAKARIA
+    terms: [Zakaria, Zakariya, Zachary, Zacharie, Zakarya]
+  - id: ZEINAB
+    terms: [Zeinab, Zainab, Zaynab, Zeynep, Zinab]
+  - id: KHADIJA
+    terms: [Khadija, Khadidja, Hatice, Khadijah]
+  - id: LEILA
+    terms: [Leila, Layla, Laila, Leyla, Lila]
+  - id: AMINA
+    terms: [Amina, Aminah, Emine, Aminata]
+  - id: SORAYA
+    terms: [Soraya, Suraya, Thoraya, Suraiya]
+
+  # ---------- Translittérations russes / slaves (suite) ----------
+  - id: ANATOLY
+    terms: [Anatoly, Anatoli, Anatoliy, Anatole]
+  - id: ARKADY
+    terms: [Arkady, Arkadi, Arkadiy, Arcade]
+  - id: BORIS
+    terms: [Boris, Borys, Borislav]
+  - id: EVGENY
+    terms: [Evgeny, Yevgeny, Evgueni, Eugene, Eugène, Evgeni, Jevgeni]
+  - id: GENNADY
+    terms: [Gennady, Guennadi, Gennadi, Hennadiy]
+  - id: IGOR
+    terms: [Igor, Ihor, Igore]
+  - id: KONSTANTIN
+    terms: [Konstantin, Constantin, Kostyantyn, Constantine]
+  - id: LEONID
+    terms: [Leonid, Leonide, Leonyd]
+  - id: MAXIM
+    terms: [Maxim, Maksim, Maxime, Maksym]
+  - id: OLEG
+    terms: [Oleg, Aleh, Olegh]
+  - id: PAVEL
+    terms: [Pavel, Pavlo, Paul, Pablo, Paolo, Pawel]
+  - id: ROMAN
+    terms: [Roman, Romain, Romano, Romanus]
+  - id: RUSLAN
+    terms: [Ruslan, Rouslan, Rusłan]
+  - id: STANISLAV
+    terms: [Stanislav, Stanislas, Stanislaw, Stanislaus]
+  - id: VALERY
+    terms: [Valery, Valeri, Valeriy, Valère, Valerio]
+  - id: VIKTOR
+    terms: [Viktor, Victor, Victeur, Vittorio, Vitor]
+  - id: EKATERINA
+    terms: [Ekaterina, Yekaterina, Katerina, Catherine, Katharina, Caterina]
+  - id: NATALIA
+    terms: [Natalia, Nataliya, Nathalie, Natalya, Natalie]
+  - id: SVETLANA
+    terms: [Svetlana, Svitlana, Sviatlana]
+  - id: TATIANA
+    terms: [Tatiana, Tatyana, Tetiana, Tatjana]
+  - id: OLGA
+    terms: [Olga, Olha, Helga]
+  - id: IRINA
+    terms: [Irina, Iryna, Irene, Irena]
+
+  # ---------- Équivalents inter-langues (Europe, suite) ----------
+  - id: ANTHONY
+    terms: [Anthony, Antoine, Antonio, Antonius, Anton, Antoni, Antonis]
+  - id: CHARLES
+    terms: [Charles, Carlos, Carlo, Karl, Carl, Karel, Károly, Charlie]
+  - id: DANIEL
+    terms: [Daniel, Danièle, Daniele, Danilo, Daniyal, Danny]
+  - id: EDWARD
+    terms: [Edward, Édouard, Eduardo, Eduard, Edoardo, Ed, Eddie]
+  - id: FRANCIS
+    terms: [Francis, François, Francisco, Francesco, Franz, Frank, Ferenc]
+  - id: GREGORY
+    terms: [Gregory, Grégoire, Gregorio, Grzegorz, Gregor, Grigori]
+  - id: LOUIS
+    terms: [Louis, Luis, Luigi, Ludwig, Lewis, Ludovico, Ludwik, Lajos]
+  - id: MARK
+    terms: [Mark, Marc, Marco, Marcos, Markus, Marek, Marcus]
+  - id: MARTIN
+    terms: [Martin, Martín, Martino, Marton, Marcin, Maarten]
+  - id: PATRICK
+    terms: [Patrick, Patrice, Patricio, Patrizio, Padraig, Pat]
+  - id: PAUL_EU
+    terms: [Paulo, Paulus, Pál, Pauli]
+  - id: PHILIP
+    terms: [Philip, Philippe, Felipe, Filippo, Filip, Phil, Filipe]
+  - id: RICHARD
+    terms: [Richard, Ricardo, Riccardo, Rick, Ricky, Rikard]
+  - id: ROBERT
+    terms: [Robert, Roberto, Rupert, Bob, Bobby, Rob, Robrecht]
+  - id: STEPHEN
+    terms: [Stephen, Steven, Étienne, Esteban, Stefano, Stefan, Istvan, Steve]
+  - id: THOMAS
+    terms: [Thomas, Tomás, Tommaso, Tomasz, Tom, Tommy, Toma]
+  - id: VINCENT
+    terms: [Vincent, Vicente, Vincenzo, Vinzenz, Vince, Vincentius]
+  - id: ANNE
+    terms: [Anne, Ana, Anna, Hannah, Hanna, Ann, Annie, Anya]
+  - id: ELIZABETH
+    terms: [Elizabeth, Elisabeth, Isabel, Isabelle, Isabella, Elisabetta, Liz, Beth, Betty, Ilse]
+  - id: HELEN
+    terms: [Helen, Hélène, Elena, Helena, Yelena, Ellen, Eleni]
+  - id: MARGARET
+    terms: [Margaret, Marguerite, Margarita, Margherita, Margarethe, Maggie, Greta]
+  - id: SOPHIA
+    terms: [Sophia, Sophie, Sofia, Sofie, Zofia, Sonya, Sonia]
+  - id: THERESA
+    terms: [Theresa, Thérèse, Teresa, Terezia, Tereza, Terry]
+
+  # ---------- Romanisations est-asiatiques et sud-asiatiques (suite) ----------
+  - id: CHENG_GIVEN
+    terms: [Cheng, Chung, Tjeng]
+  - id: FENG
+    terms: [Feng, Fung, Foong]
+  - id: HONG
+    terms: [Hong, Hung, Hoong]
+  - id: JIE
+    terms: [Jie, Chieh, Kit]
+  - id: LEI_GIVEN
+    terms: [Lei, Louie, Loi]
+  - id: QIANG
+    terms: [Qiang, Chiang, Keung]
+  - id: XIAO
+    terms: [Xiao, Hsiao, Siu]
+  - id: YAN
+    terms: [Yan, Yen, Ngan]
+  - id: YONG
+    terms: [Yong, Yung, Yoong]
+  - id: SEUNG
+    terms: [Seung, Sung, Seong]
+  - id: MIN_KO
+    terms: [Minho, Min Ho, Minho]
+  - id: RAJESH
+    terms: [Rajesh, Rajeshh, Radjesh]
+  - id: SANJAY
+    terms: [Sanjay, Sanjai, Sanjeev, Sanjiv]
+  - id: SURESH
+    terms: [Suresh, Sooresh, Souresh]
+  - id: VIJAY
+    terms: [Vijay, Bijay, Vijai]
+  - id: ARJUN
+    terms: [Arjun, Arjuna, Arjoun]
+  - id: KRISHNA
+    terms: [Krishna, Krisna, Kishan, Krishnan]

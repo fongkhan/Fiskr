@@ -1,0 +1,150 @@
+# Fiskr — ressource linguistique : équivalences d'ÉTATS, PROVINCES ET RÉGIONS
+#
+# Une adresse de fiche listée porte « Crimea » là où le référentiel client
+# porte « Crimée » ou « Krym ». Un lieu de naissance porte « CA » là où la
+# fiche porte « California ». Aucune métrique de chaîne ne rapproche
+# « Bavière » de « Bayern » ni « Donetsk Oblast » de « Donetskaya Oblast ».
+#
+# Ce fichier couvre en priorité les régions qui portent un enjeu de criblage :
+# territoires sous régime de sanctions territoriales (Crimée, oblasts
+# ukrainiens occupés), puis les subdivisions les plus fréquentes dans les
+# référentiels clients (États américains, provinces canadiennes, Länder,
+# régions françaises et italiennes, provinces chinoises).
+type: state
+label: "États, provinces et régions — codes, exonymes et variantes"
+source: "ISO 3166-2 + exonymes usuels. À compléter selon le portefeuille."
+
+groups:
+  # ---------- Territoires à enjeu de sanctions territoriales ----------
+  - id: CRIMEA
+    terms: [Crimee, Crimea, Krym, Krim, Autonomous Republic of Crimea, Respublika Krym]
+  - id: SEVASTOPOL
+    terms: [Sebastopol, Sevastopol, Sewastopol, Sevastopol City]
+  - id: DONETSK_OBLAST
+    terms: [Donetsk, Donetsk Oblast, Donetskaya Oblast, Donetsk People's Republic, DNR, Donezk]
+  - id: LUHANSK_OBLAST
+    terms: [Louhansk, Luhansk, Lugansk, Luhansk Oblast, Luhansk People's Republic, LNR]
+  - id: ZAPORIZHZHIA
+    terms: [Zaporijjia, Zaporizhzhia, Zaporozhye, Zaporizhia Oblast, Saporischschja]
+  - id: KHERSON
+    terms: [Kherson, Cherson, Kherson Oblast, Khersonska]
+  - id: ABKHAZIA
+    terms: [Abkhazie, Abkhazia, Abchasien, Apsny]
+  - id: SOUTH_OSSETIA
+    terms: [Ossetie du Sud, South Ossetia, Sudossetien, Tskhinvali Region]
+  - id: TRANSNISTRIA
+    terms: [Transnistrie, Transnistria, Transdniestria, Pridnestrovie]
+  - id: NAGORNO_KARABAKH
+    terms: [Haut Karabagh, Nagorno Karabakh, Nagorny Karabakh, Artsakh]
+  - id: XINJIANG
+    terms: [Xinjiang, Sinkiang, Turkestan oriental, East Turkestan, Uyghur Autonomous Region]
+  - id: TIBET
+    terms: [Tibet, Xizang, Tibet Autonomous Region]
+
+  # ---------- États américains (code + nom) ----------
+  - id: US_CA
+    terms: [CA, California, Californie, Kalifornien]
+  - id: US_NY
+    terms: [NY, New York State, Etat de New York]
+  - id: US_TX
+    terms: [TX, Texas, Tejas]
+  - id: US_FL
+    terms: [FL, Florida, Floride]
+  - id: US_IL
+    terms: [IL, Illinois]
+  - id: US_PA
+    terms: [PA, Pennsylvania, Pennsylvanie, Pennsylvanien]
+  - id: US_OH
+    terms: [OH, Ohio]
+  - id: US_GA
+    terms: [GA, Georgia State, Georgie]
+  - id: US_NC
+    terms: [NC, North Carolina, Caroline du Nord]
+  - id: US_MI
+    terms: [MI, Michigan]
+  - id: US_NJ
+    terms: [NJ, New Jersey, Nouveau Jersey]
+  - id: US_VA
+    terms: [VA, Virginia, Virginie]
+  - id: US_WA
+    terms: [WA, Washington State, Etat de Washington]
+  - id: US_AZ
+    terms: [AZ, Arizona]
+  - id: US_MA
+    terms: [MA, Massachusetts, Massachussetts]
+  - id: US_DE
+    terms: [Delaware, State of Delaware]
+  - id: US_NV
+    terms: [NV, Nevada]
+  - id: US_DC
+    terms: [DC, District of Columbia, District de Columbia, Washington DC]
+
+  # ---------- Provinces canadiennes ----------
+  - id: CA_QC
+    terms: [QC, Quebec, Québec, Provincia de Quebec]
+  - id: CA_ON
+    terms: [ON, Ontario]
+  - id: CA_BC
+    terms: [BC, British Columbia, Colombie Britannique]
+  - id: CA_AB
+    terms: [AB, Alberta]
+
+  # ---------- Länder allemands et régions européennes ----------
+  - id: BAVARIA
+    terms: [Baviere, Bavaria, Bayern, Baviera]
+  - id: SAXONY
+    terms: [Saxe, Saxony, Sachsen, Sajonia]
+  - id: NRW
+    terms: [Rhenanie du Nord Westphalie, North Rhine Westphalia, Nordrhein Westfalen, NRW]
+  - id: BADEN_WURTTEMBERG
+    terms: [Bade Wurtemberg, Baden Wurttemberg, Baden Wuerttemberg, Baden Württemberg]
+  - id: HESSE
+    terms: [Hesse, Hessen]
+  - id: LOMBARDY
+    terms: [Lombardie, Lombardy, Lombardia, Lombardei]
+  - id: TUSCANY
+    terms: [Toscane, Tuscany, Toscana, Toskana]
+  - id: SICILY
+    terms: [Sicile, Sicily, Sicilia, Sizilien]
+  - id: CATALONIA
+    terms: [Catalogne, Catalonia, Cataluna, Cataluña, Katalonien]
+  - id: ANDALUSIA
+    terms: [Andalousie, Andalusia, Andalucia, Andalusien]
+  - id: BASQUE_COUNTRY
+    terms: [Pays Basque, Basque Country, Pais Vasco, Euskadi, Baskenland]
+  - id: FLANDERS
+    terms: [Flandre, Flanders, Vlaanderen, Flandes]
+  - id: WALLONIA
+    terms: [Wallonie, Wallonia, Wallonien, Valonia]
+  - id: ILE_DE_FRANCE
+    terms: [Ile de France, Île-de-France, Region parisienne, Paris Region]
+  - id: PACA
+    terms: [Provence Alpes Cote d'Azur, PACA, Provence Alpes Côte d'Azur]
+  - id: SCOTLAND
+    terms: [Ecosse, Scotland, Schottland, Escocia, Alba]
+  - id: WALES
+    terms: [Pays de Galles, Wales, Cymru, Gales]
+  - id: NORTHERN_IRELAND
+    terms: [Irlande du Nord, Northern Ireland, Nordirland, Ulster]
+
+  # ---------- Provinces chinoises et russes fréquentes ----------
+  - id: GUANGDONG
+    terms: [Guangdong, Kwangtung, Canton Province, Kouang Toung]
+  - id: ZHEJIANG
+    terms: [Zhejiang, Chekiang, Tchekiang]
+  - id: FUJIAN
+    terms: [Fujian, Fukien, Foukien]
+  - id: SHANDONG
+    terms: [Shandong, Shantung, Chantoung]
+  - id: JIANGSU
+    terms: [Jiangsu, Kiangsu, Kiangsou]
+  - id: SICHUAN
+    terms: [Sichuan, Szechuan, Setchouan, Szechwan]
+  - id: TATARSTAN
+    terms: [Tatarstan, Tatarie, Tatarstan Republic, Tatarien]
+  - id: CHECHNYA
+    terms: [Tchetchenie, Chechnya, Tschetschenien, Chechen Republic, Nokhchiyn]
+  - id: DAGESTAN
+    terms: [Daghestan, Dagestan, Dagestan Republic]
+  - id: BASHKORTOSTAN
+    terms: [Bachkortostan, Bashkortostan, Baschkortostan, Bashkiria]
