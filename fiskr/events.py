@@ -233,6 +233,13 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_GOVERNANCE, audience=("admin",),
         urgency=DIGEST, link="#settings",
     ),
+    "resource_mining": Event(
+        # Une passe qui applique des equivalences elargit le perimetre des
+        # alertes : le responsable doit l'apprendre sans avoir a ouvrir l'ecran
+        label="Nouveaux homonymes découverts",
+        category=CATEGORY_GOVERNANCE, audience=("admin",),
+        urgency=DIGEST, link="#alerts",
+    ),
     "client_quality_low": Event(
         label="Qualité des données clients sous le seuil",
         category=CATEGORY_GOVERNANCE, audience=("admin", "reviewer"),

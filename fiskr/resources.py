@@ -85,9 +85,14 @@ class ResourceIndex:
         self._by_field: Dict[str, Dict[str, str]] = {f: {} for f in FIELD_TYPES}
         # type de champ -> {classe: [termes d'origine]}
         self._classes: Dict[str, Dict[str, List[str]]] = {f: {} for f in FIELD_TYPES}
+        # termes issus de la fouille automatique, pour les distinguer en
+        # diagnostic : un analyste doit savoir si une equivalence a ete
+        # declaree a la main ou decouverte par le moteur
+        self._learned: Dict[str, Set[str]] = {f: set() for f in FIELD_TYPES}
         self.files: List[Dict[str, Any]] = []
         self.collisions: List[Dict[str, str]] = []
         self.content_hash: str = ""
+        self.learned_terms: int = 0
 
     # ---------------- Interrogation ----------------
 
@@ -146,6 +151,12 @@ class ResourceIndex:
                 applied.append({"source": lt, "target": rt, "class": lc, "field": field})
         return applied
 
+    def is_learned(self, term: str, field: str) -> bool:
+        """Vrai si le terme vient de la fouille automatique, pas d'un fichier."""
+        if field not in self._learned:
+            return False
+        return normalize_term(term) in self._learned[field]
+
     def stats(self) -> Dict[str, Any]:
         return {
             "content_hash": self.content_hash,
@@ -156,11 +167,38 @@ class ResourceIndex:
                     "label": FIELD_LABELS[field],
                     "classes": len(self._classes[field]),
                     "terms": len(self._by_field[field]),
+                    "learned": len(self._learned[field]),
                 }
                 for field in FIELD_TYPES
             },
             "total_terms": sum(len(t) for t in self._by_field.values()),
+            "learned_terms": self.learned_terms,
         }
+
+    def merge_learned(self, groups: Dict[str, Dict[str, List[str]]]) -> int:
+        """
+        Fusionne les equivalences APPROUVEES issues de la fouille.
+
+        Les fichiers restent la reference : un terme deja declare a la main
+        garde sa classe, la decouverte ne l'ecrase jamais (le detecteur de
+        collisions la signale et l'ignore). L'operation se fait sur une copie
+        fraiche de l'index, jamais sur celui qu'un criblage est en train de
+        lire.
+        """
+        added = 0
+        for field, classes in groups.items():
+            if field not in FIELD_TYPES:
+                continue
+            for class_id, terms in classes.items():
+                # Un terme deja declare a la main ne devient pas « appris » :
+                # seules les cles reellement CREEES par la fusion sont marquees
+                known_before = set(self._by_field[field])
+                self._add_group(field, class_id, list(terms), "<fouille>")
+                new_keys = set(self._by_field[field]) - known_before
+                self._learned[field].update(new_keys)
+                added += len(new_keys)
+        self.learned_terms = sum(len(v) for v in self._learned.values())
+        return added
 
     # ---------------- Construction ----------------
 
@@ -283,6 +321,31 @@ def default_directory() -> Path:
     return Path(__file__).resolve().parent.parent / "resources"
 
 
+def _merge_learned_from_db(index: ResourceIndex, db=None) -> None:
+    """
+    Ajoute a un index fraichement charge les equivalences approuvees par la
+    fouille. Jamais bloquant : une base indisponible doit degrader vers les
+    seuls fichiers, pas empecher de cribler.
+    """
+    try:
+        from fiskr.resource_mining import approved_groups
+
+        if db is not None:
+            index.merge_learned(approved_groups(db))
+            return
+        from fiskr.database import SessionLocal
+
+        if SessionLocal is None:
+            return
+        session = SessionLocal()
+        try:
+            index.merge_learned(approved_groups(session))
+        finally:
+            session.close()
+    except Exception as e:
+        logger.debug(f"Équivalences apprises non fusionnées : {e}")
+
+
 def get_index() -> ResourceIndex:
     """Index actif, charge paresseusement au premier criblage."""
     global _active, _active_dir
@@ -297,14 +360,16 @@ def get_index() -> ResourceIndex:
                 logger.error(f"Ressources non chargées : {e}")
                 _active = ResourceIndex()
                 _active.collisions.append({"field": "-", "term": "-", "classes": str(e), "file": "-"})
+            _merge_learned_from_db(_active)
         return _active
 
 
-def reload_index(directory: Optional[Path] = None) -> ResourceIndex:
+def reload_index(directory: Optional[Path] = None, db=None) -> ResourceIndex:
     """Recharge l'index a chaud (remplacement atomique de l'instance)."""
     global _active, _active_dir
     target = Path(directory) if directory else default_directory()
     fresh = load_index(target)
+    _merge_learned_from_db(fresh, db=db)
     with _lock:
         _active = fresh
         _active_dir = target

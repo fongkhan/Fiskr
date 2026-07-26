@@ -102,3 +102,231 @@ groups:
     terms: [Kowalski, Kowalsky, Kovalski, Kovalsky]
   - id: NOVAK
     terms: [Novak, Novac, Nowak, Novack]
+
+  # ---------- Romanisations chinoises (suite) ----------
+  - id: MA
+    terms: [Ma, Mah, Mar]
+  - id: ZHU
+    terms: [Zhu, Chu, Chue]
+  - id: HU
+    terms: [Hu, Hoo, Hou]
+  - id: GAO
+    terms: [Gao, Kao, Ko]
+  - id: LUO
+    terms: [Luo, Lo, Law, Loh]
+  - id: LIANG
+    terms: [Liang, Leung, Leong, Neo]
+  - id: SONG
+    terms: [Song, Sung, Soong]
+  - id: TANG
+    terms: [Tang, Thang, Dang]
+  - id: DENG
+    terms: [Deng, Teng, Tung]
+  - id: FENG_SUR
+    terms: [Feng, Fung, Foong]
+  - id: CAO
+    terms: [Cao, Tsao, Tso]
+  - id: PENG
+    terms: [Peng, Pang, Phang]
+  - id: XIAO_SUR
+    terms: [Xiao, Hsiao, Shiu]
+  - id: HAN
+    terms: [Han, Hahn, Haan]
+  - id: KIM
+    terms: [Kim, Gim, Ghim]
+  - id: PARK_KO
+    terms: [Park, Pak, Bak, Bahk]
+  - id: NGUYEN
+    terms: [Nguyen, Nguyên, Nguyan, Ngyen]
+  - id: PHAM
+    terms: [Pham, Fam, Phamm]
+
+  # ---------- Romanisations russes / slaves (suite) ----------
+  - id: NOVIKOV
+    terms: [Novikov, Novikoff, Nowikow, Novikova]
+  - id: MOROZOV
+    terms: [Morozov, Morozoff, Morosow, Morozova]
+  - id: LEBEDEV
+    terms: [Lebedev, Lebedeff, Lebedew, Lebedeva]
+  - id: KOZLOV
+    terms: [Kozlov, Kozloff, Koslow, Kozlova]
+  - id: PAVLOV
+    terms: [Pavlov, Pavloff, Pawlow, Pavlova]
+  - id: SEMENOV
+    terms: [Semenov, Semyonov, Semenoff, Semenova]
+  - id: STEPANOV
+    terms: [Stepanov, Stepanoff, Stepanow, Stepanova]
+  - id: NIKOLAEV
+    terms: [Nikolaev, Nikolayev, Nikolajew, Nikolaeva]
+  - id: ORLOV
+    terms: [Orlov, Orloff, Orlow, Orlova]
+  - id: ANDREEV
+    terms: [Andreev, Andreyev, Andrejew, Andreeva]
+  - id: MAKAROV
+    terms: [Makarov, Makaroff, Makarow, Makarova]
+  - id: ZAKHAROV
+    terms: [Zakharov, Zaharov, Sacharow, Zakharova]
+  - id: BELOUSOV
+    terms: [Belousov, Bielousov, Belousoff, Belousova]
+  - id: TIMOSHENKO
+    terms: [Timoshenko, Tymoshenko, Timochenko]
+  - id: SHEVCHENKO
+    terms: [Shevchenko, Chevtchenko, Schewtschenko, Sevcenko]
+  - id: KOVALENKO
+    terms: [Kovalenko, Kowalenko, Covalenco]
+  - id: LUKASHENKO
+    terms: [Lukashenko, Loukachenko, Lukaschenko, Lukasenka]
+  - id: DERIPASKA
+    terms: [Deripaska, Deripascha, Deripaskha]
+  - id: ABRAMOVICH
+    terms: [Abramovich, Abramovitch, Abramowitsch, Abramovic]
+  - id: ROTENBERG
+    terms: [Rotenberg, Rottenberg, Rotenberh]
+  - id: TIMCHENKO
+    terms: [Timchenko, Timtchenko, Timtschenko]
+  - id: SECHIN
+    terms: [Sechin, Setchine, Setschin]
+  - id: PRIGOZHIN
+    terms: [Prigozhin, Prigojine, Prigoschin, Prigozin]
+  - id: SHOIGU
+    terms: [Shoigu, Choïgou, Schoigu, Shoygu]
+  - id: LAVROV
+    terms: [Lavrov, Lavroff, Lawrow, Lavrova]
+  - id: PUTIN
+    terms: [Putin, Poutine, Putina, Poetin]
+  - id: MEDVEDEV
+    terms: [Medvedev, Medvedeff, Medwedew, Medvedeva]
+
+  # ---------- Romanisations arabes / persanes (suite) ----------
+  - id: ALJUBOURI
+    terms: [Al Jubouri, Al-Jubouri, Aljabouri, El Jubouri]
+  - id: ALMAKTOUM
+    terms: [Al Maktoum, Al-Maktoum, Almaktoum, El Maktoum]
+  - id: ALTHANI
+    terms: [Al Thani, Al-Thani, Althani, El Thani]
+  - id: ALSABAH
+    terms: [Al Sabah, Al-Sabah, Alsabah, As Sabah]
+  - id: ALSAUD
+    terms: [Al Saud, Al-Saud, Alsaud, Ibn Saud, Bin Saud]
+  - id: ALQAEDA_NAME
+    terms: [Al Zawahiri, Al-Zawahiri, Alzawahiri, El Zawahiri, Zawahri]
+  - id: ALBAGHDADI
+    terms: [Al Baghdadi, Al-Baghdadi, Albaghdadi, El Baghdadi]
+  - id: HAMDANI
+    terms: [Hamdani, Al Hamdani, El Hamdani, Hemdani]
+  - id: JAAFAR
+    terms: [Jaafar, Jafar, Djafar, Gaafar, Jaffar]
+  - id: KHOURY
+    terms: [Khoury, Khouri, Koury, El Khoury, Al Khoury]
+  - id: MANSOURI
+    terms: [Mansouri, Mansuri, Al Mansouri, El Mansouri]
+  - id: RAHMANI
+    terms: [Rahmani, Rehmani, Al Rahmani, Rachmani]
+  - id: SALEHI
+    terms: [Salehi, Salahi, Salihi, Selehi]
+  - id: ZAHEDI
+    terms: [Zahedi, Zahidi, Sahedi]
+  - id: KHAMENEI
+    terms: [Khamenei, Khameneï, Chamenei, Hamenei]
+  - id: SOLEIMANI
+    terms: [Soleimani, Suleimani, Solimani, Sulaimani]
+  - id: BENALI
+    terms: [Ben Ali, Benali, Bin Ali, Ben-Ali]
+  - id: BOUTEFLIKA
+    terms: [Bouteflika, Boutaflika, Buteflika]
+  - id: GHANNOUCHI
+    terms: [Ghannouchi, Ghannoushi, Rannouchi]
+
+  # ---------- Variantes européennes (suite) ----------
+  - id: SCHNEIDER
+    terms: [Schneider, Schnieder, Snyder, Sneijder]
+  - id: FISCHER
+    terms: [Fischer, Fisher, Fisker, Visser]
+  - id: WEBER
+    terms: [Weber, Webber, Wever, Waber]
+  - id: MEYER
+    terms: [Meyer, Meier, Maier, Mayer, Mayr]
+  - id: WAGNER
+    terms: [Wagner, Wagener, Waggoner, Vagner]
+  - id: BECKER
+    terms: [Becker, Baker, Bakker, Backer]
+  - id: HOFFMANN
+    terms: [Hoffmann, Hofmann, Hoffman, Hofman]
+  - id: RICHTER
+    terms: [Richter, Rickter, Rihter]
+  - id: KLEIN
+    terms: [Klein, Kline, Cline, Clain]
+  - id: WOLF
+    terms: [Wolf, Wolff, Woolf, Volf]
+  - id: MARTINEZ
+    terms: [Martinez, Martínez, Martines, Martinet]
+  - id: GONZALEZ
+    terms: [Gonzalez, González, Gonzales, Goncalves, Gonçalves]
+  - id: RODRIGUEZ
+    terms: [Rodriguez, Rodríguez, Rodrigues, Rodrigez]
+  - id: FERNANDEZ
+    terms: [Fernandez, Fernández, Fernandes, Ferrandez]
+  - id: LOPEZ
+    terms: [Lopez, López, Lopes, Loppez]
+  - id: PEREZ
+    terms: [Perez, Pérez, Peres, Peretz]
+  - id: SANCHEZ
+    terms: [Sanchez, Sánchez, Sanches, Sanchis]
+  - id: RAMIREZ
+    terms: [Ramirez, Ramírez, Ramires, Ramirès]
+  - id: SILVA
+    terms: [Silva, Sylva, Da Silva, De Silva]
+  - id: SANTOS
+    terms: [Santos, Dos Santos, De Santos, Sanctos]
+  - id: ROSSI
+    terms: [Rossi, Rosi, Roussy, Russo]
+  - id: FERRARI
+    terms: [Ferrari, Ferrary, Ferraris, Ferrero]
+  - id: ESPOSITO
+    terms: [Esposito, Exposito, Espozito]
+  - id: BIANCHI
+    terms: [Bianchi, Bianco, Bianqui]
+  - id: ROMANO
+    terms: [Romano, Romani, Romanelli]
+  - id: DUBOIS
+    terms: [Dubois, Du Bois, Duboys]
+  - id: LEFEBVRE
+    terms: [Lefebvre, Lefevre, Lefèvre, Lefebre, Lefeuvre]
+  - id: MOREAU
+    terms: [Moreau, Morau, Moreaux, Morel]
+  - id: BERNARD
+    terms: [Bernard, Bernhard, Bernardo, Bernardi]
+  - id: PETIT
+    terms: [Petit, Pettit, Petitt]
+  - id: DURAND
+    terms: [Durand, Durant, Duran, Durrand]
+  - id: LEROY
+    terms: [Leroy, Le Roy, Leroi, Le Roi]
+  - id: SIMON
+    terms: [Simon, Simone, Simonet, Szymon]
+  - id: LAURENT
+    terms: [Laurent, Lorenz, Lorenzo, Laurence, Lawrence]
+  - id: JOHNSON
+    terms: [Johnson, Jonson, Johnsen, Johansson, Johansen]
+  - id: WILLIAMS
+    terms: [Williams, Willems, Willemse, Wilhelms]
+  - id: BROWN
+    terms: [Brown, Browne, Braun, Bruno]
+  - id: JONES
+    terms: [Jones, Joans, Jonas]
+  - id: MILLER
+    terms: [Miller, Millar, Milner, Millers]
+  - id: DAVIS
+    terms: [Davis, Davies, Davys]
+  - id: WILSON
+    terms: [Wilson, Willson, Wilsson]
+  - id: TAYLOR
+    terms: [Taylor, Tayler, Taillor]
+  - id: ANDERSON
+    terms: [Anderson, Andersen, Andersson, Anderssen]
+  - id: OBRIEN
+    terms: [O Brien, OBrien, O'Brien, Obrien]
+  - id: MACDONALD
+    terms: [MacDonald, McDonald, Mcdonald, Macdonald]
+  - id: MURPHY
+    terms: [Murphy, Murphey, Murfy]

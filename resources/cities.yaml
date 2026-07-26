@@ -105,3 +105,277 @@ groups:
     terms: [Havana, La Havane, La Habana, Havanna]
   - id: CARACAS
     terms: [Caracas, Santiago de Leon de Caracas]
+
+  # ---------- Exonymes européens (suite) ----------
+  - id: VIENNA
+    terms: [Vienne, Vienna, Wien, Viena, Bec]
+  - id: PRAGUE
+    terms: [Prague, Praha, Prag, Praga]
+  - id: WARSAW
+    terms: [Varsovie, Warsaw, Warszawa, Warschau, Varsovia]
+  - id: BUDAPEST
+    terms: [Budapest, Budapesth, Budimpesta]
+  - id: BUCHAREST
+    terms: [Bucarest, Bucharest, Bucuresti, Bukarest]
+  - id: BELGRADE
+    terms: [Belgrade, Beograd, Belgrad, Belgrado]
+  - id: SOFIA_CITY
+    terms: [Sofia, Sofya, Sofija, Sofía]
+  - id: ATHENS
+    terms: [Athenes, Athens, Athina, Athen, Atenas]
+  - id: LISBON
+    terms: [Lisbonne, Lisbon, Lisboa, Lissabon]
+  - id: COPENHAGEN
+    terms: [Copenhague, Copenhagen, Kobenhavn, Kopenhagen]
+  - id: STOCKHOLM
+    terms: [Stockholm, Estocolmo, Stoccolma]
+  - id: HELSINKI
+    terms: [Helsinki, Helsingfors, Helsinky]
+  - id: OSLO
+    terms: [Oslo, Christiania, Kristiania]
+  - id: DUBLIN
+    terms: [Dublin, Baile Atha Cliath, Dublino]
+  - id: EDINBURGH
+    terms: [Edimbourg, Edinburgh, Edinburgo, Duneideann]
+  - id: ANTWERP
+    terms: [Anvers, Antwerp, Antwerpen, Amberes]
+  - id: GHENT
+    terms: [Gand, Ghent, Gent, Gante]
+  - id: THE_HAGUE
+    terms: [La Haye, The Hague, Den Haag, Haag, La Haya]
+  - id: ROTTERDAM
+    terms: [Rotterdam, Roterdao, Rotterdão]
+  - id: COLOGNE
+    terms: [Cologne, Koln, Koeln, Colonia]
+  - id: FRANKFURT
+    terms: [Francfort, Frankfurt, Fráncfort, Francoforte]
+  - id: HAMBURG
+    terms: [Hambourg, Hamburg, Hamburgo, Amburgo]
+  - id: DUSSELDORF
+    terms: [Dusseldorf, Duesseldorf, Düsseldorf]
+  - id: NUREMBERG
+    terms: [Nuremberg, Nurnberg, Nürnberg, Norimberga]
+  - id: BASEL
+    terms: [Bale, Basel, Basle, Basilea]
+  - id: GENEVA
+    terms: [Geneve, Geneva, Genf, Ginebra, Ginevra]
+  - id: ZURICH
+    terms: [Zurich, Zuerich, Zurigo, Zúrich]
+  - id: MILAN
+    terms: [Milan, Milano, Mailand, Milán]
+  - id: TURIN
+    terms: [Turin, Torino, Turim]
+  - id: NAPLES
+    terms: [Naples, Napoli, Neapel, Napoles]
+  - id: FLORENCE
+    terms: [Florence, Firenze, Florenz, Florencia]
+  - id: VENICE
+    terms: [Venise, Venice, Venezia, Venedig, Venecia]
+  - id: SEVILLE
+    terms: [Seville, Sevilla, Sevilha, Siviglia]
+  - id: BARCELONA
+    terms: [Barcelone, Barcelona, Barcellona]
+  - id: VALENCIA
+    terms: [Valence, Valencia, Valenza]
+  - id: PORTO
+    terms: [Porto, Oporto, Portus]
+
+  # ---------- Exonymes Europe de l'Est, Caucase, Asie centrale ----------
+  - id: KYIV
+    terms: [Kiev, Kyiv, Kiew, Kijow]
+  - id: KHARKIV
+    terms: [Kharkov, Kharkiv, Charkow, Jarkov]
+  - id: ODESA
+    terms: [Odessa, Odesa]
+  - id: LVIV
+    terms: [Lviv, Lvov, Lemberg, Lwow]
+  - id: DONETSK
+    terms: [Donetsk, Donetzk, Donezk]
+  - id: MINSK
+    terms: [Minsk, Miensk, Mensk]
+  - id: SAINT_PETERSBURG
+    terms: [Saint Petersbourg, Saint Petersburg, St Petersburg, Sankt Peterburg, Leningrad, Petrograd]
+  - id: NIZHNY_NOVGOROD
+    terms: [Nijni Novgorod, Nizhny Novgorod, Gorki, Gorky]
+  - id: YEKATERINBURG
+    terms: [Ekaterinbourg, Yekaterinburg, Ekaterinburg, Sverdlovsk]
+  - id: NOVOSIBIRSK
+    terms: [Novossibirsk, Novosibirsk, Nowosibirsk]
+  - id: VLADIVOSTOK
+    terms: [Vladivostok, Wladiwostok, Vladivostock]
+  - id: KAZAN
+    terms: [Kazan, Kasan, Qazan]
+  - id: TBILISI
+    terms: [Tbilissi, Tbilisi, Tiflis, Tphilisi]
+  - id: YEREVAN
+    terms: [Erevan, Yerevan, Eriwan, Erivan]
+  - id: BAKU
+    terms: [Bakou, Baku, Baki, Bakú]
+  - id: TASHKENT
+    terms: [Tachkent, Tashkent, Taschkent, Toshkent]
+  - id: ALMATY
+    terms: [Almaty, Alma Ata, Alma-Ata, Almata]
+  - id: ASTANA
+    terms: [Astana, Nur Sultan, Nur-Sultan, Akmola, Tselinograd]
+  - id: BISHKEK
+    terms: [Bichkek, Bishkek, Frunze, Pishpek]
+  - id: DUSHANBE
+    terms: [Douchanbe, Dushanbe, Duschanbe, Stalinabad]
+  - id: ASHGABAT
+    terms: [Achgabat, Ashgabat, Aschgabat, Ashkhabad]
+
+  # ---------- Exonymes Moyen-Orient, Afrique, Asie (suite) ----------
+  - id: DAMASCUS
+    terms: [Damas, Damascus, Dimashq, Damasco, Damaskus]
+  - id: ALEPPO
+    terms: [Alep, Aleppo, Halab, Haleb]
+  - id: BEIRUT
+    terms: [Beyrouth, Beirut, Bayrut, Beirute]
+  - id: BAGHDAD
+    terms: [Bagdad, Baghdad, Bagdada, Baghdaad]
+  - id: MOSUL
+    terms: [Mossoul, Mosul, Al Mawsil, Mossul]
+  - id: BASRA
+    terms: [Bassora, Basra, Al Basrah, Basora]
+  - id: TEHRAN
+    terms: [Teheran, Tehran, Teherán, Tehrān]
+  - id: ISFAHAN
+    terms: [Ispahan, Isfahan, Esfahan, Isfahán]
+  - id: MASHHAD
+    terms: [Mechhed, Mashhad, Meshed, Maschhad]
+  - id: RIYADH
+    terms: [Riyad, Riyadh, Ar Riyad, Riad]
+  - id: JEDDAH
+    terms: [Djeddah, Jeddah, Jiddah, Jedda]
+  - id: MECCA
+    terms: [La Mecque, Mecca, Makkah, Makka, Meca]
+  - id: MEDINA
+    terms: [Medine, Medina, Al Madinah, Madinah]
+  - id: DUBAI
+    terms: [Dubai, Dubaï, Dubay, Dubái]
+  - id: ABU_DHABI
+    terms: [Abou Dhabi, Abu Dhabi, Abu Zabi, Abudhabi]
+  - id: DOHA
+    terms: [Doha, Ad Dawhah, Dawha]
+  - id: KUWAIT_CITY
+    terms: [Koweit, Kuwait City, Al Kuwayt, Kuweit]
+  - id: MANAMA
+    terms: [Manama, Al Manamah, Manamah]
+  - id: MUSCAT
+    terms: [Mascate, Muscat, Masqat, Mascat]
+  - id: SANAA
+    terms: [Sanaa, Sana, Sanaà, Sana'a]
+  - id: JERUSALEM
+    terms: [Jerusalem, Jérusalem, Yerushalayim, Al Quds, Gerusalemme]
+  - id: TEL_AVIV
+    terms: [Tel Aviv, Tel-Aviv, Tel Abib, Telaviv]
+  - id: ISTANBUL
+    terms: [Istanbul, Constantinople, Konstantinopel, Estambul, Stamboul]
+  - id: ANKARA
+    terms: [Ankara, Angora, Ancara]
+  - id: IZMIR
+    terms: [Izmir, Smyrne, Smyrna, Esmirna]
+  - id: ALGIERS
+    terms: [Alger, Algiers, Al Jaza'ir, Argel, Algeri]
+  - id: ORAN
+    terms: [Oran, Wahran, Orán]
+  - id: CASABLANCA
+    terms: [Casablanca, Dar el Beida, Casa Blanca, Ad Dar al Bayda]
+  - id: RABAT
+    terms: [Rabat, Ribat, Rabate]
+  - id: TUNIS
+    terms: [Tunis, Tunez, Tunisi, Tunes]
+  - id: TRIPOLI_LY
+    terms: [Tripoli, Tarabulus, Tripolis, Tripol]
+  - id: KHARTOUM
+    terms: [Khartoum, Khartum, Al Khurtum, Jartum]
+  - id: ADDIS_ABABA
+    terms: [Addis Abeba, Addis Ababa, Adis Abeba]
+  - id: NAIROBI
+    terms: [Nairobi, Nairobe, Nairóbi]
+  - id: LAGOS
+    terms: [Lagos, Eko]
+  - id: ABIDJAN
+    terms: [Abidjan, Abiyan, Abidyan]
+  - id: DAKAR
+    terms: [Dakar, Ndakaaru, Dacar]
+  - id: KINSHASA
+    terms: [Kinshasa, Leopoldville, Léopoldville, Kinshassa]
+  - id: JOHANNESBURG
+    terms: [Johannesburg, Johannesbourg, Joburg, Jozi]
+  - id: CAPE_TOWN
+    terms: [Le Cap, Cape Town, Kaapstad, Ciudad del Cabo, Kapstadt]
+  - id: SHANGHAI
+    terms: [Shanghai, Shanghaï, Changhai, Xangai]
+  - id: SHENZHEN
+    terms: [Shenzhen, Shenchen, Shumchun]
+  - id: GUANGZHOU
+    terms: [Canton, Guangzhou, Kwangchow, Kanton]
+  - id: HONG_KONG
+    terms: [Hong Kong, Hongkong, Hong-Kong, Xianggang]
+  - id: TAIPEI
+    terms: [Taipei, Taipeh, Taibei, Taipé]
+  - id: SEOUL
+    terms: [Seoul, Séoul, Soul, Seúl, Keijo]
+  - id: PYONGYANG
+    terms: [Pyongyang, Phyongyang, Pjongjang, Pyeongyang]
+  - id: TOKYO
+    terms: [Tokyo, Tokio, Toquio, Edo]
+  - id: OSAKA
+    terms: [Osaka, Ozaka, Osaca]
+  - id: BANGKOK
+    terms: [Bangkok, Krung Thep, Bankok]
+  - id: HANOI
+    terms: [Hanoi, Hanoï, Ha Noi, Hanói]
+  - id: HO_CHI_MINH
+    terms: [Ho Chi Minh Ville, Ho Chi Minh City, Saigon, Sài Gòn, Saïgon]
+  - id: JAKARTA
+    terms: [Jakarta, Djakarta, Batavia, Yakarta]
+  - id: MANILA
+    terms: [Manille, Manila, Maynila, Manilla]
+  - id: SINGAPORE_CITY
+    terms: [Singapour, Singapore, Singapura, Singapur]
+  - id: KUALA_LUMPUR
+    terms: [Kuala Lumpur, Kualalumpur, KL]
+  - id: MUMBAI
+    terms: [Bombay, Mumbai, Bombaim, Mombay]
+  - id: KOLKATA
+    terms: [Calcutta, Kolkata, Kalkutta, Calcuta]
+  - id: CHENNAI
+    terms: [Madras, Chennai, Madrás]
+  - id: BENGALURU
+    terms: [Bangalore, Bengaluru, Bangalur]
+  - id: NEW_DELHI
+    terms: [New Delhi, Nouvelle Delhi, Neu Delhi, Nueva Delhi, Delhi]
+  - id: KARACHI
+    terms: [Karachi, Karatchi, Karatschi]
+  - id: LAHORE
+    terms: [Lahore, Lahaur, Lajore]
+  - id: KABUL
+    terms: [Kaboul, Kabul, Kabol, Cabul]
+  - id: DHAKA
+    terms: [Dacca, Dhaka, Daca]
+
+  # ---------- Amériques ----------
+  - id: MEXICO_CITY
+    terms: [Mexico, Mexico City, Ciudad de Mexico, Mexiko Stadt]
+  - id: HAVANA
+    terms: [La Havane, Havana, La Habana, Havanna]
+  - id: BOGOTA
+    terms: [Bogota, Bogotá, Santa Fe de Bogota]
+  - id: CARACAS
+    terms: [Caracas, Karakas, Caraccas]
+  - id: LIMA
+    terms: [Lima, Ciudad de los Reyes]
+  - id: SANTIAGO_CL
+    terms: [Santiago, Santiago du Chili, Santiago de Chile]
+  - id: BUENOS_AIRES
+    terms: [Buenos Aires, Buenos Ayres, Bonaerense]
+  - id: SAO_PAULO
+    terms: [Sao Paulo, São Paulo, San Pablo]
+  - id: RIO_DE_JANEIRO
+    terms: [Rio de Janeiro, Rio, Riodejaneiro]
+  - id: NEW_YORK
+    terms: [New York, Nueva York, Nouvelle York, Neuyork]
+  - id: MONTREAL
+    terms: [Montreal, Montréal, Mont Real]

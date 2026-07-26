@@ -566,6 +566,51 @@ class WhitelistPair(Base):
     revoked_at = Column(DateTime, nullable=True)
     revoke_comment = Column(Text, nullable=True)
 
+class LearnedEquivalence(Base):
+    """
+    Equivalence linguistique DECOUVERTE par le moteur de fouille, par
+    opposition a celles declarees a la main dans les fichiers `resources/`.
+
+    Chaque ligne porte sa PREUVE : les fiches listees ou les alertes qui l'ont
+    fait apparaitre. Une equivalence qui elargit le perimetre des alertes doit
+    pouvoir etre justifiee devant un controleur — « le moteur l'a trouvee » ne
+    suffit pas, il faut pouvoir montrer quoi.
+
+    Cycle de vie : PROPOSED -> APPROVED (appliquee au criblage) | REJECTED.
+    Une equivalence approuvee reste revocable : le retour a REJECTED la retire
+    de l'index au rechargement suivant.
+    """
+    __tablename__ = "learned_equivalences"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Type de champ (given_name, surname, city, country, state)
+    field = Column(String(30), nullable=False, index=True)
+    # Classe canonique visee : celle d'un groupe existant que la paire rejoint,
+    # ou une classe neuve nommee d'apres le terme le plus frequent
+    class_id = Column(String(100), nullable=False)
+    # Termes de la paire decouverte, normalises
+    term_a = Column(String(200), nullable=False)
+    term_b = Column(String(200), nullable=False)
+    # Cle de deduplication : field + les deux termes tries
+    signature = Column(String(500), unique=True, nullable=False, index=True)
+    # ALIAS (graphe d'alias des listes) | ANALYST (alerte confirmee en revue)
+    source = Column(String(30), nullable=False, index=True)
+    # Nombre de fiches/alertes DISTINCTES portant la paire
+    occurrences = Column(Integer, nullable=False, default=1)
+    # Similarite de chaine et concordance phonetique, pour la confiance
+    similarity = Column(Float, nullable=False, default=0.0)
+    phonetic_match = Column(Boolean, nullable=False, default=False)
+    confidence = Column(Float, nullable=False, default=0.0, index=True)
+    # Echantillon de preuves : [{entity_id, primary_name, alias, list_type}, ...]
+    evidence = Column(JSON, nullable=True)
+    status = Column(String(20), nullable=False, default="PROPOSED", index=True)
+    discovered_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    # « systeme » quand l'auto-approbation a tranche, sinon l'utilisateur
+    decided_by = Column(String(100), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_comment = Column(Text, nullable=True)
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

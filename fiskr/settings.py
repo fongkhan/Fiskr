@@ -60,6 +60,19 @@ DEFAULT_RESOURCE_FIELDS: Dict[str, bool] = {
     "country": False,
     "state": False,
 }
+
+# Fouille quotidienne d'homonymes dans le graphe d'alias des listes et les
+# alertes confirmees. 3h15 du matin : apres les synchronisations nocturnes,
+# donc sur des listes fraiches, et hors des heures de criblage.
+SETTING_MINING = "resources.mining"
+DEFAULT_MINING: Dict[str, Any] = {
+    "enabled": True,
+    "cron": "15 3 * * *",
+    "min_occurrences": 2,
+    "min_similarity": 0.75,
+    "auto_approve_confidence": 0.85,
+    "sources": ["ALIAS", "ANALYST"],
+}
 # Checklist d'instruction des alertes (dossier d'investigation)
 SETTING_CHECKLIST = "investigation.checklist"
 DEFAULT_CHECKLIST = [
@@ -416,3 +429,40 @@ def resource_fields(db) -> Dict[str, bool]:
 def resources_active(db) -> bool:
     """Vrai si au moins un type de champ est active."""
     return any(resource_fields(db).values())
+
+
+def mining_settings(db) -> Dict[str, Any]:
+    """
+    Reglage de la fouille quotidienne d'homonymes.
+
+    `auto_approve_confidence` a 0 = aucune application automatique, la fouille
+    se contente de proposer. Le defaut applique les decouvertes tres sures
+    (0.85) : elles proviennent des alias declares par les sources officielles
+    elles-memes, et n'atteignent le criblage que si le type de champ
+    correspondant est par ailleurs active — ce qui n'est jamais le cas par
+    defaut. Une installation qui exige une mesure avant chaque elargissement
+    du perimetre met ce seuil a 0.
+    """
+    out = dict(DEFAULT_MINING)
+    value = get_setting_with_source(db, SETTING_MINING, None)["value"]
+    if isinstance(value, dict):
+        if "enabled" in value:
+            out["enabled"] = bool(value["enabled"])
+        cron_expr = str(value.get("cron") or "").strip()
+        if cron_expr:
+            out["cron"] = cron_expr
+        for key, caster, low, high in (
+            ("min_occurrences", int, 1, 1000),
+            ("min_similarity", float, 0.0, 1.0),
+            ("auto_approve_confidence", float, 0.0, 1.0),
+        ):
+            if key in value:
+                try:
+                    out[key] = max(low, min(high, caster(value[key])))
+                except (TypeError, ValueError):
+                    pass
+        if isinstance(value.get("sources"), list):
+            allowed = [s for s in value["sources"] if s in DEFAULT_MINING["sources"]]
+            if allowed:
+                out["sources"] = allowed
+    return out
