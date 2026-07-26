@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -416,6 +417,13 @@ def active_fields(db=None) -> Set[str]:
 
 _context_cache: Optional[Dict[str, Any]] = None
 
+# Surcharge du contexte pour LE SEUL THREAD COURANT. Une simulation d'impact
+# doit cribler sous un parametrage different de la production ; comme elle
+# tourne dans un thread de fond pendant que l'API sert des criblages reels sur
+# d'autres threads, une surcharge globale corromprait ces criblages. D'ou le
+# thread-local : la mesure est isolee, la production ne bouge pas.
+_local = threading.local()
+
 
 def current_context() -> Dict[str, Any]:
     """
@@ -425,12 +433,38 @@ def current_context() -> Dict[str, Any]:
     relire le reglage a chaque comparaison couterait une requete par candidat.
     Le cache est invalide par `invalidate_context()` — appele au rechargement
     des ressources et a toute modification du reglage d'activation.
+
+    Une surcharge posee par `use_context()` sur le thread courant l'emporte,
+    sans jamais toucher les autres threads.
     """
+    override = getattr(_local, "override", None)
+    if override is not None:
+        return override
     global _context_cache
     if _context_cache is None:
         fields = active_fields()
         _context_cache = {"index": get_index() if fields else None, "fields": fields}
     return _context_cache
+
+
+@contextmanager
+def use_context(fields, index: Optional["ResourceIndex"] = None):
+    """
+    Force le contexte des equivalences sur le thread courant, le temps du bloc.
+
+    Sert a mesurer : cribler un panel une fois sous le parametrage actuel et
+    une fois sous un parametrage candidat, sans que la production servie en
+    parallele ne voie quoi que ce soit changer. Restaure toujours l'etat
+    anterieur, y compris sur exception.
+    """
+    fields = set(fields or ())
+    resolved = index if index is not None else (get_index() if fields else None)
+    previous = getattr(_local, "override", None)
+    _local.override = {"index": resolved if fields else None, "fields": fields}
+    try:
+        yield _local.override
+    finally:
+        _local.override = previous
 
 
 def invalidate_context() -> None:
