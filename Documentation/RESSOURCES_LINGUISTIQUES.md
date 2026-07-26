@@ -123,8 +123,15 @@ Une table d'équivalences **augmente le rappel au prix de la précision** :
 chaque classe crée des rapprochements qui n'existaient pas. C'est l'effet
 recherché, mais il se mesure avant la production.
 
-- **Tout est désactivé par défaut.** Une installation existante ne change pas
-  de comportement tant qu'un responsable n'a rien activé.
+- **Prénoms et noms de famille sont actifs à la livraison ; villes, pays et
+  états ne le sont pas.** Ce n'est pas un choix de confort, c'est un résultat
+  de mesure : sur un panel de 716 clients criblé contre 124 fiches désignées,
+  les activer rattrape 6 vrais positifs, n'ajoute **aucune** alerte sur les
+  600 clients ordinaires et n'en fait perdre aucune. Le protocole complet et
+  les chiffres sont dans [MESURE_RESSOURCES.md](MESURE_RESSOURCES.md).
+  Les trois autres types n'ont pas été mesurés sur un panel réel et restent
+  inactifs — le principe demeure qu'un changement de paramétrage de criblage
+  se chiffre avant de s'appliquer.
 - **Activation par type de champ**, à chaud : Alertes → Blocking Keys → carte
   *Ressources Linguistiques*, ou `PUT /api/settings/ingestion` avec
   `{"resource_fields": {"given_name": true}}`. Le changement recharge l'index

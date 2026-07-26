@@ -85,9 +85,9 @@ groups:
   - id: ELSHEIKH
     terms: [El Sheikh, Al Sheikh, Alshaikh, El Cheikh, Al-Shaykh]
   - id: HADDAD
-    terms: [Haddad, Hadad, El Haddad, Al Haddad]
+    terms: [Haddad, Hadad, El Haddad, Al Haddad, حداد]
   - id: NASSER
-    terms: [Nasser, Nasir, Naser, Nassir]
+    terms: [Nasser, Nasir, Naser, Nassir, ناصر]
 
   # ---------- Variantes européennes fréquentes ----------
   - id: MUELLER
@@ -133,9 +133,9 @@ groups:
   - id: HAN
     terms: [Han, Hahn, Haan]
   - id: KIM
-    terms: [Kim, Gim, Ghim]
+    terms: [Kim, Gim, Ghim, 김]
   - id: PARK_KO
-    terms: [Park, Pak, Bak, Bahk]
+    terms: [Park, Pak, Bak, Bahk, 박]
   - id: NGUYEN
     terms: [Nguyen, Nguyên, Nguyan, Ngyen]
   - id: PHAM
@@ -213,29 +213,29 @@ groups:
   - id: ALBAGHDADI
     terms: [Al Baghdadi, Al-Baghdadi, Albaghdadi, El Baghdadi]
   - id: HAMDANI
-    terms: [Hamdani, Al Hamdani, El Hamdani, Hemdani]
+    terms: [Hamdani, Al Hamdani, El Hamdani, Hemdani, همداني]
   - id: JAAFAR
     terms: [Jaafar, Jafar, Djafar, Gaafar, Jaffar]
   - id: KHOURY
-    terms: [Khoury, Khouri, Koury, El Khoury, Al Khoury]
+    terms: [Khoury, Khouri, Koury, El Khoury, Al Khoury, خوري]
   - id: MANSOURI
-    terms: [Mansouri, Mansuri, Al Mansouri, El Mansouri]
+    terms: [Mansouri, Mansuri, Al Mansouri, El Mansouri, منصوري]
   - id: RAHMANI
-    terms: [Rahmani, Rehmani, Al Rahmani, Rachmani]
+    terms: [Rahmani, Rehmani, Al Rahmani, Rachmani, رحماني]
   - id: SALEHI
-    terms: [Salehi, Salahi, Salihi, Selehi]
+    terms: [Salehi, Salahi, Salihi, Selehi, صالحي]
   - id: ZAHEDI
     terms: [Zahedi, Zahidi, Sahedi]
   - id: KHAMENEI
     terms: [Khamenei, Khameneï, Chamenei, Hamenei]
   - id: SOLEIMANI
-    terms: [Soleimani, Suleimani, Solimani, Sulaimani]
+    terms: [Soleimani, Suleimani, Solimani, Sulaimani, سليماني]
   - id: BENALI
     terms: [Ben Ali, Benali, Bin Ali, Ben-Ali]
   - id: BOUTEFLIKA
-    terms: [Bouteflika, Boutaflika, Buteflika]
+    terms: [Bouteflika, Boutaflika, Buteflika, بوتفليقة]
   - id: GHANNOUCHI
-    terms: [Ghannouchi, Ghannoushi, Rannouchi]
+    terms: [Ghannouchi, Ghannoushi, Rannouchi, الغنوشي]
 
   # ---------- Variantes européennes (suite) ----------
   - id: SCHNEIDER
@@ -330,3 +330,19 @@ groups:
     terms: [MacDonald, McDonald, Mcdonald, Macdonald]
   - id: MURPHY
     terms: [Murphy, Murphey, Murfy]
+
+  # ---------- Écritures non latines et groupes complémentaires ----------
+  # japonais — kanji lus en chinois par la translittération
+  - id: TANAKA
+    terms: [Tanaka, 田中]
+  - id: SUZUKI
+    terms: [Suzuki, 鈴木]
+  - id: SATO
+    terms: [Sato, Satou, 佐藤]
+  - id: WATANABE
+    terms: [Watanabe, 渡辺, 渡邊]
+  - id: YAMAMOTO
+    terms: [Yamamoto, 山本]
+  # romanisations concurrentes d'un meme nom arabe
+  - id: GADDAFI
+    terms: [Gaddafi, Kadhafi, Qaddafi, Gheddafi, Kaddafi, القذافي]

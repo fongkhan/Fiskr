@@ -160,13 +160,16 @@ def apply_name_equivalences(s1: str, s2: str) -> Tuple[str, str]:
     for field in (resources.FIELD_GIVEN_NAME, resources.FIELD_SURNAME):
         if field not in ctx["fields"]:
             continue
-        left_classes = [index.canonical(t, field) for t in left]
-        right_classes = [index.canonical(t, field) for t in right]
-        shared = {c for c in left_classes if c and c in right_classes}
+        # Segments, pas tokens : un terme declare peut compter plusieurs mots
+        # (« Al Assad », « Saint Petersbourg ») et serait sinon introuvable.
+        left_spans = index.match_spans(left, field)
+        right_spans = index.match_spans(right, field)
+        right_classes = {c for _, c in right_spans if c}
+        shared = {c for _, c in left_spans if c and c in right_classes}
         if not shared:
             continue
-        left = [cls if cls in shared else tok for tok, cls in zip(left, left_classes)]
-        right = [cls if cls in shared else tok for tok, cls in zip(right, right_classes)]
+        left = [cls if cls in shared else span for span, cls in left_spans]
+        right = [cls if cls in shared else span for span, cls in right_spans]
     return " ".join(left), " ".join(right)
 
 

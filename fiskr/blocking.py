@@ -172,14 +172,27 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                         phonetics.add(p_key)
                     if s_key:
                         phonetics.add(s_key)
-                    # Equivalences linguistiques : sans cette cle, « Henri » et
-                    # « Harry » n'atterrissent jamais dans le meme seau et ne
-                    # sont donc JAMAIS compares — la table de ressources serait
-                    # sans effet. La cle est ADDITIVE : les cles phonetiques
-                    # ci-dessus restent produites, aucune paire aujourd'hui
-                    # candidate ne cesse de l'etre.
-                    for eq_key in _equivalence_keys(first_word):
-                        phonetics.add(eq_key)
+                # Equivalences linguistiques : sans cette cle, « Henri » et
+                # « Harry » n'atterrissent jamais dans le meme seau et ne sont
+                # donc JAMAIS compares — la table de ressources serait sans
+                # effet. Les cles sont ADDITIVES : les cles phonetiques
+                # ci-dessus restent produites, aucune paire aujourd'hui
+                # candidate ne cesse de l'etre.
+                #
+                # PREMIER *ET* DERNIER mot. La cle phonetique, elle, ne porte
+                # que sur le premier mot : c'est le choix historique du
+                # composant. Mais une fiche listee tient son nom complet dans
+                # UNE seule chaine (« Muammar Gaddafi »), la ou un client a des
+                # champs separes. En ne regardant que le premier mot, une
+                # equivalence de NOM DE FAMILLE ne pouvait donc jamais creer de
+                # pont vers une fiche listee : le client emettait EQGADDAFI, la
+                # fiche n'emettait que les cles de « Muammar ». La table des
+                # noms de famille etait inerte sur ce cas, qui est le cas
+                # ordinaire.
+                for word in {first_word, words[-1] if words else ""}:
+                    if word:
+                        for eq_key in _equivalence_keys(word):
+                            phonetics.add(eq_key)
                         
             if not phonetics:
                 components_values[item] = ["XX"]

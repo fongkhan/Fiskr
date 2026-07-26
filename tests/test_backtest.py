@@ -61,16 +61,29 @@ def _override_user(role: str):
     }
 
 
-def _cleanup_db():
+def _known_panels():
+    """Panels de test deja presents AVANT le test — a ne jamais supprimer."""
+    db = next(get_db())
+    try:
+        return {s.snapshot_id for s in db.query(Snapshot.snapshot_id).filter(
+            Snapshot.file_type == TEST_PANEL_FILE_TYPE).all()}
+    finally:
+        db.close()
+
+
+def _cleanup_db(known_panels=frozenset()):
     db = next(get_db())
     try:
         db.query(AppSetting).filter(AppSetting.key.in_(ALL_SETTING_KEYS)).delete(synchronize_session=False)
         db.query(WhitelistPair).filter(WhitelistPair.justification == WL_JUSTIF_MARKER).delete(synchronize_session=False)
-        # Snapshots watchlist et bases clients du test + tous les panels generes
+        # Snapshots watchlist et bases clients du test + les panels generes PAR
+        # CE TEST. Le filtre par type supprimait auparavant *tous* les panels de
+        # l'installation, y compris ceux qu'un utilisateur avait constitues pour
+        # ses propres mesures : un test ne detruit que ce qu'il a cree.
         snaps = db.query(Snapshot).filter(
             (Snapshot.file_name.like("test_bt_%")) | (Snapshot.file_type == TEST_PANEL_FILE_TYPE)
         ).all()
-        snap_ids = [s.snapshot_id for s in snaps]
+        snap_ids = [s.snapshot_id for s in snaps if s.snapshot_id not in known_panels]
         if snap_ids:
             db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id.in_(snap_ids)).delete(synchronize_session=False)
             db.query(ClientEntity).filter(ClientEntity.snapshot_id.in_(snap_ids)).delete(synchronize_session=False)
@@ -83,10 +96,11 @@ def _cleanup_db():
 @pytest.fixture
 def client():
     _override_user("admin")
+    known_panels = _known_panels()
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
-    _cleanup_db()
+    _cleanup_db(known_panels)
 
 
 def _upload_watchlist(client, rows, require_approval):
