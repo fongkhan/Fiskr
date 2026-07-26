@@ -25,7 +25,8 @@ from fiskr.scoring import match_entities, jaro_wink_similarity
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
-    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv
+    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
+    parse_multi_value
 )
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
@@ -261,7 +262,7 @@ def seed_watchlist_json(db: Session):
             raw_etype = item.get("entity_type", "I")
             etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
             
-            alt_addrs = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
+            alt_addrs = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
             
             db_ent = WatchlistEntity(
                 snapshot_id=snap_id,
@@ -2455,7 +2456,7 @@ def ingest_snapshot(
                 
                 parsed_name = item.get("individual_name_parsed") or {}
                 
-                alt_addrs_ofac = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
+                alt_addrs_ofac = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                 db_ent = WatchlistEntity(
                     snapshot_id=snap_id,
                     entity_id=item.get("entity_id"),
@@ -2518,7 +2519,7 @@ def ingest_snapshot(
                     ent_checksum = compute_checksum(item)
 
                     parsed_pdf = item.get("individual_name_parsed") or {"first_name": "", "last_name": "", "maiden_name": ""}
-                    alt_addrs_pdf = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
+                    alt_addrs_pdf = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
                         entity_id=item.get("entity_id"),
@@ -2582,7 +2583,7 @@ def ingest_snapshot(
                     etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
                     
                     parsed_csv = item.get("individual_name_parsed") or {"first_name": "", "last_name": "", "maiden_name": ""}
-                    alt_addrs_csv = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
+                    alt_addrs_csv = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
                         entity_id=item.get("entity_id") or item.get("id") or str(uuid.uuid4())[:8],
@@ -2632,7 +2633,7 @@ def ingest_snapshot(
                     "registration_country": [c.strip() for c in (item.get("registration_country") or "").split(",") if c]
                 }
                 
-                alt_addrs_client = [a.strip() for a in item.get("alternative_addresses", "").split(";")] if isinstance(item.get("alternative_addresses"), str) else (item.get("alternative_addresses") or [])
+                alt_addrs_client = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                 db_ent = ClientEntity(
                     snapshot_id=snap_id,
                     client_id=item.get("client_id"),
@@ -2669,7 +2670,7 @@ def ingest_snapshot(
                     client_phone=item.get("client_phone") or item.get("phone") or None,
                     client_email=item.get("client_email") or item.get("email") or None,
                     client_website=item.get("client_website") or item.get("website") or None,
-                    client_crypto_wallets=[w.strip() for w in (item.get("client_crypto_wallets") or "").split(";") if w.strip()],
+                    client_crypto_wallets=parse_multi_value(item, "client_crypto_wallets", "crypto_wallets"),
                     client_risk_rating=(item.get("client_risk_rating") or "").strip().upper() or None,
                     client_pep_flag=str(item.get("client_pep_flag", "")).strip().lower() in ("true", "1", "oui", "yes"),
                     client_segment=item.get("client_segment") or None,

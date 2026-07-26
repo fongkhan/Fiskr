@@ -449,3 +449,48 @@ def test_party_type_heuristic_fallback(tmp_path):
     assert entities["7001"]["gender"] == "F"
     # Aucun trait discriminant -> entite par defaut
     assert entities["7002"]["entity_type"] == "E"
+
+
+# ------------------ COLONNES MULTI-VALEURS ------------------
+
+def test_parse_multi_value_accepts_both_column_spellings():
+    """
+    L'expression d'origine n'interrogeait qu'UNE orthographe de colonne :
+    `alternative_addresses`. Toutes les colonnes voisines acceptent aussi la
+    forme prefixee `client_...`, si bien qu'un fichier ecrit
+    `client_alternative_addresses` etait ignore EN SILENCE — l'import
+    reussissait, le champ restait vide.
+    """
+    from fiskr.ingest import parse_multi_value
+
+    short = {"alternative_addresses": "rue A;rue B"}
+    long_ = {"client_alternative_addresses": "rue A;rue B"}
+    assert parse_multi_value(short, "alternative_addresses",
+                             "client_alternative_addresses") == ["rue A", "rue B"]
+    assert parse_multi_value(long_, "alternative_addresses",
+                             "client_alternative_addresses") == ["rue A", "rue B"]
+
+
+def test_parse_multi_value_returns_an_empty_list_when_absent():
+    """
+    `"".split(";")` retourne `[""]`, pas `[]` : chaque fiche sans adresse
+    alternative portait une entree vide, comptee comme une adresse par tout ce
+    qui lit ce champ.
+    """
+    from fiskr.ingest import parse_multi_value
+
+    assert parse_multi_value({}, "alternative_addresses") == []
+    assert parse_multi_value({"alternative_addresses": ""}, "alternative_addresses") == []
+    assert parse_multi_value({"alternative_addresses": "   "}, "alternative_addresses") == []
+    # Les separateurs superflus ne creent pas d'entrees vides
+    assert parse_multi_value({"alternative_addresses": "rue A;;rue B;"},
+                             "alternative_addresses") == ["rue A", "rue B"]
+
+
+def test_parse_multi_value_passes_through_an_existing_list():
+    """Un appel interne fournit deja une liste : elle est reprise telle quelle."""
+    from fiskr.ingest import parse_multi_value
+
+    assert parse_multi_value({"alternative_addresses": ["rue A"]},
+                             "alternative_addresses") == ["rue A"]
+    assert parse_multi_value({"alternative_addresses": []}, "alternative_addresses") == []
