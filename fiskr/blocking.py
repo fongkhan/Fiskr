@@ -1,6 +1,7 @@
 import re
 from typing import Set, List
 from fiskr.phonetics import double_metaphone
+from fiskr.quality import strip_accents
 
 
 def _country_equivalence_values(countries: List[str]) -> Set[str]:
@@ -164,7 +165,16 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                 name_clean = str(name).strip()
                 if not name_clean:
                     continue
-                words = re.split(r"[\s\-]+", name_clean)
+                # Translitteration AVANT la cle phonetique. Le double metaphone
+                # ne connait que l'alphabet latin : sur « 陈 », « 김 » ou
+                # « Владимир » il retourne une cle VIDE. Une fiche ecrite dans
+                # son ecriture d'origine ne produisait donc AUCUNE cle
+                # phonetique et n'etait candidate de rien — quel que soit le
+                # contenu des tables d'equivalences. Le scoring, lui,
+                # translitterait deja des deux cotes : les deux etages se
+                # contredisaient.
+                latin = strip_accents(name_clean)
+                words = re.split(r"[\s\-]+", latin) or [""]
                 first_word = words[0] if words else ""
                 if first_word:
                     p_key, s_key = double_metaphone(first_word)

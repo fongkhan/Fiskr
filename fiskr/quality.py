@@ -13,15 +13,34 @@ except ImportError:
     _transliterate = None
     TRANSLIT_AVAILABLE = False
 
+# Fin du bloc « Latin Extended-B ». Au-dela, on n'est plus dans une ecriture
+# latine : c'est le critere, et non une liste d'ecritures connues.
+_LAST_LATIN_CODEPOINT = 0x024F
+
+
 def has_non_latin_chars(text: str) -> bool:
-    """Checks if text contains characters outside ASCII/extended Latin."""
+    """
+    Vrai si le texte sort de l'ecriture latine (accents et diacritiques
+    compris, qui restent latins).
+
+    Le test porte sur le POINT DE CODE, pas sur le nom Unicode du caractere.
+    La version precedente cherchait les mots CYRILLIC / ARABIC / CJK / HEBREW /
+    THAI / GREEK dans le nom du caractere : une liste blanche d'ecritures, donc
+    fausse par construction pour toutes les autres. « 김 » se nomme HANGUL
+    SYLLABLE GIM — aucun de ces mots — et n'etait donc JAMAIS translittere ;
+    idem pour les kana japonais (HIRAGANA LETTER A, KATAKANA LETTER A), le
+    devanagari, l'armenien, le georgien, l'ethiopien. Ces noms traversaient
+    tout le criblage dans leur ecriture d'origine, ou aucune metrique de chaine
+    ni aucune cle phonetique ne pouvait rien en faire.
+
+    Le repli `except ValueError` ne rattrapait pas le cas : le hangul et les
+    kana ONT un nom Unicode.
+    """
     for char in text:
-        try:
-            name = unicodedata.name(char)
-            if any(block in name for block in ["CYRILLIC", "ARABIC", "CJK", "HEBREW", "THAI", "GREEK"]):
-                return True
-        except ValueError:
-            if ord(char) > 255:
+        if ord(char) > _LAST_LATIN_CODEPOINT and not char.isspace():
+            # Ponctuation et symboles generaux ne justifient pas une
+            # translitteration du nom entier (tiret cadratin, guillemets...)
+            if unicodedata.category(char)[0] not in ("P", "Z", "C"):
                 return True
     return False
 

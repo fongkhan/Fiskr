@@ -192,6 +192,30 @@ def test_shipped_resources_load_without_collision():
         index.canonical("London", resources.FIELD_CITY)
 
 
+def test_shipped_resources_bridge_east_asian_romanisations():
+    """
+    Coree : la translitteration automatique produit la romanisation revisee
+    officielle (박 -> Bag, 이 -> I, 최 -> Choe) alors que les listes emploient
+    la graphie consacree (Park, Lee, Choi). Aucune metrique de chaine ne
+    franchit « Bag » ≡ « Park ».
+
+    Japon : les kanji sont lus EN CHINOIS par la translittteration (田中 donne
+    « Tianzhong », pas « Tanaka ») — la lecture japonaise doit etre declaree.
+
+    Chine : rien a declarer, le pinyin de la translittteration tombe
+    exactement sur le terme romanise deja present (陈 -> CHEN).
+    """
+    index = resources.load_index(resources.default_directory())
+    S = resources.FIELD_SURNAME
+    for native, listed in (("박", "Park"), ("이", "Lee"), ("최", "Choi"),
+                           ("김", "Kim"), ("정", "Jeong"), ("윤", "Yoon"),
+                           ("문", "Moon"), ("田中", "Tanaka"), ("安倍", "Abe"),
+                           ("佐々木", "Sasaki"), ("陈", "Chen"), ("张", "Zhang")):
+        assert index.canonical(native, S) is not None, f"{native} non déclaré"
+        assert index.canonical(native, S) == index.canonical(listed, S), \
+            f"{native} et {listed} ne partagent pas de classe"
+
+
 # ------------------ BLOCKING ------------------
 
 def _keys(entity):

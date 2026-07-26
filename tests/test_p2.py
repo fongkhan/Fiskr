@@ -32,6 +32,35 @@ def test_cross_script_scoring_matches():
     assert score > 90.0
 
 
+def test_transliteration_covers_every_script_not_a_known_list():
+    """
+    La detection d'ecriture non latine se faisait par LISTE BLANCHE, en
+    cherchant CYRILLIC / ARABIC / CJK / HEBREW / THAI / GREEK dans le nom
+    Unicode du caractere. Fausse par construction pour tout le reste : « 김 »
+    se nomme HANGUL SYLLABLE GIM, les kana KATAKANA/HIRAGANA LETTER — aucun de
+    ces mots. Ces noms traversaient le criblage dans leur ecriture d'origine.
+    """
+    assert strip_accents("김").upper() == "GIM"          # hangul
+    assert strip_accents("たなか").upper() == "TANAKA"    # hiragana
+    assert strip_accents("タナカ").upper() == "TANAKA"    # katakana
+    assert strip_accents("陈").upper() == "CHEN"          # han
+    assert strip_accents("Ἀθῆναι").upper() == "ATHINAI"  # grec polytonique
+    # Le latin accentue reste du latin : pas de translitteration parasite
+    assert strip_accents("Jean-Pierre Müller") == "Jean-Pierre Muller"
+
+
+def test_uppercase_is_applied_after_transliteration():
+    """
+    `upper()` est sans effet sur une ecriture non latine : « 习 近平 ».upper()
+    reste « 习 近平 ». Passer en majuscules AVANT de translitterer produisait
+    « Xi JinPing » en casse mixte face a « XI JINPING » — les metriques de
+    chaine sont sensibles a la casse, deux graphies identiques apres
+    translitteration ne marquaient que 64,40.
+    """
+    assert compute_base_score("习 近平", "Xi Jinping", config) == 100.0
+    assert compute_base_score("陈 全国", "Chen Quanguo", config) == 100.0
+
+
 # ------------------ SEUILS DE CUT-OFF PAR LISTE ------------------
 
 def test_resolve_cut_off_overrides():

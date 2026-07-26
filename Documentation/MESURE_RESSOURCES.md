@@ -113,24 +113,70 @@ déclarer sont ceux dont la translittération **ne ressemble à rien** :
   nul en absolu n'est pas garanti : la mesure est à refaire sur la base réelle
   avant mise en production.
 
-## Angles morts identifiés, non corrigés
+## Asie de l'Est : trois défauts de moteur, pas des lacunes de données
 
-Ces cas restaient manqués après activation. Ils sont consignés parce qu'ils
-délimitent la portée réelle du dispositif.
+La première rédaction de ce document classait les échecs asiatiques
+(« 정은 김 », « 全国 陈 ») en *lacune de données*. C'était faux. Le diagnostic a
+mis au jour **trois défauts du moteur**, corrigés depuis :
+
+1. **Le hangul et les kana n'étaient jamais translittérés.** La détection
+   d'écriture non latine se faisait par liste blanche, en cherchant
+   `CYRILLIC` / `ARABIC` / `CJK` / `HEBREW` / `THAI` / `GREEK` dans le **nom
+   Unicode** du caractère. « 김 » se nomme `HANGUL SYLLABLE GIM` — aucun de ces
+   mots. Idem pour `HIRAGANA LETTER`, `KATAKANA LETTER`, le devanagari,
+   l'arménien, le géorgien. Le test porte désormais sur le **point de code**
+   (au-delà de Latin Extended-B), c'est-à-dire sur le critère réel.
+2. **La clé de blocking était calculée sur la chaîne brute.** Le double
+   métaphone ne connaît que l'alphabet latin : sur « 陈 » ou « Владимир » il
+   renvoie une clé **vide**. Une fiche écrite dans son écriture d'origine ne
+   produisait donc *aucune* clé phonétique et n'était candidate de rien — quel
+   que soit le contenu des tables. Le scoring, lui, translittérait déjà des
+   deux côtés : les deux étages du criblage se contredisaient.
+3. **La mise en majuscules précédait la translittération.** `upper()` est sans
+   effet sur une écriture non latine : « 习 近平 ».upper() reste « 习 近平 », et
+   la translittération rendait ensuite « Xi JinPing » en casse mixte face à
+   « XI JINPING ». Deux graphies pourtant identiques après translittération ne
+   marquaient que **64,40**.
+
+S'y ajoutait un point de conception, corrigé lui aussi : les listes écrivent
+les noms d'Asie de l'Est **nom de famille en tête** (« Kim Jong Un »,
+« Chen Quanguo ») quand une base clients concatène « prénom nom ». Les deux
+chaînes comparées étaient systématiquement inversées, et Jaro-Winkler +
+Damerau-Levenshtein — 80 % du poids — s'y effondrent. L'**ordre inverse** est
+désormais comparé comme une variante de nom supplémentaire. Le cas dépasse
+l'Asie (saisie inversée au guichet, formats d'échange « NOM Prénom »).
+
+Restait alors la vraie part de données : la Corée. La translittération produit
+la **romanisation révisée** officielle (박 → Bag, 이 → I, 최 → Choe) là où les
+listes emploient la graphie consacrée (Park, Lee, Choi) — c'est exactement le
+cas Henri/Harry, il se déclare. Le japonais aussi : les kanji sont lus **en
+chinois** par la translittération (田中 → « Tianzhong », pas « Tanaka »). La
+Chine, elle, n'a rien demandé : le pinyin tombe exactement sur le terme
+romanisé déjà présent (陈 → `CHEN`), aucun idéogramme n'a été ajouté.
+
+### Effet mesuré, même panel et même univers
+
+| Segment | Avant le lot | Après le lot |
+|---|---:|---:|
+| asiatiques (19) | 2 — **10,5 %** | 19 — **100 %** |
+| écritures non latines (13) | 5 — 38,5 % | 10 — 76,9 % |
+| **clients ordinaires (600)** | **0** | **0** |
+| TOTAL | 109 | **131** |
+
+Toujours **aucun bruit ajouté** sur les 600 clients ordinaires, malgré la
+comparaison de l'ordre inverse, et **aucune alerte perdue**.
+
+## Angles morts restants
 
 | Client | Fiche visée | Cause |
 |---|---|---|
-| معمر القذافي | Muammar Gaddafi | candidat (74,13), sous le seuil : `معمر` n'est pas déclaré |
 | محمد سعيد | Hafiz Muhammad Saeed | prénom seul commun, nom non déclaré |
-| خالد مشعل, علي مملوك, رامي مخلوف | — | aucun terme du couple prénom/nom déclaré en arabe |
-| Рамзан Кадыров | Ramzan Kadyrov | `KADYROV` absent des tables |
-| 정은 김 / 全国 陈 | Kim Jong Un / Chen Quanguo | ordre nom-prénom coréen/chinois non géré |
+| خالد مشعل, علي مملوك | — | aucun terme du couple prénom/nom déclaré en arabe |
 | Viatcheslav Volodine | Vyacheslav Volodin | classe `VYACHESLAV` absente |
 
-Aucun de ces cas n'est un défaut du moteur : ce sont des **lacunes de données**
-(ou, pour l'ordre nom-prénom asiatique, une fonctionnalité absente). Ils se
-comblent par enrichissement des fichiers `resources/`, ou par la fouille
-quotidienne d'homonymes (`fiskr/resource_mining.py`).
+Ceux-là sont bien des **lacunes de données** : ils se comblent par
+enrichissement des fichiers `resources/` ou par la fouille quotidienne
+d'homonymes (`fiskr/resource_mining.py`).
 
 ## Reproduire la mesure
 

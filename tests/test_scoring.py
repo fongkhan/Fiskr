@@ -100,3 +100,45 @@ def test_full_match_with_conflicts():
     # Final score should be drastically reduced and marked as NO_MATCH
     assert res["status"] == "NO_MATCH"
     assert res["final_score"] < 60.0
+
+
+# ------------------ ORDRE NOM / PRENOM ------------------
+
+def _individual(first, last, country="CN"):
+    return {"client_id": "C", "client_type": "PP",
+            "client_first_name": first, "client_last_name": last,
+            "client_countries": {"nationality": [country], "residence": [country],
+                                 "birth_country": [], "registration_country": []}}
+
+
+def _listed(name, country="CN"):
+    return {"entity_id": "E", "entity_type": "I", "primary_name": name,
+            "countries": {"citizenship": [country], "residence": [country],
+                          "birth_country": [country], "jurisdiction_country": []}}
+
+
+def test_reversed_name_order_is_compared():
+    """
+    Les listes officielles ecrivent les noms d'Asie de l'Est dans l'ordre
+    d'origine, nom de famille EN TETE (« Kim Jong Un », « Chen Quanguo »),
+    alors qu'une base clients concatene « prenom nom ». Les deux chaines
+    comparees sont alors systematiquement inversees : Jaro-Winkler et
+    Damerau-Levenshtein, qui portent 80 % du poids, s'y effondrent, et le
+    token sort seul (20 %) ne franchit jamais un seuil.
+    """
+    res = match_entities(_individual("Quanguo", "Chen"), _listed("Chen Quanguo"), test_config)
+    assert res["status"] == "ALERT"
+    assert res["final_score"] == 100.0
+    assert res["best_client_name"] == "Chen Quanguo"
+
+    res = match_entities(_individual("Jong Un", "Kim", "KP"),
+                         _listed("Kim Jong Un", "KP"), test_config)
+    assert res["status"] == "ALERT"
+
+
+def test_reversed_order_does_not_match_an_unrelated_name():
+    """L'ordre inverse est une variante de plus, pas un assouplissement."""
+    res = match_entities(_individual("Sofia", "Marchetti", "IT"),
+                         _listed("Chen Quanguo"), test_config)
+    assert res["status"] == "NO_MATCH"
+    assert res["final_score"] < 50.0

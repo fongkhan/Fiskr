@@ -92,3 +92,35 @@ def test_blocking_key_fallback():
     keys = generate_blocking_keys(entity, config)
     assert "XX_PP_MLR" in keys
     assert len(phonetic_keys(keys)) == 1
+
+
+# ------------------ ECRITURES NON LATINES ------------------
+
+def test_phonetic_key_is_computed_on_the_transliterated_form():
+    """
+    Le double metaphone ne connait que l'alphabet latin : sur « 陈 », « 김 » ou
+    « Владимир » il retournait une cle VIDE. Une fiche ecrite dans son
+    ecriture d'origine ne produisait donc AUCUNE cle phonetique et n'etait
+    candidate de rien — quel que soit le contenu des tables d'equivalences.
+    Le scoring, lui, translitterait deja des deux cotes : les deux etages du
+    criblage se contredisaient.
+    """
+    config = {"blocking": {"custom_key_layout": ["ENTITY_TYPE", "PHONETIC_FIRST"]}}
+    for native, latin in (("陈", "Chen"), ("김", "Kim"), ("Владимир", "Vladimir"),
+                          ("習", "Xi")):
+        native_keys = phonetic_keys(generate_blocking_keys(
+            {"entity_type": "I", "primary_name": native}, config))
+        assert native_keys != {"XX"}, f"{native} ne produit aucune cle phonetique"
+        latin_keys = phonetic_keys(generate_blocking_keys(
+            {"entity_type": "I", "primary_name": latin}, config))
+        assert native_keys & latin_keys, f"{native} et {latin} ne sont pas candidats"
+
+
+def test_non_latin_client_and_listed_record_become_candidates():
+    """Le cas reel : client saisi en hanzi, fiche listee en caracteres latins."""
+    config = {"blocking": {"custom_key_layout": ["ENTITY_TYPE", "PHONETIC_FIRST"]}}
+    listed = generate_blocking_keys(
+        {"entity_type": "I", "primary_name": "Chen Quanguo"}, config)
+    client = generate_blocking_keys(
+        {"client_type": "PP", "client_first_name": "全国", "client_last_name": "陈"}, config)
+    assert listed & client
