@@ -1120,6 +1120,40 @@ def parse_ofac_advanced_xml(file_path: str,
 
 
 
+# ------------------ OFAC NON-SDN (CONS_ADVANCED.XML) ------------------
+# L'OFAC publie DEUX fichiers au meme format « Advanced » : la SDN List et la
+# « Consolidated Sanctions List », dite Non-SDN. La seconde porte les regimes
+# qui ne relevent PAS d'un gel total des avoirs et sont donc absents du fichier
+# SDN — au premier rang desquels les SECTORAL SANCTIONS (SSI, directives 1 a 4
+# sur la Russie), mais aussi FSE, NS-MBS, PLC, MEU et CMIC. Un etablissement
+# expose au dollar doit les cribler ; ne charger que la SDN laisse un trou.
+#
+# Le format etant strictement identique, ce connecteur ne re-parse rien : il
+# reutilise `parse_ofac_advanced_xml`, deja eprouve sur la structure reelle du
+# fichier SDN. Deux ajustements seulement, expliques ci-dessous.
+
+
+def parse_ofac_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse le fichier Non-SDN de l'OFAC (CONS_ADVANCED.XML).
+
+    Le parseur SDN rend l'identifiant de profil OFAC nu (`pid`). Les deux
+    fichiers partagent le meme espace de FixedRef et ne se recouvrent pas
+    aujourd'hui, mais `entity_id` sert de cle aux alertes et a la liste
+    blanche : une collision ferait fusionner deux fiches distinctes. Le
+    prefixe `NONSDN-` ecarte le risque par construction plutot que par
+    confiance dans une propriete de la source.
+
+    Les relations entre profils ne sont volontairement pas recoltees ici : le
+    graphe de participations est rafraichi par source (`refresh_source_relationships`)
+    et melanger deux espaces d'identifiants prefixes differemment y produirait
+    des aretes pendantes.
+    """
+    for item in parse_ofac_advanced_xml(file_path):
+        item["entity_id"] = f"NONSDN-{item.get('entity_id')}"
+        item["origin"] = "OFAC Non-SDN Consolidated"
+        yield item
+
+
 # ------------------ REGISTRE NATIONAL DES GELS (DGT) ------------------
 # Connecteur du registre national des gels des avoirs publie par la Direction
 # generale du Tresor (gels-avoirs.dgtresor.gouv.fr, API publique ENGEL).
@@ -2583,6 +2617,233 @@ def parse_seco_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
             "passport_documents": passports,
             "national_id_documents": national_ids,
             "other_id_documents": [],
+        }
+
+
+# ------------------ CONSOLIDATED SCREENING LIST (trade.gov) ------------------
+# Agregat officiel du gouvernement americain (International Trade
+# Administration), publie en JSON public et sans authentification. Son interet
+# n'est PAS de redonner la SDN — Fiskr la recupere deja a la source — mais
+# d'apporter les listes de CONTROLE DES EXPORTATIONS, aujourd'hui absentes :
+#   - Entity List (EL), Denied Persons List (DPL), Unverified List (UVL) et
+#     Military End User (MEU) du Bureau of Industry and Security ;
+#   - ITAR Debarred (DTC) et Nonproliferation Sanctions (ISN) du Departement
+#     d'Etat.
+# Ces listes conditionnent le financement du commerce international : une
+# contrepartie de trade finance peut y figurer sans etre sur aucune liste de
+# gel des avoirs.
+#
+# Structure : {"results": [ {...}, ... ], "sources_used": [...]}
+# Chaque resultat : id, source, type (Individual|Entity|Vessel|Aircraft), name,
+# alt_names[], addresses[{address,city,state,postal_code,country}],
+# dates_of_birth[], places_of_birth[], nationalities[], citizenships[],
+# ids[{type,number,country,issue_date,expiration_date}], programs[],
+# federal_register_notice, start_date, end_date, license_requirement,
+# license_policy, title, remarks, call_sign, vessel_type, vessel_flag,
+# vessel_owner, gross_tonnage, source_list_url.
+#
+# MEME RESERVE que le connecteur SECO : ecrit d'apres le format publie et
+# valide sur un jeu d'essai, pas contre le fichier reel (acces reseau ferme).
+# Toutes les cles sont lues avec un defaut : un champ absent n'interrompt rien.
+#
+# Le fichier est charge d'un bloc (json.load), comme le registre DGT. A
+# l'echelle de la CSL (quelques dizaines de milliers de fiches) c'est sans
+# consequence ; ce serait a revoir si l'ITA publiait un jour un volume
+# comparable au dataset PEP.
+
+_CSL_TYPE_TO_ENTITY = {
+    "individual": "I",
+    "entity": "E",
+    "vessel": "V",
+    "aircraft": "O",
+}
+
+# Par defaut on ecarte la seule liste que Fiskr recupere deja a sa source et
+# qui est active en sortie de boite : la SDN. Si le connecteur Non-SDN est lui
+# aussi active, ajouter ses libelles ici evite de doubler les alertes.
+CSL_DEFAULT_EXCLUDED_SOURCES = ("Specially Designated Nationals",)
+
+
+def _csl_list(value: Any) -> List[str]:
+    """Valeur multiple tolerante : liste JSON, chaine « a; b », ou vide."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if v is not None and str(v).strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(";") if v.strip()]
+    return []
+
+
+def _csl_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "; ".join(str(v).strip() for v in value if v is not None and str(v).strip())
+    return str(value).strip()
+
+
+def _csl_address(entry: Any) -> Tuple[str, str, str]:
+    """(adresse complete, ville, pays) d'une entree d'adresse CSL."""
+    if isinstance(entry, str):
+        return entry.strip(), "", ""
+    if not isinstance(entry, dict):
+        return "", "", ""
+    city = _csl_text(entry.get("city"))
+    country = _csl_text(entry.get("country"))
+    parts = [
+        _csl_text(entry.get("address")),
+        _csl_text(entry.get("postal_code")),
+        city,
+        _csl_text(entry.get("state")),
+        country,
+    ]
+    return ", ".join(p for p in parts if p), city, country
+
+
+def parse_csl_json(
+    file_path: str,
+    excluded_sources: Optional[Tuple[str, ...]] = None,
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse la Consolidated Screening List (trade.gov) vers le schema pivot.
+
+    `excluded_sources` : fragments de libelle, compares sans tenir compte de la
+    casse, des listes a IGNORER. Sert a ne pas dupliquer une liste que Fiskr
+    recupere deja aupres de son emetteur.
+    """
+    excluded = tuple(
+        s.lower() for s in (
+            CSL_DEFAULT_EXCLUDED_SOURCES if excluded_sources is None else excluded_sources
+        ) if s
+    )
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    results = payload.get("results") if isinstance(payload, dict) else payload
+    for row in results or []:
+        if not isinstance(row, dict):
+            continue
+        name = _csl_text(row.get("name"))
+        csl_id = _csl_text(row.get("id")) or _csl_text(row.get("entity_number"))
+        if not name or not csl_id:
+            continue
+        source = _csl_text(row.get("source"))
+        source_low = source.lower()
+        if any(fragment in source_low for fragment in excluded):
+            continue
+
+        entity_type = _CSL_TYPE_TO_ENTITY.get(_csl_text(row.get("type")).lower(), "E")
+
+        aliases_raw = [{"name": a, "type": "Strong"} for a in _csl_list(row.get("alt_names"))]
+
+        dobs = []
+        for raw in _csl_list(row.get("dates_of_birth")):
+            iso = _extract_iso_date(raw) or _normalize_partial_date(raw)
+            if not iso:
+                # « circa 1968 », « 1968 to 1970 » : on retient la 1re annee
+                year = re.search(r"(\d{4})", raw)
+                iso = f"{year.group(1)}-01-01" if year else None
+            if iso:
+                dobs.append(iso)
+
+        addresses = []
+        address_countries = []
+        for entry in row.get("addresses") or []:
+            full, city, country = _csl_address(entry)
+            if full:
+                addresses.append({"full": full, "city": city, "country": country})
+            if country:
+                address_countries.append(country_label_to_iso2(country))
+
+        citizenships = [country_label_to_iso2(c) for c in
+                        _csl_list(row.get("citizenships")) + _csl_list(row.get("nationalities"))]
+        birth_countries = []
+        place_of_birth = None
+        for pob in _csl_list(row.get("places_of_birth")):
+            if not place_of_birth:
+                place_of_birth = pob
+            birth_countries.append(country_label_to_iso2(pob.split(",")[-1].strip()))
+
+        passports, national_ids, other_registrations = [], [], []
+        for doc in row.get("ids") or []:
+            if not isinstance(doc, dict):
+                continue
+            number = _csl_text(doc.get("number"))
+            if not number:
+                continue
+            doc_type = _csl_text(doc.get("type")).lower()
+            issuer = country_label_to_iso2(_csl_text(doc.get("country"))) or "XX"
+            expiry = _extract_iso_date(_csl_text(doc.get("expiration_date")))
+            if "passport" in doc_type:
+                passports.append({"number": number, "issuing_country": issuer,
+                                  "expiration_date": expiry})
+            elif any(k in doc_type for k in ("national", "identification", "cedula", "id card")):
+                national_ids.append({"number": number, "issuing_country": issuer})
+            else:
+                other_registrations.append({"id_type": doc_type or "OtherRegistration",
+                                            "number": number})
+
+        # Le contexte reglementaire d'une liste de controle des exportations
+        # est ce qui permet a l'analyste de trancher : il est conserve.
+        remarks = _csl_text(row.get("remarks"))
+        extra = [t for t in (remarks,) if t]
+        for label, key in (("Exigence de licence", "license_requirement"),
+                           ("Politique de licence", "license_policy"),
+                           ("Fiche source", "source_list_url")):
+            value = _csl_text(row.get(key))
+            if value:
+                extra.append(f"{label} : {value}")
+
+        federal_notice = _csl_text(row.get("federal_register_notice"))
+        start_date = _extract_iso_date(_csl_text(row.get("start_date")))
+        primary_addr = addresses[0] if addresses else {}
+
+        yield {
+            "entity_id": f"CSL-{csl_id}",
+            "entity_type": entity_type,
+            "primary_name": name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted({c for c in citizenships if c}),
+                "residence": [],
+                "birth_country": sorted({c for c in birth_countries if c}),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else [],
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": _csl_text(row.get("title")) or None,
+            # C'est LA liste americaine qui a designe la contrepartie : sans
+            # elle, l'analyste ne sait pas de quelle obligation il s'agit.
+            "designation_reasons": source or None,
+            "additional_informations": "; ".join(extra) or None,
+            "official_reference": build_official_reference(federal_notice, start_date),
+            "title": _csl_text(row.get("title")) or None,
+            "listed_on": start_date,
+            "delisted_on": _extract_iso_date(_csl_text(row.get("end_date"))),
+            "designating_state": "US",
+            "sanction_programs": _csl_list(row.get("programs")),
+            "name_original_script": None,
+            "origin": f"US CSL — {source}" if source else "US Consolidated Screening List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": [],
+            "vessel_call_sign": _csl_text(row.get("call_sign")) or None,
+            "vessel_type": _csl_text(row.get("vessel_type")) or None,
+            "vessel_flag": _csl_text(row.get("vessel_flag")) or None,
+            "vessel_owner": _csl_text(row.get("vessel_owner")) or None,
+            "vessel_tonnage": _csl_text(row.get("gross_tonnage")) or None,
         }
 
 

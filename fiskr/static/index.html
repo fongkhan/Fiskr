@@ -257,6 +257,8 @@
                                         <option value="WATCHLIST_PEP">PEP — OpenSanctions (CSV)</option>
                                         <option value="WATCHLIST_OFSI">UK OFSI — ConList (CSV)</option>
                                         <option value="WATCHLIST_SECO">Suisse SECO — Liste consolidée (XML ou CSV)</option>
+                                        <option value="WATCHLIST_OFAC_NONSDN">OFAC Non-SDN — Liste consolidée (XML)</option>
+                                        <option value="WATCHLIST_CSL">US CSL — Consolidated Screening List (JSON)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -643,6 +645,22 @@
                                 <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
                                 <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
                                 <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇺🇸 OFAC Non-SDN — Liste consolidée (XML)</h3>
+                                <p class="section-desc">Second fichier de l'OFAC, au même format que la SDN. Il porte les régimes qui n'emportent pas de gel total des avoirs et sont pour cette raison absents de la SDN : sanctions sectorielles (SSI), FSE, NS-MBS, PLC, MEU, CMIC. Liste séparée, seuillable à part, car la conséquence opérationnelle d'une touche n'y est pas la même (<code>sync.ofac_nonsdn.enabled</code>).</p>
+                                <button id="sync-ofacnonsdn-btn" class="btn btn-primary" onclick="handleSourceSync('OFACNONSDN')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇺🇸 US CSL — Consolidated Screening List (JSON)</h3>
+                                <p class="section-desc">Agrégat officiel du gouvernement américain, public et sans clé. Son apport propre est le contrôle des exportations, absent de toutes les autres sources branchées : Entity List, Denied Persons, Unverified et Military End User du BIS, ITAR Debarred et Nonproliferation du Département d'État. Les listes déjà récupérées à leur source sont écartées à la lecture pour ne pas doubler les alertes (<code>sync.csl.exclude_sources</code>).</p>
+                                <button id="sync-csl-btn" class="btn btn-primary" onclick="handleSourceSync('CSL')">
                                     Synchroniser maintenant
                                 </button>
                             </div>

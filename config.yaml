@@ -70,6 +70,14 @@ sync:
   ofac:
     enabled: true
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
+  # Second fichier de l'OFAC, meme format : la liste consolidee Non-SDN. Elle
+  # porte les regimes SANS gel total des avoirs, donc absents de la SDN —
+  # sanctions sectorielles (SSI, directives Russie), FSE, NS-MBS, PLC, MEU,
+  # CMIC. Opt-in : elle elargit le perimetre d'alertes, a mesurer au cahier
+  # de tests avant mise en production.
+  ofac_nonsdn:
+    enabled: false
+    url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONS_ADVANCED.XML"
   eurlex:
     enabled: true
     # Version anglaise du Journal Officiel : reference reglementaire retenue.
@@ -102,6 +110,20 @@ sync:
   ofsi:
     enabled: false
     url: "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
+  # Consolidated Screening List americaine (trade.gov) - opt-in.
+  # Agregat public et sans cle. Son apport PROPRE est le controle des
+  # exportations, absent de toutes les autres sources : BIS Entity List,
+  # Denied Persons, Unverified, Military End User ; ITAR Debarred et
+  # Nonproliferation du Departement d'Etat.
+  # exclude_sources : fragments de libelle des listes a ignorer, pour ne pas
+  # dupliquer ce que Fiskr recupere deja a la source. Absent = defaut
+  # ci-dessous ; liste VIDE = tout charger. Si `ofac_nonsdn` est active,
+  # ajouter ici ses libelles (« Sectoral Sanctions », « Non-SDN »...).
+  csl:
+    enabled: false
+    url: "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
+    exclude_sources:
+      - "Specially Designated Nationals"
   # Liste consolidee suisse (SECO) - opt-in selon l'exposition CH.
   # format: "xml"           -> export officiel SESAM de la Confederation. Voie
   #                            qui fait foi : gratuite, sans licence, elle seule

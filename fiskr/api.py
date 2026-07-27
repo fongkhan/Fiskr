@@ -26,7 +26,7 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
     parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
-    parse_seco_xml, parse_seco_opensanctions_csv,
+    parse_seco_xml, parse_seco_opensanctions_csv, parse_ofac_consolidated_xml, parse_csl_json,
     parse_multi_value
 )
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
@@ -63,7 +63,7 @@ from fiskr.backtest import (
 )
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
-    run_pep_sync, run_ofsi_sync, run_seco_sync,
+    run_pep_sync, run_ofsi_sync, run_seco_sync, run_ofac_nonsdn_sync, run_csl_sync,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
@@ -115,7 +115,8 @@ logger = logging.getLogger("fiskr.api")
 # Snapshot file types persisted as WatchlistEntity records
 WATCHLIST_FILE_TYPES = [
     "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
-    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO"
+    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
+    "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL"
 ]
 
 # Champs etendus des listes (schema pivot -> colonnes WatchlistEntity) :
@@ -312,6 +313,10 @@ def _run_scheduled_syncs():
             _apply_rescreen(run_ofsi_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["seco"]["enabled"]:
             _apply_rescreen(run_seco_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["ofac_nonsdn"]["enabled"]:
+            _apply_rescreen(run_ofac_nonsdn_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["csl"]["enabled"]:
+            _apply_rescreen(run_csl_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -319,7 +324,7 @@ def _run_scheduled_syncs():
 _SYNC_RUNNERS = {
     "ofac": run_ofac_sync, "eurlex": run_eurlex_sync, "dgt": run_dgt_sync,
     "eu_fsf": run_eu_fsf_sync, "un": run_un_sync, "pep": run_pep_sync, "ofsi": run_ofsi_sync,
-    "seco": run_seco_sync,
+    "seco": run_seco_sync, "ofac_nonsdn": run_ofac_nonsdn_sync, "csl": run_csl_sync,
 }
 # Sources en cours d'execution : une meme source ne se chevauche jamais
 _running_syncs: set = set()
@@ -2393,7 +2398,8 @@ def ingest_snapshot(
 
         # 3. Parse contents based on File Type
         eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
-        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO") or eu_fsf_upload:
+        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
+                         "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL") or eu_fsf_upload:
             if eu_fsf_upload:
                 # Liste consolidee UE au format FSF XML officiel
                 parser_stream = parse_eu_fsf_xml(str(temp_file_path))
@@ -2403,6 +2409,15 @@ def ingest_snapshot(
             elif file_type == "WATCHLIST_OFSI":
                 # Liste consolidee UK OFSI (ConList.csv format 2022)
                 parser_stream = parse_ofsi_conlist_csv(str(temp_file_path))
+            elif file_type == "WATCHLIST_OFAC_NONSDN":
+                # Liste consolidee Non-SDN de l'OFAC (meme format que la SDN)
+                parser_stream = parse_ofac_consolidated_xml(str(temp_file_path))
+            elif file_type == "WATCHLIST_CSL":
+                # Consolidated Screening List americaine (trade.gov, JSON)
+                parser_stream = parse_csl_json(
+                    str(temp_file_path),
+                    excluded_sources=get_sync_config()["csl"]["exclude_sources"],
+                )
             elif file_type == "WATCHLIST_SECO":
                 # Liste consolidee suisse : export officiel SESAM (XML) ou jeu
                 # OpenSanctions (CSV). L'extension du fichier tranche, pour que
@@ -4674,10 +4689,14 @@ def run_source_sync(
         report = run_ofsi_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     elif source == "SECO":
         report = run_seco_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "OFACNONSDN":
+        report = run_ofac_nonsdn_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "CSL":
+        report = run_csl_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO)."
+            detail="Source inconnue (valeurs possibles: OFAC, OFACNONSDN, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO, CSL)."
         )
 
     response = _serialize_sync_report(report)

@@ -36,7 +36,8 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
-    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv
+    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
+    parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
@@ -45,6 +46,11 @@ from fiskr.settings import require_approval_enabled
 logger = logging.getLogger("fiskr.sync")
 
 DEFAULT_OFAC_URL = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
+# Second fichier publie par l'OFAC, meme format « Advanced » : la liste
+# consolidee Non-SDN. Elle porte les regimes SANS gel total des avoirs, donc
+# absents du fichier SDN — sanctions sectorielles (SSI), FSE, NS-MBS, PLC,
+# MEU, CMIC. Publique, sans authentification.
+DEFAULT_OFAC_NONSDN_URL = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONS_ADVANCED.XML"
 # Version anglaise du Journal Officiel : c'est la reference reglementaire retenue
 DEFAULT_EURLEX_DAILY_URL = "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
 DEFAULT_EURLEX_KEYWORD = "restrictive measures"
@@ -85,6 +91,12 @@ DEFAULT_SECO_URL = (
 DEFAULT_SECO_OPENSANCTIONS_URL = (
     "https://data.opensanctions.org/datasets/latest/ch_seco_sanctions/targets.simple.csv"
 )
+
+# Consolidated Screening List du gouvernement americain (International Trade
+# Administration). Agregat public et sans cle : son apport propre est le
+# CONTROLE DES EXPORTATIONS (BIS Entity List, Denied Persons, Unverified,
+# Military End User ; ITAR Debarred et Nonproliferation du Departement d'Etat).
+DEFAULT_CSL_URL = "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -192,11 +204,37 @@ def get_sync_config() -> Dict[str, Any]:
             "enabled": bool((sync_cfg.get("ofsi") or {}).get("enabled", False)),
             "url": (sync_cfg.get("ofsi") or {}).get("url", DEFAULT_OFSI_URL),
         },
+        # Liste consolidee Non-SDN de l'OFAC (sanctions sectorielles et
+        # regimes sans gel total). Opt-in : elle elargit le perimetre d'alertes.
+        "ofac_nonsdn": {
+            "enabled": bool((sync_cfg.get("ofac_nonsdn") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("ofac_nonsdn") or {}).get("url", DEFAULT_OFAC_NONSDN_URL),
+        },
+        # Consolidated Screening List (trade.gov). `exclude_sources` evite de
+        # dupliquer une liste deja recuperee a sa source : par defaut la SDN.
+        "csl": _csl_source_config(sync_cfg.get("csl") or {}),
         # Liste suisse SECO, opt-in selon l'exposition CH. `format` choisit la
         # voie : "xml" (export officiel SESAM) ou "opensanctions" (CSV agrege).
         # Une URL laissee vide prend le defaut correspondant au format, pour
         # qu'un simple basculement de format suffise a changer de source.
         "seco": _seco_source_config(sync_cfg.get("seco") or {}),
+    }
+
+
+def _csl_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Configuration CSL. `exclude_sources` absent (et non pas vide) reprend le
+    defaut : une liste explicitement vide signifie « tout charger »."""
+    raw_excluded = raw.get("exclude_sources", None)
+    if raw_excluded is None:
+        excluded = tuple(CSL_DEFAULT_EXCLUDED_SOURCES)
+    elif isinstance(raw_excluded, str):
+        excluded = tuple(v.strip() for v in raw_excluded.split(";") if v.strip())
+    else:
+        excluded = tuple(str(v).strip() for v in raw_excluded if str(v).strip())
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "url": str(raw.get("url", "") or "").strip() or DEFAULT_CSL_URL,
+        "exclude_sources": excluded,
     }
 
 
@@ -1209,6 +1247,57 @@ def run_ofsi_sync(
         db, source="OFSI", file_type="WATCHLIST_OFSI", url=cfg["url"],
         parser=parse_ofsi_conlist_csv, file_label="UK_OFSI_ConList",
         temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_ofac_nonsdn_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee Non-SDN de l'OFAC (CONS_ADVANCED.XML) et
+    remplace la liste Non-SDN active.
+
+    C'est le pendant de la SDN : memes obligations de criblage, mais des
+    regimes qui n'emportent pas de gel total des avoirs (sanctions
+    sectorielles SSI, FSE, NS-MBS, PLC, MEU, CMIC) et qui sont pour cette
+    raison absents du fichier SDN. Liste separee — `WATCHLIST_OFAC_NONSDN` —
+    parce que la consequence operationnelle d'une touche n'y est pas la meme
+    et qu'un etablissement doit pouvoir la seuiller a part.
+    """
+    cfg = get_sync_config()["ofac_nonsdn"]
+    return _run_list_replacement_sync(
+        db, source="OFACNONSDN", file_type="WATCHLIST_OFAC_NONSDN", url=cfg["url"],
+        parser=parse_ofac_consolidated_xml, file_label="OFAC_Consolidated_NonSDN",
+        temp_suffix=".xml", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_csl_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la Consolidated Screening List americaine (trade.gov) et
+    remplace la liste CSL active.
+
+    L'agregat contient la SDN, que Fiskr recupere deja aupres de l'OFAC : les
+    libelles de `sync.csl.exclude_sources` sont ecartes a la lecture pour ne
+    pas doubler les alertes. Ce qui reste est l'apport propre de la CSL — les
+    listes de controle des exportations (BIS, Departement d'Etat), absentes de
+    toutes les autres sources branchees.
+    """
+    cfg = get_sync_config()["csl"]
+    excluded = cfg["exclude_sources"]
+    return _run_list_replacement_sync(
+        db, source="CSL", file_type="WATCHLIST_CSL", url=cfg["url"],
+        parser=lambda path: parse_csl_json(path, excluded_sources=excluded),
+        file_label="US_Consolidated_Screening_List",
+        temp_suffix=".json", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 

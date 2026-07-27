@@ -117,7 +117,7 @@ Réglages fichier uniquement (redémarrage requis) : `scoring.cut_off_overrides`
 
 ## 9. Périmètre par type de liste (filtres & criblage restreint)
 
-Le type de liste d'origine (`WATCHLIST_OFAC`, `WATCHLIST_UN`, `WATCHLIST_DGT`, `WATCHLIST_EU`, `WATCHLIST_PEP`, `WATCHLIST_OFSI`, `WATCHLIST_SECO`, `WATCHLIST_SSIE`) est **dénormalisé** sur les alertes, le journal d'audit et la liste blanche (colonne `list_type`, renseignée à l'écriture).
+Le type de liste d'origine (`WATCHLIST_OFAC`, `WATCHLIST_UN`, `WATCHLIST_DGT`, `WATCHLIST_EU`, `WATCHLIST_PEP`, `WATCHLIST_OFSI`, `WATCHLIST_SECO`, `WATCHLIST_OFAC_NONSDN`, `WATCHLIST_CSL`, `WATCHLIST_SSIE`) est **dénormalisé** sur les alertes, le journal d'audit et la liste blanche (colonne `list_type`, renseignée à l'écriture).
 
 * **Filtres partout** : sélecteur « Liste » sur la watchlist active (avec nouvelle colonne dédiée — la colonne « Type d'entité » reste I/E/V/O), la file d'alertes, le journal d'audit (désormais **paginé** : `GET /api/history?page=&page_size=&list_type=&status=` renvoie `{total, page, page_size, items}`), la liste blanche (`GET /api/whitelist?list_type=`) et l'historique des snapshots. Une seule table de libellés (`LIST_TYPE_LABELS`) est utilisée dans toute l'UI.
 * **Enregistrements antérieurs** : le journal d'audit étant immuable, les lignes créées avant l'ajout de la colonne ne sont **pas réécrites** — `list_type` vaut `NULL`, rendu « Inconnue » dans l'UI et ciblable via la valeur de filtre `UNKNOWN`. En lecture, `/api/history` restitue le type depuis le `decision_tree` quand il y figure (les décisions récentes) ; le filtre SQL `UNKNOWN`, lui, cible strictement les `NULL`.
