@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
+from fiskr import capabilities as caps
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities, jaro_wink_similarity
@@ -104,7 +105,8 @@ from fiskr.settings import (
     score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
     investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST,
     resource_fields, resources_active, SETTING_RESOURCE_FIELDS, DEFAULT_RESOURCE_FIELDS,
-    mining_settings, SETTING_MINING, DEFAULT_MINING
+    mining_settings, SETTING_MINING, DEFAULT_MINING,
+    engine_capabilities, SETTING_ENGINE_CAPABILITIES
 )
 from fiskr import resources as resource_tables
 from fiskr.retention import preview_retention, run_retention
@@ -1704,6 +1706,7 @@ _PORTABLE_SETTINGS = {
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
+    SETTING_ENGINE_CAPABILITIES,
 }
 
 class ConfigImportRequest(BaseModel):
@@ -2021,8 +2024,10 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     else:
         client_dict["client_type"] = "PM"
         
-    # Evaluate Data Quality
-    report = evaluate_and_clean(client_dict)
+    # Evaluate Data Quality. Canal CRIBLAGE : la normalisation de la sonde
+    # client obeit aux capacites du moteur (translitteration par ecriture,
+    # diacritiques, suffixes juridiques), contrairement a l'ingestion.
+    report = evaluate_and_clean(client_dict, channel=caps.CHANNEL_SCREENING)
     if not report["is_valid"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -5227,6 +5232,204 @@ async def update_blocking_settings(
         "cache_reloaded": reloaded,
         **_blocking_payload(db),
     }
+
+# ------------------ CAPACITES DU MOTEUR ------------------
+
+def _engine_payload(db: Session) -> Dict[str, Any]:
+    """
+    Catalogue + reglage effectif, genere depuis `fiskr/capabilities.py`.
+
+    L'ecran est ENTIEREMENT construit a partir de cette reponse : ajouter une
+    capacite au catalogue suffit a la faire apparaitre, avec son avertissement
+    de perte et sa dependance. Meme patron que le catalogue d'evenements.
+    """
+    channels = {}
+    for channel in caps.CHANNELS:
+        effectif = engine_capabilities(db, channel)
+        actives = {c for c, on in effectif.items() if on}
+        channels[channel] = {
+            "capabilities": effectif,
+            "defaults": caps.defaults_for_channel(channel),
+            # Cochee mais sans son prerequis : elle ne fait RIEN, et l'ecran
+            # doit le dire plutot que de laisser croire qu'elle agit.
+            "inert": caps.resolve_inactive_dependencies(actives),
+        }
+    catalogue = {
+        cap_id: {
+            "label": cap.label,
+            "family": cap.family,
+            "loss": cap.loss,
+            "depends_on": list(cap.depends_on),
+            "channels": list(cap.channels),
+        }
+        for cap_id, cap in caps.CAPABILITY_CATALOG.items()
+    }
+    return {
+        "catalog": catalogue,
+        "families": list(caps.FAMILY_ORDER),
+        "family_labels": dict(caps.FAMILY_LABELS),
+        "channels": list(caps.CHANNELS),
+        "channel_labels": {caps.CHANNEL_SCREENING: "Criblage clients",
+                           caps.CHANNEL_FILTERING: "Filtrage transactionnel"},
+        "scripts": list(caps.SCRIPTS),
+        "script_labels": dict(caps.SCRIPT_LABELS),
+        "state": channels,
+    }
+
+
+class EngineSettingsUpdate(BaseModel):
+    channel: str
+    # Réglage partiel accepté : les capacités absentes gardent leur valeur.
+    capabilities: Dict[str, bool]
+
+
+@app.get("/api/settings/engine")
+async def get_engine_settings(
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_blocking)
+):
+    """Capacités du moteur, par canal (rôle blocking ou admin)."""
+    return _engine_payload(db)
+
+
+@app.put("/api/settings/engine")
+async def update_engine_settings(
+    payload: EngineSettingsUpdate,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_blocking)
+):
+    """
+    Modifie a chaud les capacites d'un canal.
+
+    DOUBLE INVALIDATION obligatoire sur le canal criblage : le contexte des
+    capacites ET le cache de l'index. L'index fige ses cles de blocking au
+    chargement — sans rechargement, seule la sonde du client changerait, les
+    deux cotes ne se rencontreraient jamais et le reglage serait sans effet
+    visible. Le meme piege avait ete rencontre sur les ressources.
+    """
+    if payload.channel not in caps.CHANNELS:
+        raise HTTPException(status_code=400,
+                            detail=f"Canal inconnu : {payload.channel} "
+                                   f"(valeurs possibles : {', '.join(caps.CHANNELS)}).")
+    connues = set(caps.capabilities_for_channel(payload.channel))
+    inconnues = [c for c in payload.capabilities if c not in connues]
+    if inconnues:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Capacité inconnue sur ce canal : {', '.join(sorted(inconnues))}.")
+
+    stored = get_setting(db, SETTING_ENGINE_CAPABILITIES, {}) or {}
+    if not isinstance(stored, dict):
+        stored = {}
+    before = engine_capabilities(db, payload.channel)
+    merged = dict(stored)
+    channel_state = dict(merged.get(payload.channel) or {})
+    channel_state.update({c: bool(v) for c, v in payload.capabilities.items()})
+    merged[payload.channel] = channel_state
+    set_setting(db, SETTING_ENGINE_CAPABILITIES, merged,
+                updated_by=param_user["username"])
+
+    caps.invalidate_context()
+    after = engine_capabilities(db, payload.channel)
+    delta = {c: after[c] for c in after if before.get(c) != after[c]}
+    reloaded = False
+    if delta and payload.channel == caps.CHANNEL_SCREENING:
+        load_watchlist_cache(db)
+        reloaded = True
+
+    log_admin_action(
+        db, param_user["username"], "ENGINE_UPDATED", target=f"engine:{payload.channel}",
+        before={c: before.get(c) for c in delta}, after=delta,
+    )
+    db.commit()
+    coupees = sorted(c for c, on in delta.items() if not on)
+    return {
+        "message": "Capacités du moteur mises à jour."
+                   + (" Cache de criblage rechargé." if reloaded else ""),
+        "cache_reloaded": reloaded,
+        "changed": delta,
+        # Rappel de la perte encourue, a la reponse meme : l'ecran l'affiche,
+        # mais un appel d'API doit le porter aussi.
+        "losses": {c: caps.CAPABILITY_CATALOG[c].loss for c in coupees},
+        **_engine_payload(db),
+    }
+
+
+class EngineSimulateRequest(BaseModel):
+    panel_snapshot_id: str
+    # Parametrage candidat, capacite -> actif. Fusionne sur le reglage en
+    # vigueur : on decrit un CHANGEMENT, pas un etat complet.
+    capabilities: Dict[str, bool]
+    channel: str = "SCREENING"
+
+
+@app.post("/api/settings/engine/simulate")
+async def simulate_engine_impact_endpoint(
+    payload: EngineSimulateRequest,
+    db: Session = Depends(get_db),
+    param_user: Dict[str, Any] = Depends(require_blocking)
+):
+    """
+    Mesure l'ecart produit par un changement de capacites AVANT de l'appliquer.
+
+    Deux passes de criblage a blanc du meme panel contre le meme univers de
+    listes, sous deux parametrages. Aucune ecriture : ni alerte, ni ligne
+    d'audit, ni modification du reglage. Asynchrone — un panel reel se crible
+    en minutes, pas dans le cycle d'une requete HTTP.
+    """
+    from fiskr import engine_impact
+
+    if payload.channel not in caps.CHANNELS:
+        raise HTTPException(status_code=400, detail=f"Canal inconnu : {payload.channel}.")
+    connues = set(caps.capabilities_for_channel(payload.channel))
+    inconnues = [c for c in payload.capabilities if c not in connues]
+    if inconnues:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Capacité inconnue sur ce canal : {', '.join(sorted(inconnues))}.")
+    panel = db.query(Snapshot).filter(
+        Snapshot.snapshot_id == payload.panel_snapshot_id).first()
+    if not panel:
+        raise HTTPException(status_code=404, detail="Panel introuvable.")
+    if panel.file_type not in PANEL_FILE_TYPES:
+        raise HTTPException(status_code=400,
+                            detail="Le panel doit être une base clients ou un panel de test.")
+
+    effectif = engine_capabilities(db, payload.channel)
+    baseline = {c for c, on in effectif.items() if on}
+    candidate_map = dict(effectif)
+    candidate_map.update({c: bool(v) for c, v in payload.capabilities.items()})
+    candidate = {c for c, on in candidate_map.items() if on}
+    if candidate == baseline:
+        raise HTTPException(status_code=400,
+                            detail="Le paramétrage candidat est identique au paramétrage "
+                                   "en vigueur : il n'y a aucun écart à mesurer.")
+    channel = payload.channel
+
+    def _job(job_token: str):
+        session = next(get_db())
+        try:
+            report = engine_impact.simulate_engine_impact(
+                session, payload.panel_snapshot_id, candidate,
+                baseline_capabilities=baseline, channel=channel,
+                progress=lambda phase, done, total: progress_registry.update(
+                    job_token, phase=phase, kind="engine_simulation",
+                    label="Impact des capacités du moteur",
+                    started_by=param_user["username"], processed=done, total=total),
+            )
+            progress_registry.update(job_token, phase="DONE", kind="engine_simulation",
+                                     label="Impact des capacités du moteur",
+                                     started_by=param_user["username"])
+            progress_registry.finish(job_token, result=report)
+        finally:
+            session.close()
+
+    token = f"engsim-{uuid.uuid4().hex[:8]}"
+    _start_job(token, kind="engine_simulation", label="Impact des capacités du moteur",
+               target=_job, started_by=param_user["username"])
+    return JSONResponse(status_code=202, content={
+        "message": "Mesure d'impact lancée.", "job_token": token})
+
 
 # ------------------ RESSOURCES LINGUISTIQUES (equivalences) ------------------
 

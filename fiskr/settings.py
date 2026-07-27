@@ -36,6 +36,11 @@ SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
 SETTING_SYNC_SCHEDULES = "sync.schedules"
 SYNC_SOURCES = ("ofac", "ofac_nonsdn", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi", "seco", "csl", "canada", "dfat",
                 "hk_sfc", "amf", "worldbank")
+# Capacites du moteur de rapprochement, activables PAR CANAL. Le catalogue des
+# capacites vit dans fiskr/capabilities.py (source de verite unique, lue aussi
+# par le moteur, l'API et l'ecran) ; ici on ne stocke que l'activation :
+#   {"SCREENING": {"translit": true, ...}, "FILTERING": {...}}
+SETTING_ENGINE_CAPABILITIES = "engine.capabilities"
 # SLA de traitement des alertes : delai (heures) par priorite, 0 = pas d'echeance
 SETTING_ALERT_SLA_HOURS = "alerts.sla_hours"
 # Notifications metier : activation par evenement
@@ -231,12 +236,19 @@ def blocking_layout(db, channel: str) -> list:
     return blocking_layout_with_source(db, channel)["layout"]
 
 
-def blocking_config_for(layout: list) -> Dict[str, Any]:
-    """Copie de la config globale avec le layout de blocking injecte."""
+def blocking_config_for(layout: list, channel: str = "SCREENING") -> Dict[str, Any]:
+    """Copie de la config globale avec le layout de blocking injecte.
+
+    Le CANAL voyage avec la config : les capacites du moteur se reglent par
+    canal, et `generate_blocking_keys` doit savoir sous quel canal il travaille
+    sans qu'on ait a changer sa signature ni celle de ses six appelants.
+    """
     cfg = dict(config)
     blocking_cfg = dict(config.get("blocking", {}) or {})
     blocking_cfg["custom_key_layout"] = list(layout)
+    blocking_cfg["channel"] = channel
     cfg["blocking"] = blocking_cfg
+    cfg["engine_channel"] = channel
     return cfg
 
 
@@ -370,15 +382,22 @@ def score_thresholds(db) -> Dict[str, Any]:
     return out
 
 
-def scoring_config_with_thresholds(db) -> Dict[str, Any]:
+def scoring_config_with_thresholds(db, channel: str = "SCREENING") -> Dict[str, Any]:
     """Copie de la config globale avec les seuils a chaud injectes — a passer
-    au moteur de scoring pour que le reglage prenne effet sans redemarrage."""
+    au moteur de scoring pour que le reglage prenne effet sans redemarrage.
+
+    `engine_channel` voyage avec la config pour la meme raison que dans
+    `blocking_config_for` : les capacites du moteur se reglent par canal, et
+    `match_entities` doit savoir lequel s'applique sans changement de
+    signature. Absent = criblage, qui est le comportement historique.
+    """
     thresholds = score_thresholds(db)
     cfg = dict(config)
     scoring_cfg = dict(config.get("scoring", {}) or {})
     scoring_cfg["cut_off_threshold"] = thresholds["cut_off_threshold"]
     scoring_cfg["cut_off_overrides"] = dict(thresholds["cut_off_overrides"])
     cfg["scoring"] = scoring_cfg
+    cfg["engine_channel"] = channel
     return cfg
 
 
@@ -421,13 +440,55 @@ def exclusion_requirements(db) -> Dict[str, bool]:
     }
 
 
+def engine_capabilities(db, channel: str) -> Dict[str, bool]:
+    """
+    Capacites du moteur actives sur un canal (criblage ou filtrage).
+
+    Fusionne TOUJOURS sur les defauts du catalogue : une cle inconnue en base
+    est ignoree, et une capacite nouvellement declaree apparait avec son
+    defaut. Ajouter une entree au catalogue n'invalide donc aucune
+    installation existante.
+
+    Sans session, on en ouvre une : le moteur appelle ce chemin depuis des
+    contextes varies (API, batch, re-criblage). Jamais bloquant — au pire on
+    retombe sur les defauts, c'est-a-dire sur le moteur au complet.
+    """
+    from fiskr.capabilities import defaults_for_channel
+
+    out = defaults_for_channel(channel)
+    try:
+        session, owned = db, False
+        if session is None:
+            from fiskr.database import SessionLocal
+            if SessionLocal is None:
+                return out
+            session, owned = SessionLocal(), True
+        try:
+            stored = get_setting(session, SETTING_ENGINE_CAPABILITIES, None)
+        finally:
+            if owned:
+                session.close()
+    except Exception as e:  # jamais bloquant : au pire, le moteur au complet
+        logger.debug(f"Reglage des capacites indisponible : {e}")
+        return out
+
+    per_channel = (stored or {}).get(channel) if isinstance(stored, dict) else None
+    if isinstance(per_channel, dict):
+        for cap_id in out:
+            if cap_id in per_channel:
+                out[cap_id] = bool(per_channel[cap_id])
+    return out
+
+
 def resource_fields(db) -> Dict[str, bool]:
     """
     Types de champ pour lesquels les equivalences linguistiques s'appliquent.
 
-    Tout est desactive par defaut : une table d'equivalences change le
-    perimetre des alertes, elle doit etre activee sciemment et mesuree au
-    cahier de tests avant mise en production.
+    Prenoms et noms de famille sont actifs par defaut — mesure a l'appui, cf.
+    DEFAULT_RESOURCE_FIELDS et Documentation/MESURE_RESSOURCES.md. Les trois
+    autres types sont inactifs : une table d'equivalences change le perimetre
+    des alertes, elle doit etre activee sciemment et mesuree au cahier de
+    tests avant mise en production.
     """
     out = dict(DEFAULT_RESOURCE_FIELDS)
     value = get_setting(db, SETTING_RESOURCE_FIELDS, None)

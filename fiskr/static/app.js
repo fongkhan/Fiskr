@@ -593,6 +593,10 @@ async function checkAuthUser() {
             const canRules = isAdmin || roles.includes("rules");
             const blockingBtn = document.getElementById("sub-btn-alerts-blocking");
             if (blockingBtn) blockingBtn.classList.toggle("hidden", !canBlocking);
+            // Meme role que le blocking : c'est le meme paramétrage moteur,
+            // decoupe en deux ecrans pour ne pas en allonger un seul.
+            const engineBtn = document.getElementById("sub-btn-alerts-engine");
+            if (engineBtn) engineBtn.classList.toggle("hidden", !canBlocking);
             const rulesBtn = document.getElementById("sub-btn-alerts-rules");
             if (rulesBtn) rulesBtn.classList.toggle("hidden", !canRules);
         }
@@ -746,6 +750,9 @@ function switchSubTab(sectionId, subTabId) {
         fetchBlockingSettings();
         fetchResources();
         fetchLearnedEquivalences();
+        loadSimulationPanels();
+    } else if (subTabId === "alerts-engine") {
+        fetchEngineSettings();
         loadSimulationPanels();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
@@ -5204,16 +5211,18 @@ async function lookupResource() {
 // ------------------ MESURE D'IMPACT DES ÉQUIVALENCES ------------------
 
 async function loadSimulationPanels() {
-    const select = document.getElementById("resources-sim-panel");
-    if (!select) return;
+    const selects = ["resources-sim-panel", "engine-sim-panel"]
+        .map(id => document.getElementById(id)).filter(Boolean);
+    if (!selects.length) return;
     try {
         const response = await apiFetch("/api/testpanels");
         if (!response.ok) return;
         const data = await response.json();
         const panels = data.items || data.panels || [];
-        select.innerHTML = panels.length
+        const html = panels.length
             ? panels.map(p => `<option value="${escapeHtml(p.snapshot_id)}">${escapeHtml(p.file_name || p.snapshot_id)} — ${p.record_count} pseudo-clients</option>`).join("")
             : '<option value="">Aucun panel — générez-en un depuis Homologation</option>';
+        selects.forEach(select => { select.innerHTML = html; });
     } catch (e) {
         console.error("Error loading panels:", e);
     }
@@ -5256,13 +5265,17 @@ function renderImpactReport(containerId, report) {
         </div>`;
 }
 
-async function launchImpactSimulation(payload, containerId, buttonId) {
+// `endpoint` par defaut = les equivalences, pour que les deux appelants
+// historiques restent inchanges. Le reste du flux — 202 + jeton, attente du
+// job, rendu du rapport — est identique quelle que soit la mesure.
+async function launchImpactSimulation(payload, containerId, buttonId,
+                                      endpoint = "/api/resources/simulate") {
     const button = document.getElementById(buttonId);
     const box = document.getElementById(containerId);
     if (box) box.innerHTML = '<small style="color: var(--text-muted);">Mesure en cours…</small>';
     if (button) button.disabled = true;
     try {
-        const response = await apiFetch("/api/resources/simulate", {
+        const response = await apiFetch(endpoint, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
@@ -5312,6 +5325,114 @@ function simulatePendingImpact() {
     // l'écart mesuré est donc bien le leur et rien d'autre
     launchImpactSimulation({ panel_snapshot_id: panel, include_pending_ids: pending },
                            "mining-sim-result", "mining-sim-btn");
+}
+
+// ------------------ ALGORITHMES DU MOTEUR ------------------
+
+let engineState = null;
+let engineDraft = {};
+
+function engineChannel() {
+    return (document.getElementById("engine-channel-select") || {}).value || "SCREENING";
+}
+
+async function fetchEngineSettings() {
+    const card = document.getElementById("sub-sec-alerts-engine");
+    if (!card || card.classList.contains("hidden")) return;
+    try {
+        const response = await apiFetch("/api/settings/engine");
+        if (!response.ok) return;
+        engineState = await response.json();
+        resetEngineDraft();
+    } catch (e) {
+        console.error("Error fetching engine settings:", e);
+    }
+}
+
+function resetEngineDraft() {
+    if (!engineState) return;
+    const state = (engineState.state || {})[engineChannel()] || {};
+    engineDraft = { ...(state.capabilities || {}) };
+    renderEngineCapabilities();
+}
+
+function renderEngineCapabilities() {
+    const box = document.getElementById("engine-capabilities");
+    if (!box || !engineState) return;
+    const channel = engineChannel();
+    const state = (engineState.state || {})[channel] || {};
+    const catalog = engineState.catalog || {};
+    const defaults = state.defaults || {};
+    const inert = state.inert || {};
+    const familles = (engineState.families || []).map(famille => {
+        const entries = Object.keys(catalog)
+            .filter(id => catalog[id].family === famille
+                          && (catalog[id].channels || []).includes(channel))
+            // Les sous-bascules d'écriture juste après leur prérequis
+            .sort((a, b) => a.localeCompare(b));
+        if (!entries.length) return "";
+        const lignes = entries.map(id => {
+            const cap = catalog[id];
+            const coche = engineDraft[id] ? "checked" : "";
+            const enfant = (cap.depends_on || []).length;
+            const inerte = inert[id];
+            return `
+                <label style="display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.45rem 0.6rem; border: 1px solid var(--border-color); border-radius: 6px; margin-bottom: 0.4rem; ${enfant ? "margin-left: 1.5rem;" : ""}">
+                    <input type="checkbox" id="engine-cap-${escapeHtml(id)}" ${coche}
+                           onchange="engineDraft['${escapeHtml(id)}'] = this.checked; renderEngineCapabilities();">
+                    <span style="flex: 1;">
+                        <strong>${escapeHtml(cap.label)}</strong>
+                        ${defaults[id] === false ? ' <span class="status-badge" style="background: var(--surface-3); color: var(--text-muted);">inactive à la livraison</span>' : ""}
+                        ${inerte ? `<span class="status-badge" style="background: rgba(245,158,11,0.15); color: var(--color-warning);">sans effet : ${escapeHtml(inerte.join(", "))} est coupée</span>` : ""}
+                        <br><small style="color: var(--text-muted);">${engineDraft[id] ? "" : "⚠ "}${escapeHtml(cap.loss)}</small>
+                    </span>
+                </label>`;
+        }).join("");
+        return `<div style="margin-bottom: 1rem;">
+                    <h3 style="font-size: 0.95rem; margin-bottom: 0.5rem;">${escapeHtml((engineState.family_labels || {})[famille] || famille)}</h3>
+                    ${lignes}
+                </div>`;
+    }).join("");
+    box.innerHTML = familles;
+}
+
+async function saveEngineCapabilities() {
+    if (!engineState) return;
+    const channel = engineChannel();
+    const actuel = ((engineState.state || {})[channel] || {}).capabilities || {};
+    const coupees = Object.keys(engineDraft).filter(id => !engineDraft[id] && actuel[id]);
+    if (coupees.length) {
+        const catalog = engineState.catalog || {};
+        const pertes = coupees.map(id => `• ${(catalog[id] || {}).label} — ${(catalog[id] || {}).loss}`).join("\n\n");
+        const ok = await confirmDialog(
+            `Vous coupez ${coupees.length} mécanisme(s) du moteur. Voici ce que vous perdez :\n\n${pertes}\n\nLe changement est journalisé. Continuer ?`,
+            { title: "Algorithmes du moteur" });
+        if (!ok) return;
+    }
+    try {
+        const response = await apiFetch("/api/settings/engine", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ channel, capabilities: engineDraft }),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "échec."), "error"); return; }
+        showToast(data.message || "Capacités du moteur mises à jour.", "success");
+        engineState = data;
+        resetEngineDraft();
+    } catch (e) {
+        console.error("Error saving engine capabilities:", e);
+        showToast("Erreur réseau de communication.", "error");
+    }
+}
+
+function simulateEngineImpact() {
+    const panel = (document.getElementById("engine-sim-panel") || {}).value;
+    if (!panel) { showToast("Aucun panel de test disponible.", "warning"); return; }
+    // Le candidat est l'état des cases telles qu'elles sont cochées maintenant,
+    // même non enregistrées : on mesure avant d'appliquer, c'est tout l'objet.
+    launchImpactSimulation(
+        { panel_snapshot_id: panel, channel: engineChannel(), capabilities: engineDraft },
+        "engine-sim-result", "engine-sim-btn", "/api/settings/engine/simulate");
 }
 
 // ------------------ FOUILLE D'HOMONYMES ------------------
