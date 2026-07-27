@@ -330,32 +330,35 @@ def test_format_is_detected_from_content_not_from_the_file_name(tmp_path):
     assert [e["primary_name"] for e in entities] == ["Delta Ltd"]
 
 
-def test_a_record_without_a_country_would_be_unreachable_so_the_regulator_fills_in(tmp_path):
+def test_a_record_without_a_country_is_reachable_through_the_wildcard(tmp_path):
     """
     COUNTRY_ISO est une composante de la clé de blocking : une fiche sans pays
-    tombe dans la partition « XX », que ne rejoint AUCUN client ayant un pays.
-    Elle serait donc structurellement inatteignable. La juridiction du
-    régulateur prend le relais quand la source ne publie pas de pays.
+    tombe dans la partition « pays inconnu », que ne rejoint AUCUN client ayant
+    un pays. Ces listes n'en publiant presque jamais, elles seraient
+    structurellement inatteignables.
+
+    La correction est au niveau du MOTEUR, pas du parseur : le client interroge
+    aussi la variante « pays inconnu » de ses propres clés. Un premier jet
+    remplissait la juridiction du régulateur dans la fiche ; c'était une
+    rustine, et elle RESTREIGNAIT l'atteignabilité — une entité signalée par la
+    SFC n'aurait été visible que des clients hongkongais, alors qu'un courtier
+    frauduleux vise des victimes partout.
     """
-    from fiskr.blocking import generate_blocking_keys
+    from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
     from fiskr.config import config
 
-    blocking_cfg = config.get("blocking", {})
     dragon = list(parse_hk_sfc_alert_list(_file(tmp_path, "sfc.html", SFC_HTML)))[0]
-    assert dragon["countries"]["jurisdiction_country"] == ["HK"]
+    # Aucune géographie inventée : la source n'en publie pas
+    assert dragon["countries"]["jurisdiction_country"] == []
+    # ...mais l'autorité qui signale est conservée, elle
+    assert dragon["designating_state"] == "HK"
 
-    listed_keys = set(generate_blocking_keys(dragon, blocking_cfg))
-    client_keys = set(generate_blocking_keys({
+    listed_keys = set(generate_blocking_keys(dragon, config))
+    client = {
         "client_id": "c1", "client_type": "PM",
         "client_company_name": dragon["primary_name"],
-        "client_countries": {"registration_country": ["HK"]},
-    }, blocking_cfg))
-    assert listed_keys & client_keys, (listed_keys, client_keys)
-
-    # Preuve de ce qui se passerait sans juridiction : aucune clé commune
-    sans_pays = dict(dragon, countries={})
-    assert not set(generate_blocking_keys(sans_pays, blocking_cfg)) & client_keys
-
-    # L'AMF prend sa propre juridiction
-    amf = list(parse_amf_blacklist(_file(tmp_path, "amf.csv", AMF_CSV)))[0]
-    assert amf["countries"]["jurisdiction_country"] == ["FR"]
+        # Client FRANÇAIS : c'est le cas qui compte
+        "client_countries": {"registration_country": ["FR"]},
+    }
+    assert not listed_keys & set(generate_blocking_keys(client, config))
+    assert listed_keys & set(lookup_blocking_keys(client, config))

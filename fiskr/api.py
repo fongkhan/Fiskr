@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
-from fiskr.blocking import generate_blocking_keys
+from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities, jaro_wink_similarity
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
@@ -2042,7 +2042,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     cleansed_client["client_gender"] = report["resolved_gender"]
     
     # Generate blocking keys — meme layout que celui de l'index en memoire
-    client_keys = generate_blocking_keys(cleansed_client, blocking_config_for(watchlist_index_layout))
+    client_keys = lookup_blocking_keys(cleansed_client, blocking_config_for(watchlist_index_layout))
 
     # Retrieve candidates matching blocking keys
     candidates = {}
@@ -6110,7 +6110,7 @@ async def bench_fp_rule(
                 index.setdefault(key, []).append(ent)
         for client in _panel_clients(db, panel.snapshot_id):
             cands = {}
-            for key in generate_blocking_keys(client, screening_cfg):
+            for key in lookup_blocking_keys(client, screening_cfg):
                 for ent in index.get(key, []):
                     cands[ent["entity_id"]] = ent
             best, best_ent = None, None

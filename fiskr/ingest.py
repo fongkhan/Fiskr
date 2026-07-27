@@ -3307,7 +3307,6 @@ def parse_regulatory_alert_list(
     authority: str,
     designation_reasons: str,
     reference_label: str,
-    default_jurisdiction: str = "",
 ) -> Generator[Dict[str, Any], None, None]:
     """
     Lit une liste d'alerte de regulateur vers le schema pivot.
@@ -3370,13 +3369,16 @@ def parse_regulatory_alert_list(
             "Date de mise en garde", "Last updated",
         ))
         country = _table_get(row, "Country", "Jurisdiction", "Pays", "Juridiction")
-        # A defaut de pays publie, la juridiction du REGULATEUR fait foi. Ce
-        # n'est pas un remplissage de confort : COUNTRY_ISO est une composante
-        # de la cle de blocking et une fiche sans pays tombe dans la partition
-        # « XX », que ne rejoint aucun client ayant un pays — elle serait donc
-        # structurellement inatteignable. Une entite visee par un avertissement
-        # de la SFC opere par construction sur le marche de Hong Kong.
-        jurisdiction = country_label_to_iso2(country) if country else default_jurisdiction
+        # PAS de juridiction inventee quand la source n'en publie pas. Le
+        # premier jet remplissait avec la juridiction du regulateur, pour
+        # echapper a la partition « pays inconnu » du blocking. C'etait une
+        # rustine, et elle RESTREIGNAIT l'atteignabilite : une entite signalee
+        # par la SFC devenait visible des seuls clients hongkongais, alors
+        # qu'un courtier frauduleux vise des victimes partout. Le joker « pays
+        # inconnu » (fiskr/blocking.lookup_blocking_keys) traite le probleme au
+        # bon endroit ; l'autorite qui signale reste portee par
+        # `designating_state`, qui est la pour cela.
+        jurisdiction = country_label_to_iso2(country) if country else ""
         details = _table_get(row, "Reason", "Remarks", "Details", "Description",
                              "Comments", "Motif", "Commentaire", "Précisions", "Precisions")
         reference = _table_get(row, "Reference", "Ref", "Référence", "Case number",
@@ -3454,7 +3456,6 @@ def parse_hk_sfc_alert_list(file_path: str) -> Generator[Dict[str, Any], None, N
         authority="HK",
         designation_reasons="Mise en garde du régulateur — SFC Hong Kong (entité non autorisée / site suspect)",
         reference_label="SFC Hong Kong — Alert List",
-        default_jurisdiction="HK",
     )
 
 
@@ -3473,7 +3474,6 @@ def parse_amf_blacklist(file_path: str) -> Generator[Dict[str, Any], None, None]
         authority="FR",
         designation_reasons="Mise en garde du régulateur — AMF (acteur non autorisé)",
         reference_label="AMF — listes noires",
-        default_jurisdiction="FR",
     )
 
 

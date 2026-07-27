@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fiskr.config import config
 from fiskr.database import Snapshot, ClientEntity, compute_checksum
-from fiskr.blocking import generate_blocking_keys
+from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.alerts import is_whitelisted
 from fiskr.rescreen import _entity_dicts
@@ -130,7 +130,7 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
             except Exception:
                 pass  # une progression cassee n'interrompt jamais un criblage
         candidates: Dict[str, Dict[str, Any]] = {}
-        for key in generate_blocking_keys(client, screening_cfg):
+        for key in lookup_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
                 candidates[ent["entity_id"]] = ent
         if not candidates:

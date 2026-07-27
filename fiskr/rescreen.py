@@ -13,7 +13,7 @@ from fiskr.config import config
 from fiskr.database import (
     Snapshot, WatchlistEntity, ClientEntity, log_compliance_decision
 )
-from fiskr.blocking import generate_blocking_keys
+from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted
 
@@ -100,7 +100,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             except Exception:
                 pass  # une progression cassee n'interrompt jamais un re-criblage
         candidates: Dict[str, Dict[str, Any]] = {}
-        for key in generate_blocking_keys(client, screening_cfg):
+        for key in lookup_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
                 candidates[ent["entity_id"]] = ent
         if not candidates:

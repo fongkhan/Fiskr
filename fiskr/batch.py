@@ -106,7 +106,7 @@ def run_pandas_batch_screening(clients: List[dict], watchlist: List[dict], confi
     A lightweight, pure-Python fallback for batch screening without PySpark.
     Applies the same blocking logic and scoring rules.
     """
-    from fiskr.blocking import generate_blocking_keys
+    from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
     from fiskr.scoring import match_entities
     
     # Index watchlist by blocking key
@@ -121,7 +121,7 @@ def run_pandas_batch_screening(clients: List[dict], watchlist: List[dict], confi
     alerts = []
     # Screen each client
     for client in clients:
-        client_keys = generate_blocking_keys(client, config)
+        client_keys = lookup_blocking_keys(client, config)
         
         # Keep track of compared watchlist entity IDs to avoid duplicate matches
         seen_watchlist_ids = set()

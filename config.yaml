@@ -6,6 +6,23 @@ blocking:
     - "COUNTRY_ISO"
     - "ENTITY_TYPE"
     - "PHONETIC_FIRST"
+  # Joker « pays inconnu » a l'INTERROGATION de l'index. Sans lui, une fiche
+  # listee dont la source ne publie aucun pays tombe dans la partition « XX »
+  # que ne rejoint aucun client ayant un pays : elle est structurellement
+  # inatteignable. Le client interroge donc aussi la variante « pays inconnu »
+  # de ses propres cles.
+  #
+  # Strictement additif : aucune paire aujourd'hui candidate ne cesse de
+  # l'etre, donc AUCUNE alerte ne peut etre perdue. Le partitionnement est
+  # preserve : une fiche QUI PORTE un pays reste atteinte par les seuls clients
+  # de ce pays. Le surcout est proportionnel a la part de fiches sans pays,
+  # mesure sur un univers de 5 000 fiches et 2 000 clients :
+  #     2 % sans pays -> +24 % de candidats | 5 % -> +65 %
+  #    10 % sans pays -> +133 % | 20 % -> +306 %
+  # ...et la couverture de ces fiches passe de 0 % a 100 % dans les 4 cas.
+  # On ne paie donc que ce qu'on active : les listes de sanctions publient un
+  # pays, les listes d'alerte de regulateurs presque jamais.
+  country_wildcard: true
 
 scoring:
   cut_off_threshold: 75.0
