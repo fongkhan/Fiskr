@@ -17,6 +17,7 @@ from fiskr.database import (
     Base, Snapshot, WatchlistEntity, ClientEntity, Alert, AlertEvent, WhitelistPair
 )
 from fiskr.rescreen import rescreen_after_snapshot_change, RESCREEN_USERNAME
+from tests.conftest import wait_for_job
 
 
 @pytest.fixture
@@ -166,9 +167,14 @@ def test_sync_response_carries_rescreen_counts(client, monkeypatch):
         lambda url, dest, timeout=300.0, retries=None, progress=None:
             Path(dest).write_text(jsonlib.dumps(sample), encoding="utf-8")
     )
+    # La synchronisation repond 202 et travaille en tache de fond : on attend
+    # le job, puis on lit le rapport publie sur son jeton.
     response = client.post("/api/sync/run", json={"source": "DGT"})
-    assert response.status_code == 200
-    body = response.json()
+    assert response.status_code == 202, response.text
+    token = response.json()["job_token"]
+    state = wait_for_job(client, token)
+    assert state["status"] == "DONE", state
+    body = client.get(f"/api/progress?id={token}").json()["result"]
     assert body["status"] == "SUCCESS"
     assert "rescreen" in body
     assert "clients_screened" in body["rescreen"]

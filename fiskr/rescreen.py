@@ -7,6 +7,7 @@ en liste blanche sont supprimees de facon tracee (statut WHITELISTED dans le
 journal d'audit). Fournit aussi le lookback manuel (guidance Wolfsberg).
 """
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from fiskr.config import config
@@ -23,6 +24,10 @@ RESCREEN_USERNAME = "rescreen-auto"
 
 # Cadence des remontees de progression (un tick tous les N clients criblés)
 _PROGRESS_EVERY = 500
+
+# Cadence des cessions de GIL (voir backtest.py) : bien plus fine que celle de
+# la progression, sans quoi l'API reste muette entre deux ticks.
+_YIELD_EVERY = 25
 
 
 def _entity_dicts(db, snapshot_ids: List[str]) -> List[Dict[str, Any]]:
@@ -99,6 +104,11 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
                 progress(done, total_clients)
             except Exception:
                 pass  # une progression cassee n'interrompt jamais un re-criblage
+        # Cession explicite du GIL : sans elle, ce calcul en Python pur affame
+        # la boucle d'evenements et l'API cesse de repondre pendant tout le
+        # re-criblage (meme motif que le criblage a blanc).
+        if done % _YIELD_EVERY == 0:
+            time.sleep(0)
         candidates: Dict[str, Dict[str, Any]] = {}
         for key in lookup_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):

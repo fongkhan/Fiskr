@@ -737,6 +737,43 @@ fallback = db_config.get("fallback_to_sqlite", True)
 engine = None
 SessionLocal = None
 
+
+def _tune_sqlite(eng):
+    """
+    Regle SQLite pour que l'application RESTE DISPONIBLE pendant une operation
+    longue (ingestion d'une liste consolidee, mise en production, re-criblage).
+
+    En mode journal par defaut (DELETE), un ecrivain pose un verrou exclusif sur
+    tout le fichier : pendant les minutes que dure une ingestion, AUCUNE autre
+    requete ne peut lire. Comme toutes les routes touchent la base — la
+    dependance d'authentification elle-meme fait une lecture —, c'est l'API
+    entiere qui devenait injoignable, y compris /api/progress : l'ecran semblait
+    gele et sa progression ne s'affichait plus.
+
+    - journal_mode=WAL : les lecteurs ne sont jamais bloques par l'ecrivain ;
+    - busy_timeout : un ecrivain concurrent attend au lieu d'echouer aussitot
+      sur « database is locked » ;
+    - synchronous=NORMAL : compromis recommande avec WAL (durabilite conservee
+      hors coupure d'alimentation, ecritures nettement moins couteuses).
+
+    Sans effet sur PostgreSQL, qui ne connait pas ces pragmas et ne souffre pas
+    du probleme (MVCC).
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(eng, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=10000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        except Exception as exc:  # base en lecture seule, systeme de fichiers reseau...
+            logger.warning(f"Impossible d'appliquer les pragmas SQLite (WAL) : {exc}")
+        finally:
+            cursor.close()
+
+
 def init_db():
     global engine, SessionLocal
     try:
@@ -760,6 +797,7 @@ def init_db():
             logger.warning(f"Failed to connect to PostgreSQL: {err_msg}. Falling back to SQLite.")
             sqlite_url = f"sqlite:///{sqlite_path}"
             engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
+            _tune_sqlite(engine)
         else:
             try:
                 err_msg = str(e)
