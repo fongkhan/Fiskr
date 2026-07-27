@@ -433,6 +433,15 @@ python -m uvicorn fiskr.api:app --host 127.0.0.1 --port 8000 --reload
 ```
 Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
+> **Un seul worker.** Ne lancez pas Uvicorn avec `--workers N`. Le cache des
+> listes en mémoire et le registre de progression des opérations longues sont
+> **propres à chaque processus** : avec plusieurs workers, une requête sur deux
+> verrait un cache différent et la pastille de progression clignoterait au
+> hasard selon le worker qui répond. Ce n'est pas non plus le remède au
+> ralentissement pendant une opération longue — celui-ci est traité à sa
+> source (synchronisations en tâche de fond, SQLite en mode WAL, cessions de
+> GIL dans les criblages).
+
 1. Vous serez automatiquement redirigé vers la page de connexion **`/login`**.
 2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.

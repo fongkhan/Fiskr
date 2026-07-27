@@ -18,6 +18,26 @@ from fiskr.sync import (
 )
 from fiskr.api import app
 from fiskr.auth import get_current_user
+from tests.conftest import wait_for_job
+
+
+def _run_sync(client, payload, timeout=60.0):
+    """
+    Declenche une synchronisation (202 + jeton), attend la fin du job et
+    retourne le rapport publie sur le jeton. La synchronisation ne rend plus son
+    rapport dans la reponse du POST : elle travaille en tache de fond pour ne
+    pas immobiliser l'application pendant plusieurs minutes.
+    """
+    response = client.post("/api/sync/run", json=payload)
+    assert response.status_code == 202, response.text
+    token = response.json()["job_token"]
+    state = wait_for_job(client, token, timeout=timeout)
+    assert state["status"] == "DONE", state
+    detail = client.get(f"/api/progress?id={token}")
+    assert detail.status_code == 200, detail.text
+    report = detail.json()["result"]
+    assert report is not None, "le job s'est terminé sans rapport publié"
+    return report
 
 
 # ------------------ FIXTURES ------------------
@@ -337,8 +357,53 @@ def test_send_report_email_skipped_without_smtp(monkeypatch):
 # ------------------ API ------------------
 
 def test_api_sync_run_invalid_source(client):
+    """Refus SYNCHRONE : aucun job ne part sur une source inconnue."""
     response = client.post("/api/sync/run", json={"source": "INTERPOL"})
     assert response.status_code == 400
+
+
+def test_api_sync_run_invalid_date_is_refused_synchronously(client):
+    """Meme exigence pour une date malformee : 400 immediat, pas de 202."""
+    response = client.post("/api/sync/run", json={"source": "EURLEX", "date": "09/07/2026"})
+    assert response.status_code == 400
+
+
+def test_api_sync_run_refuses_a_second_run_of_the_same_source(client, monkeypatch):
+    """
+    Une source deja en cours ne se relance pas : deux ingestions concurrentes
+    de la meme liste se marcheraient dessus.
+    """
+    from fiskr import api as api_module
+
+    api_module._running_syncs.add("ofac")
+    try:
+        response = client.post("/api/sync/run", json={"source": "OFAC"})
+        assert response.status_code == 409
+    finally:
+        api_module._running_syncs.discard("ofac")
+
+
+def test_api_sync_run_answers_202_without_waiting(client, monkeypatch):
+    """
+    Le POST rend la main tout de suite : il ne doit PAS attendre la fin du
+    cycle. On le prouve en rendant le cycle lent — la reponse arrive avant.
+    """
+    import time as _time
+    from fiskr import api as api_module
+
+    def _slow_sync(db, **kwargs):
+        _time.sleep(1.5)
+        return SyncReport(source="OFAC", status="NO_CHANGE", added_count=0,
+                          modified_count=0, removed_count=0)
+
+    monkeypatch.setitem(api_module._SYNC_RUNNERS, "ofac", _slow_sync)
+    started = _time.monotonic()
+    response = client.post("/api/sync/run", json={"source": "OFAC"})
+    elapsed = _time.monotonic() - started
+    assert response.status_code == 202, response.text
+    assert elapsed < 1.0, f"la requête a attendu le cycle ({elapsed:.2f} s)"
+    state = wait_for_job(client, response.json()["job_token"])
+    assert state["status"] == "DONE", state
 
 
 def test_api_sync_config_and_reports(client):
@@ -356,9 +421,7 @@ def test_api_sync_config_and_reports(client):
 def test_api_sync_run_eurlex_no_publication(client, monkeypatch):
     # JO du jour sans acte "mesures restrictives" : rapport NO_PUBLICATION, aucun snapshot cree
     monkeypatch.setattr("fiskr.sync.http_get_text", lambda url, timeout=60.0: "<html><body>Rien aujourd'hui</body></html>")
-    response = client.post("/api/sync/run", json={"source": "EURLEX", "date": "2026-07-09"})
-    assert response.status_code == 200
-    data = response.json()
+    data = _run_sync(client, {"source": "EURLEX", "date": "2026-07-09"})
     assert data["status"] == "NO_PUBLICATION"
     assert data["source"] == "EURLEX"
 

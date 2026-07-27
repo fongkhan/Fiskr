@@ -13,15 +13,15 @@ jamais repris par le re-criblage automatique).
 """
 import logging
 import random
+import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from fiskr.config import config
-from fiskr.database import Snapshot, ClientEntity, compute_checksum
+from fiskr.database import Snapshot, ClientEntity, WhitelistPair, compute_checksum
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities
-from fiskr.alerts import is_whitelisted
 from fiskr.rescreen import _entity_dicts
 
 logger = logging.getLogger("fiskr.backtest")
@@ -90,6 +90,45 @@ def _client_label(client: Dict[str, Any]) -> str:
 # Cadence des remontees de progression : un tick tous les N clients criblés
 _PROGRESS_EVERY = 500
 
+# Cadence des cessions de GIL, DELIBEREMENT bien plus fine que celle de la
+# progression : entre deux ticks de progression il peut s'ecouler plusieurs
+# secondes, pendant lesquelles l'API ne repondrait pas. Une cession coute
+# environ une microseconde ; toutes les 25 fiches, son cout est invisible dans
+# la duree totale et le temps de reponse reste celui d'une application au repos.
+_YIELD_EVERY = 25
+
+
+class _RuleSnapshot(NamedTuple):
+    """
+    Copie detachee d'une regle anti-FP : le criblage a blanc n'a besoin que de
+    ces trois champs, et une copie simple survit a la liberation de la session
+    (un objet ORM, lui, serait expire par le rollback et rechargerait la base a
+    chaque acces).
+    """
+    id: int
+    name: str
+    code: str
+
+
+def _active_whitelist_keys(db) -> Set[Tuple[str, str]]:
+    """
+    Couples (client, entite) de liste blanche ACTIFS, charges EN UNE REQUETE.
+
+    Le criblage a blanc interrogeait la base pour chaque client en alerte
+    (`is_whitelisted`). Outre le cout — une requete par alerte —, ces lectures
+    rouvraient une transaction en plein calcul et maintenaient la base occupee
+    pendant toute la duree du cahier de tests. La table est une liste curee a la
+    main : la charger entierement coute une requete et tient en memoire.
+
+    Meme filtre que `is_whitelisted` (non revoquee, non expiree).
+    """
+    now = datetime.utcnow()
+    rows = db.query(WhitelistPair.client_id, WhitelistPair.watchlist_entity_id).filter(
+        WhitelistPair.revoked_at.is_(None),
+        (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
+    ).all()
+    return {(r[0], r[1]) for r in rows}
+
 
 def _dry_run_screen(db, clients: List[Dict[str, Any]],
                     entities: List[Dict[str, Any]],
@@ -106,6 +145,14 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     `progress(traites, total)` est appele tous les 500 clients : un cahier de
     tests sur une vraie base clients dure plusieurs minutes, l'utilisateur doit
     voir ou il en est. Jamais bloquant (meme motif que persist_pivot_items).
+
+    DISPONIBILITE DE L'APPLICATION PENDANT LE CALCUL — deux precautions, car
+    cette boucle dure plusieurs minutes et gelait tout le reste :
+    - la base n'est plus interrogee DANS la boucle (liste blanche prechargee)
+      et la transaction de lecture est refermee avant de commencer : plus rien
+      ne retient la base pendant le criblage ;
+    - le GIL est rendu a chaque tick de progression, sans quoi ce calcul en
+      Python pur affame la boucle d'evenements et l'API cesse de repondre.
     """
     from fiskr.settings import blocking_layout, blocking_config_for
     from fiskr.fprules import build_screening_ctx, run_rule
@@ -115,6 +162,19 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     for ent in entities:
         for key in generate_blocking_keys(ent, screening_cfg):
             index.setdefault(key, []).append(ent)
+
+    whitelist_keys = _active_whitelist_keys(db)
+    # Les regles sont detachees de la session AVANT de la liberer : un rollback
+    # expire les objets ORM, et la boucle rechargerait alors chaque regle depuis
+    # la base a chaque client — exactement ce qu'on cherche a eviter.
+    rules = [_RuleSnapshot(r.id, r.name, r.code) for r in (rule_set or [])]
+    # Tout ce dont la boucle a besoin est en memoire : on rend la base a
+    # l'application. Sans ce rollback, la transaction de lecture ouverte par les
+    # requetes ci-dessus resterait ouverte pendant toute la duree du criblage.
+    try:
+        db.rollback()
+    except Exception:  # session deja libre : sans consequence
+        pass
 
     pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
     whitelisted_suppressed = 0
@@ -129,6 +189,13 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
                 progress(done, total_clients)
             except Exception:
                 pass  # une progression cassee n'interrompt jamais un criblage
+        # Cession explicite du GIL : un thread de calcul en Python pur ne rend
+        # la main que toutes les 5 ms, ce qui suffit a rendre l'API
+        # inexploitable. Ce point de respiration la garde joignable. Il est
+        # d'autant plus necessaire ici que la boucle n'interroge plus la base :
+        # ce sont ces lectures qui, involontairement, rendaient la main.
+        if done % _YIELD_EVERY == 0:
+            time.sleep(0)
         candidates: Dict[str, Dict[str, Any]] = {}
         for key in lookup_blocking_keys(client, screening_cfg):
             for ent in index.get(key, []):
@@ -147,16 +214,16 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
         if not best or best.get("status") != "ALERT":
             continue
 
-        if is_whitelisted(db, client.get("client_id"), best_ent.get("entity_id")):
+        if (client.get("client_id"), best_ent.get("entity_id")) in whitelist_keys:
             whitelisted_suppressed += 1
             continue
 
         alerts_before_rules += 1
 
         matched_rule = None
-        if rule_set:
+        if rules:
             ctx = build_screening_ctx(client, best_ent, best)
-            for r in rule_set:
+            for r in rules:
                 result, error = run_rule(r.code, ctx)
                 if error:
                     continue  # fail-open : une regle en erreur conserve l'alerte
@@ -255,6 +322,17 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             candidate_rules.append(candidate_rule)
             candidate_rules.sort(key=lambda r: ((r.run_order if r.run_order is not None else 100), r.id))
 
+    # Fiche de la regle candidate relevee MAINTENANT : les criblages ci-dessous
+    # liberent la session, ce qui expire les objets ORM. Le rapport se construit
+    # ensuite sans redemander la base.
+    candidate_rule_info = ({
+        "id": candidate_rule.id,
+        "name": candidate_rule.name,
+        "version": candidate_rule.version,
+        "status": candidate_rule.status,
+    } if candidate_rule else None)
+    active_rules_count = len(current_rules)
+
     def _phase_progress(phase: str):
         if not progress:
             return None
@@ -292,13 +370,8 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         # Cle additive : anciens rapports (sans "rules") toujours valides,
         # le gate d'approbation ne lit que "verdict"
         "rules": {
-            "active_count": len(current_rules),
-            "candidate_rule": ({
-                "id": candidate_rule.id,
-                "name": candidate_rule.name,
-                "version": candidate_rule.version,
-                "status": candidate_rule.status,
-            } if candidate_rule else None),
+            "active_count": active_rules_count,
+            "candidate_rule": candidate_rule_info,
             "current_suppressed": current["rule_suppressed"],
             "candidate_suppressed": candidate["rule_suppressed"],
             "suppressed_delta": candidate["rule_suppressed"] - current["rule_suppressed"],

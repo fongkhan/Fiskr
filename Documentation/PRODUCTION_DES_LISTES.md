@@ -30,6 +30,17 @@ Deux voies, toutes deux aboutissant au même parcours :
   synchronisation quotidienne planifiée ou manuelle (*Sources Automatiques*).
 - **Import manuel** : fichier XML / CSV / JSON / PDF (*Import de Fichiers*).
 
+> **La synchronisation travaille en tâche de fond.** `POST /api/sync/run`
+> répond **202** avec un jeton et rend la main aussitôt : le cycle complet
+> (téléchargement, analyse, ingestion, delta, rechargement du cache,
+> re-criblage) dure plusieurs minutes, et l'application doit rester utilisable
+> pendant ce temps. La progression se suit dans le bouton, dans la pastille et
+> par `GET /api/progress?id=<jeton>` ; le rapport final est publié sur ce même
+> jeton et archivé dans *Historique des synchronisations*. Les refus restent
+> immédiats : source inconnue ou date malformée (**400**), source déjà en
+> cours de synchronisation (**409** — deux ingestions concurrentes de la même
+> liste se marcheraient dessus).
+
 En mode homologation, le snapshot arrive en `PENDING_REVIEW` : il est archivé,
 comparé, testable — mais **invisible du moteur de criblage** tant qu'il n'est
 pas approuvé. Après un import ou une synchro, l'application propose d'ouvrir

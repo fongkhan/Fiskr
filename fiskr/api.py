@@ -4682,6 +4682,35 @@ class SyncRunRequest(BaseModel):
 def _serialize_sync_report(report: SyncReport) -> Dict[str, Any]:
     return {c.name: getattr(report, c.name) for c in report.__table__.columns}
 
+
+# Alias acceptes par l'API -> (cle d'execution, nom de source du moteur).
+# La cle d'execution est celle de `_SYNC_RUNNERS` : c'est elle qui sert de
+# verrou anti-chevauchement, PARTAGE avec le planificateur cron (une source ne
+# doit pas etre synchronisee deux fois en parallele, que les declenchements
+# soient manuels ou planifies). Le nom de source est celui que le moteur
+# utilise pour son jeton de progression `sync:<source>`.
+_SYNC_SOURCE_ALIASES: Dict[str, Tuple[str, str]] = {
+    "OFAC": ("ofac", "OFAC"),
+    "OFACNONSDN": ("ofac_nonsdn", "OFACNONSDN"),
+    "EURLEX": ("eurlex", "EURLEX"),
+    "EUFSF": ("eu_fsf", "EUFSF"),
+    "EU_FSF": ("eu_fsf", "EUFSF"),
+    "FSF": ("eu_fsf", "EUFSF"),
+    "DGT": ("dgt", "DGT"),
+    "UN": ("un", "UN"),
+    "ONU": ("un", "UN"),
+    "PEP": ("pep", "PEP"),
+    "OFSI": ("ofsi", "OFSI"),
+    "SECO": ("seco", "SECO"),
+    "CSL": ("csl", "CSL"),
+    "CANADA": ("canada", "CANADA"),
+    "DFAT": ("dfat", "DFAT"),
+    "HKSFC": ("hk_sfc", "HKSFC"),
+    "AMF": ("amf", "AMF"),
+    "WORLDBANK": ("worldbank", "WORLDBANK"),
+}
+
+
 @app.post("/api/sync/run")
 def run_source_sync(
     request: SyncRunRequest,
@@ -4690,73 +4719,93 @@ def run_source_sync(
 ):
     """
     Declenche manuellement la synchronisation d'une source officielle :
-    telechargement du fichier OFAC ou scraping du Journal Officiel EUR-Lex,
-    delta par rapport a la liste active, application et rapport de suivi.
+    telechargement, delta par rapport a la liste active, application et rapport
+    de suivi.
+
+    Repond **202** avec un jeton. Le cycle complet — telechargement, analyse,
+    ingestion de plusieurs dizaines de milliers de fiches, delta, rechargement
+    du cache puis re-criblage — dure plusieurs minutes. Tant qu'il tournait DANS
+    la requete, il monopolisait une session de base et le processus : plus
+    aucune requete n'aboutissait, l'ecran paraissait gele et sa propre
+    progression ne s'affichait plus. Meme traitement que le cahier de tests.
+
+    Les refus restent SYNCHRONES : source inconnue ou date malformee (400),
+    source deja en cours de synchronisation (409). Rien ne part sur une demande
+    invalide.
+
+    La progression se suit par GET /api/progress?id=<jeton> et le rapport final
+    y est publie (champ `result`), en plus d'etre archive en base et relisible
+    par GET /api/sync/reports.
     """
     source = (request.source or "").strip().upper()
-    reload_cache = lambda: load_watchlist_cache(db)
-    # Identite de l'operation posee AVANT le cycle de sync : `started_by`
-    # n'etant jamais ecrase, la pastille affiche le demandeur reel et non
-    # « système » (valeur par defaut des declenchements planifies)
-    progress_registry.update(f"sync:{source.lower()}", phase="DOWNLOAD", kind="sync",
-                             label=f"Synchronisation {source}",
-                             started_by=current_user.get("username") or "?")
-
-    if source == "OFAC":
-        report = run_ofac_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "EURLEX":
-        for_date = None
-        if request.date:
-            try:
-                for_date = datetime.strptime(request.date, "%Y-%m-%d").date()
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Format de date invalide (attendu: YYYY-MM-DD)."
-                )
-        report = run_eurlex_sync(db, for_date=for_date, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "DGT":
-        report = run_dgt_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source in ("EUFSF", "EU_FSF", "FSF"):
-        report = run_eu_fsf_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source in ("UN", "ONU"):
-        report = run_un_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "PEP":
-        report = run_pep_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "OFSI":
-        report = run_ofsi_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "SECO":
-        report = run_seco_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "OFACNONSDN":
-        report = run_ofac_nonsdn_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "CSL":
-        report = run_csl_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "CANADA":
-        report = run_canada_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "DFAT":
-        report = run_dfat_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "HKSFC":
-        report = run_hk_sfc_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "AMF":
-        report = run_amf_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    elif source == "WORLDBANK":
-        report = run_worldbank_sync(db, trigger="MANUAL", reload_cache=reload_cache)
-    else:
+    alias = _SYNC_SOURCE_ALIASES.get(source)
+    if alias is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Source inconnue (valeurs possibles: OFAC, OFACNONSDN, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO, CSL, CANADA, DFAT, HKSFC, AMF, WORLDBANK)."
         )
+    run_key, engine_source = alias
 
-    response = _serialize_sync_report(report)
-    # Surveillance continue : re-criblage du referentiel clients contre les
-    # entites nouvelles/modifiees du snapshot applique
-    if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
-        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
-        if snap:
-            response["rescreen"] = rescreen_after_snapshot_change(
-                db, snap.file_type, report.snapshot_id, report.previous_snapshot_id
+    for_date = None
+    if run_key == "eurlex" and request.date:
+        try:
+            for_date = datetime.strptime(request.date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Format de date invalide (attendu: YYYY-MM-DD)."
             )
-    return response
+
+    if run_key in _running_syncs:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Une synchronisation {engine_source} est déjà en cours."
+        )
+
+    # Meme jeton que celui publie par le moteur (`SyncProgress`) et que celui
+    # interroge par le tableau de bord.
+    token = f"sync:{engine_source.lower()}"
+    username = current_user.get("username") or "?"
+    _running_syncs.add(run_key)
+
+    def _job(job_token: str):
+        session = next(get_db())
+        try:
+            kwargs: Dict[str, Any] = {
+                "trigger": "MANUAL",
+                "reload_cache": lambda: load_watchlist_cache(session),
+            }
+            if run_key == "eurlex":
+                kwargs["for_date"] = for_date
+            report = _SYNC_RUNNERS[run_key](session, **kwargs)
+            result = _serialize_sync_report(report)
+            # Surveillance continue : re-criblage du referentiel clients contre
+            # les entites nouvelles/modifiees du snapshot applique
+            if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(session):
+                snap = session.query(Snapshot).filter(
+                    Snapshot.snapshot_id == report.snapshot_id).first()
+                if snap:
+                    result["rescreen"] = rescreen_after_snapshot_change(
+                        session, snap.file_type, report.snapshot_id,
+                        report.previous_snapshot_id,
+                        progress=lambda done, total: progress_registry.update(
+                            job_token, phase="RESCREEN", processed=done, total=total,
+                            snapshot_id=report.snapshot_id),
+                    )
+            progress_registry.finish(job_token, result=result)
+        finally:
+            session.close()
+            _running_syncs.discard(run_key)
+
+    # `started_by` n'etant jamais ecrase, la pastille affiche le demandeur reel
+    # et non « système » (valeur par defaut des declenchements planifies)
+    _start_job(token, kind="sync", label=f"Synchronisation {engine_source}",
+               target=_job, started_by=username)
+    return JSONResponse(status_code=202, content={
+        "message": f"Synchronisation {engine_source} lancée.",
+        "source": engine_source,
+        "job_token": token,
+    })
 
 @app.get("/api/sync/reports")
 async def get_sync_reports(

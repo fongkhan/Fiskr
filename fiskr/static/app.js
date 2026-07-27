@@ -1263,19 +1263,16 @@ async function handleSourceSync(source) {
     const originalText = btn.textContent;
     btn.textContent = "Synchronisation en cours...";
 
-    // Progression en direct dans le bouton (phase + compteur), jeton sync:<source>
-    const syncToken = `sync:${source.toLowerCase()}`;
-    const syncTimer = setInterval(async () => {
-        try {
-            const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(syncToken)}`);
-            if (!resp.ok) return;
-            const p = await resp.json();
-            if (p.status !== "RUNNING") return;
-            const label = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "";
-            const count = p.processed ? ` ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}` : "";
-            btn.textContent = `${label}${count}`;
-        } catch (e) { /* jamais bloquant */ }
-    }, 1500);
+    // La synchronisation répond 202 et travaille en tâche de fond : elle dure
+    // plusieurs minutes et bloquait l'application entière quand on l'attendait
+    // dans la requête. On suit son jeton, et le rapport est relu à la fin.
+    let syncTimer = null;
+    const stopFollowing = () => {
+        if (syncTimer) clearInterval(syncTimer);
+        syncTimer = null;
+        btn.disabled = false;
+        btn.textContent = originalText;
+    };
 
     try {
         const response = await apiFetch("/api/sync/run", {
@@ -1286,35 +1283,71 @@ async function handleSourceSync(source) {
         const data = await response.json();
         if (!response.ok) {
             showToast(`Erreur de synchronisation : ${data.detail || JSON.stringify(data)}`, "error");
+            stopFollowing();
             return;
         }
-        const srcLabel = SYNC_SOURCE_LABELS[data.source] || data.source;
-        let msg = `Synchronisation ${srcLabel} : ${data.status} — delta +${data.added_count} / ~${data.modified_count} / −${data.removed_count}`;
-        if (data.rescreen && data.rescreen.new_alerts) {
-            msg += ` · re-criblage : ${data.rescreen.new_alerts} nouvelle(s) alerte(s)`;
-        }
-        showToast(msg, data.status === "ERROR" ? "error" : "success", 8000);
-        fetchSyncReports();
-        fetchSnapshots();
-        fetchWatchlist();
-        fetchWatchlistHash();
-        fetchPendingReviews();
-        refreshSidebarCounters();
-        // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
-        if (data.status === "PENDING_REVIEW" && data.snapshot_id) {
-            const go = await confirmDialog(
-                `La synchronisation ${srcLabel} attend une homologation. Ouvrir le parcours de production de liste maintenant ?`,
-                { confirmLabel: "Ouvrir l'homologation", cancelLabel: "Plus tard" }
-            );
-            if (go) openPendingReview(data.snapshot_id);
-        }
+
+        // Suivi sur le jeton renvoyé par le serveur : progression dans le
+        // bouton, puis restitution du rapport à la fin.
+        //
+        // La fin est détectée SUR CE JETON, et non par le suivi global des
+        // opérations : une synchronisation sans changement se termine en moins
+        // d'un cycle de ce suivi, qui ne la verrait jamais « en cours » et ne
+        // déclencherait donc jamais la fin — le bouton resterait désactivé.
+        const syncToken = data.job_token;
+        let finished = false;
+        syncTimer = setInterval(async () => {
+            try {
+                const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(syncToken)}`, { silent: true });
+                if (!resp.ok) return;
+                const p = await resp.json();
+                if (p.status === "RUNNING") {
+                    const label = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "";
+                    const count = p.processed ? ` ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}` : "";
+                    btn.textContent = `${label}${count}`;
+                    return;
+                }
+                if (finished) return;
+                finished = true;
+                stopFollowing();
+                await finishSourceSync(p);
+            } catch (e) { /* jamais bloquant */ }
+        }, 1500);
     } catch (e) {
         console.error("Error running source sync:", e);
         showToast("Erreur réseau pendant la synchronisation.", "error");
-    } finally {
-        clearInterval(syncTimer);
-        btn.disabled = false;
-        btn.textContent = originalText;
+        stopFollowing();
+    }
+}
+
+// Fin d'une synchronisation : rafraîchissement des écrans concernés et
+// restitution du rapport, publié sur le jeton de l'opération.
+async function finishSourceSync(state) {
+    fetchSyncReports();
+    fetchSnapshots();
+    fetchWatchlist();
+    fetchWatchlistHash();
+    fetchPendingReviews();
+    refreshSidebarCounters();
+    if (state.status === "ERROR") {
+        showToast(`Erreur de synchronisation : ${state.error || "erreur inconnue"}`, "error", 9000);
+        return;
+    }
+    const report = state.result;
+    if (!report) return;
+    const srcLabel = SYNC_SOURCE_LABELS[report.source] || report.source;
+    let msg = `Synchronisation ${srcLabel} : ${report.status} — delta +${report.added_count} / ~${report.modified_count} / −${report.removed_count}`;
+    if (report.rescreen && report.rescreen.new_alerts) {
+        msg += ` · re-criblage : ${report.rescreen.new_alerts} nouvelle(s) alerte(s)`;
+    }
+    showToast(msg, report.status === "ERROR" ? "error" : "success", 8000);
+    // Fluidité du parcours : proposer d'enchaîner sur l'homologation
+    if (report.status === "PENDING_REVIEW" && report.snapshot_id) {
+        const go = await confirmDialog(
+            `La synchronisation ${srcLabel} attend une homologation. Ouvrir le parcours de production de liste maintenant ?`,
+            { confirmLabel: "Ouvrir l'homologation", cancelLabel: "Plus tard" }
+        );
+        if (go) openPendingReview(report.snapshot_id);
     }
 }
 
