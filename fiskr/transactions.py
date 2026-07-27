@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from fiskr.config import config
 from fiskr.database import log_compliance_decision
 from fiskr.names import parse_individual_name
-from fiskr.phonetics import double_metaphone
 from fiskr.scoring import match_entities, resolve_cut_off
 from fiskr.alerts import open_or_redetect_alert
 
@@ -233,17 +232,21 @@ def _distinct_parties(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     return list(seen.values())
 
 
-def _phonetic_keys(name: str) -> set:
-    keys = set()
-    for word in re.split(r"[\s\-]+", (name or "").strip()):
-        if not word:
-            continue
-        p_key, s_key = double_metaphone(word)
-        if p_key:
-            keys.add(p_key)
-        if s_key:
-            keys.add(s_key)
-    return keys
+def _name_rotations(name: str) -> List[str]:
+    """
+    Variantes du nom ou chaque mot passe en tete, a tour de role.
+
+    L'ordre des mots d'un champ libre de paiement n'est pas fiable : « PUTIN
+    VLADIMIR », « VLADIMIR PUTIN », « MR V PUTIN » designent la meme personne.
+    `generate_blocking_keys` fonde sa cle phonetique sur le PREMIER mot ; les
+    rotations garantissent donc que chaque mot du champ est vu au moins une
+    fois comme premier mot, ce qui reproduit la propriete de l'ancienne
+    implantation (phonetique de TOUS les mots) sans en dupliquer le code.
+    """
+    words = [w for w in re.split(r"[\s\-]+", (name or "").strip()) if w]
+    if len(words) <= 1:
+        return [" ".join(words)]
+    return [" ".join([words[i]] + words[:i] + words[i + 1:]) for i in range(len(words))]
 
 
 def _filtering_index(entities: List[Dict[str, Any]], filtering_cfg: Dict[str, Any],
@@ -267,30 +270,36 @@ def _filtering_index(entities: List[Dict[str, Any]], filtering_cfg: Dict[str, An
 
 def party_blocking_keys(party: Dict[str, Any], filtering_cfg: Dict[str, Any]) -> set:
     """
-    Cles de blocking d'une partie de paiement, pour le layout du canal
-    FILTERING. Composantes adaptees a la pauvrete des donnees de paiement :
-    - PHONETIC_FIRST : phonetique de TOUS les mots du nom (l'ordre des mots
-      d'un champ libre de paiement n'est pas fiable) ;
-    - ENTITY_TYPE : les deux variantes PP et PM (nature inconnue) ;
-    - COUNTRY_ISO : pays / pays de naissance de la partie (sinon XX).
-    """
-    layout = (filtering_cfg.get("blocking", {}) or {}).get("custom_key_layout", ["PHONETIC_FIRST"])
-    components: Dict[str, List[str]] = {}
-    for item in layout:
-        if item == "PHONETIC_FIRST":
-            phonetics = _phonetic_keys(party.get("name", ""))
-            components[item] = sorted(phonetics) if phonetics else ["XX"]
-        elif item == "ENTITY_TYPE":
-            components[item] = ["PP", "PM"]
-        elif item == "COUNTRY_ISO":
-            countries = [c for c in (party.get("country"), party.get("birth_country")) if c]
-            components[item] = sorted(set(countries)) if countries else ["XX"]
-        else:
-            components[item] = ["XX"]
+    Cles d'interrogation d'une partie de paiement, pour le layout du canal
+    FILTERING.
 
-    keys = {""}
-    for item in layout:
-        keys = {f"{k}_{v}" if k else v for v in components[item] for k in keys}
+    UNIFIE sur `blocking.lookup_blocking_keys`, comme l'index qu'elle
+    interroge. L'implantation precedente reconstruisait les cles a la main et
+    divergeait de l'index sur trois points, tous a perte :
+
+    - AUCUNE TRANSLITTERATION. Le double metaphone ne connait que l'alphabet
+      latin : sur « ВЛАДИМИР ПУТИН » il rendait une cle vide, la partie
+      tombait dans le seau « XX » et n'etait candidate de RIEN. L'index, lui,
+      translitterait. Une partie de paiement ecrite en cyrillique, en arabe ou
+      en chinois etait donc structurellement inatteignable au filtrage — le
+      meme defaut de nature que le trou « pays inconnu » corrige precedemment.
+    - AUCUNE CLE D'EQUIVALENCE. Les tables linguistiques etaient inertes sur
+      ce canal, quel que soit leur reglage.
+    - AUCUNE CAPACITE DU MOTEUR. Une bascule posee dans blocking.py restait
+      sans effet ici, ce qui aurait vide de sens le reglage « par canal ».
+
+    Les proprietes propres au filtrage sont conservees : les deux natures PP
+    et PM sont interrogees (la nature d'une partie est inconnue), et l'ordre
+    des mots n'est pas suppose fiable — cf. `_name_rotations`.
+    """
+    from fiskr.blocking import lookup_blocking_keys
+    keys: set = set()
+    for variante in _name_rotations(party.get("name", "")):
+        sonde = dict(party)
+        sonde["name"] = variante
+        for as_individual in (True, False):
+            keys |= lookup_blocking_keys(
+                _party_client_dict(sonde, as_individual, "filtrage"), filtering_cfg)
     return keys
 
 

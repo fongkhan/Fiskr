@@ -1,3 +1,27 @@
+"""
+Criblage de masse : deux chemins, dont UN SEUL est le moteur du produit.
+
+`run_pandas_batch_screening` passe par `lookup_blocking_keys` et
+`match_entities` : c'est le moteur complet, et les capacites reglables
+(fiskr/capabilities.py) y agissent comme partout ailleurs.
+
+`run_spark_batch_screening` et son UDF sont un artefact de contrat (DAT) —
+AUCUN appelant dans le depot. Le declarer ici noir sur blanc plutot que de
+laisser croire qu'un reglage y agit :
+
+  HORS PERIMETRE DU PILOTAGE DU MOTEUR. L'UDF re-implemente le scoring a la
+  main. Elle IGNORE la geographie (l'ajustement est importe et jamais
+  appele), n'appelle pas `resolve_cut_off` — le seuil y est ecrit en dur a
+  75.0, sans egard aux seuils par liste regles a chaud — et ne passe pas par
+  `match_entities` : ni hard match sur identifiants, ni variantes de noms,
+  ni capacites. Un etablissement qui couperait une capacite ne verrait
+  AUCUN effet sur ce chemin.
+
+Le remettre dans le moteur suppose de recrire l'UDF autour de
+`match_entities`, donc de changer sa signature et le contrat qui la fige.
+Tant que ce chemin n'a pas d'appelant, ce serait un cout sans usage : on le
+documente, on ne le maquille pas.
+"""
 import json
 import logging
 from typing import Dict, Any, List
