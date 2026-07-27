@@ -1734,7 +1734,26 @@
 
             <!-- SECTION : PARAMÈTRES (ADMIN) -->
             <section id="sec-settings" class="tab-content">
-                <div class="grid-layout" style="grid-template-columns: 1fr;">
+                <div class="sub-tabs" role="tablist" aria-label="Sections des paramètres">
+                    <button id="sub-btn-settings-governance" class="sub-tab-btn active" role="tab" aria-selected="true" onclick="switchSubTab('settings', 'settings-governance')">
+                        ⚖️ Gouvernance
+                    </button>
+                    <button id="sub-btn-settings-alerts" class="sub-tab-btn" role="tab" aria-selected="false" onclick="switchSubTab('settings', 'settings-alerts')">
+                        🔔 Alertes
+                    </button>
+                    <button id="sub-btn-settings-screening" class="sub-tab-btn" role="tab" aria-selected="false" onclick="switchSubTab('settings', 'settings-screening')">
+                        🎯 Criblage
+                    </button>
+                    <button id="sub-btn-settings-integrations" class="sub-tab-btn" role="tab" aria-selected="false" onclick="switchSubTab('settings', 'settings-integrations')">
+                        🔌 Intégrations
+                    </button>
+                    <button id="sub-btn-settings-account" class="sub-tab-btn" role="tab" aria-selected="false" onclick="switchSubTab('settings', 'settings-account')">
+                        👤 Mon compte
+                    </button>
+                </div>
+
+                <div id="sub-sec-settings-governance" class="sub-tab-content active" role="tabpanel" aria-labelledby="sub-btn-settings-governance">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
                     <!-- Réglages transverses à chaud (gouvernent homologation, alertes, liste blanche, re-criblage) -->
                     <div class="card form-card hidden" id="review-settings-card">
                         <h2>Réglages de Gouvernance (Admin)</h2>
@@ -1795,7 +1814,46 @@
                             <label for="setting-quality-min">Score minimal de qualité du référentiel clients (%, 0 = pas de seuil)</label>
                             <input type="number" id="setting-quality-min" min="0" max="100" step="1" value="0">
                         </div>
-                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">⏱ SLA de traitement des alertes</h3>
+                        <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
+                    </div>
+
+                    <!-- Double authentification TOTP (tous les utilisateurs) -->
+                    <div class="card form-card hidden" id="retention-card">
+                        <h2>🗄 Rétention des Données (Admin)</h2>
+                        <p class="section-desc">Durée de conservation (jours) par famille — <strong>0 = conservation illimitée</strong> (défaut), minimum 30 jours quand une purge est activée. La purge tourne chaque jour à l'heure indiquée et chaque exécution est tracée <code>RETENTION_PURGE</code>. Le journal des actions d'administration n'est <strong>jamais</strong> purgé ; les décisions de criblage encore liées à une alerte conservée ne sont jamais supprimées.</p>
+                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+                            <div class="form-group"><label for="retention-audit">Décisions de criblage</label><input type="number" id="retention-audit" min="0" step="1"></div>
+                            <div class="form-group"><label for="retention-alerts">Alertes clôturées</label><input type="number" id="retention-alerts" min="0" step="1"></div>
+                            <div class="form-group"><label for="retention-syncs">Rapports de sync</label><input type="number" id="retention-syncs" min="0" step="1"></div>
+                            <div class="form-group"><label for="retention-batch">Campagnes batch</label><input type="number" id="retention-batch" min="0" step="1"></div>
+                        </div>
+                        <div class="form-group" style="max-width: 420px;">
+                            <label for="retention-cron">Heure de purge (cron 5 champs)</label>
+                            <input type="text" id="retention-cron" placeholder="30 2 * * *">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="retention-archive" style="width: 18px; height: 18px;">
+                                Archiver avant purge (JSON Lines dans <code>retention_archive/</code>, à externaliser par l'exploitation)
+                            </label>
+                        </div>
+                        <p id="retention-preview" class="section-desc" style="margin: 0.5rem 0 1rem;"></p>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="saveRetentionSettings()">Enregistrer la politique</button>
+                            <button class="btn btn-secondary" onclick="runRetentionNow()">🗑 Purger maintenant…</button>
+                        </div>
+                    </div>
+
+                    <!-- Absence & délégation (tous les utilisateurs) -->
+                    </div>
+                </div>
+
+                <div id="sub-sec-settings-alerts" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-alerts">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
+                    <div class="card form-card hidden" id="notifications-settings-card">
+                        <h2>🔔 Alertes & Notifications (Admin)</h2>
+                        <p class="section-desc">Délais de traitement par priorité, courriels et webhooks émis à chaque étape, et récapitulatif périodique. Ces réglages appartiennent à la même famille que la gouvernance : le bouton ci-dessous enregistre l'ensemble en un seul appel, où qu'on le clique.</p>
+                        <h3 style="font-size: 1rem; margin: 0.5rem 0;">⏱ SLA de traitement des alertes</h3>
                         <p class="section-desc" style="margin-bottom: 0.75rem;">Délai de traitement (heures) par priorité — l'échéance est calculée à la création de l'alerte, le retard est signalé dans la file. 0 = pas d'échéance.</p>
                         <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 640px;">
                             <div class="form-group"><label for="setting-sla-critical">Critique</label><input type="number" id="setting-sla-critical" min="0" step="1"></div>
@@ -1838,80 +1896,11 @@
                         </div>
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
                     </div>
-
-                    <!-- Double authentification TOTP (tous les utilisateurs) -->
-                    <div class="card form-card" id="mfa-card">
-                        <h2>🛡 Double Authentification (MFA)</h2>
-                        <p class="section-desc">Code à usage unique (TOTP, RFC 6238) demandé à chaque connexion, généré par une application d'authentification (Google Authenticator, Aegis, FreeOTP…). En cas de téléphone perdu, un administrateur peut réinitialiser la MFA du compte.</p>
-                        <div id="mfa-status" style="margin-bottom: 1rem;"></div>
-                        <div id="mfa-setup-zone" class="hidden" style="margin-bottom: 1rem;">
-                            <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">1. Saisissez ce secret dans votre application (ou scannez l'URI) — <strong>il n'est affiché qu'une seule fois</strong> :</p>
-                            <pre id="mfa-secret" style="user-select: all; padding: 0.75rem; font-size: 1rem; letter-spacing: 0.08em;"></pre>
-                            <pre id="mfa-uri" style="user-select: all; padding: 0.5rem; font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;"></pre>
-                            <p style="font-size: 0.9rem; margin: 0.75rem 0 0.5rem;">2. Confirmez avec le code affiché par l'application :</p>
-                            <div class="filter-bar">
-                                <input type="text" id="mfa-confirm-code" inputmode="numeric" maxlength="6" placeholder="123456" style="max-width: 140px;">
-                                <button class="btn btn-sm btn-primary" onclick="confirmTotp()">Confirmer & activer</button>
-                            </div>
-                        </div>
-                        <div id="mfa-actions"></div>
                     </div>
+                </div>
 
-                    <!-- Rétention des données (admin) -->
-                    <div class="card form-card hidden" id="retention-card">
-                        <h2>🗄 Rétention des Données (Admin)</h2>
-                        <p class="section-desc">Durée de conservation (jours) par famille — <strong>0 = conservation illimitée</strong> (défaut), minimum 30 jours quand une purge est activée. La purge tourne chaque jour à l'heure indiquée et chaque exécution est tracée <code>RETENTION_PURGE</code>. Le journal des actions d'administration n'est <strong>jamais</strong> purgé ; les décisions de criblage encore liées à une alerte conservée ne sont jamais supprimées.</p>
-                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
-                            <div class="form-group"><label for="retention-audit">Décisions de criblage</label><input type="number" id="retention-audit" min="0" step="1"></div>
-                            <div class="form-group"><label for="retention-alerts">Alertes clôturées</label><input type="number" id="retention-alerts" min="0" step="1"></div>
-                            <div class="form-group"><label for="retention-syncs">Rapports de sync</label><input type="number" id="retention-syncs" min="0" step="1"></div>
-                            <div class="form-group"><label for="retention-batch">Campagnes batch</label><input type="number" id="retention-batch" min="0" step="1"></div>
-                        </div>
-                        <div class="form-group" style="max-width: 420px;">
-                            <label for="retention-cron">Heure de purge (cron 5 champs)</label>
-                            <input type="text" id="retention-cron" placeholder="30 2 * * *">
-                        </div>
-                        <div class="form-group" style="margin-bottom: 0.75rem;">
-                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                <input type="checkbox" id="retention-archive" style="width: 18px; height: 18px;">
-                                Archiver avant purge (JSON Lines dans <code>retention_archive/</code>, à externaliser par l'exploitation)
-                            </label>
-                        </div>
-                        <p id="retention-preview" class="section-desc" style="margin: 0.5rem 0 1rem;"></p>
-                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                            <button class="btn btn-primary" onclick="saveRetentionSettings()">Enregistrer la politique</button>
-                            <button class="btn btn-secondary" onclick="runRetentionNow()">🗑 Purger maintenant…</button>
-                        </div>
-                    </div>
-
-                    <!-- Absence & délégation (tous les utilisateurs) -->
-                    <div class="card form-card" id="absence-card">
-                        <h2>🌴 Absence & Délégation</h2>
-                        <p class="section-desc">Pendant votre absence, toute alerte qui vous serait assignée ira à votre délégué, et vos alertes ouvertes peuvent lui être réassignées immédiatement (chaque réassignation est tracée dans l'historique de l'alerte).</p>
-                        <div id="absence-status" style="margin-bottom: 1rem;"></div>
-                        <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 560px;">
-                            <div class="form-group">
-                                <label for="absence-until">Absent jusqu'au</label>
-                                <input type="datetime-local" id="absence-until">
-                            </div>
-                            <div class="form-group">
-                                <label for="absence-delegate">Délégué</label>
-                                <select id="absence-delegate"><option value="">Choisir…</option></select>
-                            </div>
-                        </div>
-                        <div class="form-group" style="margin-bottom: 0.75rem;">
-                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
-                                <input type="checkbox" id="absence-reassign" checked style="width: 18px; height: 18px;">
-                                Réassigner immédiatement mes alertes ouvertes au délégué
-                            </label>
-                        </div>
-                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                            <button class="btn btn-primary" onclick="saveAbsence()">Déclarer l'absence</button>
-                            <button class="btn btn-secondary" onclick="clearAbsence()">Mettre fin à l'absence</button>
-                        </div>
-                    </div>
-
-                    <!-- Seuils de score (admin) -->
+                <div id="sub-sec-settings-screening" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-screening">
+                    <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
                     <div class="card form-card hidden" id="scoring-card">
                         <h2>🎯 Seuils de Score du Criblage (Admin)</h2>
                         <p class="section-desc">Seuil de cut-off global et surcharges par type de liste, appliqués <strong>à chaud</strong> au criblage clients et au filtrage transactionnel (prioritaires sur <code>config.yaml</code>). Surcharge vide = seuil global. Toute modification est journalisée.</p>
@@ -1940,18 +1929,11 @@
                     </div>
 
                     <!-- Portabilité de la configuration (admin) -->
-                    <div class="card form-card hidden" id="config-portability-card">
-                        <h2>💼 Portabilité de la Configuration (Admin)</h2>
-                        <p class="section-desc">Export/import JSON des réglages à chaud (homologation, 4-yeux, blocking keys, planification cron, SLA, notifications, rétention…) pour aligner recette et production. <strong>Aucun secret ne transite</strong> : ni comptes, ni clés d'API. Chaque import est journalisé <code>SETTINGS_IMPORTED</code> avec le delta.</p>
-                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                            <button class="btn btn-primary" onclick="exportAppConfig()">⬇ Exporter la configuration</button>
-                            <button class="btn btn-secondary" onclick="document.getElementById('config-import-file').click()">⬆ Importer…</button>
-                            <input type="file" id="config-import-file" accept=".json,application/json" style="display: none;" onchange="importAppConfig(this)">
-                        </div>
-                        <p id="config-import-result" class="section-desc" style="margin-top: 0.75rem;"></p>
                     </div>
+                </div>
 
-                    <!-- Clés d'API techniques (comptes de service) -->
+                <div id="sub-sec-settings-integrations" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-integrations">
+                    <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
                     <div class="card form-card hidden" id="apikeys-card">
                         <h2>🔑 Clés d'API Techniques (Admin)</h2>
                         <p class="section-desc">Comptes de service pour les intégrations systèmes (CFT, ordonnanceur, SI amont) : authentification par en-tête <code>X-API-Key</code>, rôles restreints (jamais admin), révocation immédiate, usage tracé. <strong>La clé complète n'est affichée qu'à la création.</strong></p>
@@ -1980,11 +1962,72 @@
                         </div>
                         <div id="hookstats-body"></div>
                     </div>
+                    <div class="card form-card hidden" id="config-portability-card">
+                        <h2>💼 Portabilité de la Configuration (Admin)</h2>
+                        <p class="section-desc">Export/import JSON des réglages à chaud (homologation, 4-yeux, blocking keys, planification cron, SLA, notifications, rétention…) pour aligner recette et production. <strong>Aucun secret ne transite</strong> : ni comptes, ni clés d'API. Chaque import est journalisé <code>SETTINGS_IMPORTED</code> avec le delta.</p>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="exportAppConfig()">⬇ Exporter la configuration</button>
+                            <button class="btn btn-secondary" onclick="document.getElementById('config-import-file').click()">⬆ Importer…</button>
+                            <input type="file" id="config-import-file" accept=".json,application/json" style="display: none;" onchange="importAppConfig(this)">
+                        </div>
+                        <p id="config-import-result" class="section-desc" style="margin-top: 0.75rem;"></p>
+                    </div>
+
+                    <!-- Clés d'API techniques (comptes de service) -->
+                    </div>
+                </div>
+
+                <div id="sub-sec-settings-account" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-account">
+                    <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
+                    <div class="card form-card" id="mfa-card">
+                        <h2>🛡 Double Authentification (MFA)</h2>
+                        <p class="section-desc">Code à usage unique (TOTP, RFC 6238) demandé à chaque connexion, généré par une application d'authentification (Google Authenticator, Aegis, FreeOTP…). En cas de téléphone perdu, un administrateur peut réinitialiser la MFA du compte.</p>
+                        <div id="mfa-status" style="margin-bottom: 1rem;"></div>
+                        <div id="mfa-setup-zone" class="hidden" style="margin-bottom: 1rem;">
+                            <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">1. Saisissez ce secret dans votre application (ou scannez l'URI) — <strong>il n'est affiché qu'une seule fois</strong> :</p>
+                            <pre id="mfa-secret" style="user-select: all; padding: 0.75rem; font-size: 1rem; letter-spacing: 0.08em;"></pre>
+                            <pre id="mfa-uri" style="user-select: all; padding: 0.5rem; font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;"></pre>
+                            <p style="font-size: 0.9rem; margin: 0.75rem 0 0.5rem;">2. Confirmez avec le code affiché par l'application :</p>
+                            <div class="filter-bar">
+                                <input type="text" id="mfa-confirm-code" inputmode="numeric" maxlength="6" placeholder="123456" style="max-width: 140px;">
+                                <button class="btn btn-sm btn-primary" onclick="confirmTotp()">Confirmer & activer</button>
+                            </div>
+                        </div>
+                        <div id="mfa-actions"></div>
+                    </div>
+
+                    <!-- Rétention des données (admin) -->
+                    <div class="card form-card" id="absence-card">
+                        <h2>🌴 Absence & Délégation</h2>
+                        <p class="section-desc">Pendant votre absence, toute alerte qui vous serait assignée ira à votre délégué, et vos alertes ouvertes peuvent lui être réassignées immédiatement (chaque réassignation est tracée dans l'historique de l'alerte).</p>
+                        <div id="absence-status" style="margin-bottom: 1rem;"></div>
+                        <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 560px;">
+                            <div class="form-group">
+                                <label for="absence-until">Absent jusqu'au</label>
+                                <input type="datetime-local" id="absence-until">
+                            </div>
+                            <div class="form-group">
+                                <label for="absence-delegate">Délégué</label>
+                                <select id="absence-delegate"><option value="">Choisir…</option></select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="absence-reassign" checked style="width: 18px; height: 18px;">
+                                Réassigner immédiatement mes alertes ouvertes au délégué
+                            </label>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="saveAbsence()">Déclarer l'absence</button>
+                            <button class="btn btn-secondary" onclick="clearAbsence()">Mettre fin à l'absence</button>
+                        </div>
+                    </div>
+
+                    <!-- Seuils de score (admin) -->
+                    </div>
                 </div>
             </section>
-
-            <!-- SECTION : GESTION DES UTILISATEURS (ADMIN) -->
-            <section id="sec-users" class="tab-content">
+<section id="sec-users" class="tab-content">
 
                 <div class="card result-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">

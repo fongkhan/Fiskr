@@ -554,6 +554,8 @@ async function checkAuthUser() {
             // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
             const settingsCard = document.getElementById("review-settings-card");
             if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
+            const notifSettingsCard = document.getElementById("notifications-settings-card");
+            if (notifSettingsCard) notifSettingsCard.classList.toggle("hidden", !isAdmin);
             const apiKeysCard = document.getElementById("apikeys-card");
             if (apiKeysCard) apiKeysCard.classList.toggle("hidden", !isAdmin);
             const hookStatsCard = document.getElementById("hookstats-card");
