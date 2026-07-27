@@ -183,15 +183,16 @@ def compute_base_score(s1: str, s2: str, config: dict) -> float:
     amont quand elles sont activees : elles ne modifient pas les metriques,
     elles ramenent les variantes connues d'un meme nom a une forme commune.
     """
-    from fiskr.quality import strip_accents
+    from fiskr.quality import strip_accents_for_matching
     # Translitteration PUIS passage en majuscules — jamais l'inverse. `upper()`
     # est sans effet sur les ecritures non latines : « 习 近平 ».upper() reste
     # « 习 近平 », et la translitteration rendait ensuite « Xi JinPing » en
     # casse mixte, compare a « XI JINPING » cote liste. Les metriques de chaine
     # sont sensibles a la casse : deux graphies pourtant identiques apres
     # translitteration ne marquaient que 64,40.
-    s1_norm = strip_accents(s1.strip()).upper()
-    s2_norm = strip_accents(s2.strip()).upper()
+    channel = config.get("engine_channel", caps.CHANNEL_SCREENING)
+    s1_norm = strip_accents_for_matching(s1.strip(), channel).upper()
+    s2_norm = strip_accents_for_matching(s2.strip(), channel).upper()
     s1_norm, s2_norm = apply_name_equivalences(s1_norm, s2_norm)
 
     weights = config.get("scoring", {}).get("weights", {})

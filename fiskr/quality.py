@@ -2,6 +2,8 @@ import re
 import unicodedata
 from datetime import datetime
 
+from fiskr import capabilities as caps
+
 # Translitteration multi-ecritures (cyrillique, arabe, CJK, grec, hebreu...)
 # vers le latin : indispensable pour que les alias non latins des listes
 # officielles (OFAC, ONU) matchent les noms latins du referentiel clients.
@@ -16,6 +18,77 @@ except ImportError:
 # Fin du bloc « Latin Extended-B ». Au-dela, on n'est plus dans une ecriture
 # latine : c'est le critere, et non une liste d'ecritures connues.
 _LAST_LATIN_CODEPOINT = 0x024F
+
+# Plages de points de code par ECRITURE. Elles ne servent pas a decider SI on
+# translittere — c'est le role de `_is_non_latin` ci-dessous, inchange — mais a
+# NOMMER l'ecriture rencontree, ce qu'aucun code du depot ne savait faire.
+# `has_non_latin_chars` etait binaire : « latin / non latin ». Il etait donc
+# impossible de traiter le cyrillique autrement que le chinois, alors que ce
+# sont deux decisions de conformite distinctes — un etablissement expose a la
+# Russie et pas a la Chine n'a aucune raison de payer le cout de l'un pour
+# l'autre.
+#
+# Les plages suivent l'attribution Unicode par bloc. Ce qui n'entre dans aucune
+# n'est pas ignore : il tombe dans « other », qui a sa propre bascule. Aucune
+# ecriture ne peut donc echapper au reglage par oubli de plage.
+_SCRIPT_RANGES = (
+    ("cyrillic", ((0x0400, 0x04FF), (0x0500, 0x052F), (0x2DE0, 0x2DFF),
+                  (0xA640, 0xA69F))),
+    ("greek", ((0x0370, 0x03FF), (0x1F00, 0x1FFF))),
+    ("hebrew", ((0x0590, 0x05FF), (0xFB1D, 0xFB4F))),
+    ("arabic", ((0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF),
+                (0xFB50, 0xFDFF), (0xFE70, 0xFEFF))),
+    ("devanagari", ((0x0900, 0x097F), (0xA8E0, 0xA8FF))),
+    ("thai", ((0x0E00, 0x0E7F),)),
+    # Hangul avant han : les jamo et les syllabes coreennes ont leurs propres
+    # blocs, mais un texte coreen ancien peut melanger hanja (han) et hangul.
+    ("hangul", ((0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F),
+                (0xAC00, 0xD7AF), (0xD7B0, 0xD7FF))),
+    ("kana", ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF),
+              (0xFF66, 0xFF9D))),
+    ("han", ((0x2E80, 0x2FDF), (0x3005, 0x3007), (0x3400, 0x4DBF),
+             (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x20000, 0x2A6DF),
+             (0x2A700, 0x2EBEF))),
+)
+
+SCRIPT_OTHER = "other"
+
+
+def _is_non_latin(char: str) -> bool:
+    """
+    Critere HISTORIQUE, inchange : au-dela du latin etendu B, et ni
+    ponctuation, ni separateur, ni caractere de controle.
+
+    Il reste le seul juge de « faut-il translitterer ce caractere ». Le
+    nommage d'ecriture vient APRES et ne peut donc pas elargir ni restreindre
+    le perimetre de translitteration existant.
+    """
+    if ord(char) <= _LAST_LATIN_CODEPOINT or char.isspace():
+        return False
+    # Ponctuation et symboles generaux ne justifient pas une translitteration
+    # du nom entier (tiret cadratin, guillemets...)
+    return unicodedata.category(char)[0] not in ("P", "Z", "C")
+
+
+def script_of(char: str) -> str:
+    """Ecriture d'un caractere non latin. « other » si aucune plage connue."""
+    code = ord(char)
+    for name, ranges in _SCRIPT_RANGES:
+        for start, end in ranges:
+            if start <= code <= end:
+                return name
+    return SCRIPT_OTHER
+
+
+def detect_scripts(text: str) -> frozenset:
+    """
+    Ecritures non latines presentes dans le texte.
+
+    Vide pour un texte purement latin — accents et diacritiques compris, qui
+    restent latins. Un nom peut en contenir plusieurs : « 陈 Quanguo »,
+    « ООО Ромашка Ltd ».
+    """
+    return frozenset(script_of(c) for c in (text or "") if _is_non_latin(c))
 
 
 def has_non_latin_chars(text: str) -> bool:
@@ -36,13 +109,11 @@ def has_non_latin_chars(text: str) -> bool:
     Le repli `except ValueError` ne rattrapait pas le cas : le hangul et les
     kana ONT un nom Unicode.
     """
-    for char in text:
-        if ord(char) > _LAST_LATIN_CODEPOINT and not char.isspace():
-            # Ponctuation et symboles generaux ne justifient pas une
-            # translitteration du nom entier (tiret cadratin, guillemets...)
-            if unicodedata.category(char)[0] not in ("P", "Z", "C"):
-                return True
-    return False
+    return any(_is_non_latin(c) for c in text or "")
+
+def _strip_combining(text: str) -> str:
+    nfkd_form = unicodedata.normalize('NFKD', text)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def strip_accents(text: str) -> str:
     """
@@ -50,14 +121,74 @@ def strip_accents(text: str) -> str:
     non latines (cyrillique Владимир -> Vladimir, arabe, CJK...) quand le
     texte en contient, puis retire accents et diacritiques (Müller -> Muller).
     Utilise partout (nettoyage a l'ingestion, scoring des deux cotes).
+
+    INCONDITIONNEL, et cela n'est pas un oubli. `resources.normalize_term` bat
+    l'index des equivalences avec cette fonction, et la recherche d'API s'en
+    sert aussi : si la normalisation devenait reglable ICI, l'index cesserait
+    de retrouver ses propres entrees des qu'un reglage changerait. La variante
+    reglable est `strip_accents_for_matching`, reservee a la COMPARAISON.
     """
     if TRANSLIT_AVAILABLE and text and has_non_latin_chars(text):
         text = _transliterate(text)
-    nfkd_form = unicodedata.normalize('NFKD', text)
-    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+    return _strip_combining(text)
 
-def clean_noise_words(text: str) -> str:
-    """Removes corporate noise suffixes (SA, SARL, LLC, LTD, GMBH, SOCIETE) for PMs."""
+
+def _transliterate_selected(text: str, scripts) -> str:
+    """
+    Translittere les seuls caracteres des ecritures citees, caractere par
+    caractere. Chemin emprunte UNIQUEMENT quand un texte melange des ecritures
+    dont certaines sont coupees : quand elles sont toutes actives, on repasse
+    par `_transliterate` sur la chaine entiere, donc le rendu d'aujourd'hui
+    est preserve au caractere pres.
+    """
+    out = []
+    for char in text:
+        if _is_non_latin(char) and script_of(char) in scripts:
+            out.append(_transliterate(char))
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def strip_accents_for_matching(text: str, channel: str = caps.CHANNEL_SCREENING) -> str:
+    """
+    Variante REGLABLE de `strip_accents`, reservee a la comparaison (blocking,
+    scoring, nettoyage du client au criblage).
+
+    Deux reglages y jouent :
+    - la translitteration, globalement puis ecriture par ecriture. Une ecriture
+      coupee traverse le moteur telle quelle : aucune metrique de chaine ne
+      peut rien en faire et le double metaphone rend une cle vide. C'est
+      exactement la perte annoncee par le catalogue.
+    - l'aplatissement des diacritiques : coupe, « Müller » cesse de rapprocher
+      « MULLER ».
+
+    Toutes capacites actives, le resultat est celui de `strip_accents`.
+    """
+    if TRANSLIT_AVAILABLE and text and caps.is_active(caps.CAP_TRANSLIT, channel):
+        scripts = detect_scripts(text)
+        if scripts:
+            actives = {s for s in scripts
+                       if caps.is_active(caps.script_capability(s), channel)}
+            if actives == scripts:
+                text = _transliterate(text)
+            elif actives:
+                text = _transliterate_selected(text, actives)
+    if not caps.is_active(caps.CAP_DIACRITICS, channel):
+        return text
+    return _strip_combining(text)
+
+def clean_noise_words(text: str, channel: str = None) -> str:
+    """Removes corporate noise suffixes (SA, SARL, LLC, LTD, GMBH, SOCIETE) for PMs.
+
+    `channel` absent = normalisation INCONDITIONNELLE. C'est le cas de
+    l'ingestion : ce qui est stocke ne doit pas dependre d'un reglage a chaud,
+    sinon deux fiches de la meme liste porteraient des formes differentes
+    selon l'heure de leur import. Le reglage n'agit que sur le chemin de
+    COMPARAISON, ou un canal est fourni.
+    """
+    if channel is not None and not caps.is_active(caps.CAP_NOISE_WORDS, channel):
+        return text
     pattern = r"\b(SA|SARL|LLC|LTD|GMBH|SOCIETE)\b"
     cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", cleaned).strip()
@@ -79,10 +210,24 @@ def validate_lei(lei: str) -> bool:
     lei_clean = lei.strip()
     return len(lei_clean) == 20 and lei_clean.isalnum()
 
-def evaluate_and_clean(entity: dict) -> dict:
+def evaluate_and_clean(entity: dict, channel: str = None) -> dict:
     """
     Evaluates upgraded data quality rules on Watchlist or Client entries.
     Identifies Level 1 REJECT, Level 2 WARNING/DEGRADED, and Level 3 AUTO-CLEAN.
+
+    `channel` absent = INGESTION : la normalisation est inconditionnelle, et
+    c'est voulu. Ce qui est stocke est verse au dossier reglementaire avec son
+    instantane de liste ; le faire dependre d'un reglage a chaud rendrait deux
+    fiches de la meme liste normalisees differemment selon l'heure de leur
+    import, et effacerait retroactivement la forme d'origine.
+
+    `channel` fourni = COMPARAISON : c'est le nettoyage de la sonde client au
+    criblage, ou les capacites du moteur s'appliquent.
+
+    CONSEQUENCE A CONNAITRE, et elle est asymetrique : couper une ecriture agit
+    immediatement sur le cote CLIENT ; les fiches deja ingerees restent
+    normalisees telles qu'elles ont ete stockees, jusqu'au prochain
+    rechargement complet de leur liste.
     """
     errors = []
     warnings = []
@@ -276,13 +421,14 @@ def evaluate_and_clean(entity: dict) -> dict:
         # Standard casing
         t = t.upper()
         
-        # Accent stripping
-        t = strip_accents(t)
-        
+        # Accent stripping. Au criblage (canal fourni) la normalisation obeit
+        # aux capacites ; a l'ingestion elle reste inconditionnelle.
+        t = strip_accents(t) if channel is None else strip_accents_for_matching(t, channel)
+
         # PM Noise Suffixes
         if is_pm:
-            t = clean_noise_words(t)
-            
+            t = clean_noise_words(t, channel)
+
         return re.sub(r"\s+", " ", t).strip()
 
     # Clean primary name

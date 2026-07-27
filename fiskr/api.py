@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
+from fiskr import capabilities as caps
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities, jaro_wink_similarity
@@ -2021,8 +2022,10 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     else:
         client_dict["client_type"] = "PM"
         
-    # Evaluate Data Quality
-    report = evaluate_and_clean(client_dict)
+    # Evaluate Data Quality. Canal CRIBLAGE : la normalisation de la sonde
+    # client obeit aux capacites du moteur (translitteration par ecriture,
+    # diacritiques, suffixes juridiques), contrairement a l'ingestion.
+    report = evaluate_and_clean(client_dict, channel=caps.CHANNEL_SCREENING)
     if not report["is_valid"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

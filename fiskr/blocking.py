@@ -3,7 +3,7 @@ from typing import Set, List
 
 from fiskr import capabilities as caps
 from fiskr.phonetics import double_metaphone
-from fiskr.quality import strip_accents
+from fiskr.quality import strip_accents_for_matching
 
 
 def _country_equivalence_values(countries: List[str]) -> Set[str]:
@@ -181,7 +181,7 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                 # contenu des tables d'equivalences. Le scoring, lui,
                 # translitterait deja des deux cotes : les deux etages se
                 # contredisaient.
-                latin = strip_accents(name_clean)
+                latin = strip_accents_for_matching(name_clean, channel)
                 words = re.split(r"[\s\-]+", latin) or [""]
                 first_word = words[0] if words else ""
                 if first_word and caps.is_active(caps.CAP_BLOCKING_PHONETIC, channel):

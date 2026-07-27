@@ -32,6 +32,20 @@ sont deja pilotees et mesurees par leur propre ecran : ce catalogue ne les
 duplique pas. Il pilote en revanche leur PREREQUIS au blocking, sans lequel
 elles sont inertes (cf. CAP_BLOCKING_EQUIVALENCES).
 
+OU LES CAPACITES AGISSENT, ET OU ELLES N'AGISSENT PAS
+-----------------------------------------------------
+Elles pilotent la COMPARAISON : generation des cles de blocking, normalisation
+des noms compares, ajustements, rapprochement sur identifiants. Elles ne
+pilotent PAS la normalisation faite a l'ingestion : ce qui est stocke est
+verse au dossier reglementaire avec son instantane de liste, et le faire
+dependre d'un reglage a chaud normaliserait deux fiches de la meme liste
+differemment selon l'heure de leur import.
+
+Consequence a connaitre : les capacites d'ecriture et de nettoyage
+(translitteration, diacritiques, suffixes juridiques) agissent immediatement
+sur la sonde CLIENT ; les fiches deja ingerees gardent la forme sous laquelle
+elles ont ete stockees, jusqu'au prochain rechargement complet de leur liste.
+
 CONVENTIONS
 -----------
 - `loss` est OBLIGATOIRE : c'est ce que l'etablissement perd en coupant la
@@ -360,7 +374,9 @@ for _script in SCRIPTS:
         family=FAMILY_SCRIPTS,
         loss=f"Les noms écrits en {SCRIPT_LABELS[_script]} ne sont plus "
              f"translittérés : ils n'atteignent aucune métrique de comparaison "
-             f"et sortent du périmètre de criblage.",
+             f"et sortent du périmètre de criblage — sauf ceux que les tables "
+             f"d'équivalences connaissent déjà, qui restent rapprochés par "
+             f"elles. La perte est donc réelle mais inégale : elle se mesure.",
         depends_on=(CAP_TRANSLIT,),
     )
 del _script
