@@ -256,6 +256,7 @@
                                         <option value="WATCHLIST_UN">Liste consolidée ONU (XML)</option>
                                         <option value="WATCHLIST_PEP">PEP — OpenSanctions (CSV)</option>
                                         <option value="WATCHLIST_OFSI">UK OFSI — ConList (CSV)</option>
+                                        <option value="WATCHLIST_SECO">Suisse SECO — Liste consolidée (XML ou CSV)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -642,6 +643,14 @@
                                 <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
                                 <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
                                 <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇨🇭 Suisse SECO — Liste consolidée</h3>
+                                <p class="section-desc">Liste consolidée du Secrétariat d'État à l'économie. Deux voies au choix : l'export officiel SESAM de la Confédération, seul à porter la base légale suisse (ordonnance RS) et les dates d'inscription, ou le jeu OpenSanctions au format plat en secours. Opt-in selon l'exposition suisse (<code>sync.seco.enabled</code>, <code>sync.seco.format</code>).</p>
+                                <button id="sync-seco-btn" class="btn btn-primary" onclick="handleSourceSync('SECO')">
                                     Synchroniser maintenant
                                 </button>
                             </div>

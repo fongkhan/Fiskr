@@ -17,6 +17,7 @@ const LIST_TYPE_LABELS = {
     WATCHLIST_DGT: "DGT",
     WATCHLIST_PEP: "PEP",
     WATCHLIST_OFSI: "OFSI",
+    WATCHLIST_SECO: "SECO",
     WATCHLIST_SSIE: "SSIE",
     CLIENT_BASE: "Base clients",
 };
@@ -29,6 +30,7 @@ const SYNC_SOURCE_LABELS = {
     UN: "ONU",
     PEP: "PEP OpenSanctions",
     OFSI: "UK OFSI",
+    SECO: "Suisse SECO",
 };
 
 function listTypeLabel(t) {
@@ -1228,7 +1230,7 @@ async function handleIngestion(event) {
 
 // Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn" };
+    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn", SECO: "sync-seco-btn" };
     const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
@@ -1385,7 +1387,7 @@ function showSyncReportDetail(report) {
 // Sources planifiables (clef API -> libellé de SYNC_SOURCE_LABELS)
 const CRON_SOURCE_KEYS = {
     ofac: "OFAC", eurlex: "EURLEX", dgt: "DGT", eu_fsf: "EUFSF",
-    un: "UN", pep: "PEP", ofsi: "OFSI",
+    un: "UN", pep: "PEP", ofsi: "OFSI", seco: "SECO",
 };
 
 async function fetchSyncConfig() {
@@ -7772,7 +7774,7 @@ async function clearAbsence() {
 
 // --- Seuils de score à chaud (admin) ---
 const SCORING_OVERRIDE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_UN",
-                                "WATCHLIST_DGT", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SSIE"];
+                                "WATCHLIST_DGT", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO", "WATCHLIST_SSIE"];
 
 async function fetchScoringSettings() {
     const card = document.getElementById("scoring-card");

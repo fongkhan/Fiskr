@@ -26,7 +26,7 @@ Exclusions → Cahier de Tests → Décision**.
 
 Deux voies, toutes deux aboutissant au même parcours :
 
-- **Sources automatiques** (OFAC, EUR-Lex, UE FSF, DGT, ONU, PEP, OFSI) :
+- **Sources automatiques** (OFAC, EUR-Lex, UE FSF, DGT, ONU, PEP, OFSI, SECO) :
   synchronisation quotidienne planifiée ou manuelle (*Sources Automatiques*).
 - **Import manuel** : fichier XML / CSV / JSON / PDF (*Import de Fichiers*).
 

@@ -26,6 +26,7 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
     parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
+    parse_seco_xml, parse_seco_opensanctions_csv,
     parse_multi_value
 )
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
@@ -62,8 +63,9 @@ from fiskr.backtest import (
 )
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
-    run_pep_sync, run_ofsi_sync,
+    run_pep_sync, run_ofsi_sync, run_seco_sync,
     get_sync_config, EURLEX_ARCHIVE_DIR,
+    EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
     _truncate_delta_details
 )
@@ -113,38 +115,13 @@ logger = logging.getLogger("fiskr.api")
 # Snapshot file types persisted as WatchlistEntity records
 WATCHLIST_FILE_TYPES = [
     "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
-    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI"
+    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO"
 ]
 
-# Champs etendus des listes (schema pivot -> colonnes WatchlistEntity).
-# Reutilise par les 3 chemins d'ingestion (parseurs officiels, PDF, CSV).
-EXTENDED_ENTITY_FIELDS = (
-    "crypto_wallets", "bic_swift", "tax_id", "duns_number",
-    "vessel_call_sign", "vessel_mmsi", "vessel_flag", "vessel_type",
-    "vessel_tonnage", "vessel_owner",
-    "aircraft_model", "aircraft_operator", "aircraft_construction_number",
-    "sanction_programs", "listed_on", "delisted_on", "name_original_script",
-    "title", "pep_role", "secondary_sanctions_risk", "designating_state",
-    "organization_established_date", "organization_type",
-    "phone_numbers", "email_addresses", "websites",
-)
-
-_EXTENDED_LIST_FIELDS = ("sanction_programs", "phone_numbers", "email_addresses", "websites")
-
-def _extended_entity_kwargs(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Champs etendus normalises : les colonnes CSV texte des champs liste
-    sont decoupees sur « ; » (parite avec les parseurs officiels)."""
-    out: Dict[str, Any] = {}
-    for field in EXTENDED_ENTITY_FIELDS:
-        value = item.get(field)
-        if isinstance(value, str) and field in _EXTENDED_LIST_FIELDS:
-            value = [v.strip() for v in value.split(";") if v.strip()] or None
-        elif isinstance(value, str) and field == "crypto_wallets":
-            value = [{"currency": "", "address": v.strip()} for v in value.split(";") if v.strip()] or None
-        elif isinstance(value, str):
-            value = value.strip() or None
-        out[field] = value
-    return out
+# Champs etendus des listes (schema pivot -> colonnes WatchlistEntity) :
+# EXTENDED_ENTITY_FIELDS et _extended_entity_kwargs sont importes de fiskr.sync,
+# ou ils vivent desormais, parce que les DEUX chemins d'ecriture en dependent —
+# l'upload manuel (ici) et la synchronisation automatique.
 
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
@@ -333,6 +310,8 @@ def _run_scheduled_syncs():
             _apply_rescreen(run_pep_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["ofsi"]["enabled"]:
             _apply_rescreen(run_ofsi_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["seco"]["enabled"]:
+            _apply_rescreen(run_seco_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -340,6 +319,7 @@ def _run_scheduled_syncs():
 _SYNC_RUNNERS = {
     "ofac": run_ofac_sync, "eurlex": run_eurlex_sync, "dgt": run_dgt_sync,
     "eu_fsf": run_eu_fsf_sync, "un": run_un_sync, "pep": run_pep_sync, "ofsi": run_ofsi_sync,
+    "seco": run_seco_sync,
 }
 # Sources en cours d'execution : une meme source ne se chevauche jamais
 _running_syncs: set = set()
@@ -2413,7 +2393,7 @@ def ingest_snapshot(
 
         # 3. Parse contents based on File Type
         eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
-        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI") or eu_fsf_upload:
+        if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO") or eu_fsf_upload:
             if eu_fsf_upload:
                 # Liste consolidee UE au format FSF XML officiel
                 parser_stream = parse_eu_fsf_xml(str(temp_file_path))
@@ -2423,6 +2403,14 @@ def ingest_snapshot(
             elif file_type == "WATCHLIST_OFSI":
                 # Liste consolidee UK OFSI (ConList.csv format 2022)
                 parser_stream = parse_ofsi_conlist_csv(str(temp_file_path))
+            elif file_type == "WATCHLIST_SECO":
+                # Liste consolidee suisse : export officiel SESAM (XML) ou jeu
+                # OpenSanctions (CSV). L'extension du fichier tranche, pour que
+                # les deux voies s'importent a la main sans reglage prealable.
+                if file.filename.lower().endswith(".csv"):
+                    parser_stream = parse_seco_opensanctions_csv(str(temp_file_path))
+                else:
+                    parser_stream = parse_seco_xml(str(temp_file_path))
             elif file_type == "WATCHLIST_UN":
                 # Liste consolidee du Conseil de securite de l'ONU (XML officiel)
                 parser_stream = parse_un_consolidated_xml(str(temp_file_path))
@@ -4684,10 +4672,12 @@ def run_source_sync(
         report = run_pep_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     elif source == "OFSI":
         report = run_ofsi_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "SECO":
+        report = run_seco_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN, PEP, OFSI)."
+            detail="Source inconnue (valeurs possibles: OFAC, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO)."
         )
 
     response = _serialize_sync_report(report)

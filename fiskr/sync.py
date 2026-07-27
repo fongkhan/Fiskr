@@ -36,7 +36,7 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
-    parse_pep_targets_csv, parse_ofsi_conlist_csv
+    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
@@ -68,6 +68,23 @@ DEFAULT_PEP_URL = "https://data.opensanctions.org/datasets/latest/peps/targets.s
 
 # Liste consolidee UK OFSI (HM Treasury, publique, format 2022)
 DEFAULT_OFSI_URL = "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
+
+# Liste consolidee suisse (SECO). Deux voies au choix, reglees par
+# `sync.seco.format` :
+#   - "xml" (defaut) : export officiel SESAM de la Confederation. Source qui
+#     fait foi, gratuite, sans licence, et qui porte la base legale suisse
+#     (ordonnance RS) ainsi que les dates d'inscription.
+#   - "opensanctions" : jeu `ch_seco_sanctions` agrege par OpenSanctions, format
+#     plat targets.simple.csv. Utile si l'export officiel est indisponible, au
+#     prix de la base legale et des dates d'acte — et sous licence
+#     OpenSanctions pour un usage commercial.
+DEFAULT_SECO_URL = (
+    "https://www.sesam.search.admin.ch/sesam-search-web/pages/"
+    "downloadXmlGesamtliste.xhtml?lang=en&action=downloadXmlGesamtlisteAction"
+)
+DEFAULT_SECO_OPENSANCTIONS_URL = (
+    "https://data.opensanctions.org/datasets/latest/ch_seco_sanctions/targets.simple.csv"
+)
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -175,6 +192,25 @@ def get_sync_config() -> Dict[str, Any]:
             "enabled": bool((sync_cfg.get("ofsi") or {}).get("enabled", False)),
             "url": (sync_cfg.get("ofsi") or {}).get("url", DEFAULT_OFSI_URL),
         },
+        # Liste suisse SECO, opt-in selon l'exposition CH. `format` choisit la
+        # voie : "xml" (export officiel SESAM) ou "opensanctions" (CSV agrege).
+        # Une URL laissee vide prend le defaut correspondant au format, pour
+        # qu'un simple basculement de format suffise a changer de source.
+        "seco": _seco_source_config(sync_cfg.get("seco") or {}),
+    }
+
+
+def _seco_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    fmt = str(raw.get("format", "xml") or "xml").strip().lower()
+    if fmt not in ("xml", "opensanctions"):
+        fmt = "xml"
+    url = str(raw.get("url", "") or "").strip()
+    if not url:
+        url = DEFAULT_SECO_OPENSANCTIONS_URL if fmt == "opensanctions" else DEFAULT_SECO_URL
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "format": fmt,
+        "url": url,
     }
 
 
@@ -359,6 +395,39 @@ def _clamp_to_column_lengths(values: Dict[str, Any]) -> Dict[str, Any]:
     return values
 
 
+# Colonnes etendues extraites par les parseurs officiels (26 champs AML). Elles
+# vivent ici et non dans l'API parce que les DEUX chemins d'ecriture en ont
+# besoin : l'upload manuel et la synchronisation automatique.
+EXTENDED_ENTITY_FIELDS = (
+    "crypto_wallets", "bic_swift", "tax_id", "duns_number",
+    "vessel_call_sign", "vessel_mmsi", "vessel_flag", "vessel_type",
+    "vessel_tonnage", "vessel_owner",
+    "aircraft_model", "aircraft_operator", "aircraft_construction_number",
+    "sanction_programs", "listed_on", "delisted_on", "name_original_script",
+    "title", "pep_role", "secondary_sanctions_risk", "designating_state",
+    "organization_established_date", "organization_type",
+    "phone_numbers", "email_addresses", "websites",
+)
+
+_EXTENDED_LIST_FIELDS = ("sanction_programs", "phone_numbers", "email_addresses", "websites")
+
+
+def extended_entity_kwargs(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Champs etendus normalises : les colonnes CSV texte des champs liste
+    sont decoupees sur « ; » (parite avec les parseurs officiels)."""
+    out: Dict[str, Any] = {}
+    for field in EXTENDED_ENTITY_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str) and field in _EXTENDED_LIST_FIELDS:
+            value = [v.strip() for v in value.split(";") if v.strip()] or None
+        elif isinstance(value, str) and field == "crypto_wallets":
+            value = [{"currency": "", "address": v.strip()} for v in value.split(";") if v.strip()] or None
+        elif isinstance(value, str):
+            value = value.strip() or None
+        out[field] = value
+    return out
+
+
 def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str, Any]) -> WatchlistEntity:
     """Construit une ligne WatchlistEntity depuis un enregistrement au schema pivot."""
     parsed_name = item.get("individual_name_parsed") or {}
@@ -390,6 +459,7 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
         designation=item.get("designation"),
         designation_reasons=item.get("designation_reasons"),
         additional_informations=item.get("additional_informations") or item.get("additional_info"),
+        official_reference=item.get("official_reference"),
         alternative_addresses=alt_addrs or [],
         imo_number=item.get("imo_number"),
         aircraft_tail_number=item.get("aircraft_tail_number"),
@@ -399,7 +469,8 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
         passport_documents=item.get("passport_documents"),
         national_id_documents=item.get("national_id_documents"),
         other_id_documents=item.get("other_id_documents"),
-        entity_checksum=item.get("entity_checksum") or compute_checksum(item)
+        entity_checksum=item.get("entity_checksum") or compute_checksum(item),
+        **extended_entity_kwargs(item)
     )))
 
 
@@ -1138,6 +1209,37 @@ def run_ofsi_sync(
         db, source="OFSI", file_type="WATCHLIST_OFSI", url=cfg["url"],
         parser=parse_ofsi_conlist_csv, file_label="UK_OFSI_ConList",
         temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_seco_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee suisse (SECO) et remplace la liste SECO
+    active.
+
+    Deux voies au choix (`sync.seco.format`), qui produisent le meme schema
+    pivot et donc le meme criblage :
+      - `xml`           : export officiel SESAM de la Confederation. Voie qui
+                          fait foi ; elle seule porte la base legale suisse
+                          (ordonnance RS) et les dates d'inscription.
+      - `opensanctions` : jeu `ch_seco_sanctions` au format targets.simple.csv.
+                          Voie de secours a format plat, soumise a la licence
+                          OpenSanctions pour un usage commercial.
+    """
+    cfg = get_sync_config()["seco"]
+    if cfg["format"] == "opensanctions":
+        parser, label, suffix = parse_seco_opensanctions_csv, "SECO_OpenSanctions", ".csv"
+    else:
+        parser, label, suffix = parse_seco_xml, "SECO_Gesamtliste", ".xml"
+    return _run_list_replacement_sync(
+        db, source="SECO", file_type="WATCHLIST_SECO", url=cfg["url"],
+        parser=parser, file_label=label,
+        temp_suffix=suffix, trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 
