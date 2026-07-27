@@ -138,6 +138,27 @@ sync:
   dfat:
     enabled: false
     url: "https://www.dfat.gov.au/sites/default/files/regulation8_consolidated.csv"
+  # --- LISTES D'ALERTE DE REGULATEURS (opt-in) ---
+  # Ce ne sont PAS des listes de sanctions : une touche n'emporte aucune
+  # obligation de gel, c'est un signal de risque a instruire. Chacune a donc son
+  # propre type de liste, donc son propre seuil : pensez a poser une surcharge
+  # dans scoring.cut_off_overrides (ex. WATCHLIST_HK_SFC: 90.0) plutot que de
+  # les cribler au meme seuil qu'un gel des avoirs.
+  # L'extension de l'url choisit le lecteur : .json, .csv, .xlsx, sinon page web
+  # (extraction du tableau principal). Confirmez l'url de telechargement a la
+  # premiere execution : ces regulateurs refondent regulierement leurs pages.
+  hk_sfc:
+    enabled: false
+    url: "https://www.sfc.hk/en/alert-list"
+  amf:
+    enabled: false
+    url: "https://www.amf-france.org/fr/listes-noires-et-mises-en-garde"
+  # Exclusions de la Banque mondiale : encore une autre nature — ni gel, ni mise
+  # en garde, mais une exclusion des marches finances prononcee pour fraude ou
+  # corruption averee. La date de fin d'exclusion alimente delisted_on.
+  worldbank:
+    enabled: false
+    url: "https://apigwext.worldbank.org/dvsvc/v1.0/json/APPLICATION/ADOBE_EXPERIENCE_MANAGER/FIRM/SANCTIONED_FIRM"
   # Liste consolidee suisse (SECO) - opt-in selon l'exposition CH.
   # format: "xml"           -> export officiel SESAM de la Confederation. Voie
   #                            qui fait foi : gratuite, sans licence, elle seule

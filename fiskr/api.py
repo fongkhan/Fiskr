@@ -28,6 +28,7 @@ from fiskr.ingest import (
     parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
     parse_seco_xml, parse_seco_opensanctions_csv, parse_ofac_consolidated_xml, parse_csl_json,
     parse_canada_sema_csv, parse_dfat_consolidated,
+    parse_hk_sfc_alert_list, parse_amf_blacklist, parse_worldbank_debarred_json,
     parse_multi_value
 )
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
@@ -65,7 +66,7 @@ from fiskr.backtest import (
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     run_pep_sync, run_ofsi_sync, run_seco_sync, run_ofac_nonsdn_sync, run_csl_sync,
-    run_canada_sync, run_dfat_sync,
+    run_canada_sync, run_dfat_sync, run_hk_sfc_sync, run_amf_sync, run_worldbank_sync,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
@@ -118,7 +119,8 @@ logger = logging.getLogger("fiskr.api")
 WATCHLIST_FILE_TYPES = [
     "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
     "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
-    "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL", "WATCHLIST_CANADA", "WATCHLIST_DFAT"
+    "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL", "WATCHLIST_CANADA", "WATCHLIST_DFAT",
+    "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK"
 ]
 
 # Champs etendus des listes (schema pivot -> colonnes WatchlistEntity) :
@@ -323,6 +325,12 @@ def _run_scheduled_syncs():
             _apply_rescreen(run_canada_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["dfat"]["enabled"]:
             _apply_rescreen(run_dfat_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["hk_sfc"]["enabled"]:
+            _apply_rescreen(run_hk_sfc_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["amf"]["enabled"]:
+            _apply_rescreen(run_amf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        if sync_cfg["worldbank"]["enabled"]:
+            _apply_rescreen(run_worldbank_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -332,6 +340,7 @@ _SYNC_RUNNERS = {
     "eu_fsf": run_eu_fsf_sync, "un": run_un_sync, "pep": run_pep_sync, "ofsi": run_ofsi_sync,
     "seco": run_seco_sync, "ofac_nonsdn": run_ofac_nonsdn_sync, "csl": run_csl_sync,
     "canada": run_canada_sync, "dfat": run_dfat_sync,
+    "hk_sfc": run_hk_sfc_sync, "amf": run_amf_sync, "worldbank": run_worldbank_sync,
 }
 # Sources en cours d'execution : une meme source ne se chevauche jamais
 _running_syncs: set = set()
@@ -2407,7 +2416,8 @@ def ingest_snapshot(
         eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
         if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
                          "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL",
-                         "WATCHLIST_CANADA", "WATCHLIST_DFAT") or eu_fsf_upload:
+                         "WATCHLIST_CANADA", "WATCHLIST_DFAT",
+                         "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK") or eu_fsf_upload:
             if eu_fsf_upload:
                 # Liste consolidee UE au format FSF XML officiel
                 parser_stream = parse_eu_fsf_xml(str(temp_file_path))
@@ -2417,6 +2427,15 @@ def ingest_snapshot(
             elif file_type == "WATCHLIST_OFSI":
                 # Liste consolidee UK OFSI (ConList.csv format 2022)
                 parser_stream = parse_ofsi_conlist_csv(str(temp_file_path))
+            elif file_type == "WATCHLIST_HK_SFC":
+                # Liste d'alerte SFC Hong Kong (page web, CSV ou JSON)
+                parser_stream = parse_hk_sfc_alert_list(str(temp_file_path))
+            elif file_type == "WATCHLIST_AMF":
+                # Listes noires de l'AMF (page web, CSV ou JSON)
+                parser_stream = parse_amf_blacklist(str(temp_file_path))
+            elif file_type == "WATCHLIST_WORLDBANK":
+                # Fournisseurs exclus par la Banque mondiale (JSON)
+                parser_stream = parse_worldbank_debarred_json(str(temp_file_path))
             elif file_type == "WATCHLIST_CANADA":
                 # Sanctions autonomes canadiennes (SEMA, CSV bilingue)
                 parser_stream = parse_canada_sema_csv(str(temp_file_path))
@@ -4711,10 +4730,16 @@ def run_source_sync(
         report = run_canada_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     elif source == "DFAT":
         report = run_dfat_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "HKSFC":
+        report = run_hk_sfc_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "AMF":
+        report = run_amf_sync(db, trigger="MANUAL", reload_cache=reload_cache)
+    elif source == "WORLDBANK":
+        report = run_worldbank_sync(db, trigger="MANUAL", reload_cache=reload_cache)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, OFACNONSDN, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO, CSL, CANADA, DFAT)."
+            detail="Source inconnue (valeurs possibles: OFAC, OFACNONSDN, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO, CSL, CANADA, DFAT, HKSFC, AMF, WORLDBANK)."
         )
 
     response = _serialize_sync_report(report)
