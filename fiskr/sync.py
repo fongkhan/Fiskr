@@ -38,7 +38,8 @@ from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
     parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
     parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES,
-    parse_canada_sema_csv, parse_dfat_consolidated
+    parse_canada_sema_csv, parse_dfat_consolidated,
+    parse_hk_sfc_alert_list, parse_amf_blacklist, parse_worldbank_debarred_json
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
@@ -110,6 +111,23 @@ DEFAULT_CANADA_URL = (
 # sanctions autonomes australiennes. Publiee en XLSX et en CSV — l'extension
 # de l'URL choisit le lecteur, la voie XLSX demandant le paquet openpyxl.
 DEFAULT_DFAT_URL = "https://www.dfat.gov.au/sites/default/files/regulation8_consolidated.csv"
+
+# LISTES D'ALERTE DE REGULATEURS. Ce ne sont PAS des listes de sanctions :
+# une touche n'emporte aucune obligation de gel, c'est un signal de risque a
+# instruire. Chacune a donc son propre type de liste, donc son propre seuil.
+# Hong Kong n'ayant pas de regime de sanctions autonome, c'est cette liste-la
+# qui apporte quelque chose qu'aucune autre source branchee ne porte.
+DEFAULT_HK_SFC_URL = "https://www.sfc.hk/en/alert-list"
+# Listes noires de l'AMF : marche domestique de l'etablissement.
+DEFAULT_AMF_URL = "https://www.amf-france.org/fr/listes-noires-et-mises-en-garde"
+
+# Exclusions de la Banque mondiale : ni gel, ni mise en garde — une exclusion
+# des marches finances, prononcee pour fraude ou corruption averee. Criblee
+# au titre du risque de contrepartie sur le financement de projets.
+DEFAULT_WORLDBANK_URL = (
+    "https://apigwext.worldbank.org/dvsvc/v1.0/json/APPLICATION/"
+    "ADOBE_EXPERIENCE_MANAGER/FIRM/SANCTIONED_FIRM"
+)
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -235,6 +253,19 @@ def get_sync_config() -> Dict[str, Any]:
         "dfat": {
             "enabled": bool((sync_cfg.get("dfat") or {}).get("enabled", False)),
             "url": (sync_cfg.get("dfat") or {}).get("url", DEFAULT_DFAT_URL),
+        },
+        # Listes d'alerte de regulateurs et exclusions de bailleurs : opt-in.
+        "hk_sfc": {
+            "enabled": bool((sync_cfg.get("hk_sfc") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("hk_sfc") or {}).get("url", DEFAULT_HK_SFC_URL),
+        },
+        "amf": {
+            "enabled": bool((sync_cfg.get("amf") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("amf") or {}).get("url", DEFAULT_AMF_URL),
+        },
+        "worldbank": {
+            "enabled": bool((sync_cfg.get("worldbank") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("worldbank") or {}).get("url", DEFAULT_WORLDBANK_URL),
         },
         # Liste suisse SECO, opt-in selon l'exposition CH. `format` choisit la
         # voie : "xml" (export officiel SESAM) ou "opensanctions" (CSV agrege).
@@ -1320,6 +1351,87 @@ def run_csl_sync(
         db, source="CSL", file_type="WATCHLIST_CSL", url=cfg["url"],
         parser=lambda path: parse_csl_json(path, excluded_sources=excluded),
         file_label="US_Consolidated_Screening_List",
+        temp_suffix=".json", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def _alert_list_suffix(url: str) -> str:
+    """Extension a donner au fichier telecharge : elle commande le lecteur.
+
+    Les regulateurs servent leur liste tantot en page web, tantot en CSV ou en
+    JSON, parfois sans extension dans l'URL. Le defaut est donc HTML, qui est
+    la forme la plus repandue de ces listes.
+    """
+    path = url.lower().split("?")[0]
+    for suffix in (".json", ".csv", ".xlsx", ".xlsm", ".html", ".htm"):
+        if path.endswith(suffix):
+            return suffix
+    return ".html"
+
+
+def run_hk_sfc_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste d'alerte de la Securities and Futures Commission de
+    Hong Kong et remplace la liste HK-SFC active.
+
+    Ce n'est PAS une liste de sanctions : la SFC y recense les entites non
+    autorisees, les sites frauduleux et les usurpations d'identite
+    d'intermediaires agrees. Une touche est un signal de risque a instruire,
+    pas une obligation de gel — d'ou un type de liste distinct, seuillable a
+    part via `scoring.cut_off_overrides`.
+    """
+    cfg = get_sync_config()["hk_sfc"]
+    return _run_list_replacement_sync(
+        db, source="HKSFC", file_type="WATCHLIST_HK_SFC", url=cfg["url"],
+        parser=parse_hk_sfc_alert_list, file_label="HK_SFC_Alert_List",
+        temp_suffix=_alert_list_suffix(cfg["url"]), trigger=trigger,
+        fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_amf_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge les listes noires de l'Autorite des marches financiers et
+    remplace la liste AMF active. Meme nature que HK-SFC : mise en garde, pas
+    gel des avoirs.
+    """
+    cfg = get_sync_config()["amf"]
+    return _run_list_replacement_sync(
+        db, source="AMF", file_type="WATCHLIST_AMF", url=cfg["url"],
+        parser=parse_amf_blacklist, file_label="AMF_Listes_Noires",
+        temp_suffix=_alert_list_suffix(cfg["url"]), trigger=trigger,
+        fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_worldbank_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste des fournisseurs et personnes exclus des marches
+    finances par le Groupe de la Banque mondiale.
+
+    Troisieme nature encore : ni gel, ni mise en garde — une exclusion
+    prononcee pour fraude ou corruption averee. La date de fin d'exclusion est
+    portee par `delisted_on`, la colonne prevue pour cela.
+    """
+    cfg = get_sync_config()["worldbank"]
+    return _run_list_replacement_sync(
+        db, source="WORLDBANK", file_type="WATCHLIST_WORLDBANK", url=cfg["url"],
+        parser=parse_worldbank_debarred_json, file_label="WorldBank_Debarred",
         temp_suffix=".json", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a listed record without a country was structurally unreachable
+- **The hole.** The screening index is built from the **listed** records' blocking keys; the client queries it with its own. `COUNTRY_ISO` being a key component, a listed record whose source publishes no country falls into the `XX` partition — which **no client that has a country ever joins**. Verified directly: the record emits `XX_PM_KLTN`, a Hong Kong client emits `HK_PM_KLTN`, intersection empty. Such a record could only be found by a client that also had no country, i.e. by a gap in the institution's own reference data. This is not an edge case: regulator alert lists almost never publish a country, EUR-Lex scrapes records with no geography, the CSL carries some.
+- **The fix sits on the query side, not the index side.** The client now also queries the "unknown country" variant of its own keys (`blocking.lookup_blocking_keys`, used by screening, rescreening, backtest and batch). Two properties make this acceptable, and both are tested: it is **strictly additive** — every key queried yesterday is still queried, so **no alert can be lost** — and **partitioning is preserved**: a listed record that *does* carry a country is still reached only by clients of that country.
+- **Measured** on a 5 000-record / 2 000-client universe, by share of country-less records:
+
+  | country-less share | candidates/client before | after | overhead | country-less records reachable |
+  |---|---|---|---|---|
+  | 2 % | 16.09 | 20.02 | +24 % | 0 → 100 % |
+  | 5 % | 15.80 | 26.00 | +65 % | 0 → 100 % |
+  | 10 % | 15.01 | 34.89 | +133 % | 0 → 100 % |
+  | 20 % | 13.36 | 54.20 | +306 % | 0 → 100 % |
+
+  Coverage of those records goes from **zero to complete** in all four cases, and the cost is proportional to the share — you only pay for what you enable, since sanctions lists publish a country and regulator alert lists almost never do. `blocking.country_wildcard` (default `true`) switches it off for an institution whose sources all carry geography.
+- **A patch removed on the way.** The alert-list parsers first filled in the regulator's own jurisdiction to escape the `XX` partition. Once the engine-level fix existed, that patch became actively harmful: it **narrowed** reachability — an entity flagged by the SFC would have been visible only to Hong Kong clients, when a fraudulent broker targets victims anywhere. No geography is invented any more; the flagging authority stays in `designating_state`, which exists for that.
+
+### Added — regulator alert lists and development-bank debarments
+A new **category** of source, not just more of the same. HK-SFC was asked for; the other two follow from the same reader and the same reasoning.
+
+- **Hong Kong SFC alert list** (`WATCHLIST_HK_SFC`, `run_hk_sfc_sync`) — unauthorised entities, fraudulent websites and impersonations of licensed intermediaries. Hong Kong has **no autonomous sanctions regime** (UN measures are transposed by ordinance), so this list is what provides coverage of its own.
+- **AMF blacklists** (`WATCHLIST_AMF`, `run_amf_sync`) — operators and sites offering investment services without authorisation. Same nature, and the alert list a French regulated institution has the most direct use for.
+- **World Bank debarred firms** (`WATCHLIST_WORLDBANK`, `run_worldbank_sync`) — a third nature again: neither a freeze nor a warning, but a **time-limited debarment** for established fraud or corruption. Its end date feeds `delisted_on`, the column that already exists for exactly that.
+- **The design point that matters: an alert is not a freeze.** A hit on a regulator's warning list is a risk signal to investigate, not an asset-freezing obligation. Each list therefore keeps its **own list type** — hence its own threshold via `scoring.cut_off_overrides`, its own counters, its own queue — instead of being poured into the same stream as the freeze lists. No default override is shipped: that is a screening-parameter decision for the institution, and this project does not change screening parameters silently.
+- The two regulator lists share one reader, because they share three properties: published as a **table** (usually HTML), no common column convention between regulators, and **no technical identifier**. Columns are looked up by normalised form under several English and French spellings; the HTML reader picks the page's **largest** table, which is the most robust way to skip layout tables without knowing the page; and keys derive from a stable hash of name + domain, so two homonyms on two domains stay two records.
+
+### Fixed
+- **The file format is now detected from the content, not from the URL's extension.** Regulators serve their list at an address with no extension at all. Trusting the name would read a CSV as a web page, and the import would come out at **zero records** — that is, silently, wearing the appearance of an empty list rather than an error, which in a screening engine is the worst possible failure mode. The first bytes decide: `PK\x03\x04` → workbook, `{`/`[` → JSON, `<` → HTML, otherwise a delimited table.
+- **A record with no country was structurally unreachable.** `COUNTRY_ISO` is a blocking-key component and a record without a country falls into the `XX` partition, which **no client that has a country ever joins** — verified directly: a listed entity with no country emits `XX_PM_KLTN`, a Hong Kong client emits `HK_PM_KLTN`, intersection empty. Alert lists rarely publish a country, so every one of their records would have been dead on arrival. The **regulator's own jurisdiction** now fills in when the source is silent, which is also factually right: an entity the SFC warns about operates on the Hong Kong market by construction.
+  - Worth flagging beyond this batch: the same trap applies to **any** listed record without a country, from any source. Making `XX` a wildcard that pairs with everything would close it, but that changes screening behaviour and belongs in its own measured batch (the test book quantifies exactly this kind of change), not as a rider on a connector.
+- **`Personne morale` contains `person`.** The first draft of the entity-type test classified every French company as a natural person. Since the entity type is a blocking-key component, the error would have **discarded candidates rather than showing up** as a wrong label. Legal-person spellings are now tested first, and the ambiguous bare `person` fragment is gone.
+
 ### Added — Canadian and Australian national lists
 The two candidates named as "next up" in the previous batch, now shipped. Both are published as **tables**, not structured schemas, and their column headings move between versions — the Canadian one exists in two languages on top of that. So both readers look a column up by its **normalised form** (no case, no accents, no separators) and accept several spellings per field; that tolerance is the most fragile property of the pair, and it is what the tests pin down.
 

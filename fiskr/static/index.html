@@ -261,6 +261,9 @@
                                         <option value="WATCHLIST_CSL">US CSL — Consolidated Screening List (JSON)</option>
                                         <option value="WATCHLIST_CANADA">Canada SEMA — Sanctions autonomes (CSV)</option>
                                         <option value="WATCHLIST_DFAT">Australie DFAT — Liste consolidée (CSV ou XLSX)</option>
+                                        <option value="WATCHLIST_HK_SFC">Hong Kong SFC — Liste d'alerte (web, CSV ou JSON)</option>
+                                        <option value="WATCHLIST_AMF">AMF — Listes noires (web, CSV ou JSON)</option>
+                                        <option value="WATCHLIST_WORLDBANK">Banque mondiale — Fournisseurs exclus (JSON)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -679,6 +682,30 @@
                                 <h3 style="margin-top: 0;">🇦🇺 Australie DFAT — Liste consolidée</h3>
                                 <p class="section-desc">Liste consolidée du Department of Foreign Affairs and Trade, qui réunit les sanctions onusiennes transposées et les désignations autonomes australiennes. Les lignes se répètent par variante de nom et sont regroupées par référence, comme le fichier britannique. L'extension de l'URL choisit le lecteur : CSV en natif, XLSX si le paquet optionnel openpyxl est installé (<code>sync.dfat.enabled</code>).</p>
                                 <button id="sync-dfat-btn" class="btn btn-primary" onclick="handleSourceSync('DFAT')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇭🇰 Hong Kong SFC — Liste d'alerte</h3>
+                                <p class="section-desc">Entités non autorisées, sites frauduleux et usurpations d'identité d'intermédiaires agréés recensés par la Securities and Futures Commission. Ce n'est pas une liste de sanctions : une touche est un signal de risque à instruire, pas une obligation de gel — d'où un type de liste distinct, à seuiller à part dans <code>scoring.cut_off_overrides</code>. Hong Kong n'ayant pas de régime de sanctions autonome, c'est cette liste qui apporte une couverture propre (<code>sync.hk_sfc.enabled</code>).</p>
+                                <button id="sync-hksfc-btn" class="btn btn-primary" onclick="handleSourceSync('HKSFC')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇫🇷 AMF — Listes noires</h3>
+                                <p class="section-desc">Acteurs et sites proposant des services d'investissement sans y être autorisés, signalés par l'Autorité des marchés financiers. Même nature que la liste de Hong Kong : mise en garde et non gel des avoirs. C'est la liste d'alerte dont un assujetti français a l'usage le plus direct (<code>sync.amf.enabled</code>).</p>
+                                <button id="sync-amf-btn" class="btn btn-primary" onclick="handleSourceSync('AMF')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🏛️ Banque mondiale — Fournisseurs exclus (JSON)</h3>
+                                <p class="section-desc">Fournisseurs et personnes exclus des marchés financés par le Groupe de la Banque mondiale, pour fraude ou corruption avérée. Encore une autre nature : ni gel, ni mise en garde, mais une exclusion à durée déterminée — la date de fin alimente la colonne de radiation. Criblée au titre du risque de contrepartie sur le financement de projets et le trade finance (<code>sync.worldbank.enabled</code>).</p>
+                                <button id="sync-worldbank-btn" class="btn btn-primary" onclick="handleSourceSync('WORLDBANK')">
                                     Synchroniser maintenant
                                 </button>
                             </div>

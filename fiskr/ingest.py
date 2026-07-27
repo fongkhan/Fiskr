@@ -5,6 +5,7 @@ import hashlib
 import logging
 from typing import List, Dict, Any, Generator, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 
 # We try to import pypdf to extract PDF text, fallback to empty text if unavailable.
 try:
@@ -3164,6 +3165,411 @@ def parse_dfat_consolidated(file_path: str) -> Generator[Dict[str, Any], None, N
             "lei_number": None,
             "national_registry_ids": [],
             "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": [],
+        }
+
+
+# ------------------ LISTES D'ALERTE DES REGULATEURS ------------------
+# Une liste d'alerte n'est PAS une liste de sanctions. La SFC de Hong Kong,
+# l'AMF, la FCA publient des mises en garde contre des entites non autorisees,
+# des sites frauduleux, des usurpations d'identite d'etablissements agrees.
+# Une touche n'emporte aucune obligation de gel : c'est un signal de risque,
+# a instruire. C'est pourquoi chaque liste d'alerte recoit son PROPRE type de
+# liste — donc son propre seuil (`scoring.cut_off_overrides`) et ses propres
+# statistiques — au lieu d'etre versee dans le meme flux que les gels d'avoirs.
+#
+# Ces listes ont trois proprietes communes qui justifient un lecteur partage :
+# elles sont publiees sous forme de TABLEAU (HTML le plus souvent, parfois CSV
+# ou JSON), leurs intitules de colonnes varient d'un regulateur a l'autre, et
+# elles ne portent AUCUN identifiant technique.
+
+
+class _HTMLTableExtractor(HTMLParser):
+    """Extrait les lignes du plus grand <table> d'une page.
+
+    Les regulateurs publient leur liste d'alerte comme une page web ; le
+    tableau de donnees y voisine avec des tableaux de mise en page. On retient
+    celui qui a le plus de lignes, ce qui est le critere le plus robuste sans
+    connaitre la page.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables: List[List[List[str]]] = []
+        self._table: Optional[List[List[str]]] = None
+        self._row: Optional[List[str]] = None
+        self._cell: Optional[List[str]] = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._table = []
+        elif tag == "tr" and self._table is not None:
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None:
+            self._row.append(re.sub(r"\s+", " ", "".join(self._cell)).strip())
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if any(self._row):
+                self._table.append(self._row)
+            self._row = None
+        elif tag == "table" and self._table is not None:
+            self.tables.append(self._table)
+            self._table = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _read_html_table_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
+    """Lignes du tableau principal d'une page HTML, en-tete = 1re ligne."""
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        parser = _HTMLTableExtractor()
+        parser.feed(f.read())
+    if not parser.tables:
+        return
+    table = max(parser.tables, key=len)
+    if len(table) < 2:
+        return
+    header = table[0]
+    for row in table[1:]:
+        yield {header[i]: row[i] for i in range(min(len(header), len(row)))}
+
+
+def _sniff_table_format(file_path: str) -> str:
+    """Devine le format d'apres les PREMIERS OCTETS, pas d'apres l'extension.
+
+    Les regulateurs servent leur liste a une URL sans extension : se fier au
+    nom du fichier ferait lire un CSV comme une page web, et l'import
+    ressortirait a ZERO fiche — c'est-a-dire silencieusement, sous les traits
+    d'une liste vide plutot que d'une erreur. Le contenu tranche donc.
+    """
+    with open(file_path, "rb") as f:
+        head = f.read(4096)
+    if head[:4] == b"PK\x03\x04":          # classeur Excel (archive zip)
+        return "xlsx"
+    text = head.decode("utf-8", errors="replace").lstrip("\ufeff").lstrip()
+    if text[:1] in ("{", "["):
+        return "json"
+    if text[:1] == "<":
+        return "html"
+    return "table"
+
+
+def _read_alert_rows(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Lignes d'une liste d'alerte : JSON, CSV/XLSX ou tableau HTML."""
+    detected = _sniff_table_format(file_path)
+    if detected == "json":
+        with open(file_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            for key in ("results", "data", "items", "records", "rows"):
+                if isinstance(payload.get(key), list):
+                    payload = payload[key]
+                    break
+            else:
+                payload = [payload]
+        for row in payload or []:
+            if isinstance(row, dict):
+                yield row
+        return
+    if detected == "html":
+        yield from _read_html_table_rows(file_path)
+        return
+    if detected == "xlsx":
+        yield from _read_xlsx_rows(file_path)
+        return
+    yield from _read_table_rows(file_path)
+
+
+def _alert_stable_id(name: str, website: str) -> str:
+    """
+    Ces listes ne portent pas d'identifiant. La cle de delta derive donc du nom
+    normalise, complete du site quand il y en a un : deux entites homonymes
+    sevissant sur deux domaines restent deux fiches distinctes, et la meme
+    entite garde sa cle d'une publication a l'autre.
+    """
+    seed = _strip_accents_lower(name) + "|" + _strip_accents_lower(website)
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def parse_regulatory_alert_list(
+    file_path: str,
+    *,
+    id_prefix: str,
+    origin: str,
+    authority: str,
+    designation_reasons: str,
+    reference_label: str,
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Lit une liste d'alerte de regulateur vers le schema pivot.
+
+    Les colonnes sont cherchees par forme normalisee et sous plusieurs
+    libelles, anglais comme francais : les regulateurs n'ont aucune convention
+    commune, et le meme regulateur change d'intitules au fil des refontes.
+    """
+    for row in _read_alert_rows(file_path):
+        row = {k: v for k, v in row.items() if k}
+        name = _table_get(
+            row, "Name", "Name of Entity", "Entity Name", "Company Name", "Company",
+            "Entity", "Nom", "Dénomination", "Denomination", "Nom de l'entité",
+            "Raison sociale", "Nom commercial", "Entité",
+        )
+        websites = parse_multi_value(
+            {"w": _table_get(row, "Website", "Websites", "Web site", "URL", "Site",
+                             "Site internet", "Adresse du site", "Sites internet")},
+            "w",
+        )
+        if not name:
+            # Certaines listes ne nomment que le site : il fait alors office
+            # d'identite, faute de quoi la ligne serait perdue.
+            name = websites[0] if websites else ""
+        if not name:
+            continue
+
+        aliases_raw = [
+            {"name": a, "type": "Strong"}
+            for a in parse_multi_value(
+                {"a": _table_get(row, "Also known as", "Alias", "Aliases", "Other names",
+                                 "Trading name", "Autres dénominations", "Autre dénomination",
+                                 "Nom(s) commercial(aux)")},
+                "a",
+            )
+        ]
+        # Les autres domaines d'une meme entite sont cherchables comme alias :
+        # un virement libelle au nom du site doit ressortir.
+        aliases_raw += [{"name": w, "type": "Weak"} for w in websites[1:]]
+
+        raw_type_label = _table_get(row, "Type", "Category", "Catégorie", "Categorie",
+                                    "Entity type", "Nature")
+        raw_type = _strip_accents_lower(raw_type_label)
+        # ATTENTION : « personne morale » contient « person ». Les libelles de
+        # personne MORALE sont donc testes EN PREMIER, sans quoi toute societe
+        # francaise serait typee personne physique — et le type d'entite est une
+        # composante de la cle de blocking, donc l'erreur ecarterait des
+        # candidats au lieu de se voir.
+        if any(k in raw_type for k in ("personne morale", "entity", "entite", "company",
+                                       "corporate", "societe", "organisation", "organization")):
+            entity_type = "E"
+        elif any(k in raw_type for k in ("individual", "personne physique", "natural person")):
+            entity_type = "I"
+        else:
+            entity_type = "E"
+
+        published = _extract_iso_date(_table_get(
+            row, "Date", "Date of publication", "Publication date", "Date added",
+            "Date of listing", "Date de publication", "Date d'inscription",
+            "Date de mise en garde", "Last updated",
+        ))
+        country = _table_get(row, "Country", "Jurisdiction", "Pays", "Juridiction")
+        # PAS de juridiction inventee quand la source n'en publie pas. Le
+        # premier jet remplissait avec la juridiction du regulateur, pour
+        # echapper a la partition « pays inconnu » du blocking. C'etait une
+        # rustine, et elle RESTREIGNAIT l'atteignabilite : une entite signalee
+        # par la SFC devenait visible des seuls clients hongkongais, alors
+        # qu'un courtier frauduleux vise des victimes partout. Le joker « pays
+        # inconnu » (fiskr/blocking.lookup_blocking_keys) traite le probleme au
+        # bon endroit ; l'autorite qui signale reste portee par
+        # `designating_state`, qui est la pour cela.
+        jurisdiction = country_label_to_iso2(country) if country else ""
+        details = _table_get(row, "Reason", "Remarks", "Details", "Description",
+                             "Comments", "Motif", "Commentaire", "Précisions", "Precisions")
+        reference = _table_get(row, "Reference", "Ref", "Référence", "Case number",
+                               "Numéro", "Numero")
+
+        extra = [t for t in (details,) if t]
+        if websites:
+            extra.append("Site(s) : " + ", ".join(websites))
+        if raw_type_label:
+            extra.append(f"Catégorie : {raw_type_label}")
+
+        yield {
+            "entity_id": "{}-{}".format(
+                id_prefix,
+                re.sub(r"[^A-Za-z0-9._-]+", "", reference) if reference
+                else _alert_stable_id(name, websites[0] if websites else "")
+            ),
+            "entity_type": entity_type,
+            "primary_name": name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": [],
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": [],
+                "residence": [],
+                "birth_country": [],
+                "jurisdiction_country": [jurisdiction] if jurisdiction else [],
+            },
+            "place_of_birth": None,
+            "address": _table_get(row, "Address", "Adresse", "Registered address") or None,
+            "alternative_addresses": [],
+            "city": None,
+            "country": country or None,
+            "designation": None,
+            # Le libelle dit explicitement qu'il s'agit d'une mise en garde :
+            # l'analyste ne doit jamais la confondre avec un gel des avoirs.
+            "designation_reasons": designation_reasons,
+            "additional_informations": "; ".join(extra) or None,
+            "official_reference": build_official_reference(reference or reference_label, published),
+            "title": None,
+            "listed_on": published,
+            "designating_state": authority,
+            "sanction_programs": [],
+            "name_original_script": None,
+            "origin": origin,
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": [],
+            "websites": websites,
+        }
+
+
+def parse_hk_sfc_alert_list(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Liste d'alerte de la Securities and Futures Commission de Hong Kong.
+
+    La SFC y recense les entites non autorisees, les sites suspects et les
+    usurpations d'identite d'intermediaires agrees. Hong Kong n'ayant pas de
+    regime de sanctions autonome (les mesures onusiennes y sont transposees par
+    ordonnance), c'est cette liste-la qui apporte quelque chose qu'aucune autre
+    source branchee ne porte.
+    """
+    return parse_regulatory_alert_list(
+        file_path,
+        id_prefix="HKSFC",
+        origin="Hong Kong SFC — Alert List",
+        authority="HK",
+        designation_reasons="Mise en garde du régulateur — SFC Hong Kong (entité non autorisée / site suspect)",
+        reference_label="SFC Hong Kong — Alert List",
+    )
+
+
+def parse_amf_blacklist(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Listes noires de l'Autorite des marches financiers (France).
+
+    Sites et entites proposant des services d'investissement sans y etre
+    autorises. Marche domestique de l'etablissement : c'est la liste d'alerte
+    dont un assujetti francais a le plus directement l'usage.
+    """
+    return parse_regulatory_alert_list(
+        file_path,
+        id_prefix="AMF",
+        origin="AMF — Listes noires",
+        authority="FR",
+        designation_reasons="Mise en garde du régulateur — AMF (acteur non autorisé)",
+        reference_label="AMF — listes noires",
+    )
+
+
+# ------------------ EXCLUSIONS BANQUE MONDIALE ------------------
+# Fournisseurs et personnes exclus des marches finances par le Groupe de la
+# Banque mondiale (sanctions de passation de marches). Ni gel des avoirs ni
+# mise en garde : une exclusion pour fraude ou corruption averee, publiee en
+# JSON public. Les banques la criblent au titre du risque de contrepartie sur
+# le financement de projets et le commerce international.
+#
+# Structure : {"response": {"ZPROCSUPP": [ {...}, ... ]}} — l'enveloppe exacte
+# varie selon le point d'entree, d'ou une recherche tolerante de la liste.
+
+
+def _worldbank_records(payload: Any) -> List[Dict[str, Any]]:
+    """Trouve la liste d'enregistrements quelle que soit l'enveloppe JSON."""
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for value in payload.values():
+        found = _worldbank_records(value)
+        if found:
+            return found
+    return []
+
+
+def parse_worldbank_debarred_json(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste des fournisseurs exclus par la Banque mondiale."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    for row in _worldbank_records(payload):
+        row = {(k or "").strip().upper(): v for k, v in row.items()}
+
+        def get(*keys: str) -> str:
+            for key in keys:
+                value = row.get(key)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return ""
+
+        name = get("SUPP_NAME", "FIRM_NAME", "NAME")
+        if not name:
+            continue
+        supplier_id = get("SUPP_ID", "ID") or _alert_stable_id(name, "")
+        country = get("COUNTRY_NAME", "COUNTRY")
+        from_date = _extract_iso_date(get("DEBAR_FROM_DATE", "FROM_DATE"))
+        to_date = _extract_iso_date(get("DEBAR_TO_DATE", "TO_DATE"))
+        reason = get("DEBAR_REASON", "REASON", "GROUNDS")
+        address = get("SUPP_ADDR", "ADDRESS")
+
+        extra = [t for t in (reason,) if t]
+        if to_date:
+            extra.append(f"Exclusion jusqu'au {to_date}")
+
+        yield {
+            "entity_id": f"WB-{supplier_id}",
+            "entity_type": "E",
+            "primary_name": name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases([]),
+            "dates_of_birth": [],
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": [],
+                "residence": [],
+                "birth_country": [],
+                "jurisdiction_country": [country_label_to_iso2(country)] if country else [],
+            },
+            "place_of_birth": None,
+            "address": address or None,
+            "alternative_addresses": [],
+            "city": get("SUPP_CITY", "CITY") or None,
+            "country": country or None,
+            "designation": None,
+            "designation_reasons": "Exclusion des marchés financés par la Banque mondiale",
+            "additional_informations": "; ".join(extra) or None,
+            "official_reference": build_official_reference(
+                f"Banque mondiale — exclusion {supplier_id}", from_date),
+            "title": None,
+            "listed_on": from_date,
+            # La fin d'exclusion est une radiation programmee : la colonne
+            # existe deja, autant la renseigner plutot que de la noyer en texte.
+            "delisted_on": to_date,
+            "designating_state": "WB",
+            "sanction_programs": [],
+            "name_original_script": None,
+            "origin": "World Bank — Debarred firms and individuals",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [{"id_type": "WorldBankSupplierId", "number": supplier_id}],
             "passport_documents": [],
             "national_id_documents": [],
             "other_id_documents": [],

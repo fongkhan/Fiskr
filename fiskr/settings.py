@@ -34,7 +34,8 @@ SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
 SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
 # Planification cron par source de synchronisation (source -> expression 5 champs)
 SETTING_SYNC_SCHEDULES = "sync.schedules"
-SYNC_SOURCES = ("ofac", "ofac_nonsdn", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi", "seco", "csl", "canada", "dfat")
+SYNC_SOURCES = ("ofac", "ofac_nonsdn", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi", "seco", "csl", "canada", "dfat",
+                "hk_sfc", "amf", "worldbank")
 # SLA de traitement des alertes : delai (heures) par priorite, 0 = pas d'echeance
 SETTING_ALERT_SLA_HOURS = "alerts.sla_hours"
 # Notifications metier : activation par evenement

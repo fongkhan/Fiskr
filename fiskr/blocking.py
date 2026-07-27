@@ -222,3 +222,49 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
         keys = new_keys
         
     return keys
+
+
+# ------------------ CLES D'INTERROGATION (cote requete) ------------------
+# L'index de criblage est bati sur les cles des fiches LISTEES ; le client
+# interroge cet index avec les siennes. La dissymetrie compte : une fiche
+# listee sans pays tombe dans la partition « XX », que ne rejoint AUCUN client
+# ayant un pays. Elle est donc structurellement inatteignable — et ce n'est pas
+# un cas de bord : les listes d'alerte de regulateurs ne publient presque
+# jamais de pays, EUR-Lex scrape des fiches sans geographie, la CSL en compte.
+#
+# La correction se pose du COTE REQUETE, pas du cote index : le client
+# interroge en plus la variante « pays inconnu » de ses propres cles. C'est
+# strictement additif — aucune paire aujourd'hui candidate ne cesse de l'etre —
+# et cela preserve le partitionnement : une fiche listee QUI PORTE un pays
+# n'est toujours atteinte que par les clients de ce pays. Le surcout est borne
+# par le nombre de fiches sans pays, pas par la taille de la base.
+
+
+def _without_countries(entity: dict) -> dict:
+    """Copie de l'entite privee de sa geographie (le reste est inchange)."""
+    stripped = dict(entity)
+    if "client_type" in entity or "client_id" in entity:
+        stripped["client_countries"] = {}
+    else:
+        stripped["countries"] = {}
+    return stripped
+
+
+def lookup_blocking_keys(entity: dict, config: dict) -> Set[str]:
+    """
+    Cles a interroger dans l'index de criblage pour cette entite.
+
+    Ce sont ses cles propres, PLUS la variante dont la composante pays vaut
+    « pays inconnu » — la seule facon d'atteindre les fiches listees dont la
+    source ne publie pas de geographie. Quand COUNTRY_ISO n'est pas dans le
+    layout, les deux ensembles coincident et la fonction ne coute rien.
+    """
+    keys = generate_blocking_keys(entity, config)
+    blocking_cfg = config.get("blocking", {}) or {}
+    layout = blocking_cfg.get(
+        "custom_key_layout", ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"])
+    if "COUNTRY_ISO" not in layout:
+        return keys
+    if not blocking_cfg.get("country_wildcard", True):
+        return keys
+    return keys | generate_blocking_keys(_without_countries(entity), config)
