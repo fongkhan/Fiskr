@@ -14,6 +14,36 @@ except ImportError:
 
 logger = logging.getLogger("fiskr.ingest")
 
+
+def parse_multi_value(item: Dict[str, Any], *column_names: str,
+                      separator: str = ";") -> List[str]:
+    """
+    Liste de valeurs saisie dans UNE colonne CSV, valeurs separees par
+    `separator`. Accepte plusieurs orthographes de colonne et retourne la
+    premiere renseignee ; une liste deja construite (JSON, appel interne) est
+    reprise telle quelle.
+
+    Remplace une expression qui etait recopiee a cinq endroits et qui portait
+    deux defauts :
+    - elle n'interrogeait qu'UNE orthographe de colonne. Pour les adresses
+      alternatives c'etait la forme courte `alternative_addresses`, alors que
+      toutes les colonnes voisines acceptent aussi la forme prefixee
+      `client_...`. Un fichier ecrit avec `client_alternative_addresses` etait
+      donc ignore en silence ;
+    - une colonne vide donnait `[""]` et non `[]` : `"".split(";")` retourne
+      `[""]`. Chaque fiche sans adresse alternative portait une entree vide,
+      comptee comme une adresse par tout ce qui lit ce champ.
+    """
+    for name in column_names:
+        raw = item.get(name)
+        if raw is None:
+            continue
+        if not isinstance(raw, str):
+            return list(raw) if raw else []
+        if raw.strip():
+            return [part.strip() for part in raw.split(separator) if part.strip()]
+    return []
+
 # ------------------ ALIAS RISK CATEGORIZATION (Section 5.6) ------------------
 
 def qualify_alias_priority(alias: str, alias_type_attr: str = "") -> str:

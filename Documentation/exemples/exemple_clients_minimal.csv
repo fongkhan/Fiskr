@@ -1,0 +1,4 @@
+client_id,client_type,client_first_name,client_last_name,client_company_name,client_dob,client_gender,nationality,residence
+CLI-000001,PP,Jean,Martin,,1975-03-12,M,FR,FR
+CLI-000002,PP,Amina,Benali,,1988-11-02,F,"DZ,FR",FR
+CLI-000003,PM,,,Boulangerie Martin SARL,,,,FR
