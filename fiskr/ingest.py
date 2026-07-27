@@ -1,6 +1,7 @@
 import re
 import csv
 import json
+import hashlib
 import logging
 from typing import List, Dict, Any, Generator, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
@@ -11,6 +12,16 @@ try:
     PDF_AVAILABLE = True
 except ImportError:
     PDF_AVAILABLE = False
+
+# Lecture des classeurs Excel (liste australienne DFAT). Dependance OPTIONNELLE,
+# sur le meme principe que pypdf : son absence n'empeche pas Fiskr de demarrer,
+# elle rend seulement la voie XLSX indisponible — avec un message qui dit quoi
+# installer plutot qu'une pile d'appels.
+try:
+    import openpyxl
+    XLSX_AVAILABLE = True
+except ImportError:
+    XLSX_AVAILABLE = False
 
 logger = logging.getLogger("fiskr.ingest")
 
@@ -1120,6 +1131,40 @@ def parse_ofac_advanced_xml(file_path: str,
 
 
 
+# ------------------ OFAC NON-SDN (CONS_ADVANCED.XML) ------------------
+# L'OFAC publie DEUX fichiers au meme format « Advanced » : la SDN List et la
+# « Consolidated Sanctions List », dite Non-SDN. La seconde porte les regimes
+# qui ne relevent PAS d'un gel total des avoirs et sont donc absents du fichier
+# SDN — au premier rang desquels les SECTORAL SANCTIONS (SSI, directives 1 a 4
+# sur la Russie), mais aussi FSE, NS-MBS, PLC, MEU et CMIC. Un etablissement
+# expose au dollar doit les cribler ; ne charger que la SDN laisse un trou.
+#
+# Le format etant strictement identique, ce connecteur ne re-parse rien : il
+# reutilise `parse_ofac_advanced_xml`, deja eprouve sur la structure reelle du
+# fichier SDN. Deux ajustements seulement, expliques ci-dessous.
+
+
+def parse_ofac_consolidated_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse le fichier Non-SDN de l'OFAC (CONS_ADVANCED.XML).
+
+    Le parseur SDN rend l'identifiant de profil OFAC nu (`pid`). Les deux
+    fichiers partagent le meme espace de FixedRef et ne se recouvrent pas
+    aujourd'hui, mais `entity_id` sert de cle aux alertes et a la liste
+    blanche : une collision ferait fusionner deux fiches distinctes. Le
+    prefixe `NONSDN-` ecarte le risque par construction plutot que par
+    confiance dans une propriete de la source.
+
+    Les relations entre profils ne sont volontairement pas recoltees ici : le
+    graphe de participations est rafraichi par source (`refresh_source_relationships`)
+    et melanger deux espaces d'identifiants prefixes differemment y produirait
+    des aretes pendantes.
+    """
+    for item in parse_ofac_advanced_xml(file_path):
+        item["entity_id"] = f"NONSDN-{item.get('entity_id')}"
+        item["origin"] = "OFAC Non-SDN Consolidated"
+        yield item
+
+
 # ------------------ REGISTRE NATIONAL DES GELS (DGT) ------------------
 # Connecteur du registre national des gels des avoirs publie par la Direction
 # generale du Tresor (gels-avoirs.dgtresor.gouv.fr, API publique ENGEL).
@@ -1905,8 +1950,20 @@ def _normalize_partial_date(raw: str) -> Optional[str]:
     return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
 
 
-def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
-    """Parse le dataset PEP OpenSanctions (targets.simple.csv) vers le schema pivot."""
+def parse_opensanctions_simple_csv(
+    file_path: str,
+    id_prefix: str = "PEP",
+    origin: str = "OpenSanctions PEP",
+    designation_reasons: str = "Personne Politiquement Exposée (PEP)",
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse un dataset OpenSanctions au format `targets.simple.csv`.
+
+    Le format est le meme pour tous les jeux de donnees du fournisseur : seuls
+    changent le prefixe d'identifiant, la provenance affichee et le motif de
+    designation. C'est ce qui permet de brancher une seconde source (SECO) sur
+    le meme lecteur sans le dupliquer.
+    """
     with open(file_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -1932,7 +1989,7 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
             pep_first_seen = _extract_iso_date(row.get("first_seen", ""))
 
             yield {
-                "entity_id": f"PEP-{os_id}",
+                "entity_id": f"{id_prefix}-{os_id}",
                 "entity_type": entity_type,
                 "primary_name": name,
                 "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
@@ -1952,13 +2009,13 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
                 "alternative_addresses": addresses[1:],
                 "country": None,
                 "designation": positions[0] if positions else None,
-                "designation_reasons": "Personne Politiquement Exposée (PEP)",
+                "designation_reasons": designation_reasons,
                 "additional_informations": "; ".join(identifiers) or None,
                 "pep_role": "; ".join(positions) or None,
                 "listed_on": pep_first_seen,
                 "phone_numbers": pep_phones,
                 "email_addresses": pep_emails,
-                "origin": "OpenSanctions PEP",
+                "origin": origin,
                 "imo_number": None,
                 "aircraft_tail_number": None,
                 "lei_number": None,
@@ -1968,6 +2025,32 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
                 "national_id_documents": [],
                 "other_id_documents": []
             }
+
+
+def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse le dataset PEP OpenSanctions (targets.simple.csv) vers le schema pivot."""
+    return parse_opensanctions_simple_csv(
+        file_path,
+        id_prefix="PEP",
+        origin="OpenSanctions PEP",
+        designation_reasons="Personne Politiquement Exposée (PEP)",
+    )
+
+
+def parse_seco_opensanctions_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse le jeu de donnees SECO agrege par OpenSanctions (`ch_seco_sanctions`,
+    format targets.simple.csv). Voie de secours du connecteur XML officiel :
+    meme perimetre de listes, mais un format plat, donc sans base legale ni
+    dates d'acte. Meme reserve de licence que le dataset PEP — usage non
+    commercial libre, licence requise au-dela.
+    """
+    return parse_opensanctions_simple_csv(
+        file_path,
+        id_prefix="SECO",
+        origin="OpenSanctions SECO (CH)",
+        designation_reasons="Sanctions suisses (SECO)",
+    )
 
 
 # ------------------ LISTE UK OFSI (ConList.csv, format 2022) ------------------
@@ -2124,6 +2207,966 @@ def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, No
             "passport_documents": [{"number": passport_num, "issuing_country": "XX", "expiration_date": None}] if passport_num else [],
             "national_id_documents": [{"number": ni_number, "issuing_country": "GB"}] if ni_number else [],
             "other_id_documents": []
+        }
+
+
+# ------------------ LISTE SECO SUISSE (XML SESAM) ------------------
+# Liste consolidee des sanctions du Secretariat d'Etat a l'economie (SECO),
+# publiee au format XML par la plate-forme SESAM de la Confederation. La Suisse
+# transpose les mesures de l'ONU et de l'UE dans ses propres ordonnances : le
+# fichier porte donc le regime suisse applicable, avec sa base legale (RS).
+#
+# Structure du schema :
+#   <export>
+#     <sanctions-program>
+#       <program-key>UKR</program-key>
+#       <sanctions-set ssid="1"><version-date/><origin>EU</origin></sanctions-set>
+#       <sanctions-set-name lang="fra">Ordonnance ... (RS 946.231...)</sanctions-set-name>
+#     </sanctions-program>
+#     <target ssid="1000" sanctions-set-id="1">
+#       <individual|entity|object ssid="...">
+#         <identity main="true">
+#           <name name-type="primary-name" quality="good">
+#             <name-part name-part-type="family-name"><value>IVANOV</value></name-part>
+#             <name-part name-part-type="given-name"><value>Ivan</value></name-part>
+#           </name>
+#           <address><address-details/><location/><zip-code/><country iso-code="RU"/></address>
+#           <place-of-birth><location/><country iso-code="RU"/></place-of-birth>
+#           <nationality><country iso-code="RU"/></nationality>
+#           <identification-document document-type="passport">
+#             <number/><issuer code="RU"/><expiry-date><day-month-year year="..."/></expiry-date>
+#           </identification-document>
+#           <day-month-year year="1970" month="3" day="12"/>
+#         </identity>
+#         <justification lang="fra">...</justification>
+#         <other-information lang="fra">...</other-information>
+#         <modification modification-type="added" effective-date="2022-03-04"/>
+#       </individual>
+#     </target>
+#   </export>
+#
+# AVERTISSEMENT ASSUME : ce parseur est ecrit d'apres le schema publie et
+# valide sur un jeu d'essai synthetique couvrant les trois types de cibles ; il
+# n'a PAS pu etre confronte au fichier reel, l'acces reseau a
+# sesam.search.admin.ch etant ferme dans l'environnement de developpement. La
+# premiere synchronisation reelle doit donc etre POINTEE avant mise en
+# production (le mode homologation est fait pour cela). C'est la raison pour
+# laquelle la lecture se fait par NOM LOCAL sur le sous-arbre de la cible et
+# non par chemin rigide : la profondeur exacte a laquelle le schema place la
+# date de naissance, l'adresse ou la nationalite peut varier sans casser
+# l'extraction.
+
+_SECO_GIVEN_PARTS = ("given-name", "father-name", "grand-father-name")
+_SECO_FAMILY_PARTS = ("family-name", "maiden-name", "tribal-name")
+_SECO_DECORATIVE_PARTS = ("title", "suffix")
+# Une <day-month-year> sous l'un de ces ancetres n'est PAS une date de naissance
+# (validite d'un document, date d'inscription, date d'une relation).
+_SECO_NON_BIRTH_ANCESTORS = {
+    "identification-document", "modification", "relation", "place-of-birth"
+}
+
+
+def _seco_local(elem: ET.Element) -> str:
+    return elem.tag.split('}')[-1]
+
+
+def _seco_attr(elem: ET.Element, *names: str) -> str:
+    """Premier attribut renseigne parmi `names`, insensible au namespace et a la casse."""
+    for name in names:
+        value = get_attrib_insensitive(elem, name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _seco_text(elem: Optional[ET.Element]) -> str:
+    if elem is None:
+        return ""
+    return (elem.text or "").strip()
+
+
+def _seco_find(elem: ET.Element, local: str) -> List[ET.Element]:
+    """Descendants (a n'importe quelle profondeur) portant ce nom local."""
+    return [d for d in elem.iter() if d.tag.split('}')[-1] == local]
+
+
+def _seco_first_text(elem: ET.Element, local: str) -> str:
+    for node in _seco_find(elem, local):
+        text = _seco_text(node)
+        if text:
+            return text
+    return ""
+
+
+def _seco_parent_map(root: ET.Element) -> Dict[ET.Element, ET.Element]:
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def _seco_ancestors(elem: ET.Element, parents: Dict[ET.Element, ET.Element]) -> Set[str]:
+    """Noms locaux de tous les ancetres, pour lever une ambiguite de contexte."""
+    out: Set[str] = set()
+    node = parents.get(elem)
+    while node is not None:
+        out.add(_seco_local(node))
+        node = parents.get(node)
+    return out
+
+
+def _seco_dmy(elem: ET.Element) -> Optional[str]:
+    """<day-month-year year="1970" month="3" day="12"/> -> 1970-03-12.
+
+    Une date partielle (annee seule) est ramenee au 1er janvier, comme le font
+    deja les connecteurs ONU et PEP : le scoring applique de toute facon une
+    tolerance en annees.
+    """
+    year = _seco_attr(elem, "year")
+    if not (year.isdigit() and len(year) == 4):
+        # Certaines exports ecrivent la date en texte plutot qu'en attributs
+        return _normalize_partial_date(_seco_text(elem))
+    month = _seco_attr(elem, "month")
+    day = _seco_attr(elem, "day")
+    month = month if month.isdigit() and 1 <= int(month) <= 12 else "1"
+    day = day if day.isdigit() and 1 <= int(day) <= 31 else "1"
+    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+
+def _seco_country(elem: ET.Element) -> Tuple[str, str]:
+    """(libelle, ISO2) du premier <country> du sous-arbre. L'attribut iso-code
+    prime ; a defaut le libelle passe par la table de correspondance commune."""
+    for country in _seco_find(elem, "country"):
+        label = _seco_text(country)
+        iso = _seco_attr(country, "iso-code", "code", "iso").upper()
+        if len(iso) != 2:
+            iso = country_label_to_iso2(label) if label else ""
+        if label or iso:
+            return label, iso
+    return "", ""
+
+
+def _seco_name_parts(name_elem: ET.Element) -> List[Tuple[str, str]]:
+    """[(type_de_partie, valeur)] dans l'ordre du document."""
+    parts: List[Tuple[str, str]] = []
+    for part in _seco_find(name_elem, "name-part"):
+        value = _seco_first_text(part, "value") or _seco_text(part)
+        if value:
+            parts.append((_seco_attr(part, "name-part-type", "type").lower(), value))
+    return parts
+
+
+def _seco_compose(parts: List[Tuple[str, str]]) -> Tuple[str, str, str, str]:
+    """
+    Retourne (nom_compose, nom_dans_l_ordre_du_document, prenoms, nom_de_famille).
+
+    Le nom compose suit l'ordre « prenoms puis patronyme » attendu par le
+    moteur. L'ordre du document est rendu a part parce que les listes suisses
+    ecrivent couramment le patronyme en premier : les deux graphies sont
+    indexees, l'une comme nom principal, l'autre comme alias.
+    """
+    whole = [value for ptype, value in parts if ptype == "whole-name"]
+    given = [value for ptype, value in parts if ptype in _SECO_GIVEN_PARTS]
+    family = [value for ptype, value in parts if ptype in _SECO_FAMILY_PARTS]
+    document_order = " ".join(
+        value for ptype, value in parts if ptype not in _SECO_DECORATIVE_PARTS
+    ).strip()
+    composed = whole[0] if whole else (" ".join(given + family).strip() or document_order)
+    return composed, document_order, " ".join(given).strip(), " ".join(family).strip()
+
+
+def _seco_localized(elem: ET.Element, local: str) -> str:
+    """Texte d'un bloc multilingue, francais d'abord (le fichier est trilingue)."""
+    by_lang: Dict[str, str] = {}
+    for node in _seco_find(elem, local):
+        text = _seco_text(node)
+        if text:
+            by_lang.setdefault(_seco_attr(node, "lang", "xml:lang").lower(), text)
+    for lang in ("fra", "fre", "fr", "", "eng", "en", "deu", "ger", "de", "ita", "it"):
+        if lang in by_lang:
+            return by_lang[lang]
+    return next(iter(by_lang.values()), "")
+
+
+def _seco_programs(file_path: str) -> Dict[str, Dict[str, str]]:
+    """
+    Premiere passe : ssid du jeu de sanctions -> {cle de programme, intitule de
+    l'ordonnance, origine (ONU/UE)}. Les <target> sont liberees au fil de l'eau,
+    cette passe ne charge pas le fichier en memoire.
+    """
+    programs: Dict[str, Dict[str, str]] = {}
+    for _, prog in _stream_target_elements(file_path, {"sanctions-program"}):
+        key = _seco_first_text(prog, "program-key")
+        label = _seco_localized(prog, "sanctions-set-name") or _seco_localized(prog, "sanctions-program-name")
+        for sset in _seco_find(prog, "sanctions-set"):
+            ssid = _seco_attr(sset, "ssid")
+            if ssid:
+                programs[ssid] = {
+                    "key": key,
+                    "label": label,
+                    "origin": _seco_first_text(sset, "origin"),
+                }
+    return programs
+
+
+def parse_seco_xml(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee suisse (SECO / SESAM) vers le schema pivot."""
+    programs = _seco_programs(file_path)
+
+    for _, target in _stream_target_elements(file_path, {"target"}):
+        subject = next(
+            (c for c in target if _seco_local(c) in ("individual", "entity", "object")),
+            None
+        )
+        if subject is None:
+            continue
+        ssid = _seco_attr(target, "ssid") or _seco_attr(subject, "ssid")
+        if not ssid:
+            continue
+
+        subject_local = _seco_local(subject)
+        if subject_local == "individual":
+            entity_type = "I"
+        elif subject_local == "entity":
+            entity_type = "E"
+        else:
+            object_type = _seco_attr(subject, "object-type", "type").lower()
+            entity_type = "V" if any(k in object_type for k in ("vessel", "ship", "schiff", "navire")) else "O"
+
+        parents = _seco_parent_map(subject)
+
+        # --- Noms : identite principale (main="true") vs identites alias ---
+        identities = _seco_find(subject, "identity") or [subject]
+        primary_name = first_name = last_name = seco_title = ""
+        aliases_raw: List[Dict[str, str]] = []
+        for identity in identities:
+            is_main = _seco_attr(identity, "main").lower() in ("true", "1", "yes")
+            for name_elem in _seco_find(identity, "name"):
+                parts = _seco_name_parts(name_elem)
+                if not parts:
+                    continue
+                composed, document_order, given, family = _seco_compose(parts)
+                if not composed:
+                    continue
+                name_type = _seco_attr(name_elem, "name-type", "type").lower()
+                quality = _seco_attr(name_elem, "quality", "name-quality").lower()
+                alias_type = "Weak" if any(k in quality for k in ("low", "weak", "poor")) else "Strong"
+                if is_main and not primary_name and ("primary" in name_type or not name_type):
+                    primary_name = composed
+                    first_name, last_name = given, family
+                    titles = [value for ptype, value in parts if ptype == "title"]
+                    seco_title = titles[0] if titles else ""
+                else:
+                    aliases_raw.append({"name": composed, "type": alias_type})
+                if document_order and document_order != composed:
+                    aliases_raw.append({"name": document_order, "type": alias_type})
+        if not primary_name:
+            # Aucune identite marquee principale : le premier nom lu fait office
+            # de nom principal plutot que d'ecarter la fiche.
+            if not aliases_raw:
+                continue
+            primary_name = aliases_raw.pop(0)["name"]
+
+        # --- Dates de naissance (hors validite de document et dates d'acte) ---
+        dobs = []
+        for dmy in _seco_find(subject, "day-month-year"):
+            if _SECO_NON_BIRTH_ANCESTORS & _seco_ancestors(dmy, parents):
+                continue
+            iso = _seco_dmy(dmy)
+            if iso:
+                dobs.append(iso)
+
+        place_of_birth = None
+        birth_countries = []
+        for pob in _seco_find(subject, "place-of-birth"):
+            location = _seco_first_text(pob, "location")
+            country_label, country_iso = _seco_country(pob)
+            label = ", ".join(p for p in (location, country_label) if p)
+            if label and not place_of_birth:
+                place_of_birth = label
+            if country_iso:
+                birth_countries.append(country_iso)
+
+        citizenships = []
+        for nat in _seco_find(subject, "nationality"):
+            _, iso = _seco_country(nat)
+            if iso:
+                citizenships.append(iso)
+
+        addresses = []
+        address_countries = []
+        for addr in _seco_find(subject, "address"):
+            if "identification-document" in _seco_ancestors(addr, parents):
+                continue
+            chunks = []
+            for local in ("c-o", "address-details", "po-box", "zip-code", "location", "area-code"):
+                chunks.extend(t for t in (_seco_text(n) for n in _seco_find(addr, local)) if t)
+            country_label, country_iso = _seco_country(addr)
+            if country_label:
+                chunks.append(country_label)
+            full = ", ".join(chunks)
+            if full:
+                addresses.append({
+                    "full": full,
+                    "city": _seco_first_text(addr, "location"),
+                    "country": country_label,
+                })
+            if country_iso:
+                address_countries.append(country_iso)
+
+        passports = []
+        national_ids = []
+        other_registrations = []
+        for doc in _seco_find(subject, "identification-document"):
+            number = _seco_first_text(doc, "number")
+            if not number:
+                continue
+            doc_type = _seco_attr(doc, "document-type", "type").lower()
+            issuer_iso = ""
+            for issuer in _seco_find(doc, "issuer"):
+                code = _seco_attr(issuer, "code", "iso-code", "iso").upper()
+                issuer_iso = code if len(code) == 2 else country_label_to_iso2(_seco_text(issuer))
+                if issuer_iso:
+                    break
+            if not issuer_iso:
+                _, issuer_iso = _seco_country(doc)
+            expiry = None
+            for exp in _seco_find(doc, "expiry-date"):
+                for dmy in _seco_find(exp, "day-month-year"):
+                    expiry = _seco_dmy(dmy) or expiry
+                expiry = expiry or _extract_iso_date(_seco_text(exp))
+            if "passport" in doc_type:
+                passports.append({
+                    "number": number,
+                    "issuing_country": issuer_iso or "XX",
+                    "expiration_date": expiry,
+                })
+            elif any(k in doc_type for k in ("id-card", "identity", "identification", "national")):
+                national_ids.append({"number": number, "issuing_country": issuer_iso or "XX"})
+            else:
+                other_registrations.append({
+                    "id_type": doc_type or "OtherRegistration",
+                    "number": number,
+                })
+
+        gender = "U"
+        for node in _seco_find(subject, "gender"):
+            raw = (_seco_text(node) or _seco_attr(node, "value", "code")).upper()[:1]
+            if raw in ("M", "F"):
+                gender = raw
+            elif raw == "W":      # weiblich, version allemande du fichier
+                gender = "F"
+
+        # --- Dates d'acte : inscription et derniere mise a jour ---
+        added_dates, all_dates = [], []
+        for mod in _seco_find(subject, "modification"):
+            mtype = _seco_attr(mod, "modification-type", "type").lower()
+            effective = _extract_iso_date(_seco_attr(mod, "effective-date"))
+            published = _extract_iso_date(_seco_attr(mod, "publication-date"))
+            all_dates.extend(d for d in (effective, published) if d)
+            if effective and "add" in mtype:
+                added_dates.append(effective)
+        listed_on = min(added_dates) if added_dates else (min(all_dates) if all_dates else None)
+        last_update = max(all_dates) if all_dates else None
+
+        set_id = _seco_attr(target, "sanctions-set-id") or _seco_attr(subject, "sanctions-set-id")
+        program = programs.get(set_id, {})
+        program_key = program.get("key", "")
+        program_label = program.get("label", "")
+        # La Suisse transpose l'ONU et l'UE : l'origine de la mesure est une
+        # information de conformite, pas un detail — elle est conservee.
+        origin_authority = program.get("origin", "")
+
+        justification = _seco_localized(subject, "justification")
+        other_information = _seco_localized(subject, "other-information")
+        extra_info = [t for t in (other_information,) if t]
+        if program_label and program_label != justification:
+            extra_info.append(f"Base legale suisse : {program_label}")
+        if origin_authority:
+            extra_info.append(f"Mesure d'origine {origin_authority}, transposee par la Suisse")
+
+        primary_addr = addresses[0] if addresses else {}
+        yield {
+            "entity_id": f"SECO-{ssid}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "maiden_name": "",
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": gender,
+            "countries": {
+                "citizenship": sorted(set(citizenships)),
+                "residence": [],
+                "birth_country": sorted(set(birth_countries)),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else [],
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": None,
+            "designation_reasons": justification or None,
+            "additional_informations": "; ".join(extra_info) or None,
+            "official_reference": build_official_reference(
+                program_label or program_key or f"SECO ssid {ssid}", last_update
+            ),
+            "title": seco_title or None,
+            "listed_on": listed_on,
+            "designating_state": origin_authority or "CH",
+            "sanction_programs": [program_key] if program_key else [],
+            "name_original_script": None,
+            "origin": "SECO Consolidated List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": [],
+        }
+
+
+# ------------------ CONSOLIDATED SCREENING LIST (trade.gov) ------------------
+# Agregat officiel du gouvernement americain (International Trade
+# Administration), publie en JSON public et sans authentification. Son interet
+# n'est PAS de redonner la SDN — Fiskr la recupere deja a la source — mais
+# d'apporter les listes de CONTROLE DES EXPORTATIONS, aujourd'hui absentes :
+#   - Entity List (EL), Denied Persons List (DPL), Unverified List (UVL) et
+#     Military End User (MEU) du Bureau of Industry and Security ;
+#   - ITAR Debarred (DTC) et Nonproliferation Sanctions (ISN) du Departement
+#     d'Etat.
+# Ces listes conditionnent le financement du commerce international : une
+# contrepartie de trade finance peut y figurer sans etre sur aucune liste de
+# gel des avoirs.
+#
+# Structure : {"results": [ {...}, ... ], "sources_used": [...]}
+# Chaque resultat : id, source, type (Individual|Entity|Vessel|Aircraft), name,
+# alt_names[], addresses[{address,city,state,postal_code,country}],
+# dates_of_birth[], places_of_birth[], nationalities[], citizenships[],
+# ids[{type,number,country,issue_date,expiration_date}], programs[],
+# federal_register_notice, start_date, end_date, license_requirement,
+# license_policy, title, remarks, call_sign, vessel_type, vessel_flag,
+# vessel_owner, gross_tonnage, source_list_url.
+#
+# MEME RESERVE que le connecteur SECO : ecrit d'apres le format publie et
+# valide sur un jeu d'essai, pas contre le fichier reel (acces reseau ferme).
+# Toutes les cles sont lues avec un defaut : un champ absent n'interrompt rien.
+#
+# Le fichier est charge d'un bloc (json.load), comme le registre DGT. A
+# l'echelle de la CSL (quelques dizaines de milliers de fiches) c'est sans
+# consequence ; ce serait a revoir si l'ITA publiait un jour un volume
+# comparable au dataset PEP.
+
+_CSL_TYPE_TO_ENTITY = {
+    "individual": "I",
+    "entity": "E",
+    "vessel": "V",
+    "aircraft": "O",
+}
+
+# Par defaut on ecarte la seule liste que Fiskr recupere deja a sa source et
+# qui est active en sortie de boite : la SDN. Si le connecteur Non-SDN est lui
+# aussi active, ajouter ses libelles ici evite de doubler les alertes.
+CSL_DEFAULT_EXCLUDED_SOURCES = ("Specially Designated Nationals",)
+
+
+def _csl_list(value: Any) -> List[str]:
+    """Valeur multiple tolerante : liste JSON, chaine « a; b », ou vide."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if v is not None and str(v).strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(";") if v.strip()]
+    return []
+
+
+def _csl_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "; ".join(str(v).strip() for v in value if v is not None and str(v).strip())
+    return str(value).strip()
+
+
+def _csl_address(entry: Any) -> Tuple[str, str, str]:
+    """(adresse complete, ville, pays) d'une entree d'adresse CSL."""
+    if isinstance(entry, str):
+        return entry.strip(), "", ""
+    if not isinstance(entry, dict):
+        return "", "", ""
+    city = _csl_text(entry.get("city"))
+    country = _csl_text(entry.get("country"))
+    parts = [
+        _csl_text(entry.get("address")),
+        _csl_text(entry.get("postal_code")),
+        city,
+        _csl_text(entry.get("state")),
+        country,
+    ]
+    return ", ".join(p for p in parts if p), city, country
+
+
+def parse_csl_json(
+    file_path: str,
+    excluded_sources: Optional[Tuple[str, ...]] = None,
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse la Consolidated Screening List (trade.gov) vers le schema pivot.
+
+    `excluded_sources` : fragments de libelle, compares sans tenir compte de la
+    casse, des listes a IGNORER. Sert a ne pas dupliquer une liste que Fiskr
+    recupere deja aupres de son emetteur.
+    """
+    excluded = tuple(
+        s.lower() for s in (
+            CSL_DEFAULT_EXCLUDED_SOURCES if excluded_sources is None else excluded_sources
+        ) if s
+    )
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    results = payload.get("results") if isinstance(payload, dict) else payload
+    for row in results or []:
+        if not isinstance(row, dict):
+            continue
+        name = _csl_text(row.get("name"))
+        csl_id = _csl_text(row.get("id")) or _csl_text(row.get("entity_number"))
+        if not name or not csl_id:
+            continue
+        source = _csl_text(row.get("source"))
+        source_low = source.lower()
+        if any(fragment in source_low for fragment in excluded):
+            continue
+
+        entity_type = _CSL_TYPE_TO_ENTITY.get(_csl_text(row.get("type")).lower(), "E")
+
+        aliases_raw = [{"name": a, "type": "Strong"} for a in _csl_list(row.get("alt_names"))]
+
+        dobs = []
+        for raw in _csl_list(row.get("dates_of_birth")):
+            iso = _extract_iso_date(raw) or _normalize_partial_date(raw)
+            if not iso:
+                # « circa 1968 », « 1968 to 1970 » : on retient la 1re annee
+                year = re.search(r"(\d{4})", raw)
+                iso = f"{year.group(1)}-01-01" if year else None
+            if iso:
+                dobs.append(iso)
+
+        addresses = []
+        address_countries = []
+        for entry in row.get("addresses") or []:
+            full, city, country = _csl_address(entry)
+            if full:
+                addresses.append({"full": full, "city": city, "country": country})
+            if country:
+                address_countries.append(country_label_to_iso2(country))
+
+        citizenships = [country_label_to_iso2(c) for c in
+                        _csl_list(row.get("citizenships")) + _csl_list(row.get("nationalities"))]
+        birth_countries = []
+        place_of_birth = None
+        for pob in _csl_list(row.get("places_of_birth")):
+            if not place_of_birth:
+                place_of_birth = pob
+            birth_countries.append(country_label_to_iso2(pob.split(",")[-1].strip()))
+
+        passports, national_ids, other_registrations = [], [], []
+        for doc in row.get("ids") or []:
+            if not isinstance(doc, dict):
+                continue
+            number = _csl_text(doc.get("number"))
+            if not number:
+                continue
+            doc_type = _csl_text(doc.get("type")).lower()
+            issuer = country_label_to_iso2(_csl_text(doc.get("country"))) or "XX"
+            expiry = _extract_iso_date(_csl_text(doc.get("expiration_date")))
+            if "passport" in doc_type:
+                passports.append({"number": number, "issuing_country": issuer,
+                                  "expiration_date": expiry})
+            elif any(k in doc_type for k in ("national", "identification", "cedula", "id card")):
+                national_ids.append({"number": number, "issuing_country": issuer})
+            else:
+                other_registrations.append({"id_type": doc_type or "OtherRegistration",
+                                            "number": number})
+
+        # Le contexte reglementaire d'une liste de controle des exportations
+        # est ce qui permet a l'analyste de trancher : il est conserve.
+        remarks = _csl_text(row.get("remarks"))
+        extra = [t for t in (remarks,) if t]
+        for label, key in (("Exigence de licence", "license_requirement"),
+                           ("Politique de licence", "license_policy"),
+                           ("Fiche source", "source_list_url")):
+            value = _csl_text(row.get(key))
+            if value:
+                extra.append(f"{label} : {value}")
+
+        federal_notice = _csl_text(row.get("federal_register_notice"))
+        start_date = _extract_iso_date(_csl_text(row.get("start_date")))
+        primary_addr = addresses[0] if addresses else {}
+
+        yield {
+            "entity_id": f"CSL-{csl_id}",
+            "entity_type": entity_type,
+            "primary_name": name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": sorted(set(dobs)),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted({c for c in citizenships if c}),
+                "residence": [],
+                "birth_country": sorted({c for c in birth_countries if c}),
+                "jurisdiction_country": sorted(set(address_countries)) if entity_type != "I" else [],
+            },
+            "place_of_birth": place_of_birth,
+            "address": primary_addr.get("full"),
+            "alternative_addresses": [a["full"] for a in addresses[1:]],
+            "city": primary_addr.get("city") or None,
+            "country": primary_addr.get("country") or None,
+            "designation": _csl_text(row.get("title")) or None,
+            # C'est LA liste americaine qui a designe la contrepartie : sans
+            # elle, l'analyste ne sait pas de quelle obligation il s'agit.
+            "designation_reasons": source or None,
+            "additional_informations": "; ".join(extra) or None,
+            "official_reference": build_official_reference(federal_notice, start_date),
+            "title": _csl_text(row.get("title")) or None,
+            "listed_on": start_date,
+            "delisted_on": _extract_iso_date(_csl_text(row.get("end_date"))),
+            "designating_state": "US",
+            "sanction_programs": _csl_list(row.get("programs")),
+            "name_original_script": None,
+            "origin": f"US CSL — {source}" if source else "US Consolidated Screening List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": other_registrations,
+            "passport_documents": passports,
+            "national_id_documents": national_ids,
+            "other_id_documents": [],
+            "vessel_call_sign": _csl_text(row.get("call_sign")) or None,
+            "vessel_type": _csl_text(row.get("vessel_type")) or None,
+            "vessel_flag": _csl_text(row.get("vessel_flag")) or None,
+            "vessel_owner": _csl_text(row.get("vessel_owner")) or None,
+            "vessel_tonnage": _csl_text(row.get("gross_tonnage")) or None,
+        }
+
+
+# ------------------ LECTURE TOLERANTE DE TABLEAUX ------------------
+# Les listes nationales publiees en CSV ou en tableur changent d'intitules de
+# colonnes au fil des versions, et plusieurs existent en deux langues. Plutot
+# que de figer une orthographe, les connecteurs ci-dessous cherchent une
+# colonne par sa FORME NORMALISEE (sans casse, sans accents, sans separateurs),
+# et acceptent plusieurs libelles pour un meme champ.
+
+
+def _table_key(label: str) -> str:
+    """« Date of Birth », « date_of_birth », « Date de naissance » -> forme comparable."""
+    return re.sub(r"[^a-z0-9]", "", _strip_accents_lower(label or ""))
+
+
+def _table_get(row: Dict[str, Any], *labels: str) -> str:
+    """Premiere colonne renseignee parmi `labels`, comparee sans casse ni accents."""
+    normalized = {_table_key(k): v for k, v in row.items() if k}
+    for label in labels:
+        value = normalized.get(_table_key(label))
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _read_xlsx_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
+    """Lignes d'un classeur Excel sous forme de dictionnaires (1re feuille).
+
+    La premiere ligne NON VIDE fait office d'en-tete : les listes officielles
+    font souvent preceder le tableau d'un bandeau de titre.
+    """
+    if not XLSX_AVAILABLE:
+        raise RuntimeError(
+            "Lecture XLSX indisponible : le paquet openpyxl n'est pas installe. "
+            "Installez-le (pip install openpyxl) ou utilisez la version CSV de la liste."
+        )
+    workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        sheet = workbook[workbook.sheetnames[0]]
+        header: Optional[List[str]] = None
+        for raw in sheet.iter_rows(values_only=True):
+            values = ["" if v is None else str(v).strip() for v in raw]
+            if header is None:
+                if any(values):
+                    header = values
+                continue
+            if not any(values):
+                continue
+            yield {header[i]: values[i] for i in range(min(len(header), len(values)))}
+    finally:
+        workbook.close()
+
+
+def _read_table_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
+    """Lignes d'un CSV ou d'un XLSX, choisies sur l'extension du fichier."""
+    if file_path.lower().endswith((".xlsx", ".xlsm")):
+        yield from _read_xlsx_rows(file_path)
+        return
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            yield {k: ("" if v is None else v) for k, v in row.items() if k}
+
+
+# ------------------ LISTE CANADIENNE (SEMA, Affaires mondiales Canada) ------------------
+# Liste consolidee des sanctions autonomes canadiennes (Special Economic
+# Measures Act et Loi sur les mesures economiques speciales), publiee en CSV
+# par Affaires mondiales Canada. Le Canada sanctionne de facon autonome, avec
+# un perimetre qui ne recoupe ni celui de l'UE ni celui de l'OFAC.
+#
+# Le fichier existe en anglais ET en francais : les deux jeux d'intitules sont
+# acceptes, ce qui evite qu'un telechargement depuis la page francophone donne
+# une liste vide. Colonnes attendues (ordre indifferent) :
+#   Country / Pays, Item / Article, Schedule / Annexe,
+#   LastName / Nom, GivenName / Prenom, Aliases / Pseudonymes,
+#   DateOfBirth / DateDeNaissance, Entity / Entite, Title / Titre,
+#   DateOfListing / DateInscription
+#
+# MEME RESERVE que SECO et CSL : ecrit d'apres le format publie et valide sur
+# un jeu d'essai, pas contre le fichier reel (acces reseau ferme).
+
+
+def _canada_stable_id(schedule: str, item: str, name: str) -> str:
+    """
+    Le fichier canadien ne porte pas d'identifiant technique. La cle de delta
+    est donc reconstruite : annexe + article quand ils sont presents (c'est la
+    reference reglementaire, stable d'une publication a l'autre), a defaut une
+    empreinte du nom. Sans cle stable, chaque publication paraitrait remplacer
+    integralement la precedente et le delta serait illisible.
+    """
+    reference = "-".join(p for p in (schedule, item) if p)
+    if reference:
+        return re.sub(r"[^A-Za-z0-9.-]+", "", reference.replace(" ", ""))
+    return hashlib.sha1(_strip_accents_lower(name).encode("utf-8")).hexdigest()[:12].upper()
+
+
+def parse_canada_sema_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee des sanctions autonomes canadiennes."""
+    seen: Dict[str, int] = {}
+    for row in _read_table_rows(file_path):
+        entity = _table_get(row, "Entity", "Entite", "Entité", "EntityName")
+        last_name = _table_get(row, "LastName", "Last Name", "Nom", "NomDeFamille")
+        given_name = _table_get(row, "GivenName", "Given Name", "Prenom", "Prénom", "Prenoms")
+        if entity:
+            entity_type = "E"
+            primary_name = entity
+            first_name = last_name_out = ""
+        else:
+            entity_type = "I"
+            primary_name = " ".join(p for p in (given_name, last_name) if p)
+            first_name, last_name_out = given_name, last_name
+        if not primary_name:
+            continue
+
+        schedule = _table_get(row, "Schedule", "Annexe")
+        item = _table_get(row, "Item", "Article")
+        base_id = _canada_stable_id(schedule, item, primary_name)
+        # Une meme annexe/article peut porter plusieurs designes : on suffixe
+        # pour garder une cle unique sans perdre la reference reglementaire.
+        seen[base_id] = seen.get(base_id, 0) + 1
+        entity_id = base_id if seen[base_id] == 1 else f"{base_id}.{seen[base_id]}"
+
+        aliases_raw = [
+            {"name": a, "type": "Strong"}
+            for a in parse_multi_value(
+                {"aliases": _table_get(row, "Aliases", "Alias", "Pseudonymes", "AKA")},
+                "aliases",
+            )
+        ]
+        # L'ordre inverse (patronyme d'abord) reste cherchable, comme pour SECO
+        if entity_type == "I" and given_name and last_name:
+            aliases_raw.append({"name": f"{last_name} {given_name}", "type": "Strong"})
+
+        dob = _extract_iso_date(_table_get(row, "DateOfBirth", "Date of Birth",
+                                           "DateDeNaissance", "Date de naissance"))
+        country = _table_get(row, "Country", "Pays")
+        listed_on = _extract_iso_date(_table_get(row, "DateOfListing", "Date of Listing",
+                                                 "DateInscription", "Date d'inscription"))
+        title = _table_get(row, "Title", "Titre")
+        reference = " ".join(p for p in (schedule and f"Annexe {schedule}",
+                                         item and f"article {item}") if p)
+
+        yield {
+            "entity_id": f"CA-{entity_id}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name, "last_name": last_name_out, "maiden_name": ""
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": [dob] if dob else [],
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": [country_label_to_iso2(country)] if (country and entity_type == "I") else [],
+                "residence": [],
+                "birth_country": [],
+                "jurisdiction_country": [country_label_to_iso2(country)] if (country and entity_type != "I") else [],
+            },
+            "place_of_birth": None,
+            "address": None,
+            "alternative_addresses": [],
+            "city": None,
+            "country": country or None,
+            "designation": title or None,
+            "designation_reasons": f"Sanctions autonomes canadiennes — {country}" if country
+                                   else "Sanctions autonomes canadiennes",
+            "additional_informations": None,
+            "official_reference": build_official_reference(reference, listed_on),
+            "title": title or None,
+            "listed_on": listed_on,
+            "designating_state": "CA",
+            "sanction_programs": [country] if country else [],
+            "name_original_script": None,
+            "origin": "Canada — Sanctions autonomes (SEMA)",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": [],
+        }
+
+
+# ------------------ LISTE AUSTRALIENNE (DFAT Consolidated List) ------------------
+# Liste consolidee du Department of Foreign Affairs and Trade, qui reunit les
+# sanctions onusiennes transposees ET les sanctions autonomes australiennes.
+# Publiee en XLSX et en CSV : les deux sont acceptes, l'extension tranche.
+#
+# Structure en LIGNES REPETEES par variante de nom, regroupees par `Reference`
+# — le meme principe que le ConList britannique. La colonne `Name Type`
+# distingue le nom principal des alias.
+#
+# MEME RESERVE : ecrit d'apres le format publie, valide sur un jeu d'essai.
+
+
+def parse_dfat_consolidated(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee australienne (DFAT), CSV ou XLSX."""
+    groups: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    for row in _read_table_rows(file_path):
+        reference = _table_get(row, "Reference", "Ref", "ReferenceNumber")
+        name = _table_get(row, "Name of Individual or Entity", "Name", "NameOfIndividualOrEntity")
+        if not name:
+            continue
+        if not reference:
+            reference = hashlib.sha1(
+                _strip_accents_lower(name).encode("utf-8")).hexdigest()[:12].upper()
+
+        group = groups.get(reference)
+        if group is None:
+            group = groups[reference] = {
+                "primary": "", "aliases": [], "type": "", "dobs": [], "pobs": [],
+                "citizenships": [], "addresses": [], "info": [], "committees": "",
+                "control_date": "", "listing": "",
+            }
+            order.append(reference)
+
+        name_type = _table_get(row, "Name Type", "NameType", "Type of Name").lower()
+        is_primary = ("primary" in name_type) or (not name_type and not group["primary"])
+        if is_primary and not group["primary"]:
+            group["primary"] = name
+        elif name != group["primary"]:
+            group["aliases"].append(name)
+
+        group["type"] = group["type"] or _table_get(row, "Type", "Entity Type")
+        for raw in parse_multi_value({"v": _table_get(row, "Date of Birth", "DateOfBirth", "DOB")}, "v"):
+            iso = _extract_iso_date(raw) or _normalize_partial_date(raw)
+            if not iso:
+                year = re.search(r"(\d{4})", raw)
+                iso = f"{year.group(1)}-01-01" if year else None
+            if iso:
+                group["dobs"].append(iso)
+        for key in ("Place of Birth", "PlaceOfBirth"):
+            value = _table_get(row, key)
+            if value:
+                group["pobs"].append(value)
+                break
+        for raw in parse_multi_value({"v": _table_get(row, "Citizenship", "Nationality")}, "v"):
+            group["citizenships"].append(country_label_to_iso2(raw))
+        address = _table_get(row, "Address", "Addresses")
+        if address and address not in group["addresses"]:
+            group["addresses"].append(address)
+        info = _table_get(row, "Additional Information", "AdditionalInformation")
+        if info and info not in group["info"]:
+            group["info"].append(info)
+        group["committees"] = group["committees"] or _table_get(row, "Committees", "Committee")
+        group["listing"] = group["listing"] or _table_get(row, "Listing Information", "ListingInformation")
+        group["control_date"] = group["control_date"] or _table_get(row, "Control Date", "ControlDate")
+
+    for reference in order:
+        group = groups[reference]
+        primary_name = group["primary"] or (group["aliases"].pop(0) if group["aliases"] else "")
+        if not primary_name:
+            continue
+        raw_type = group["type"].lower()
+        if "individual" in raw_type or "person" in raw_type:
+            entity_type = "I"
+        elif "vessel" in raw_type or "ship" in raw_type:
+            entity_type = "V"
+        else:
+            entity_type = "E"
+
+        control_date = _extract_iso_date(group["control_date"])
+        # Le comite onusien d'origine, quand il y en a un : la liste
+        # australienne transpose l'ONU autant qu'elle designe pour son compte.
+        committees = group["committees"]
+        yield {
+            "entity_id": f"AU-{reference}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(
+                [{"name": a, "type": "Strong"} for a in dict.fromkeys(group["aliases"])]
+            ),
+            "dates_of_birth": sorted(set(group["dobs"])),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted({c for c in group["citizenships"] if c}),
+                "residence": [],
+                "birth_country": [],
+                "jurisdiction_country": [],
+            },
+            "place_of_birth": group["pobs"][0] if group["pobs"] else None,
+            "address": group["addresses"][0] if group["addresses"] else None,
+            "alternative_addresses": group["addresses"][1:],
+            "city": None,
+            "country": None,
+            "designation": None,
+            "designation_reasons": group["listing"] or None,
+            "additional_informations": "; ".join(group["info"]) or None,
+            "official_reference": build_official_reference(reference, control_date),
+            "title": None,
+            "listed_on": control_date,
+            "designating_state": "UN" if committees else "AU",
+            "sanction_programs": [committees] if committees else [],
+            "name_original_script": None,
+            "origin": "Australie — DFAT Consolidated List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": [],
         }
 
 

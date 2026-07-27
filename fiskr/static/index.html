@@ -256,6 +256,11 @@
                                         <option value="WATCHLIST_UN">Liste consolidée ONU (XML)</option>
                                         <option value="WATCHLIST_PEP">PEP — OpenSanctions (CSV)</option>
                                         <option value="WATCHLIST_OFSI">UK OFSI — ConList (CSV)</option>
+                                        <option value="WATCHLIST_SECO">Suisse SECO — Liste consolidée (XML ou CSV)</option>
+                                        <option value="WATCHLIST_OFAC_NONSDN">OFAC Non-SDN — Liste consolidée (XML)</option>
+                                        <option value="WATCHLIST_CSL">US CSL — Consolidated Screening List (JSON)</option>
+                                        <option value="WATCHLIST_CANADA">Canada SEMA — Sanctions autonomes (CSV)</option>
+                                        <option value="WATCHLIST_DFAT">Australie DFAT — Liste consolidée (CSV ou XLSX)</option>
                                         <option value="CLIENT_BASE">Référentiel Clients Banque (CSV)</option>
                                     </select>
                                 </div>
@@ -642,6 +647,46 @@
                                 <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
                                 <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
                                 <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇺🇸 OFAC Non-SDN — Liste consolidée (XML)</h3>
+                                <p class="section-desc">Second fichier de l'OFAC, au même format que la SDN. Il porte les régimes qui n'emportent pas de gel total des avoirs et sont pour cette raison absents de la SDN : sanctions sectorielles (SSI), FSE, NS-MBS, PLC, MEU, CMIC. Liste séparée, seuillable à part, car la conséquence opérationnelle d'une touche n'y est pas la même (<code>sync.ofac_nonsdn.enabled</code>).</p>
+                                <button id="sync-ofacnonsdn-btn" class="btn btn-primary" onclick="handleSourceSync('OFACNONSDN')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇺🇸 US CSL — Consolidated Screening List (JSON)</h3>
+                                <p class="section-desc">Agrégat officiel du gouvernement américain, public et sans clé. Son apport propre est le contrôle des exportations, absent de toutes les autres sources branchées : Entity List, Denied Persons, Unverified et Military End User du BIS, ITAR Debarred et Nonproliferation du Département d'État. Les listes déjà récupérées à leur source sont écartées à la lecture pour ne pas doubler les alertes (<code>sync.csl.exclude_sources</code>).</p>
+                                <button id="sync-csl-btn" class="btn btn-primary" onclick="handleSourceSync('CSL')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇨🇦 Canada SEMA — Sanctions autonomes (CSV)</h3>
+                                <p class="section-desc">Liste consolidée d'Affaires mondiales Canada. Le Canada désigne de façon autonome : son périmètre ne recoupe ni celui de l'UE ni celui de l'OFAC. Le fichier n'ayant pas d'identifiant technique, la clé de rapprochement est reconstruite depuis la référence réglementaire (annexe et article), faute de quoi chaque publication paraîtrait remplacer intégralement la précédente (<code>sync.canada.enabled</code>).</p>
+                                <button id="sync-canada-btn" class="btn btn-primary" onclick="handleSourceSync('CANADA')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇦🇺 Australie DFAT — Liste consolidée</h3>
+                                <p class="section-desc">Liste consolidée du Department of Foreign Affairs and Trade, qui réunit les sanctions onusiennes transposées et les désignations autonomes australiennes. Les lignes se répètent par variante de nom et sont regroupées par référence, comme le fichier britannique. L'extension de l'URL choisit le lecteur : CSV en natif, XLSX si le paquet optionnel openpyxl est installé (<code>sync.dfat.enabled</code>).</p>
+                                <button id="sync-dfat-btn" class="btn btn-primary" onclick="handleSourceSync('DFAT')">
+                                    Synchroniser maintenant
+                                </button>
+                            </div>
+
+                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                                <h3 style="margin-top: 0;">🇨🇭 Suisse SECO — Liste consolidée</h3>
+                                <p class="section-desc">Liste consolidée du Secrétariat d'État à l'économie. Deux voies au choix : l'export officiel SESAM de la Confédération, seul à porter la base légale suisse (ordonnance RS) et les dates d'inscription, ou le jeu OpenSanctions au format plat en secours. Opt-in selon l'exposition suisse (<code>sync.seco.enabled</code>, <code>sync.seco.format</code>).</p>
+                                <button id="sync-seco-btn" class="btn btn-primary" onclick="handleSourceSync('SECO')">
                                     Synchroniser maintenant
                                 </button>
                             </div>

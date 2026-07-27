@@ -36,7 +36,9 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
-    parse_pep_targets_csv, parse_ofsi_conlist_csv
+    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
+    parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES,
+    parse_canada_sema_csv, parse_dfat_consolidated
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
@@ -45,6 +47,11 @@ from fiskr.settings import require_approval_enabled
 logger = logging.getLogger("fiskr.sync")
 
 DEFAULT_OFAC_URL = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML"
+# Second fichier publie par l'OFAC, meme format « Advanced » : la liste
+# consolidee Non-SDN. Elle porte les regimes SANS gel total des avoirs, donc
+# absents du fichier SDN — sanctions sectorielles (SSI), FSE, NS-MBS, PLC,
+# MEU, CMIC. Publique, sans authentification.
+DEFAULT_OFAC_NONSDN_URL = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONS_ADVANCED.XML"
 # Version anglaise du Journal Officiel : c'est la reference reglementaire retenue
 DEFAULT_EURLEX_DAILY_URL = "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
 DEFAULT_EURLEX_KEYWORD = "restrictive measures"
@@ -68,6 +75,41 @@ DEFAULT_PEP_URL = "https://data.opensanctions.org/datasets/latest/peps/targets.s
 
 # Liste consolidee UK OFSI (HM Treasury, publique, format 2022)
 DEFAULT_OFSI_URL = "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
+
+# Liste consolidee suisse (SECO). Deux voies au choix, reglees par
+# `sync.seco.format` :
+#   - "xml" (defaut) : export officiel SESAM de la Confederation. Source qui
+#     fait foi, gratuite, sans licence, et qui porte la base legale suisse
+#     (ordonnance RS) ainsi que les dates d'inscription.
+#   - "opensanctions" : jeu `ch_seco_sanctions` agrege par OpenSanctions, format
+#     plat targets.simple.csv. Utile si l'export officiel est indisponible, au
+#     prix de la base legale et des dates d'acte — et sous licence
+#     OpenSanctions pour un usage commercial.
+DEFAULT_SECO_URL = (
+    "https://www.sesam.search.admin.ch/sesam-search-web/pages/"
+    "downloadXmlGesamtliste.xhtml?lang=en&action=downloadXmlGesamtlisteAction"
+)
+DEFAULT_SECO_OPENSANCTIONS_URL = (
+    "https://data.opensanctions.org/datasets/latest/ch_seco_sanctions/targets.simple.csv"
+)
+
+# Consolidated Screening List du gouvernement americain (International Trade
+# Administration). Agregat public et sans cle : son apport propre est le
+# CONTROLE DES EXPORTATIONS (BIS Entity List, Denied Persons, Unverified,
+# Military End User ; ITAR Debarred et Nonproliferation du Departement d'Etat).
+DEFAULT_CSL_URL = "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
+
+# Liste consolidee des sanctions autonomes canadiennes (SEMA), publiee en CSV
+# par Affaires mondiales Canada. Le Canada designe de facon autonome, avec un
+# perimetre qui ne recoupe ni celui de l'UE ni celui de l'OFAC.
+DEFAULT_CANADA_URL = (
+    "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.csv"
+)
+
+# Liste consolidee australienne (DFAT) : sanctions onusiennes transposees ET
+# sanctions autonomes australiennes. Publiee en XLSX et en CSV — l'extension
+# de l'URL choisit le lecteur, la voie XLSX demandant le paquet openpyxl.
+DEFAULT_DFAT_URL = "https://www.dfat.gov.au/sites/default/files/regulation8_consolidated.csv"
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -175,6 +217,61 @@ def get_sync_config() -> Dict[str, Any]:
             "enabled": bool((sync_cfg.get("ofsi") or {}).get("enabled", False)),
             "url": (sync_cfg.get("ofsi") or {}).get("url", DEFAULT_OFSI_URL),
         },
+        # Liste consolidee Non-SDN de l'OFAC (sanctions sectorielles et
+        # regimes sans gel total). Opt-in : elle elargit le perimetre d'alertes.
+        "ofac_nonsdn": {
+            "enabled": bool((sync_cfg.get("ofac_nonsdn") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("ofac_nonsdn") or {}).get("url", DEFAULT_OFAC_NONSDN_URL),
+        },
+        # Consolidated Screening List (trade.gov). `exclude_sources` evite de
+        # dupliquer une liste deja recuperee a sa source : par defaut la SDN.
+        "csl": _csl_source_config(sync_cfg.get("csl") or {}),
+        # Sanctions autonomes canadiennes (SEMA) et liste consolidee
+        # australienne (DFAT) : opt-in selon l'exposition geographique.
+        "canada": {
+            "enabled": bool((sync_cfg.get("canada") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("canada") or {}).get("url", DEFAULT_CANADA_URL),
+        },
+        "dfat": {
+            "enabled": bool((sync_cfg.get("dfat") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("dfat") or {}).get("url", DEFAULT_DFAT_URL),
+        },
+        # Liste suisse SECO, opt-in selon l'exposition CH. `format` choisit la
+        # voie : "xml" (export officiel SESAM) ou "opensanctions" (CSV agrege).
+        # Une URL laissee vide prend le defaut correspondant au format, pour
+        # qu'un simple basculement de format suffise a changer de source.
+        "seco": _seco_source_config(sync_cfg.get("seco") or {}),
+    }
+
+
+def _csl_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Configuration CSL. `exclude_sources` absent (et non pas vide) reprend le
+    defaut : une liste explicitement vide signifie « tout charger »."""
+    raw_excluded = raw.get("exclude_sources", None)
+    if raw_excluded is None:
+        excluded = tuple(CSL_DEFAULT_EXCLUDED_SOURCES)
+    elif isinstance(raw_excluded, str):
+        excluded = tuple(v.strip() for v in raw_excluded.split(";") if v.strip())
+    else:
+        excluded = tuple(str(v).strip() for v in raw_excluded if str(v).strip())
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "url": str(raw.get("url", "") or "").strip() or DEFAULT_CSL_URL,
+        "exclude_sources": excluded,
+    }
+
+
+def _seco_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    fmt = str(raw.get("format", "xml") or "xml").strip().lower()
+    if fmt not in ("xml", "opensanctions"):
+        fmt = "xml"
+    url = str(raw.get("url", "") or "").strip()
+    if not url:
+        url = DEFAULT_SECO_OPENSANCTIONS_URL if fmt == "opensanctions" else DEFAULT_SECO_URL
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "format": fmt,
+        "url": url,
     }
 
 
@@ -359,6 +456,39 @@ def _clamp_to_column_lengths(values: Dict[str, Any]) -> Dict[str, Any]:
     return values
 
 
+# Colonnes etendues extraites par les parseurs officiels (26 champs AML). Elles
+# vivent ici et non dans l'API parce que les DEUX chemins d'ecriture en ont
+# besoin : l'upload manuel et la synchronisation automatique.
+EXTENDED_ENTITY_FIELDS = (
+    "crypto_wallets", "bic_swift", "tax_id", "duns_number",
+    "vessel_call_sign", "vessel_mmsi", "vessel_flag", "vessel_type",
+    "vessel_tonnage", "vessel_owner",
+    "aircraft_model", "aircraft_operator", "aircraft_construction_number",
+    "sanction_programs", "listed_on", "delisted_on", "name_original_script",
+    "title", "pep_role", "secondary_sanctions_risk", "designating_state",
+    "organization_established_date", "organization_type",
+    "phone_numbers", "email_addresses", "websites",
+)
+
+_EXTENDED_LIST_FIELDS = ("sanction_programs", "phone_numbers", "email_addresses", "websites")
+
+
+def extended_entity_kwargs(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Champs etendus normalises : les colonnes CSV texte des champs liste
+    sont decoupees sur « ; » (parite avec les parseurs officiels)."""
+    out: Dict[str, Any] = {}
+    for field in EXTENDED_ENTITY_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str) and field in _EXTENDED_LIST_FIELDS:
+            value = [v.strip() for v in value.split(";") if v.strip()] or None
+        elif isinstance(value, str) and field == "crypto_wallets":
+            value = [{"currency": "", "address": v.strip()} for v in value.split(";") if v.strip()] or None
+        elif isinstance(value, str):
+            value = value.strip() or None
+        out[field] = value
+    return out
+
+
 def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str, Any]) -> WatchlistEntity:
     """Construit une ligne WatchlistEntity depuis un enregistrement au schema pivot."""
     parsed_name = item.get("individual_name_parsed") or {}
@@ -390,6 +520,7 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
         designation=item.get("designation"),
         designation_reasons=item.get("designation_reasons"),
         additional_informations=item.get("additional_informations") or item.get("additional_info"),
+        official_reference=item.get("official_reference"),
         alternative_addresses=alt_addrs or [],
         imo_number=item.get("imo_number"),
         aircraft_tail_number=item.get("aircraft_tail_number"),
@@ -399,7 +530,8 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
         passport_documents=item.get("passport_documents"),
         national_id_documents=item.get("national_id_documents"),
         other_id_documents=item.get("other_id_documents"),
-        entity_checksum=item.get("entity_checksum") or compute_checksum(item)
+        entity_checksum=item.get("entity_checksum") or compute_checksum(item),
+        **extended_entity_kwargs(item)
     )))
 
 
@@ -1138,6 +1270,134 @@ def run_ofsi_sync(
         db, source="OFSI", file_type="WATCHLIST_OFSI", url=cfg["url"],
         parser=parse_ofsi_conlist_csv, file_label="UK_OFSI_ConList",
         temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_ofac_nonsdn_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee Non-SDN de l'OFAC (CONS_ADVANCED.XML) et
+    remplace la liste Non-SDN active.
+
+    C'est le pendant de la SDN : memes obligations de criblage, mais des
+    regimes qui n'emportent pas de gel total des avoirs (sanctions
+    sectorielles SSI, FSE, NS-MBS, PLC, MEU, CMIC) et qui sont pour cette
+    raison absents du fichier SDN. Liste separee — `WATCHLIST_OFAC_NONSDN` —
+    parce que la consequence operationnelle d'une touche n'y est pas la meme
+    et qu'un etablissement doit pouvoir la seuiller a part.
+    """
+    cfg = get_sync_config()["ofac_nonsdn"]
+    return _run_list_replacement_sync(
+        db, source="OFACNONSDN", file_type="WATCHLIST_OFAC_NONSDN", url=cfg["url"],
+        parser=parse_ofac_consolidated_xml, file_label="OFAC_Consolidated_NonSDN",
+        temp_suffix=".xml", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_csl_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la Consolidated Screening List americaine (trade.gov) et
+    remplace la liste CSL active.
+
+    L'agregat contient la SDN, que Fiskr recupere deja aupres de l'OFAC : les
+    libelles de `sync.csl.exclude_sources` sont ecartes a la lecture pour ne
+    pas doubler les alertes. Ce qui reste est l'apport propre de la CSL — les
+    listes de controle des exportations (BIS, Departement d'Etat), absentes de
+    toutes les autres sources branchees.
+    """
+    cfg = get_sync_config()["csl"]
+    excluded = cfg["exclude_sources"]
+    return _run_list_replacement_sync(
+        db, source="CSL", file_type="WATCHLIST_CSL", url=cfg["url"],
+        parser=lambda path: parse_csl_json(path, excluded_sources=excluded),
+        file_label="US_Consolidated_Screening_List",
+        temp_suffix=".json", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_canada_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee des sanctions autonomes canadiennes (SEMA)
+    et remplace la liste canadienne active.
+
+    Le fichier existe en anglais et en francais ; le lecteur accepte les deux
+    jeux d'intitules de colonnes, pour qu'un telechargement depuis la page
+    francophone ne produise pas une liste vide.
+    """
+    cfg = get_sync_config()["canada"]
+    return _run_list_replacement_sync(
+        db, source="CANADA", file_type="WATCHLIST_CANADA", url=cfg["url"],
+        parser=parse_canada_sema_csv, file_label="Canada_SEMA_Consolidated",
+        temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_dfat_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee australienne (DFAT) et remplace la liste
+    australienne active.
+
+    Le format suit l'extension de l'URL configuree : `.csv` par defaut, `.xlsx`
+    si l'etablissement prefere le classeur publie — ce dernier demande le
+    paquet optionnel openpyxl, dont l'absence produit un rapport d'erreur
+    explicite plutot qu'une pile d'appels.
+    """
+    cfg = get_sync_config()["dfat"]
+    suffix = ".xlsx" if cfg["url"].lower().split("?")[0].endswith((".xlsx", ".xlsm")) else ".csv"
+    return _run_list_replacement_sync(
+        db, source="DFAT", file_type="WATCHLIST_DFAT", url=cfg["url"],
+        parser=parse_dfat_consolidated, file_label="Australia_DFAT_Consolidated",
+        temp_suffix=suffix, trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_seco_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee suisse (SECO) et remplace la liste SECO
+    active.
+
+    Deux voies au choix (`sync.seco.format`), qui produisent le meme schema
+    pivot et donc le meme criblage :
+      - `xml`           : export officiel SESAM de la Confederation. Voie qui
+                          fait foi ; elle seule porte la base legale suisse
+                          (ordonnance RS) et les dates d'inscription.
+      - `opensanctions` : jeu `ch_seco_sanctions` au format targets.simple.csv.
+                          Voie de secours a format plat, soumise a la licence
+                          OpenSanctions pour un usage commercial.
+    """
+    cfg = get_sync_config()["seco"]
+    if cfg["format"] == "opensanctions":
+        parser, label, suffix = parse_seco_opensanctions_csv, "SECO_OpenSanctions", ".csv"
+    else:
+        parser, label, suffix = parse_seco_xml, "SECO_Gesamtliste", ".xml"
+    return _run_list_replacement_sync(
+        db, source="SECO", file_type="WATCHLIST_SECO", url=cfg["url"],
+        parser=parser, file_label=label,
+        temp_suffix=suffix, trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 
