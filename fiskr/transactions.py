@@ -353,9 +353,9 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     # phonetique seule) + index local construit une seule fois par message
     from fiskr.settings import blocking_layout, blocking_config_for, scoring_config_with_thresholds
     from fiskr.fprules import evaluate_fp_rules, build_filtering_ctx, annotate_suppression
-    filtering_cfg = blocking_config_for(blocking_layout(db, "FILTERING"))
+    filtering_cfg = blocking_config_for(blocking_layout(db, "FILTERING"), channel="FILTERING")
     # Seuils de cut-off a chaud (reglage > config.yaml), memes regles qu'au criblage
-    scoring_config = scoring_config_with_thresholds(db)
+    scoring_config = scoring_config_with_thresholds(db, channel="FILTERING")
     all_entities = [item for items in watchlist_index.values() for item in items]
     # Dedup par entity_id (une entite apparait sous plusieurs cles de l'index criblage)
     unique_entities = {e["entity_id"]: e for e in all_entities}.values()

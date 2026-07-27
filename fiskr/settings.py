@@ -236,12 +236,19 @@ def blocking_layout(db, channel: str) -> list:
     return blocking_layout_with_source(db, channel)["layout"]
 
 
-def blocking_config_for(layout: list) -> Dict[str, Any]:
-    """Copie de la config globale avec le layout de blocking injecte."""
+def blocking_config_for(layout: list, channel: str = "SCREENING") -> Dict[str, Any]:
+    """Copie de la config globale avec le layout de blocking injecte.
+
+    Le CANAL voyage avec la config : les capacites du moteur se reglent par
+    canal, et `generate_blocking_keys` doit savoir sous quel canal il travaille
+    sans qu'on ait a changer sa signature ni celle de ses six appelants.
+    """
     cfg = dict(config)
     blocking_cfg = dict(config.get("blocking", {}) or {})
     blocking_cfg["custom_key_layout"] = list(layout)
+    blocking_cfg["channel"] = channel
     cfg["blocking"] = blocking_cfg
+    cfg["engine_channel"] = channel
     return cfg
 
 
@@ -375,15 +382,22 @@ def score_thresholds(db) -> Dict[str, Any]:
     return out
 
 
-def scoring_config_with_thresholds(db) -> Dict[str, Any]:
+def scoring_config_with_thresholds(db, channel: str = "SCREENING") -> Dict[str, Any]:
     """Copie de la config globale avec les seuils a chaud injectes — a passer
-    au moteur de scoring pour que le reglage prenne effet sans redemarrage."""
+    au moteur de scoring pour que le reglage prenne effet sans redemarrage.
+
+    `engine_channel` voyage avec la config pour la meme raison que dans
+    `blocking_config_for` : les capacites du moteur se reglent par canal, et
+    `match_entities` doit savoir lequel s'applique sans changement de
+    signature. Absent = criblage, qui est le comportement historique.
+    """
     thresholds = score_thresholds(db)
     cfg = dict(config)
     scoring_cfg = dict(config.get("scoring", {}) or {})
     scoring_cfg["cut_off_threshold"] = thresholds["cut_off_threshold"]
     scoring_cfg["cut_off_overrides"] = dict(thresholds["cut_off_overrides"])
     cfg["scoring"] = scoring_cfg
+    cfg["engine_channel"] = channel
     return cfg
 
 

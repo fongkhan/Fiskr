@@ -1,5 +1,7 @@
 import re
 from typing import Set, List
+
+from fiskr import capabilities as caps
 from fiskr.phonetics import double_metaphone
 from fiskr.quality import strip_accents
 
@@ -56,6 +58,10 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
     """
     blocking_config = config.get("blocking", {})
     layout = blocking_config.get("custom_key_layout", ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"])
+    # Le canal voyage dans la config (cf. settings.blocking_config_for) : les
+    # capacites du moteur se reglent par canal, et les gardes ci-dessous
+    # doivent savoir lequel s'applique.
+    channel = blocking_config.get("channel", caps.CHANNEL_SCREENING)
     
     is_client = "client_type" in entity or "client_id" in entity
     
@@ -86,8 +92,10 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
             else:
                 # Les classes d'equivalence viennent EN PLUS des valeurs
                 # brutes : aucune paire aujourd'hui candidate ne cesse de l'etre
-                components_values[item] = sorted(
-                    set(all_countries) | _country_equivalence_values(all_countries))
+                equivalences = (_country_equivalence_values(all_countries)
+                                if caps.is_active(caps.CAP_BLOCKING_EQUIVALENCES, channel)
+                                else set())
+                components_values[item] = sorted(set(all_countries) | equivalences)
                 
         elif item == "ENTITY_TYPE":
             if is_client:
@@ -176,7 +184,7 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                 latin = strip_accents(name_clean)
                 words = re.split(r"[\s\-]+", latin) or [""]
                 first_word = words[0] if words else ""
-                if first_word:
+                if first_word and caps.is_active(caps.CAP_BLOCKING_PHONETIC, channel):
                     p_key, s_key = double_metaphone(first_word)
                     if p_key:
                         phonetics.add(p_key)
@@ -199,10 +207,11 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                 # fiche n'emettait que les cles de « Muammar ». La table des
                 # noms de famille etait inerte sur ce cas, qui est le cas
                 # ordinaire.
-                for word in {first_word, words[-1] if words else ""}:
-                    if word:
-                        for eq_key in _equivalence_keys(word):
-                            phonetics.add(eq_key)
+                if caps.is_active(caps.CAP_BLOCKING_EQUIVALENCES, channel):
+                    for word in {first_word, words[-1] if words else ""}:
+                        if word:
+                            for eq_key in _equivalence_keys(word):
+                                phonetics.add(eq_key)
                         
             if not phonetics:
                 components_values[item] = ["XX"]
@@ -265,6 +274,11 @@ def lookup_blocking_keys(entity: dict, config: dict) -> Set[str]:
         "custom_key_layout", ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"])
     if "COUNTRY_ISO" not in layout:
         return keys
+    # Deux interrupteurs, et le plus restrictif gagne : le reglage de fichier
+    # historique (config.yaml) ET la capacite reglable a chaud.
     if not blocking_cfg.get("country_wildcard", True):
+        return keys
+    channel = blocking_cfg.get("channel", caps.CHANNEL_SCREENING)
+    if not caps.is_active(caps.CAP_BLOCKING_COUNTRY_WILDCARD, channel):
         return keys
     return keys | generate_blocking_keys(_without_countries(entity), config)

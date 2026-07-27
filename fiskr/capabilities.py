@@ -448,6 +448,47 @@ def is_active(capability: str, channel: str = CHANNEL_SCREENING) -> bool:
     return all(dep in active for dep in cap.depends_on)
 
 
+def describe_context(channel: str = CHANNEL_SCREENING) -> Optional[Dict[str, object]]:
+    """
+    Ecart entre le parametrage EFFECTIF et les defauts du catalogue.
+
+    Destine au decision_tree du journal d'audit. Une alerte doit rester
+    explicable des annees plus tard, or le reglage des capacites vit en base :
+    il n'est pas recopie dans le `config_state` fige au criblage. Sans cette
+    trace, un controleur relisant une alerte de 2026 en 2029 ne peut pas
+    savoir quels mecanismes tournaient ce jour-la.
+
+    On n'ecrit QUE l'ecart aux defauts, pour deux raisons :
+    - une installation au parametrage standard produit exactement le meme
+      arbre de decision qu'avant l'introduction du catalogue (la cle est
+      absente), comme le fait deja `resource_equivalences` ;
+    - l'ecart est precisement l'information que la lecture du code ne donne
+      pas. Enumerer les trente-quatre capacites a chaque alerte n'apprendrait
+      rien de plus et alourdirait chaque ligne du journal.
+
+    Renvoie None quand le moteur tourne au parametrage standard.
+    """
+    active = current_context(channel)
+    defaults = defaults_for_channel(channel)
+    disabled = sorted(cap_id for cap_id, on in defaults.items()
+                      if on and cap_id not in active)
+    enabled = sorted(cap_id for cap_id, on in defaults.items()
+                     if not on and cap_id in active)
+    # Une capacite cochee dont le prerequis est coupe n'a rien fait : le dire
+    # evite de laisser croire, a la relecture, qu'elle a joue.
+    inert = sorted(resolve_inactive_dependencies(active))
+    if not (disabled or enabled or inert):
+        return None
+    trace: Dict[str, object] = {"channel": channel}
+    if disabled:
+        trace["disabled"] = disabled
+    if enabled:
+        trace["enabled"] = enabled
+    if inert:
+        trace["inert"] = inert
+    return trace
+
+
 @contextmanager
 def use_context(channel: str, active: Iterable[str]):
     """

@@ -1,6 +1,8 @@
 import re
 from datetime import datetime
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
+
+from fiskr import capabilities as caps
 
 # ------------------ STRING METRICS ------------------
 
@@ -206,23 +208,33 @@ def compute_base_score(s1: str, s2: str, config: dict) -> float:
 
 # ------------------ HARD MATCH SÉQUENCE ------------------
 
-def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
+def check_hard_matches(client: dict, watchlist: dict,
+                       channel: str = caps.CHANNEL_SCREENING) -> Tuple[bool, str]:
     """
     Checks the exact ID matching sequence (Section 5.5).
     Returns (True, reason) if any match is verified, else (False, "").
+
+    Chaque famille d'identifiant est pilotable (cf. fiskr/capabilities.py) :
+    un hit force ALERT a 100/100 et CONTOURNE le seuil de coupure, donc
+    couper l'une d'elles fait retomber au scoring flou une identite pourtant
+    certaine — c'est un faux negatif reglementaire assume, pas un reglage de
+    confort. Le catalogue le dit dans le champ `loss` de chaque capacite.
     """
     def clean_doc_num(num: str) -> str:
         return re.sub(r"[^A-Za-z0-9]", "", str(num)).upper()
 
+    def on(capability: str) -> bool:
+        return caps.is_active(capability, channel)
+
     # Priority 1: LEI (Legal Entity Identifier - Corporates)
-    clei = (client.get("client_lei_number") or "").strip().upper()
+    clei = (client.get("client_lei_number") or "").strip().upper() if on(caps.CAP_HARD_LEI) else ""
     wlei = (watchlist.get("lei_number") or "").strip().upper()
     # Confirm structural validity of LEI (20 chars alphanumeric)
     if clei and wlei and len(clei) == 20 and clei.isalnum() and clei == wlei:
         return True, f"Hard Match Priorité 1 : Numéro LEI identique ({clei})"
 
     # Priority 1bis: BIC/SWIFT (institutions financieres, agents du filtrage)
-    cbic = (client.get("client_bic") or "").strip().upper()
+    cbic = (client.get("client_bic") or "").strip().upper() if on(caps.CAP_HARD_BIC) else ""
     wbic = (watchlist.get("bic_swift") or "").strip().upper()
     if cbic and wbic and len(cbic) in (8, 11) and cbic.isalnum():
         # Un BIC 8 est le prefixe d'un BIC 11 (agence) : comparaison sur 8
@@ -230,13 +242,13 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
             return True, f"Hard Match Priorité 1 : BIC/SWIFT identique ({cbic})"
 
     # Priority 1ter: Numero fiscal (Tax ID / INN)
-    ctax = clean_doc_num(client.get("client_tax_id") or "")
+    ctax = clean_doc_num(client.get("client_tax_id") or "") if on(caps.CAP_HARD_TAX_ID) else ""
     wtax = clean_doc_num(watchlist.get("tax_id") or "")
     if ctax and wtax and ctax == wtax:
         return True, f"Hard Match Priorité 1 : Numéro fiscal identique ({ctax})"
 
     # Priority 1quater: Adresse de monnaie numerique (exacte, sensible a la casse)
-    c_wallets = client.get("client_crypto_wallets") or []
+    c_wallets = (client.get("client_crypto_wallets") or []) if on(caps.CAP_HARD_CRYPTO) else []
     if isinstance(c_wallets, str):
         c_wallets = [c_wallets]
     w_wallets = watchlist.get("crypto_wallets") or []
@@ -250,7 +262,7 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
             return True, f"Hard Match Priorité 1 : Adresse crypto identique ({cw_addr[:16]}…)"
 
     # Priority 2: Passport (Individuals)
-    c_passports = client.get("client_passport_documents") or []
+    c_passports = (client.get("client_passport_documents") or []) if on(caps.CAP_HARD_PASSPORT) else []
     w_passports = watchlist.get("passport_documents") or []
     if not isinstance(c_passports, list): c_passports = []
     if not isinstance(w_passports, list): w_passports = []
@@ -266,7 +278,7 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
                 return True, f"Hard Match Priorité 2 : Passeport identique ({cp_num} - {cp_country})"
 
     # Priority 3: National Registry IDs (SIREN, VAT, etc.)
-    c_reg = client.get("client_national_registry_ids") or []
+    c_reg = (client.get("client_national_registry_ids") or []) if on(caps.CAP_HARD_NATIONAL_REGISTRY) else []
     w_reg = watchlist.get("national_registry_ids") or []
     if not isinstance(c_reg, list): c_reg = []
     if not isinstance(w_reg, list): w_reg = []
@@ -282,7 +294,7 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
                 return True, f"Hard Match Priorité 3 : Registre national identique ({cr_num} - {cr_country})"
 
     # Priority 4: National ID (CNI)
-    c_nid = client.get("client_national_id_documents") or []
+    c_nid = (client.get("client_national_id_documents") or []) if on(caps.CAP_HARD_NATIONAL_ID) else []
     w_nid = watchlist.get("national_id_documents") or []
     if not isinstance(c_nid, list): c_nid = []
     if not isinstance(w_nid, list): w_nid = []
@@ -298,28 +310,28 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
                 return True, f"Hard Match Priorité 4 : Carte Nationale d'Identité identique ({cn_num} - {cn_country})"
 
     # Priority 5: Transports (Vessels / Aircraft)
-    c_imo = (client.get("transaction_vessel_imo") or "").strip()
+    c_imo = (client.get("transaction_vessel_imo") or "").strip() if on(caps.CAP_HARD_VESSEL) else ""
     w_imo = (watchlist.get("imo_number") or "").strip()
     if c_imo and w_imo and clean_doc_num(c_imo) == clean_doc_num(w_imo):
         return True, f"Hard Match Priorité 5 : IMO Navire identique ({c_imo})"
 
-    c_tail = (client.get("transaction_aircraft_registration") or "").strip().upper()
+    c_tail = (client.get("transaction_aircraft_registration") or "").strip().upper() if on(caps.CAP_HARD_AIRCRAFT) else ""
     w_tail = (watchlist.get("aircraft_tail_number") or "").strip().upper()
     if c_tail and w_tail and clean_doc_num(c_tail) == clean_doc_num(w_tail):
         return True, f"Hard Match Priorité 5 : Immatriculation Aéronef identique ({c_tail})"
 
-    c_mmsi = (client.get("transaction_vessel_mmsi") or "").strip()
+    c_mmsi = (client.get("transaction_vessel_mmsi") or "").strip() if on(caps.CAP_HARD_VESSEL) else ""
     w_mmsi = (watchlist.get("vessel_mmsi") or "").strip()
     if c_mmsi and w_mmsi and clean_doc_num(c_mmsi) == clean_doc_num(w_mmsi):
         return True, f"Hard Match Priorité 5 : MMSI Navire identique ({c_mmsi})"
 
-    c_call = (client.get("transaction_vessel_call_sign") or "").strip().upper()
+    c_call = (client.get("transaction_vessel_call_sign") or "").strip().upper() if on(caps.CAP_HARD_VESSEL) else ""
     w_call = (watchlist.get("vessel_call_sign") or "").strip().upper()
     if c_call and w_call and clean_doc_num(c_call) == clean_doc_num(w_call):
         return True, f"Hard Match Priorité 5 : Indicatif radio Navire identique ({c_call})"
 
     # Priority 6: Other IDs / Other Registrations
-    c_oid = client.get("client_other_id_documents") or []
+    c_oid = (client.get("client_other_id_documents") or []) if on(caps.CAP_HARD_OTHER_DOCUMENTS) else []
     w_oid = watchlist.get("other_id_documents") or []
     if not isinstance(c_oid, list): c_oid = []
     if not isinstance(w_oid, list): w_oid = []
@@ -334,7 +346,7 @@ def check_hard_matches(client: dict, watchlist: dict) -> Tuple[bool, str]:
             if co_num == wo_num and co_type == wo_type:
                 return True, f"Hard Match Priorité 6 : Autre ID identique ({co_num} - Type: {co_type})"
 
-    c_oreg = client.get("client_other_registration_ids") or []
+    c_oreg = (client.get("client_other_registration_ids") or []) if on(caps.CAP_HARD_OTHER_DOCUMENTS) else []
     w_oreg = watchlist.get("other_registration_ids") or []
     if not isinstance(c_oreg, list): c_oreg = []
     if not isinstance(w_oreg, list): w_oreg = []
@@ -469,7 +481,9 @@ def _country_key(value: str) -> str:
     return ctx["index"].canonical(raw, resources.FIELD_COUNTRY) or raw
 
 
-def calculate_geography_adjustment(client_countries: List[str], watchlist_countries: List[str], config: dict) -> Tuple[float, str]:
+def calculate_geography_adjustment(client_countries: List[str], watchlist_countries: List[str],
+                                   config: dict,
+                                   channel: str = caps.CHANNEL_SCREENING) -> Tuple[float, str]:
     rules = config.get("scoring", {}).get("contextual_rules", {})
     match_bonus = rules.get("geography_match_bonus", 10)
     no_match_malus = rules.get("geography_no_match_malus", -10)
@@ -487,6 +501,15 @@ def calculate_geography_adjustment(client_countries: List[str], watchlist_countr
             wc.setdefault(_country_key(c), str(c).upper().strip())
 
     if not cc or not wc:
+        # Un pays MANQUANT d'un cote vaut malus par defaut — comportement
+        # historique. Ce n'est pas evident : l'absence d'information n'est pas
+        # une information contraire, et un referentiel client mal renseigne
+        # voit ainsi ses scores baisser sans qu'aucune donnee ne le justifie.
+        # La capacite permet de le rendre NEUTRE ; elle est inactive par
+        # defaut, parce qu'elle ELARGIT le perimetre d'alertes et doit donc se
+        # mesurer avant de s'appliquer.
+        if caps.is_active(caps.CAP_ADJUST_GEOGRAPHY_MISSING_NEUTRAL, channel):
+            return 0.0, "Pays manquant d'un côté : ajustement neutre"
         return float(no_match_malus), "Aucun point de contact géographique (pays manquant)"
 
     intersection = set(cc).intersection(set(wc))
@@ -502,17 +525,38 @@ def calculate_geography_adjustment(client_countries: List[str], watchlist_countr
 
 # ------------------ FULL MATCHING ENGINE ------------------
 
+def _traced(result: Dict[str, Any], capabilities_applied: Optional[dict]) -> Dict[str, Any]:
+    """
+    Pose la trace du parametrage moteur sur une issue de rapprochement.
+
+    La cle n'apparait que si le moteur s'ecarte des defauts du catalogue :
+    un parametrage standard produit exactement le meme arbre de decision
+    qu'avant l'introduction des capacites.
+    """
+    if capabilities_applied:
+        result["capabilities_applied"] = capabilities_applied
+    return result
+
+
 def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[str, Any]:
     """
     Matches client profile and watchlist entry.
     First checks the exact Hard Match sequence.
     If no hard match, runs the Fuzzy Scoring logic with context adjustments.
     """
+    # Canal du moteur : les capacites se reglent par canal (criblage vs
+    # filtrage transactionnel). Il voyage dans la config, cf.
+    # settings.scoring_config_with_thresholds — absent = criblage.
+    channel = config.get("engine_channel", caps.CHANNEL_SCREENING)
+    # Lu UNE fois par rapprochement, et pose sur chaque issue : une alerte de
+    # hard match doit rester aussi explicable qu'une alerte floue.
+    capabilities_applied = caps.describe_context(channel)
+
     # 1. Sequential Hard Match Check
-    is_hard_matched, hard_match_reason = check_hard_matches(client, watchlist_entry)
-    
+    is_hard_matched, hard_match_reason = check_hard_matches(client, watchlist_entry, channel)
+
     if is_hard_matched:
-        return {
+        return _traced({
             "status": "ALERT",
             "base_score": 100.0,
             "final_score": 100.0,
@@ -526,7 +570,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
             "hard_match_triggered": True,
             "hard_match_details": hard_match_reason,
             "cut_off_applied": resolve_cut_off(config, watchlist_entry)
-        }
+        }, capabilities_applied)
 
     # 2. Gather names for Fuzzy Scoring
     c_names = []
@@ -553,10 +597,10 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
         # « 全国 陈 » contre « Chen Quanguo » plafonnait a 42,22.
         # Le cas depasse l'Asie (saisie inversee au guichet, formats d'echange
         # « NOM Prenom ») et vaut donc pour toute personne physique.
-        if fname and lname:
+        if fname and lname and caps.is_active(caps.CAP_NAMES_REVERSED, channel):
             c_names.append(f"{lname} {fname}".strip())
         maiden = client.get("client_maiden_name") or ""
-        if maiden:
+        if maiden and caps.is_active(caps.CAP_NAMES_MAIDEN, channel):
             c_names.append(maiden)
     else:
         comp = client.get("client_company_name") or ""
@@ -566,9 +610,10 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     # Include fallback primary name and aliases
     if client.get("primary_name"):
         c_names.append(client.get("primary_name"))
-    for a in (client.get("aliases") or []):
-        if a:
-            c_names.append(a)
+    if caps.is_active(caps.CAP_NAMES_ALIASES_CLIENT, channel):
+        for a in (client.get("aliases") or []):
+            if a:
+                c_names.append(a)
             
     c_names = list(set([n.strip() for n in c_names if n and str(n).strip()]))
     
@@ -577,11 +622,13 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
         w_names.append(watchlist_entry.get("primary_name"))
         
     parsed = watchlist_entry.get("individual_name_parsed") or {}
-    if isinstance(parsed, dict) and parsed.get("maiden_name"):
+    if (isinstance(parsed, dict) and parsed.get("maiden_name")
+            and caps.is_active(caps.CAP_NAMES_MAIDEN, channel)):
         w_names.append(parsed.get("maiden_name"))
         
     # High Priority Aliases ONLY
-    wl_aliases = watchlist_entry.get("aliases", []) or []
+    wl_aliases = (watchlist_entry.get("aliases", []) or []
+                  if caps.is_active(caps.CAP_NAMES_ALIASES_LISTED, channel) else [])
     if isinstance(wl_aliases, dict):
         wl_high_aliases = wl_aliases.get("high_priority", []) or []
     else:
@@ -600,7 +647,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     w_names = list(set([n.strip() for n in w_names if n and str(n).strip()]))
     
     if not c_names or not w_names:
-        return {
+        return _traced({
             "status": "NO_MATCH",
             "base_score": 0.0,
             "final_score": 0.0,
@@ -613,8 +660,8 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
             },
             "hard_match_triggered": False,
             "cut_off_applied": resolve_cut_off(config, watchlist_entry)
-        }
-        
+        }, capabilities_applied)
+
     # Best Match fuzzy scoring
     best_base_score = -1.0
     best_c_name = ""
@@ -634,14 +681,20 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     if client.get("dates_of_birth"):
         client_dobs.extend(client.get("dates_of_birth"))
     wl_dobs = watchlist_entry.get("dates_of_birth") or []
-    dob_adj, dob_desc = calculate_dob_adjustment(client_dobs, wl_dobs, config)
+    if caps.is_active(caps.CAP_ADJUST_DOB, channel):
+        dob_adj, dob_desc = calculate_dob_adjustment(client_dobs, wl_dobs, config)
+    else:
+        dob_adj, dob_desc = 0.0, "Ajustement par date de naissance désactivé"
     
     # Genders
     client_gender = client.get("client_gender") or (client.get("genders", ["U"])[0] if client.get("genders") else "U")
     wl_genders = [watchlist_entry.get("gender")] if watchlist_entry.get("gender") else []
     if watchlist_entry.get("genders"):
         wl_genders.extend(watchlist_entry.get("genders"))
-    gender_adj, gender_desc = calculate_gender_adjustment(client_gender, wl_genders, config)
+    if caps.is_active(caps.CAP_ADJUST_GENDER, channel):
+        gender_adj, gender_desc = calculate_gender_adjustment(client_gender, wl_genders, config)
+    else:
+        gender_adj, gender_desc = 0.0, "Ajustement par genre désactivé"
     
     # Geography (Countries)
     cc_dict = client.get("client_countries") or {}
@@ -668,7 +721,10 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     if watchlist_entry.get("jurisdiction_country"):
         w_countries.append(watchlist_entry.get("jurisdiction_country"))
     
-    geo_adj, geo_desc = calculate_geography_adjustment(c_countries, w_countries, config)
+    if caps.is_active(caps.CAP_ADJUST_GEOGRAPHY, channel):
+        geo_adj, geo_desc = calculate_geography_adjustment(c_countries, w_countries, config, channel)
+    else:
+        geo_adj, geo_desc = 0.0, "Ajustement géographique désactivé"
     
     # 4. Final aggregation
     total_adjustments = dob_adj + gender_adj + geo_adj
@@ -707,4 +763,4 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     # criblages existants garde exactement sa forme actuelle
     if equivalences:
         result["resource_equivalences"] = equivalences
-    return result
+    return _traced(result, capabilities_applied)
