@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Canadian and Australian national lists
+The two candidates named as "next up" in the previous batch, now shipped. Both are published as **tables**, not structured schemas, and their column headings move between versions — the Canadian one exists in two languages on top of that. So both readers look a column up by its **normalised form** (no case, no accents, no separators) and accept several spellings per field; that tolerance is the most fragile property of the pair, and it is what the tests pin down.
+
+- **Canada — SEMA autonomous sanctions** (`WATCHLIST_CANADA`, `run_canada_sync`). Canada designates **autonomously**: its perimeter overlaps neither the EU's nor OFAC's, so this is coverage nothing else in the app provides. The English and French editions of the CSV both parse — a download from the francophone page must not yield an empty list, and there is a test asserting the two produce identical output.
+  - **The file carries no technical identifier.** Left alone, every publication would look like a wholesale replacement of the previous one and the delta would be unreadable. The matching key is therefore rebuilt from the regulatory reference (schedule + item), which is also the right thing to show an auditor; two designations sharing a schedule/item keep distinct keys, and a row with neither falls back to a **stable** hash of the name — tested by parsing the same file twice and comparing.
+- **Australia — DFAT consolidated list** (`WATCHLIST_DFAT`, `run_dfat_sync`). Combines transposed UN sanctions with Australia's own designations; the originating authority is preserved in `designating_state` depending on whether a UN committee is named, the same reasoning applied to SECO. Rows repeat per name variant and are grouped by reference, exactly like the UK `ConList` — an address or a date carried by an *alias* row still joins its group.
+  - Read from **CSV natively or XLSX**, chosen by the URL's extension. `openpyxl` is an **optional** dependency handled like the existing `pypdf`: its absence does not stop Fiskr from starting, it only makes the XLSX route unavailable, and it fails with a message saying what to install rather than a stack trace. The workbook reader skips the title banner that official files put above the table.
+- Same reservation as the rest of the batch: written from the published formats, validated on fixtures, **not against the real files** — no host is reachable from this development environment.
+
+### Fixed
+- **Three end-to-end tests could fail depending on what their neighbours left behind.** Each imported a list and then screened a homonym, asserting on the global `best_match`. With several such tests now in the suite, a marker from one could outscore the record under test in the other's screening — `IVANOVD784BC` losing to `IVANOVA04FF1`, the same shared-prefix fuzzy-fallback trap already diagnosed on `test_watchlist_db.py`. Each screening is now **restricted to the list under test** (`screening_lists`), which is also the more faithful assertion — the claim being tested is "this list intercepts", not "nothing else in the database resembles it" — and the Canadian fixture uses a surname deliberately unrelated to the others.
+
 ### Added — two more public sources, chosen for what they close rather than for the count
 Both are public, free, key-free and machine-readable. Both are off by default: a new list widens the alert perimeter, which is a screening-parameter change and belongs in the test book before production.
 

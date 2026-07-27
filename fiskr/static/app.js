@@ -20,6 +20,8 @@ const LIST_TYPE_LABELS = {
     WATCHLIST_SECO: "SECO",
     WATCHLIST_OFAC_NONSDN: "OFAC Non-SDN",
     WATCHLIST_CSL: "US CSL",
+    WATCHLIST_CANADA: "Canada",
+    WATCHLIST_DFAT: "Australie",
     WATCHLIST_SSIE: "SSIE",
     CLIENT_BASE: "Base clients",
 };
@@ -35,6 +37,8 @@ const SYNC_SOURCE_LABELS = {
     SECO: "Suisse SECO",
     OFACNONSDN: "OFAC Non-SDN",
     CSL: "US CSL",
+    CANADA: "Canada SEMA",
+    DFAT: "Australie DFAT",
 };
 
 function listTypeLabel(t) {
@@ -1234,7 +1238,7 @@ async function handleIngestion(event) {
 
 // Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn", SECO: "sync-seco-btn", OFACNONSDN: "sync-ofacnonsdn-btn", CSL: "sync-csl-btn" };
+    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn", SECO: "sync-seco-btn", OFACNONSDN: "sync-ofacnonsdn-btn", CSL: "sync-csl-btn", CANADA: "sync-canada-btn", DFAT: "sync-dfat-btn" };
     const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
@@ -1392,7 +1396,7 @@ function showSyncReportDetail(report) {
 const CRON_SOURCE_KEYS = {
     ofac: "OFAC", eurlex: "EURLEX", dgt: "DGT", eu_fsf: "EUFSF",
     un: "UN", pep: "PEP", ofsi: "OFSI", seco: "SECO",
-    ofac_nonsdn: "OFACNONSDN", csl: "CSL",
+    ofac_nonsdn: "OFACNONSDN", csl: "CSL", canada: "CANADA", dfat: "DFAT",
 };
 
 async function fetchSyncConfig() {
@@ -7780,7 +7784,8 @@ async function clearAbsence() {
 // --- Seuils de score à chaud (admin) ---
 const SCORING_OVERRIDE_TYPES = ["WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_UN",
                                 "WATCHLIST_DGT", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
-                                "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL", "WATCHLIST_SSIE"];
+                                "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL",
+                                "WATCHLIST_CANADA", "WATCHLIST_DFAT", "WATCHLIST_SSIE"];
 
 async function fetchScoringSettings() {
     const card = document.getElementById("scoring-card");

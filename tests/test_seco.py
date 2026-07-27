@@ -415,6 +415,12 @@ def test_end_to_end_upload_then_screen(api):
         "client_gender": "M",
         "client_countries": {"nationality": ["RU"], "residence": [],
                              "birth_country": [], "registration_country": []},
+        # Le test verifie que la liste SUISSE intercepte : on restreint le
+        # perimetre a cette liste. Sans cela, un homonyme laisse par un autre
+        # test dans la base de developpement peut remporter le best_match et
+        # faire echouer un test qui, seul, passe — exactement le piege de
+        # marqueurs a prefixe commun deja rencontre sur test_watchlist_db.
+        "screening_lists": ["WATCHLIST_SECO"],
     })
     assert result.status_code == 200, result.text
     best = result.json()["best_match"]

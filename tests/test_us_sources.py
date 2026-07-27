@@ -333,6 +333,7 @@ def test_end_to_end_csl_upload_then_screen(api):
         "client_company_name": f"SHENZHEN PRECISION OPTICS {marker}",
         "client_countries": {"nationality": [], "residence": [],
                              "birth_country": [], "registration_country": ["CN"]},
+        "screening_lists": ["WATCHLIST_CSL"],
     })
     assert result.status_code == 200, result.text
     best = result.json()["best_match"]

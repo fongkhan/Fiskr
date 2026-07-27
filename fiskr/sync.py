@@ -37,7 +37,8 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
     parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
-    parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES
+    parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES,
+    parse_canada_sema_csv, parse_dfat_consolidated
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
@@ -97,6 +98,18 @@ DEFAULT_SECO_OPENSANCTIONS_URL = (
 # CONTROLE DES EXPORTATIONS (BIS Entity List, Denied Persons, Unverified,
 # Military End User ; ITAR Debarred et Nonproliferation du Departement d'Etat).
 DEFAULT_CSL_URL = "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
+
+# Liste consolidee des sanctions autonomes canadiennes (SEMA), publiee en CSV
+# par Affaires mondiales Canada. Le Canada designe de facon autonome, avec un
+# perimetre qui ne recoupe ni celui de l'UE ni celui de l'OFAC.
+DEFAULT_CANADA_URL = (
+    "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.csv"
+)
+
+# Liste consolidee australienne (DFAT) : sanctions onusiennes transposees ET
+# sanctions autonomes australiennes. Publiee en XLSX et en CSV — l'extension
+# de l'URL choisit le lecteur, la voie XLSX demandant le paquet openpyxl.
+DEFAULT_DFAT_URL = "https://www.dfat.gov.au/sites/default/files/regulation8_consolidated.csv"
 
 # Archivage probant : les PDF officiels des actes EUR-Lex font foi en audit
 EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
@@ -213,6 +226,16 @@ def get_sync_config() -> Dict[str, Any]:
         # Consolidated Screening List (trade.gov). `exclude_sources` evite de
         # dupliquer une liste deja recuperee a sa source : par defaut la SDN.
         "csl": _csl_source_config(sync_cfg.get("csl") or {}),
+        # Sanctions autonomes canadiennes (SEMA) et liste consolidee
+        # australienne (DFAT) : opt-in selon l'exposition geographique.
+        "canada": {
+            "enabled": bool((sync_cfg.get("canada") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("canada") or {}).get("url", DEFAULT_CANADA_URL),
+        },
+        "dfat": {
+            "enabled": bool((sync_cfg.get("dfat") or {}).get("enabled", False)),
+            "url": (sync_cfg.get("dfat") or {}).get("url", DEFAULT_DFAT_URL),
+        },
         # Liste suisse SECO, opt-in selon l'exposition CH. `format` choisit la
         # voie : "xml" (export officiel SESAM) ou "opensanctions" (CSV agrege).
         # Une URL laissee vide prend le defaut correspondant au format, pour
@@ -1298,6 +1321,52 @@ def run_csl_sync(
         parser=lambda path: parse_csl_json(path, excluded_sources=excluded),
         file_label="US_Consolidated_Screening_List",
         temp_suffix=".json", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_canada_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee des sanctions autonomes canadiennes (SEMA)
+    et remplace la liste canadienne active.
+
+    Le fichier existe en anglais et en francais ; le lecteur accepte les deux
+    jeux d'intitules de colonnes, pour qu'un telechargement depuis la page
+    francophone ne produise pas une liste vide.
+    """
+    cfg = get_sync_config()["canada"]
+    return _run_list_replacement_sync(
+        db, source="CANADA", file_type="WATCHLIST_CANADA", url=cfg["url"],
+        parser=parse_canada_sema_csv, file_label="Canada_SEMA_Consolidated",
+        temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+    )
+
+
+def run_dfat_sync(
+    db,
+    trigger: str = "MANUAL",
+    fetcher: Optional[Callable[[str, Path], None]] = None,
+    reload_cache: Optional[Callable[[], None]] = None,
+) -> SyncReport:
+    """
+    Telecharge la liste consolidee australienne (DFAT) et remplace la liste
+    australienne active.
+
+    Le format suit l'extension de l'URL configuree : `.csv` par defaut, `.xlsx`
+    si l'etablissement prefere le classeur publie — ce dernier demande le
+    paquet optionnel openpyxl, dont l'absence produit un rapport d'erreur
+    explicite plutot qu'une pile d'appels.
+    """
+    cfg = get_sync_config()["dfat"]
+    suffix = ".xlsx" if cfg["url"].lower().split("?")[0].endswith((".xlsx", ".xlsm")) else ".csv"
+    return _run_list_replacement_sync(
+        db, source="DFAT", file_type="WATCHLIST_DFAT", url=cfg["url"],
+        parser=parse_dfat_consolidated, file_label="Australia_DFAT_Consolidated",
+        temp_suffix=suffix, trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 

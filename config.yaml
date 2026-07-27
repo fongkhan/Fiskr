@@ -124,6 +124,20 @@ sync:
     url: "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
     exclude_sources:
       - "Specially Designated Nationals"
+  # Sanctions autonomes canadiennes (SEMA, Affaires mondiales Canada) - opt-in.
+  # Le Canada designe de facon autonome : son perimetre ne recoupe ni celui de
+  # l'UE ni celui de l'OFAC. Le CSV existe en anglais et en francais, les deux
+  # jeux d'intitules de colonnes sont acceptes.
+  canada:
+    enabled: false
+    url: "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.csv"
+  # Liste consolidee australienne (DFAT) - opt-in. Reunit les sanctions
+  # onusiennes transposees et les designations autonomes australiennes.
+  # L'extension de l'url choisit le lecteur : .csv (natif) ou .xlsx, cette
+  # derniere voie demandant le paquet optionnel openpyxl.
+  dfat:
+    enabled: false
+    url: "https://www.dfat.gov.au/sites/default/files/regulation8_consolidated.csv"
   # Liste consolidee suisse (SECO) - opt-in selon l'exposition CH.
   # format: "xml"           -> export officiel SESAM de la Confederation. Voie
   #                            qui fait foi : gratuite, sans licence, elle seule

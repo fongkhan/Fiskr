@@ -1,6 +1,7 @@
 import re
 import csv
 import json
+import hashlib
 import logging
 from typing import List, Dict, Any, Generator, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
@@ -11,6 +12,16 @@ try:
     PDF_AVAILABLE = True
 except ImportError:
     PDF_AVAILABLE = False
+
+# Lecture des classeurs Excel (liste australienne DFAT). Dependance OPTIONNELLE,
+# sur le meme principe que pypdf : son absence n'empeche pas Fiskr de demarrer,
+# elle rend seulement la voie XLSX indisponible — avec un message qui dit quoi
+# installer plutot qu'une pile d'appels.
+try:
+    import openpyxl
+    XLSX_AVAILABLE = True
+except ImportError:
+    XLSX_AVAILABLE = False
 
 logger = logging.getLogger("fiskr.ingest")
 
@@ -2844,6 +2855,318 @@ def parse_csl_json(
             "vessel_flag": _csl_text(row.get("vessel_flag")) or None,
             "vessel_owner": _csl_text(row.get("vessel_owner")) or None,
             "vessel_tonnage": _csl_text(row.get("gross_tonnage")) or None,
+        }
+
+
+# ------------------ LECTURE TOLERANTE DE TABLEAUX ------------------
+# Les listes nationales publiees en CSV ou en tableur changent d'intitules de
+# colonnes au fil des versions, et plusieurs existent en deux langues. Plutot
+# que de figer une orthographe, les connecteurs ci-dessous cherchent une
+# colonne par sa FORME NORMALISEE (sans casse, sans accents, sans separateurs),
+# et acceptent plusieurs libelles pour un meme champ.
+
+
+def _table_key(label: str) -> str:
+    """« Date of Birth », « date_of_birth », « Date de naissance » -> forme comparable."""
+    return re.sub(r"[^a-z0-9]", "", _strip_accents_lower(label or ""))
+
+
+def _table_get(row: Dict[str, Any], *labels: str) -> str:
+    """Premiere colonne renseignee parmi `labels`, comparee sans casse ni accents."""
+    normalized = {_table_key(k): v for k, v in row.items() if k}
+    for label in labels:
+        value = normalized.get(_table_key(label))
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _read_xlsx_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
+    """Lignes d'un classeur Excel sous forme de dictionnaires (1re feuille).
+
+    La premiere ligne NON VIDE fait office d'en-tete : les listes officielles
+    font souvent preceder le tableau d'un bandeau de titre.
+    """
+    if not XLSX_AVAILABLE:
+        raise RuntimeError(
+            "Lecture XLSX indisponible : le paquet openpyxl n'est pas installe. "
+            "Installez-le (pip install openpyxl) ou utilisez la version CSV de la liste."
+        )
+    workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        sheet = workbook[workbook.sheetnames[0]]
+        header: Optional[List[str]] = None
+        for raw in sheet.iter_rows(values_only=True):
+            values = ["" if v is None else str(v).strip() for v in raw]
+            if header is None:
+                if any(values):
+                    header = values
+                continue
+            if not any(values):
+                continue
+            yield {header[i]: values[i] for i in range(min(len(header), len(values)))}
+    finally:
+        workbook.close()
+
+
+def _read_table_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
+    """Lignes d'un CSV ou d'un XLSX, choisies sur l'extension du fichier."""
+    if file_path.lower().endswith((".xlsx", ".xlsm")):
+        yield from _read_xlsx_rows(file_path)
+        return
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            yield {k: ("" if v is None else v) for k, v in row.items() if k}
+
+
+# ------------------ LISTE CANADIENNE (SEMA, Affaires mondiales Canada) ------------------
+# Liste consolidee des sanctions autonomes canadiennes (Special Economic
+# Measures Act et Loi sur les mesures economiques speciales), publiee en CSV
+# par Affaires mondiales Canada. Le Canada sanctionne de facon autonome, avec
+# un perimetre qui ne recoupe ni celui de l'UE ni celui de l'OFAC.
+#
+# Le fichier existe en anglais ET en francais : les deux jeux d'intitules sont
+# acceptes, ce qui evite qu'un telechargement depuis la page francophone donne
+# une liste vide. Colonnes attendues (ordre indifferent) :
+#   Country / Pays, Item / Article, Schedule / Annexe,
+#   LastName / Nom, GivenName / Prenom, Aliases / Pseudonymes,
+#   DateOfBirth / DateDeNaissance, Entity / Entite, Title / Titre,
+#   DateOfListing / DateInscription
+#
+# MEME RESERVE que SECO et CSL : ecrit d'apres le format publie et valide sur
+# un jeu d'essai, pas contre le fichier reel (acces reseau ferme).
+
+
+def _canada_stable_id(schedule: str, item: str, name: str) -> str:
+    """
+    Le fichier canadien ne porte pas d'identifiant technique. La cle de delta
+    est donc reconstruite : annexe + article quand ils sont presents (c'est la
+    reference reglementaire, stable d'une publication a l'autre), a defaut une
+    empreinte du nom. Sans cle stable, chaque publication paraitrait remplacer
+    integralement la precedente et le delta serait illisible.
+    """
+    reference = "-".join(p for p in (schedule, item) if p)
+    if reference:
+        return re.sub(r"[^A-Za-z0-9.-]+", "", reference.replace(" ", ""))
+    return hashlib.sha1(_strip_accents_lower(name).encode("utf-8")).hexdigest()[:12].upper()
+
+
+def parse_canada_sema_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee des sanctions autonomes canadiennes."""
+    seen: Dict[str, int] = {}
+    for row in _read_table_rows(file_path):
+        entity = _table_get(row, "Entity", "Entite", "Entité", "EntityName")
+        last_name = _table_get(row, "LastName", "Last Name", "Nom", "NomDeFamille")
+        given_name = _table_get(row, "GivenName", "Given Name", "Prenom", "Prénom", "Prenoms")
+        if entity:
+            entity_type = "E"
+            primary_name = entity
+            first_name = last_name_out = ""
+        else:
+            entity_type = "I"
+            primary_name = " ".join(p for p in (given_name, last_name) if p)
+            first_name, last_name_out = given_name, last_name
+        if not primary_name:
+            continue
+
+        schedule = _table_get(row, "Schedule", "Annexe")
+        item = _table_get(row, "Item", "Article")
+        base_id = _canada_stable_id(schedule, item, primary_name)
+        # Une meme annexe/article peut porter plusieurs designes : on suffixe
+        # pour garder une cle unique sans perdre la reference reglementaire.
+        seen[base_id] = seen.get(base_id, 0) + 1
+        entity_id = base_id if seen[base_id] == 1 else f"{base_id}.{seen[base_id]}"
+
+        aliases_raw = [
+            {"name": a, "type": "Strong"}
+            for a in parse_multi_value(
+                {"aliases": _table_get(row, "Aliases", "Alias", "Pseudonymes", "AKA")},
+                "aliases",
+            )
+        ]
+        # L'ordre inverse (patronyme d'abord) reste cherchable, comme pour SECO
+        if entity_type == "I" and given_name and last_name:
+            aliases_raw.append({"name": f"{last_name} {given_name}", "type": "Strong"})
+
+        dob = _extract_iso_date(_table_get(row, "DateOfBirth", "Date of Birth",
+                                           "DateDeNaissance", "Date de naissance"))
+        country = _table_get(row, "Country", "Pays")
+        listed_on = _extract_iso_date(_table_get(row, "DateOfListing", "Date of Listing",
+                                                 "DateInscription", "Date d'inscription"))
+        title = _table_get(row, "Title", "Titre")
+        reference = " ".join(p for p in (schedule and f"Annexe {schedule}",
+                                         item and f"article {item}") if p)
+
+        yield {
+            "entity_id": f"CA-{entity_id}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {
+                "first_name": first_name, "last_name": last_name_out, "maiden_name": ""
+            },
+            "aliases": categorize_aliases(aliases_raw),
+            "dates_of_birth": [dob] if dob else [],
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": [country_label_to_iso2(country)] if (country and entity_type == "I") else [],
+                "residence": [],
+                "birth_country": [],
+                "jurisdiction_country": [country_label_to_iso2(country)] if (country and entity_type != "I") else [],
+            },
+            "place_of_birth": None,
+            "address": None,
+            "alternative_addresses": [],
+            "city": None,
+            "country": country or None,
+            "designation": title or None,
+            "designation_reasons": f"Sanctions autonomes canadiennes — {country}" if country
+                                   else "Sanctions autonomes canadiennes",
+            "additional_informations": None,
+            "official_reference": build_official_reference(reference, listed_on),
+            "title": title or None,
+            "listed_on": listed_on,
+            "designating_state": "CA",
+            "sanction_programs": [country] if country else [],
+            "name_original_script": None,
+            "origin": "Canada — Sanctions autonomes (SEMA)",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": [],
+        }
+
+
+# ------------------ LISTE AUSTRALIENNE (DFAT Consolidated List) ------------------
+# Liste consolidee du Department of Foreign Affairs and Trade, qui reunit les
+# sanctions onusiennes transposees ET les sanctions autonomes australiennes.
+# Publiee en XLSX et en CSV : les deux sont acceptes, l'extension tranche.
+#
+# Structure en LIGNES REPETEES par variante de nom, regroupees par `Reference`
+# — le meme principe que le ConList britannique. La colonne `Name Type`
+# distingue le nom principal des alias.
+#
+# MEME RESERVE : ecrit d'apres le format publie, valide sur un jeu d'essai.
+
+
+def parse_dfat_consolidated(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee australienne (DFAT), CSV ou XLSX."""
+    groups: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    for row in _read_table_rows(file_path):
+        reference = _table_get(row, "Reference", "Ref", "ReferenceNumber")
+        name = _table_get(row, "Name of Individual or Entity", "Name", "NameOfIndividualOrEntity")
+        if not name:
+            continue
+        if not reference:
+            reference = hashlib.sha1(
+                _strip_accents_lower(name).encode("utf-8")).hexdigest()[:12].upper()
+
+        group = groups.get(reference)
+        if group is None:
+            group = groups[reference] = {
+                "primary": "", "aliases": [], "type": "", "dobs": [], "pobs": [],
+                "citizenships": [], "addresses": [], "info": [], "committees": "",
+                "control_date": "", "listing": "",
+            }
+            order.append(reference)
+
+        name_type = _table_get(row, "Name Type", "NameType", "Type of Name").lower()
+        is_primary = ("primary" in name_type) or (not name_type and not group["primary"])
+        if is_primary and not group["primary"]:
+            group["primary"] = name
+        elif name != group["primary"]:
+            group["aliases"].append(name)
+
+        group["type"] = group["type"] or _table_get(row, "Type", "Entity Type")
+        for raw in parse_multi_value({"v": _table_get(row, "Date of Birth", "DateOfBirth", "DOB")}, "v"):
+            iso = _extract_iso_date(raw) or _normalize_partial_date(raw)
+            if not iso:
+                year = re.search(r"(\d{4})", raw)
+                iso = f"{year.group(1)}-01-01" if year else None
+            if iso:
+                group["dobs"].append(iso)
+        for key in ("Place of Birth", "PlaceOfBirth"):
+            value = _table_get(row, key)
+            if value:
+                group["pobs"].append(value)
+                break
+        for raw in parse_multi_value({"v": _table_get(row, "Citizenship", "Nationality")}, "v"):
+            group["citizenships"].append(country_label_to_iso2(raw))
+        address = _table_get(row, "Address", "Addresses")
+        if address and address not in group["addresses"]:
+            group["addresses"].append(address)
+        info = _table_get(row, "Additional Information", "AdditionalInformation")
+        if info and info not in group["info"]:
+            group["info"].append(info)
+        group["committees"] = group["committees"] or _table_get(row, "Committees", "Committee")
+        group["listing"] = group["listing"] or _table_get(row, "Listing Information", "ListingInformation")
+        group["control_date"] = group["control_date"] or _table_get(row, "Control Date", "ControlDate")
+
+    for reference in order:
+        group = groups[reference]
+        primary_name = group["primary"] or (group["aliases"].pop(0) if group["aliases"] else "")
+        if not primary_name:
+            continue
+        raw_type = group["type"].lower()
+        if "individual" in raw_type or "person" in raw_type:
+            entity_type = "I"
+        elif "vessel" in raw_type or "ship" in raw_type:
+            entity_type = "V"
+        else:
+            entity_type = "E"
+
+        control_date = _extract_iso_date(group["control_date"])
+        # Le comite onusien d'origine, quand il y en a un : la liste
+        # australienne transpose l'ONU autant qu'elle designe pour son compte.
+        committees = group["committees"]
+        yield {
+            "entity_id": f"AU-{reference}",
+            "entity_type": entity_type,
+            "primary_name": primary_name,
+            "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+            "aliases": categorize_aliases(
+                [{"name": a, "type": "Strong"} for a in dict.fromkeys(group["aliases"])]
+            ),
+            "dates_of_birth": sorted(set(group["dobs"])),
+            "date_of_death": None,
+            "is_deceased": False,
+            "gender": "U",
+            "countries": {
+                "citizenship": sorted({c for c in group["citizenships"] if c}),
+                "residence": [],
+                "birth_country": [],
+                "jurisdiction_country": [],
+            },
+            "place_of_birth": group["pobs"][0] if group["pobs"] else None,
+            "address": group["addresses"][0] if group["addresses"] else None,
+            "alternative_addresses": group["addresses"][1:],
+            "city": None,
+            "country": None,
+            "designation": None,
+            "designation_reasons": group["listing"] or None,
+            "additional_informations": "; ".join(group["info"]) or None,
+            "official_reference": build_official_reference(reference, control_date),
+            "title": None,
+            "listed_on": control_date,
+            "designating_state": "UN" if committees else "AU",
+            "sanction_programs": [committees] if committees else [],
+            "name_original_script": None,
+            "origin": "Australie — DFAT Consolidated List",
+            "imo_number": None,
+            "aircraft_tail_number": None,
+            "lei_number": None,
+            "national_registry_ids": [],
+            "other_registration_ids": [],
+            "passport_documents": [],
+            "national_id_documents": [],
+            "other_id_documents": [],
         }
 
 
