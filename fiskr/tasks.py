@@ -1,0 +1,387 @@
+"""
+Corps des taches de fond, enregistrees dans la file de travaux (fiskr.jobs).
+
+Deplacees ici depuis les closures d'api.py pour deux raisons :
+- un demon travailleur (fiskr/worker.py) doit pouvoir les executer dans un
+  AUTRE processus : leurs parametres sont donc strictement serialisables
+  (JSON), jamais des objets vivants ;
+- une tache relancee apres un redemarrage (reprise automatique) est reconstruite
+  depuis sa ligne `jobs` : seul un corps nomme + des params JSON le permettent.
+
+Regle du cache de production : les taches qui changent les listes en
+production appellent `_refresh_production_cache`. Dans le processus API
+(modes thread/eager), le cache memoire est recharge immediatement ; depuis le
+demon, seule l'EPOQUE en base est incrementee — chaque processus API la
+surveille et recharge son propre cache (fiskr/api.py, verification throttlee).
+"""
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from fiskr import jobs
+from fiskr.database import Snapshot
+from fiskr.settings import bump_watchlist_epoch
+
+logger = logging.getLogger("fiskr.tasks")
+
+
+def _refresh_production_cache(session) -> None:
+    """
+    Les listes en production ont change : incremente l'epoque (tous les
+    processus API rechargeront leur cache), et recharge TOUT DE SUITE le
+    cache local si nous sommes dans un processus API — un test ou un
+    deploiement sans demon doit voir le changement au retour du job.
+    """
+    bump_watchlist_epoch(session)
+    if not jobs.IN_WORKER:
+        from fiskr.api import load_watchlist_cache
+        load_watchlist_cache(session)
+
+
+@jobs.task("backtest")
+def backtest_task(ctx: jobs.JobContext, *, snapshot_id: str, panel_snapshot_id: str,
+                  candidate_rule_id: Optional[int] = None, username: str = "?") -> None:
+    """
+    Cahier de tests d'homologation : criblage A/B a blanc. Persiste le rapport
+    sur le snapshot — le front le relit par GET /api/review/snapshots/{id},
+    y compris apres un rechargement de page ou un redemarrage.
+    """
+    from fiskr.backtest import run_backtest
+    from fiskr.notifier import emit
+    from fiskr.settings import backtest_max_gap_pct
+
+    session = ctx.session()
+    try:
+        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+        if snap is None:
+            raise ValueError("Snapshot introuvable.")
+
+        report = run_backtest(session, snap, panel_snapshot_id,
+                              threshold_pct=backtest_max_gap_pct(session),
+                              executed_by=username,
+                              candidate_rule_id=candidate_rule_id,
+                              progress=lambda phase, done, total: ctx.update(
+                                  phase=phase, processed=done, total=total,
+                                  snapshot_id=snapshot_id))
+        snap.backtest_report = report
+        snap.backtest_at = datetime.utcnow()
+        snap.backtest_by = username
+        session.commit()
+        # Un ecart eleve doit remonter tout de suite (il bloque l'approbation) ;
+        # un verdict OK part dans le recapitulatif periodique
+        emit(session, "backtest_completed", {
+            "Snapshot": snap.snapshot_id, "Liste": snap.file_type,
+            "Verdict": report.get("verdict"),
+            "Écart": f"{report.get('gap_pct')} % (seuil {report.get('threshold_pct')} %)",
+            "Alertes production": (report.get("current") or {}).get("alerts"),
+            "Alertes candidate": (report.get("candidate") or {}).get("alerts"),
+            "Nouvelles paires": report.get("new_pairs_count"),
+            "Exécuté par": username,
+        }, urgency_override="immediate" if report.get("verdict") != "OK" else None)
+        ctx.set_result({"verdict": report.get("verdict"), "gap_pct": report.get("gap_pct"),
+                        "snapshot_id": snapshot_id})
+    finally:
+        session.close()
+
+
+@jobs.task("approve")
+def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
+                          previous_snapshot_id: Optional[str] = None,
+                          excluded_count: int = 0, username: str = "?") -> None:
+    """
+    Suites d'une approbation : rafraichissement du cache de production puis
+    re-criblage post-delta du referentiel clients. La promotion elle-meme,
+    acte de gouvernance, a deja ete commitee de facon synchrone par l'endpoint.
+    """
+    from fiskr.notifier import emit
+    from fiskr.rescreen import rescreen_after_snapshot_change
+    from fiskr.settings import auto_rescreen_enabled
+
+    session = ctx.session()
+    try:
+        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+        if snap is None:
+            raise ValueError("Snapshot introuvable.")
+
+        ctx.update(phase="RELOAD", snapshot_id=snapshot_id)
+        _refresh_production_cache(session)
+
+        rescreen_result = None
+        if auto_rescreen_enabled(session):
+            rescreen_result = rescreen_after_snapshot_change(
+                session, snap.file_type, snap.snapshot_id, previous_snapshot_id,
+                progress=lambda done, total: ctx.update(
+                    phase="RESCREEN", processed=done, total=total,
+                    snapshot_id=snapshot_id),
+            )
+        # Étape structurante de la production des listes : mail immédiat
+        report = snap.backtest_report or {}
+        emit(session, "snapshot_approved", {
+            "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
+            "Fiches": snap.record_count, "Exclusions": excluded_count,
+            "Approuvé par": username,
+            "Commentaire": snap.review_comment or "—",
+            "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
+            "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
+        })
+        ctx.set_result({"snapshot_id": snapshot_id, "rescreen": rescreen_result})
+    finally:
+        session.close()
+
+
+@jobs.task("sync")
+def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
+                     for_date: Optional[str] = None, username: str = "?") -> None:
+    """
+    Cycle complet de synchronisation d'une source officielle : telechargement,
+    delta, application (ou attente d'homologation), re-criblage post-delta.
+    Le rapport est publie sur la ligne du job ET archive en base (SyncReport).
+    """
+    from fiskr.rescreen import rescreen_after_snapshot_change
+    from fiskr.settings import auto_rescreen_enabled
+
+    session = ctx.session()
+    try:
+        from fiskr.api import _SYNC_RUNNERS, _serialize_sync_report
+
+        kwargs: Dict[str, Any] = {
+            "trigger": "MANUAL" if username != "système" else "SCHEDULED",
+            "reload_cache": lambda: _refresh_production_cache(session),
+        }
+        if run_key == "eurlex" and for_date:
+            kwargs["for_date"] = datetime.strptime(for_date, "%Y-%m-%d").date()
+        report = _SYNC_RUNNERS[run_key](session, **kwargs)
+        result = _serialize_sync_report(report)
+        # Surveillance continue : re-criblage du referentiel clients contre
+        # les entites nouvelles/modifiees du snapshot applique
+        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(session):
+            snap = session.query(Snapshot).filter(
+                Snapshot.snapshot_id == report.snapshot_id).first()
+            if snap:
+                result["rescreen"] = rescreen_after_snapshot_change(
+                    session, snap.file_type, report.snapshot_id,
+                    report.previous_snapshot_id,
+                    progress=lambda done, total: ctx.update(
+                        phase="RESCREEN", processed=done, total=total,
+                        snapshot_id=report.snapshot_id),
+                )
+        ctx.set_result(result)
+    finally:
+        session.close()
+
+
+@jobs.task("engine_simulation")
+def engine_simulation_task(ctx: jobs.JobContext, *, panel_snapshot_id: str,
+                           candidate: List[str], baseline: List[str],
+                           channel: str = "SCREENING", username: str = "?") -> None:
+    """Mesure d'impact des capacites du moteur : deux passes a blanc, aucune
+    ecriture. Le rapport vit sur la ligne du job (relisible apres redemarrage)."""
+    from fiskr import engine_impact
+
+    session = ctx.session()
+    try:
+        report = engine_impact.simulate_engine_impact(
+            session, panel_snapshot_id, set(candidate),
+            baseline_capabilities=set(baseline), channel=channel,
+            progress=lambda phase, done, total: ctx.update(
+                phase=phase, processed=done, total=total),
+        )
+        ctx.set_result(report)
+    finally:
+        session.close()
+
+
+@jobs.task("resource_simulation")
+def resource_simulation_task(ctx: jobs.JobContext, *, panel_snapshot_id: str,
+                             candidate: List[str], baseline: Optional[List[str]] = None,
+                             include_pending_ids: Optional[List[int]] = None,
+                             username: str = "?") -> None:
+    """Mesure d'impact des equivalences linguistiques : memes garanties que la
+    mesure des capacites (a blanc, rapport persiste sur la ligne du job)."""
+    from fiskr import resource_impact
+
+    session = ctx.session()
+    try:
+        report = resource_impact.simulate_resource_impact(
+            session, panel_snapshot_id, set(candidate),
+            baseline_fields=set(baseline) if baseline is not None else None,
+            include_pending_ids=list(include_pending_ids or []),
+            progress=lambda phase, done, total: ctx.update(
+                phase=phase, processed=done, total=total),
+        )
+        ctx.set_result(report)
+    finally:
+        session.close()
+
+
+@jobs.task("ingest")
+def ingest_task(ctx: jobs.JobContext, *, snapshot_id: str, temp_path: str,
+                original_filename: str, file_type: str, delimiter: str = ",",
+                ssie_selector_overrides=None, ssie_source_format=None,
+                progress_id: Optional[str] = None, username: str = "?") -> None:
+    """
+    Import d'un fichier deja televerse : parsing, Quality Gate, persistance,
+    bascule de statut, cache, re-criblage. L'upload et l'empreinte ont deja eu
+    lieu dans la requete (les refus y restent synchrones) ; le snapshot existe
+    en PROCESSING. Le fichier temporaire appartient a ce job, qui le supprime.
+    """
+    from fiskr.api import _ingest_parse_and_finalize
+
+    session = ctx.session()
+    try:
+        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+        if snap is None:
+            raise ValueError("Snapshot introuvable (supprimé avant l'import ?).")
+        result = _ingest_parse_and_finalize(
+            session, snap, temp_path, original_filename, file_type, delimiter,
+            ssie_selector_overrides, ssie_source_format, progress_id, username)
+        ctx.set_result(result)
+    finally:
+        session.close()
+
+
+@jobs.task("quality_check")
+def quality_check_task(ctx: jobs.JobContext, *, snapshot_id: str) -> None:
+    """Controle de completude du referentiel clients apres import : delegue au
+    corps historique (cache du resultat + notification sous seuil). La file
+    porte desormais le cycle de vie — fini le jeton RUNNING jamais clos."""
+    from fiskr.api import _client_quality_post_import
+
+    _client_quality_post_import(snapshot_id)
+
+
+@jobs.task("lookback")
+def lookback_task(ctx: jobs.JobContext, *, file_type: Optional[str] = None,
+                  username: str = "?") -> None:
+    """Lookback manuel (guidance Wolfsberg) : tout le referentiel contre
+    toutes les listes en production — l'operation la plus lourde du produit,
+    executee et suivie par la file."""
+    from fiskr.rescreen import rescreen_lookback
+
+    session = ctx.session()
+    try:
+        result = rescreen_lookback(
+            session, file_type,
+            progress=lambda done, total: ctx.update(
+                phase="RESCREEN", processed=done, total=total))
+        ctx.set_result({"message": "Lookback exécuté.", **result})
+    finally:
+        session.close()
+
+
+@jobs.task("batch_campaign")
+def batch_campaign_task(ctx: jobs.JobContext, *, campaign_id: int, profiles_path: str,
+                        username: str = "?", requested_lists: Optional[List[str]] = None) -> None:
+    """
+    Campagne de criblage batch : les profils clients ont ete deposes dans un
+    fichier temporaire par l'endpoint (la ligne jobs ne porte que des
+    parametres bornes). La progression fine vit dans BatchCampaign, comme
+    toujours ; la file porte le cycle de vie et la reprise.
+    """
+    import json
+    from pathlib import Path
+
+    from fiskr.database import BatchCampaign, BatchResult
+
+    path = Path(profiles_path)
+    try:
+        profiles = json.loads(path.read_text(encoding="utf-8"))
+
+        # Reprise apres interruption (demon tue en pleine campagne) : la
+        # campagne repart de zero — les resultats partiels de la tentative
+        # interrompue sont purges pour ne pas etre comptes deux fois.
+        session = ctx.session()
+        try:
+            campaign = session.query(BatchCampaign).filter(
+                BatchCampaign.id == campaign_id).first()
+            if campaign is None:
+                return
+            if campaign.processed_clients:
+                session.query(BatchResult).filter(
+                    BatchResult.campaign_id == campaign_id).delete()
+                campaign.processed_clients = 0
+                campaign.alert_count = 0
+                campaign.no_match_count = 0
+                campaign.rejected_count = 0
+            campaign.status = "RUNNING"
+            campaign.error_message = None
+            campaign.finished_at = None
+            session.commit()
+        finally:
+            session.close()
+
+        from fiskr.api import _run_batch_campaign
+        _run_batch_campaign(campaign_id, profiles, username, requested_lists)
+        ctx.set_result({"campaign_id": campaign_id, "clients": len(profiles)})
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@jobs.task("fprules_bench")
+def fprules_bench_task(ctx: jobs.JobContext, *, rule_id: int, panel_snapshot_id: str,
+                       username: str = "?") -> None:
+    """Banc d'essai d'une regle anti-FP sur panel : criblage a blanc
+    O(panel × univers), aucune ecriture. Rapport sur la ligne du job."""
+    from fiskr.api import _fprules_bench_panel
+
+    session = ctx.session()
+    try:
+        result = _fprules_bench_panel(
+            session, rule_id, panel_snapshot_id,
+            progress=lambda done, total: ctx.update(
+                phase="BENCH", processed=done, total=total))
+        ctx.set_result(result)
+    finally:
+        session.close()
+
+
+@jobs.task("testpanel_generate")
+def testpanel_generate_task(ctx: jobs.JobContext, *, source_ids: List[str],
+                            size: int = 500, seed: Optional[int] = None,
+                            username: str = "?") -> None:
+    """Generation d'un panel de pseudo-clients (copies, typos, quasi-collisions,
+    neutres) : O(univers) en lecture — le resultat legacy vit sur la ligne du
+    job pour que le mode eager reponde 200 comme l'endpoint d'origine."""
+    from fiskr.backtest import generate_test_panel
+    from fiskr.notifier import emit
+
+    session = ctx.session()
+    try:
+        ctx.update(phase="GENERATE")
+        snap = generate_test_panel(session, source_ids, size=size,
+                                   seed=seed, created_by=username)
+        emit(session, "test_panel_generated", {
+            "Panel": snap.file_name, "Pseudo-clients": snap.record_count,
+            "Snapshot": snap.snapshot_id, "Généré par": username,
+        })
+        ctx.set_result({
+            "message": f"Panel de {snap.record_count} pseudo-clients généré.",
+            "snapshot_id": snap.snapshot_id,
+            "file_name": snap.file_name,
+            "record_count": snap.record_count,
+        })
+    finally:
+        session.close()
+
+
+@jobs.task("mining")
+def mining_task(ctx: jobs.JobContext, *, username: str = "?") -> None:
+    """Fouille d'homonymes : parcours des listes en production, propositions
+    d'equivalences apprises."""
+    from fiskr.database import log_admin_action
+    from fiskr.resource_mining import run_resource_mining
+
+    session = ctx.session()
+    try:
+        report = run_resource_mining(session, started_by=username, token=ctx.token)
+        log_admin_action(session, username, "RESOURCE_MINING_RUN",
+                         target="resources", after=report)
+        session.commit()
+        # Notification des decouvertes : portee par la tache (et non par le
+        # planificateur) pour que les passes manuelles ET planifiees signalent
+        if report and (report.get("created") or report.get("auto_approved")):
+            from fiskr.notify import notify_event
+            notify_event("resource_mining", report)
+        ctx.set_result(report)
+    finally:
+        session.close()

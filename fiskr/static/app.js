@@ -1222,7 +1222,26 @@ async function handleIngestion(event) {
             return;
         }
         
-        const data = await response.json();
+        let data = await response.json();
+        // 202 : l'upload est fini, mais le parsing, le Quality Gate, la
+        // persistance et le re-criblage continuent en tâche de fond (démon
+        // travailleur). On suit le jeton jusqu'au rapport final — l'écran
+        // reste réactif et l'opération est visible dans la pastille ⚙.
+        if (response.status === 202) {
+            const finalState = await waitForJobEnd(data.job_token || progressId, {
+                onTick: (p) => {
+                    const label = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "Import";
+                    const count = p.processed ? ` ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}` : "";
+                    btn.textContent = `${label}${count}`;
+                },
+            });
+            if (!finalState || finalState.status === "ERROR") {
+                showToast(`Erreur d'importation : ${(finalState && finalState.error) || "erreur inconnue"}`, "error", 9000);
+                fetchSnapshots();
+                return;
+            }
+            data = finalState.result || {};
+        }
         showToast(`Instantané importé avec succès ! ${data.message}`, "success");
         fileInput.value = "";
         fetchSnapshots();
@@ -3672,10 +3691,19 @@ async function generateTestPanel() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ snapshot_id: reviewCurrentSnapshotId, size }),
         });
-        const data = await response.json();
+        let data = await response.json();
         if (!response.ok) {
             showToast("Erreur : " + (data.detail || "Échec de la génération."), "error");
             return;
+        }
+        // 202 : la génération (O(univers) en lecture) tourne en tâche de fond
+        if (response.status === 202) {
+            const finalState = await waitForJobEnd(data.progress_token);
+            if (!finalState || finalState.status === "ERROR") {
+                showToast("Erreur : " + ((finalState && finalState.error) || "échec de la génération."), "error", 9000);
+                return;
+            }
+            data = finalState.result || {};
         }
         showToast(data.message, "success");
         await fetchTestPanels(data.snapshot_id);
@@ -6398,8 +6426,22 @@ async function benchFpRule(source) {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ source, sample_size: 200 }),
         });
-        const data = await response.json();
+        let data = await response.json();
         if (!response.ok) { if (bench) bench.innerHTML = `<small style="color:var(--color-alert);">${escapeHtml(data.detail || "échec")}</small>`; return; }
+        // 202 (source panel) : criblage à blanc O(panel × univers) en tâche de
+        // fond — suivi par jeton, progression affichée dans l'encart
+        if (response.status === 202) {
+            const finalState = await waitForJobEnd(data.progress_token, {
+                onTick: (p) => {
+                    if (bench && p.processed) bench.innerHTML = `<small style="color: var(--text-muted);">Criblage du panel… ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}</small>`;
+                },
+            });
+            if (!finalState || finalState.status === "ERROR") {
+                if (bench) bench.innerHTML = `<small style="color:var(--color-alert);">${escapeHtml((finalState && finalState.error) || "échec du banc d'essai")}</small>`;
+                return;
+            }
+            data = finalState.result || {};
+        }
         const tp = data.true_positive_hits || [];
         if (bench) bench.innerHTML = `
             <div style="background: var(--surface-hover); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.75rem;">
@@ -7160,6 +7202,93 @@ function runningOperationFor(kind, snapshotId) {
         && op.snapshot_id === snapshotId) || null;
 }
 
+// Attend la fin d'un job de la file de travaux (réponse 202) en interrogeant
+// son jeton, et retourne l'état final (status, error, result). `onTick`
+// permet d'afficher la progression pendant l'attente. Retourne null si le
+// jeton reste introuvable (job purgé ou serveur redémarré sans trace).
+async function waitForJobEnd(token, { onTick = null, intervalMs = 1500 } = {}) {
+    let misses = 0;
+    while (true) {
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+        try {
+            const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(token)}`, { silent: true });
+            if (!resp.ok) {
+                if (++misses >= 8) return null;
+                continue;
+            }
+            misses = 0;
+            const state = await resp.json();
+            if (state.status === "RUNNING") {
+                if (onTick) { try { onTick(state); } catch (e) { /* jamais bloquant */ } }
+                continue;
+            }
+            return state;
+        } catch (e) {
+            if (++misses >= 8) return null;
+        }
+    }
+}
+
+// ------------------ TRAVAUX (file de travaux persistée : historique + relance) ------------------
+
+async function renderJobsSection() {
+    const section = document.getElementById("notif-jobs-section");
+    const list = document.getElementById("notif-jobs-list");
+    if (!section || !list) return;
+    try {
+        const response = await apiFetch("/api/jobs?limit=12", { silent: true });
+        if (!response.ok) { section.classList.add("hidden"); return; }
+        const items = (await response.json()).items || [];
+        // Les opérations vivantes sont déjà dans « Opérations en cours » :
+        // cette section montre le devenir des travaux — surtout les échecs,
+        // qui se relancent d'un clic (la reprise automatique plafonnée les a
+        // laissés en ERROR exprès : un humain décide de la suite).
+        const finished = items.filter(j => j.status !== "RUNNING" && j.status !== "QUEUED");
+        if (!finished.length) { section.classList.add("hidden"); list.innerHTML = ""; return; }
+        section.classList.remove("hidden");
+        const badges = {
+            DONE: '<span class="status-badge no_match">Terminé</span>',
+            ERROR: '<span class="status-badge alert">Échec</span>',
+            CANCELLED: '<span class="status-badge warning">Annulé</span>',
+        };
+        list.innerHTML = finished.slice(0, 8).map(j => {
+            const icon = OPERATION_KIND_ICONS[j.kind] || "⚙";
+            const when = j.finished_at ? new Date(j.finished_at + "Z").toLocaleString(uiLocale()) : "";
+            const dur = (j.duration_s !== null && j.duration_s !== undefined) ? ` · ${j.duration_s} s` : "";
+            const retryBtn = j.retryable
+                ? `<button class="btn-secondary" style="padding: 0.1rem 0.5rem; font-size: 0.72rem;" onclick="event.stopPropagation(); retryJob(${j.id});">↻ Relancer</button>`
+                : "";
+            const err = j.status === "ERROR" && j.error
+                ? `<div style="color: var(--color-alert); font-size: 0.72rem; margin-top: 0.15rem;">${escapeHtml(String(j.error).slice(0, 160))}</div>`
+                : "";
+            return `<div class="ops-row">
+                <div class="ops-row-head">
+                    <span>${icon} ${escapeHtml(j.label || j.token)}</span>
+                    <span>${badges[j.status] || escapeHtml(j.status)}</span>
+                </div>
+                <div class="ops-row-meta">${escapeHtml(when)}${dur}${j.created_by ? ` · @${escapeHtml(j.created_by)}` : ""} ${retryBtn}</div>
+                ${err}
+            </div>`;
+        }).join("");
+    } catch (e) { /* le centre de notifications reste utilisable sans cette section */ }
+}
+
+async function retryJob(jobId) {
+    try {
+        const response = await apiFetch(`/api/jobs/${jobId}/retry`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "relance impossible."), "error");
+            return;
+        }
+        showToast(`${data.label || "Job"} : remis en file.`, "success");
+        fetchActiveOperations();
+        renderJobsSection();
+    } catch (e) {
+        showToast("Erreur réseau pendant la relance.", "error");
+    }
+}
+
 // ------------------ CENTRE DE NOTIFICATIONS (🔔) ------------------
 
 let _lastCounters = {};
@@ -7192,7 +7321,7 @@ function toggleNotifCenter(force) {
     if (!panel) return;
     const open = force !== undefined ? force : panel.classList.contains("hidden");
     panel.classList.toggle("hidden", !open);
-    if (open) { renderOpsSection(); renderNotifCenter(); }
+    if (open) { renderOpsSection(); renderNotifCenter(); renderJobsSection(); }
 }
 
 document.addEventListener("click", (e) => {

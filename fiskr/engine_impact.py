@@ -113,11 +113,13 @@ def simulate_engine_impact(
             Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
             Snapshot.status == "READY").all()
     ]
-    entities = _entity_dicts(db, snapshot_ids) if snapshot_ids else []
+    from fiskr import screenpool
+    rules = active_rules(db, channel)
+    # Projection memoire derivee des regles evaluees (cf. run_backtest)
+    projection = screenpool.projection_for(rules)
+    entities = _entity_dicts(db, snapshot_ids, projection=projection) if snapshot_ids else []
     if not entities:
         raise ValueError("Aucune liste en production : rien à cribler.")
-
-    rules = active_rules(db, channel)
     if baseline_capabilities is None:
         baseline_capabilities = {c for c, on in engine_capabilities(db, channel).items() if on}
     baseline_capabilities = set(baseline_capabilities)
@@ -134,9 +136,11 @@ def simulate_engine_impact(
     # les deux passes ne mesurerait que la moitie de l'effet.
     with caps.use_context(channel, baseline_capabilities):
         before = _dry_run_screen(db, clients, entities, rule_set=rules,
+                                 panel_snapshot_id=panel_snapshot_id,
                                  progress=_phase("SCREEN_CURRENT"))
     with caps.use_context(channel, candidate_capabilities):
         after = _dry_run_screen(db, clients, entities, rule_set=rules,
+                                panel_snapshot_id=panel_snapshot_id,
                                 progress=_phase("SCREEN_CANDIDATE"))
 
     before_keys = {_pair_key(p) for p in before["pairs"].values()}

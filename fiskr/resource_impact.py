@@ -130,11 +130,13 @@ def simulate_resource_impact(
             Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
             Snapshot.status == "READY").all()
     ]
-    entities = _entity_dicts(db, snapshot_ids) if snapshot_ids else []
+    from fiskr import screenpool
+    rules = active_rules(db, "SCREENING")
+    # Projection memoire derivee des regles evaluees (cf. run_backtest)
+    projection = screenpool.projection_for(rules)
+    entities = _entity_dicts(db, snapshot_ids, projection=projection) if snapshot_ids else []
     if not entities:
         raise ValueError("Aucune liste en production : rien à cribler.")
-
-    rules = active_rules(db, "SCREENING")
     if baseline_fields is None:
         baseline_fields = {f for f, on in resource_fields(db).items() if on}
     baseline_fields = set(baseline_fields)
@@ -149,9 +151,11 @@ def simulate_resource_impact(
 
     with resources.use_context(baseline_fields):
         before = _dry_run_screen(db, clients, entities, rule_set=rules,
+                                 panel_snapshot_id=panel_snapshot_id,
                                  progress=_phase("SCREEN_CURRENT"))
     with resources.use_context(candidate_fields, candidate_index):
         after = _dry_run_screen(db, clients, entities, rule_set=rules,
+                                panel_snapshot_id=panel_snapshot_id,
                                 progress=_phase("SCREEN_CANDIDATE"))
         # Les explications se calculent DANS le contexte candidat : hors de lui,
         # aucune equivalence ne s'applique et la trace serait vide

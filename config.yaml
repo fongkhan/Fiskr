@@ -50,6 +50,23 @@ database:
   fallback_to_sqlite: true
   sqlite_path: "fiskr.sqlite3"
 
+# File de travaux (operations longues) — lu au demarrage du processus, un
+# changement necessite un redemarrage (contrairement aux reglages a chaud).
+jobs:
+  # worker : demon dedie (production — le calcul lourd ne touche jamais le
+  #          processus API) | thread : threads du processus API (repli sans
+  #          demon) | eager : inline, synchrone (tests)
+  mode: worker
+  # Jobs simultanes dans le demon (les jobs lourds delegueront leur CPU au
+  # pool de tranches : 2 suffit pour suivre sans saturer)
+  slots: 2
+  # Processus de calcul par criblage parallele : 0 = auto (borne par les
+  # coeurs ET par la RAM disponible), 1 = sequentiel force
+  screen_processes: 0
+  # L'API demarre le demon elle-meme s'il est absent (indispensable en
+  # hebergement mutualise Passenger, sans systemd)
+  autostart: true
+
 # Mode homologation : environnement de validation avant mise en production.
 # Ces valeurs sont des defauts : un admin peut les modifier a chaud depuis le
 # dashboard (elles sont alors stockees en base et priment sur ce fichier).

@@ -36,3 +36,7 @@ exclusion_evidence/
 alert_evidence/
 eurlex_archive/
 retention_archive/
+
+# Demon travailleur (runtime)
+fiskr-worker.lock
+worker.log

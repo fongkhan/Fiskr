@@ -410,6 +410,76 @@ ADMIN_PASSWORD=adminpassword
 
 ---
 
+## ⚙️ Architecture d'exécution : processus API + démon travailleur
+
+Depuis la migration de la file de travaux, Fiskr s'exécute en **deux types de
+processus** — et plus aucun calcul lourd ne tourne dans un processus API :
+
+```
+Processus API (×N, Passenger/uvicorn)      Démon travailleur (×1, verrou flock)
+┌────────────────────────────┐             ┌─────────────────────────────────┐
+│ requêtes HTTP, criblage    │   table     │ boucle de claim → K slots       │
+│ unitaire, cache des listes │   `jobs`    │ planificateurs (cron, inbox CFT,│
+│ dépôt des jobs → 202+jeton │ ◄─────────► │ digest, rétention, notif, mine) │
+│ autostart + watchdog démon │ (PostgreSQL)│ battement de cœur + REPRISE     │
+│ lecture de la progression  │             │  ┌───────────────────────────┐  │
+└────────────────────────────┘             │  │ pool fork() par job lourd │  │
+                                           │  │ (tranches de clients)     │  │
+                                           └──┴───────────────────────────┴──┘
+```
+
+- **La table `jobs` (PostgreSQL) est le canal unique** entre les deux mondes :
+  file d'attente (claim par `SELECT … FOR UPDATE SKIP LOCKED`), progression
+  inter-processus, résultats persistés (relisibles après redémarrage),
+  exclusivité (`dedupe_key` → 409), et **reprise automatique** : un job
+  interrompu par un arrêt brutal est détecté par son battement de cœur périmé
+  et remis en file (relance de zéro, plafonnée par `attempts` ; au-delà, ERROR
+  relançable d'un clic depuis la section **Travaux** du centre de
+  notifications).
+- **Le démon est unique par construction** : verrou `flock` sur
+  `fiskr-worker.lock`, rendu par le noyau à la mort du processus — pas de
+  fichier de PID fantôme. Il héberge aussi **tous les planificateurs
+  périodiques** : sous Passenger, N processus API signifiaient N
+  planificateurs (N digests, N synchronisations) ; désormais un seul tic.
+- **Autostart sans systemd** (hébergement mutualisé type o2switch) : chaque
+  processus API vérifie le battement de cœur du démon (au démarrage, à chaque
+  dépôt de job, et toutes les 60 s par un watchdog) et le relance détaché
+  (`start_new_session`) s'il manque. La course entre N processus API est
+  inoffensive : le flock n'en laisse vivre qu'un. Journal du démon :
+  `worker.log` à la racine du projet.
+- **Dans un job lourd, le calcul est parallélisé par `fork()`** : l'univers
+  des listes est chargé une fois (projection mémoire aux seuls champs lus par
+  le moteur, ~3,8 Ko/fiche au lieu de ~8,4), l'index de blocking est construit,
+  puis le panel de clients est découpé en tranches sur un pool de processus
+  enfants qui partagent cette mémoire en copy-on-write (`gc.freeze()`). Les
+  enfants sont en **lecture seule** : toutes les écritures (alertes, audit,
+  `hit_count` des règles) restent dans le parent — résultats déterministes,
+  prouvés identiques au séquentiel par test. Le nombre de processus est borné
+  par un budget CPU **et** mémoire (cas PEP 750 000 fiches pris en compte).
+- **Invalidation du cache inter-processus par époque** : le démon ne peut pas
+  toucher la mémoire d'un processus API ; quand la production change
+  (synchronisation, approbation, import), il incrémente `watchlist.epoch` en
+  base et chaque processus API recharge son cache local (vérification toutes
+  les 5 s). Plusieurs processus API sont donc **sûrs** — la restriction
+  historique à un seul worker ne s'applique qu'au mode dégradé `thread`.
+
+Réglages (`config.yaml`, section `jobs:` — lus au démarrage du processus) :
+
+| Réglage | Défaut | Rôle |
+|---|---|---|
+| `jobs.mode` | `worker` | `worker` : démon dédié (production) · `thread` : threads du processus API (repli sans démon, comportement historique) · `eager` : inline synchrone (tests) |
+| `jobs.slots` | `2` | Jobs simultanés dans le démon (les jobs lourds délèguent leur CPU au pool de tranches) |
+| `jobs.screen_processes` | `0` | Processus du pool de criblage : `0` = auto (budget CPU/mémoire), `1` = séquentiel forcé, `N` = imposé |
+| `jobs.autostart` | `true` | L'API relance le démon absent (watchdog 60 s) |
+
+> **Passenger (mutualisé)** : réglez `passenger_min_instances 1` pour que le
+> premier visiteur n'attende pas le démarrage à froid, et laissez
+> `jobs.autostart: true` — c'est l'API qui fait naître le démon, aucun accès
+> systemd/cron n'est nécessaire. Budget de connexions PostgreSQL : N processus
+> API (pool SQLAlchemy) + le démon (2 slots) + les tranches de criblage (une
+> connexion éphémère chacune, ≤ `screen_processes`) — largement sous le
+> `max_connections = 100` par défaut.
+
 ## 🚀 Installation & Lancement
 
 ### Prérequis
@@ -433,14 +503,13 @@ python -m uvicorn fiskr.api:app --host 127.0.0.1 --port 8000 --reload
 ```
 Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 
-> **Un seul worker.** Ne lancez pas Uvicorn avec `--workers N`. Le cache des
-> listes en mémoire et le registre de progression des opérations longues sont
-> **propres à chaque processus** : avec plusieurs workers, une requête sur deux
-> verrait un cache différent et la pastille de progression clignoterait au
-> hasard selon le worker qui répond. Ce n'est pas non plus le remède au
-> ralentissement pendant une opération longue — celui-ci est traité à sa
-> source (synchronisations en tâche de fond, SQLite en mode WAL, cessions de
-> GIL dans les criblages).
+> **Plusieurs workers : possible en mode `worker` uniquement.** En mode
+> `jobs.mode: worker` (défaut), plusieurs processus API sont sûrs : la
+> progression vit dans la table `jobs`, le cache des listes est invalidé
+> inter-processus par époque, et les planificateurs ne tournent que dans le
+> démon. En mode **`thread`** (repli sans démon), gardez un seul worker : le
+> registre de progression et le cache redeviennent propres au processus qui a
+> lancé l'opération.
 
 1. Vous serez automatiquement redirigé vers la page de connexion **`/login`**.
 2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).

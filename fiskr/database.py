@@ -38,9 +38,13 @@ class Snapshot(Base):
 
 class WatchlistEntity(Base):
     __tablename__ = "watchlist_entities"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     snapshot_id = Column(String(50), ForeignKey("snapshots.snapshot_id"), nullable=False)
+    # Relation declaree pour l'ORDONNANCEMENT du flush : sans elle, l'ORM peut
+    # inserer les fiches AVANT leur snapshot dans un meme commit — defaut
+    # masque par SQLite (FK non appliquees par defaut), revele par PostgreSQL.
+    snapshot = relationship("Snapshot")
     entity_id = Column(String(100), nullable=False)
     entity_type = Column(String(10), nullable=False) # I, E, V, O
     primary_name = Column(String(1000), nullable=False)
@@ -151,9 +155,11 @@ class WatchlistEntityChange(Base):
 
 class ClientEntity(Base):
     __tablename__ = "client_entities"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     snapshot_id = Column(String(50), ForeignKey("snapshots.snapshot_id"), nullable=False)
+    # Meme motif que WatchlistEntity.snapshot : ordonnancement du flush
+    snapshot = relationship("Snapshot")
     client_id = Column(String(100), nullable=False)
     client_type = Column(String(10), nullable=False) # PP, PM
     
@@ -249,6 +255,86 @@ class SyncReport(Base):
     removed_count = Column(Integer, default=0)
     delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
     email_sent = Column(Boolean, default=False)
+
+# Types de snapshots persistes en WatchlistEntity (listes officielles).
+# Vit ici (et non dans api.py) pour que le demon travailleur et les modules
+# moteur n'aient pas a importer l'application FastAPI ; api.py re-exporte.
+WATCHLIST_FILE_TYPES = [
+    "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
+    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
+    "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL", "WATCHLIST_CANADA", "WATCHLIST_DFAT",
+    "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK"
+]
+
+
+def production_watchlist_reference(db) -> tuple:
+    """
+    (version, empreinte) des listes EN PRODUCTION, derivees de la base.
+
+    Miroir exact de ce que `load_watchlist_cache` pose dans le processus API
+    (version constante, empreinte = hash du snapshot READY le plus recent).
+    Le re-criblage execute dans le demon travailleur trace cette reference au
+    journal d'audit : il ne peut pas lire le cache memoire d'un autre
+    processus, et un audit portant « N/A » serait faux.
+    """
+    snap = db.query(Snapshot).filter(
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+        Snapshot.status == "READY",
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    return "Database Active Snapshot", (snap.file_hash if snap else "N/A")
+
+
+JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "ERROR", "CANCELLED")
+
+class Job(Base):
+    """
+    File de travaux persistee : chaque operation longue (cahier de tests,
+    synchronisation, import, re-criblage, simulation...) vit ici, du depot a
+    la fin. C'est le canal unique entre le processus API et le demon
+    travailleur (fiskr/worker.py), et ce qui permet la REPRISE apres un
+    redemarrage : un job RUNNING au battement de coeur perime est remis en
+    file (relance de zero) tant que `attempts` < `max_attempts`, puis marque
+    ERROR, relancable d'un clic.
+
+    La progression (phase/processed/total) y est ecrite par le travailleur
+    (commits throttles) : le registre memoire de fiskr/progress.py ne
+    traverse pas les processus, cette ligne si. `result` porte le rapport
+    final (borne : les listes de details sont deja tronquees en amont).
+    """
+    __tablename__ = "jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Jeton public, celui de GET /api/progress?id= — reprend les formats
+    # existants (backtest:<snap>, sync:<source>, uuid d'import...). PAS unique :
+    # un meme jeton revient a chaque execution (sync:ofac chaque jour) ; les
+    # lectures prennent la ligne la plus recente.
+    token = Column(String(100), nullable=False, index=True)
+    kind = Column(String(40), nullable=False, index=True)
+    label = Column(String(255), nullable=True)
+    params = Column(JSON, nullable=True)
+    status = Column(String(20), default="QUEUED", index=True)
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=2)
+    not_before = Column(DateTime, nullable=True)   # backoff entre tentatives
+    priority = Column(Integer, default=100)        # plus petit = plus urgent
+    # Exclusivite : deux jobs portant la meme cle ne coexistent pas en file
+    # (ex. "sync:ofac" — une meme source ne se synchronise pas deux fois)
+    dedupe_key = Column(String(150), nullable=True, index=True)
+    # Progression inter-processus (miroir du registre memoire)
+    phase = Column(String(30), nullable=True)
+    processed = Column(Integer, default=0)
+    total = Column(Integer, nullable=True)
+    snapshot_id = Column(String(50), nullable=True)
+    # Execution
+    claimed_by = Column(String(100), nullable=True)    # "host:pid"
+    heartbeat_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+    result = Column(JSON, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 
 class Alert(Base):
     """
@@ -369,6 +455,8 @@ _PERFORMANCE_INDEXES = (
     Index("ix_wl_entities_entity_id", WatchlistEntity.entity_id),
     Index("ix_client_entities_snapshot_id", ClientEntity.snapshot_id),
     Index("ix_client_entities_client_id", ClientEntity.client_id),
+    # File de travaux : le claim parcourt QUEUED par priorite puis anciennete
+    Index("ix_jobs_claim", Job.status, Job.priority, Job.id),
 )
 
 
