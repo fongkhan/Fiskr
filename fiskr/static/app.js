@@ -598,6 +598,62 @@ async function refreshSidebarCounters() {
     } catch (e) { /* silencieux : simple polling de badges */ }
 }
 
+// ------------------ SUPERVISION DU DÉMON TRAVAILLEUR ------------------
+// En production mutualisée (mode « worker »), tout le calcul lourd — dont les
+// synchronisations — passe par un démon séparé. S'il est arrêté, les jobs
+// restent en file sans jamais démarrer : ce bandeau rend cette panne visible
+// et offre la relance (admin), au lieu d'un QUEUED silencieux.
+let _workerRestarting = false;
+
+async function refreshWorkerStatus() {
+    const banner = document.getElementById("worker-down-banner");
+    if (!banner) return;
+    try {
+        const response = await apiFetch("/api/worker/status", { silent: true });
+        if (!response.ok) return;
+        const s = await response.json();
+        if (!s.down) { banner.classList.add("hidden"); return; }
+        banner.classList.remove("hidden");
+        const txt = document.getElementById("worker-down-text");
+        if (txt) {
+            const n = s.queued || 0;
+            const t = fiskrI18n
+                ? fiskrI18n.t("Le démon de traitement est arrêté : {n} opération(s) en attente ne démarreront pas.")
+                : "Le démon de traitement est arrêté : {n} opération(s) en attente ne démarreront pas.";
+            txt.textContent = t.replace("{n}", n);
+        }
+        const btn = document.getElementById("worker-down-restart");
+        if (btn) {
+            const isAdmin = currentUser && userRoles(currentUser).includes("admin");
+            btn.classList.toggle("hidden", !isAdmin || _workerRestarting);
+        }
+    } catch (e) { /* silencieux : simple sonde de supervision */ }
+}
+
+async function restartWorker() {
+    if (_workerRestarting) return;
+    _workerRestarting = true;
+    const btn = document.getElementById("worker-down-restart");
+    if (btn) { btn.disabled = true; btn.textContent = "Relance en cours…"; }
+    try {
+        const response = await apiFetch("/api/worker/restart", { method: "POST" });
+        if (response.ok) {
+            const s = await response.json();
+            showToast(s.alive ? "Démon relancé." : "Relance demandée — vérification en cours…",
+                      s.alive ? "success" : "info");
+        } else {
+            const err = await response.json().catch(() => ({}));
+            showToast(err.detail || "Relance impossible.", "error");
+        }
+    } catch (e) {
+        showToast("Relance impossible (réseau).", "error");
+    } finally {
+        _workerRestarting = false;
+        if (btn) { btn.disabled = false; btn.textContent = fiskrI18n ? fiskrI18n.t("Relancer le démon") : "Relancer le démon"; }
+        setTimeout(refreshWorkerStatus, 1500);
+    }
+}
+
 // Peuple les selects de filtre « Liste » et les cases du périmètre de criblage
 function initListTypeControls() {
     const selects = [
@@ -680,6 +736,9 @@ document.addEventListener("DOMContentLoaded", () => {
     refreshSidebarCounters();
     // Badges vivants : compteurs légers rafraîchis toutes les 60 s
     setInterval(refreshSidebarCounters, 60_000);
+    // Supervision du démon travailleur : bandeau si arrêté (prod « worker »)
+    refreshWorkerStatus();
+    setInterval(refreshWorkerStatus, 30_000);
     // Opérations de fond : cadence adaptative (2 s en activité, 8 s au repos).
     // Repeuple aussi la pastille au chargement — une opération lancée avant le
     // rechargement de la page reste suivie.

@@ -852,6 +852,23 @@ textarea {
 /* Filtres génériques de tableau (attachTableFilters) */
 .table-filter-bar { margin-bottom: 0.6rem; }
 tr.filtered-out { display: none; }
+
+/* Bandeau de supervision : démon travailleur arrêté */
+.worker-down-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0 0 1rem;
+    padding: 0.7rem 1rem;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+.worker-down-banner.hidden { display: none; }
+.worker-down-icon { font-size: 1.1rem; }
+.worker-down-text { flex: 1; }
 .filter-count {
     font-size: 0.78rem;
     color: var(--text-muted);

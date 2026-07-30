@@ -140,6 +140,14 @@
                 </div>
             </header>
 
+            <!-- Bandeau de supervision : le demon travailleur est arrêté et des
+                 traitements attendent en file (production mutualisée sans démon). -->
+            <div id="worker-down-banner" class="worker-down-banner hidden" role="alert">
+                <span class="worker-down-icon" aria-hidden="true">⚠️</span>
+                <span id="worker-down-text" class="worker-down-text"></span>
+                <button id="worker-down-restart" class="btn btn-sm btn-primary hidden" onclick="restartWorker()">Relancer le démon</button>
+            </div>
+
             <!-- SECTION 0 : VUE D'ENSEMBLE (ACCUEIL) -->
             <section id="sec-home" class="tab-content active">
                 <div id="home-tiles" class="home-tiles"></div>
