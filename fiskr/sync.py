@@ -185,25 +185,43 @@ def source_network_config(source: str) -> Dict[str, Any]:
     return network
 
 
-def get_sync_config() -> Dict[str, Any]:
-    """Configuration de synchronisation (config.yaml, section sync) avec defauts."""
+def _apply_hot_sync_settings(db, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Applique les reglages a chaud (base) par-dessus config.yaml : interrupteur
+    general des synchronisations planifiees et activation par source. Ce sont
+    les valeurs que le planificateur doit lire — l'exploitant coupe ou relance
+    une source depuis l'application, sans editer de fichier ni redemarrer.
+    """
+    from fiskr.settings import sync_auto_enabled, sync_sources_enabled
+
+    cfg["auto_enabled"] = sync_auto_enabled(db)
+    for source, enabled in sync_sources_enabled(db).items():
+        if isinstance(cfg.get(source), dict):
+            cfg[source]["enabled"] = enabled
+    return cfg
+
+
+def get_sync_config(db=None) -> Dict[str, Any]:
+    """
+    Configuration de synchronisation (config.yaml, section sync) avec defauts.
+
+    Avec une session `db`, les reglages a chaud de la synchronisation
+    automatique (interrupteur general, sources actives) sont appliques
+    par-dessus : c'est la forme que doivent lire les planificateurs et l'ecran
+    de reglages. Sans session, seule la configuration fichier est rendue — les
+    appels internes (parametres reseau, URL d'une source) n'ont pas besoin de
+    la base et ne doivent pas la solliciter.
+    """
+    from fiskr.settings import sync_network_settings
+
     sync_cfg = config.get("sync", {}) or {}
-    network_cfg = sync_cfg.get("network") or {}
-    return {
+    cfg = {
         "auto_enabled": bool(sync_cfg.get("auto_enabled", False)),
         "schedule_time": sync_cfg.get("schedule_time", "06:00"),
         # Parametres reseau partages par toutes les sources (repris par les
-        # helpers HTTP : reprises sur erreurs de transport, User-Agent, delais)
-        "network": {
-            "timeout_seconds": float(network_cfg.get("timeout_seconds", 60) or 60),
-            "download_timeout_seconds": float(network_cfg.get("download_timeout_seconds", 120) or 120),
-            "retries": int(network_cfg.get("retries", 3) or 3),
-            "backoff_seconds": float(network_cfg.get("backoff_seconds", 3) or 3),
-            "user_agent": str(network_cfg.get(
-                "user_agent",
-                "Mozilla/5.0 (compatible; Fiskr-Compliance/2.4; +https://github.com/fongkhan/Fiskr)"
-            )),
-        },
+        # helpers HTTP), reglables a chaud — lecture standalone sans session :
+        # les surcharges PAR SOURCE (sync.<source>.network) continuent de primer
+        "network": sync_network_settings(db),
         "ofac": {
             "enabled": bool((sync_cfg.get("ofac") or {}).get("enabled", True)),
             "url": (sync_cfg.get("ofac") or {}).get("url", DEFAULT_OFAC_URL),
@@ -299,6 +317,7 @@ def get_sync_config() -> Dict[str, Any]:
             for key, src in OPENSANCTIONS_BY_KEY.items()
         },
     }
+    return _apply_hot_sync_settings(db, cfg) if db is not None else cfg
 
 
 def _csl_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:

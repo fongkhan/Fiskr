@@ -797,6 +797,17 @@ async function checkAuthUser() {
             if (scoringCard) scoringCard.classList.toggle("hidden", !isAdmin);
             const checklistCard = document.getElementById("checklist-card");
             if (checklistCard) checklistCard.classList.toggle("hidden", !isAdmin);
+            // Synchronisation automatique : acte d'exploitation réservé à
+            // l'administrateur — la carte entière est masquée pour les autres
+            // (le serveur refuse de toute façon l'écriture, cf. require_admin)
+            const syncAutomationCard = document.getElementById("sync-automation-card");
+            if (syncAutomationCard) syncAutomationCard.classList.toggle("hidden", !isAdmin);
+            // Cartes de reglages issues de config.yaml : administration pure
+            for (const cardId of ["institution-card", "security-access-card",
+                                  "adverse-media-card", "llm-card", "batch-inbox-card"]) {
+                const card = document.getElementById(cardId);
+                if (card) card.classList.toggle("hidden", !isAdmin);
+            }
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -1681,8 +1692,8 @@ async function fetchSyncConfig() {
         const cfg = await response.json();
         const info = document.getElementById("sync-schedule-info");
         const autoTxt = cfg.auto_enabled
-            ? "⏰ Planificateur cron actif : chaque source suit sa propre expression ci-dessous."
-            : "⏸️ Synchronisation automatique désactivée (sync.auto_enabled dans config.yaml).";
+            ? "⏰ Synchronisation automatique active : chaque source activée suit sa propre expression cron."
+            : "⏸️ Synchronisation automatique désactivée — aucune source ne part toute seule (un administrateur l'active plus bas).";
         const mailTxt = cfg.email_configured
             ? "Rapports envoyés par email (SMTP configuré)."
             : "Rapports disponibles dans l'application uniquement (SMTP non configuré).";
@@ -1733,8 +1744,8 @@ function renderSourcesTable(cfg) {
                     <div class="section-desc" style="margin: 0.15rem 0 0; font-size: 0.76rem;">${escapeHtml(s.desc)}</div>
                 </td>
                 <td>${enabled
-                    ? '<span class="status-badge no_match">activée</span>'
-                    : '<span class="status-badge" style="opacity: 0.6;">désactivée</span>'}</td>
+                    ? '<span class="status-badge no_match" title="Participe aux synchronisations planifiées">activée</span>'
+                    : '<span class="status-badge" style="opacity: 0.6;" title="Exclue des synchronisations planifiées — le bouton Synchroniser reste disponible">désactivée</span>'}</td>
                 <td>${state}<div class="section-desc" style="font-size: 0.72rem; margin-top: 0.15rem;">prochaine : ${escapeHtml(nextRun)}</div></td>
                 <td><button class="btn btn-primary" style="padding: 0.3rem 0.7rem; font-size: 0.8rem;"
                         onclick="startSourceSync('${s.alias}')">Synchroniser</button></td>
@@ -1776,28 +1787,49 @@ async function startSourceSync(alias) {
 // des opérations de fond sans redemander /api/sync/config
 let _lastSyncConfig = null;
 
+// Panneau de synchronisation automatique (carte réservée aux admins) :
+// interrupteur général + participation et cron par source. Tout est réglable
+// à chaud — plus besoin d'éditer config.yaml sur le serveur ni de redémarrer.
 function renderCronSchedules(cfg) {
     if (cfg) _lastSyncConfig = cfg;
     cfg = _lastSyncConfig;
     const tbody = document.querySelector("#cron-schedules-table tbody");
     if (!tbody || !cfg) return;
-    const isAdmin = currentUser && userRoles(currentUser).includes("admin");
     const schedules = cfg.schedules || {};
     const nextRuns = cfg.next_runs || {};
+    const origins = cfg.automation_sources || {};
+
+    const autoBox = document.getElementById("sync-auto-enabled");
+    if (autoBox) autoBox.checked = !!cfg.auto_enabled;
+    // Paramètres réseau communs (accordéon « avancé »)
+    const net = cfg.network || {};
+    const setNet = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ""; };
+    setNet("net-timeout", net.timeout_seconds); setNet("net-dl-timeout", net.download_timeout_seconds);
+    setNet("net-retries", net.retries); setNet("net-backoff", net.backoff_seconds);
+    setNet("net-user-agent", net.user_agent);
+    const originEl = document.getElementById("sync-auto-origin");
+    if (originEl) {
+        originEl.textContent = origins.auto_enabled === "database"
+            ? "Réglé depuis l'application (surcharge config.yaml)."
+            : "Valeur héritée de config.yaml — la modifier ici la surcharge à chaud.";
+    }
+
     tbody.innerHTML = Object.entries(CRON_SOURCE_KEYS).map(([source, labelKey]) => {
         const enabled = (cfg[source] || {}).enabled;
+        const overridden = origins[source] === "database";
         return `<tr>
             <td>${escapeHtml(SYNC_SOURCE_LABELS[labelKey] || labelKey)}
-                ${enabled ? "" : '<br><small style="color: var(--text-muted);">source désactivée</small>'}</td>
+                ${overridden ? '<br><small style="color: var(--text-muted);">réglé dans l\'application</small>' : ""}</td>
+            <td><input type="checkbox" id="auto-${source}" ${enabled ? "checked" : ""}
+                       style="width: 17px; height: 17px;"
+                       title="La source participe aux synchronisations planifiées"></td>
             <td><input type="text" id="cron-${source}" value="${escapeHtml(schedules[source] || "")}"
-                       style="font-family: monospace; max-width: 200px;" ${isAdmin ? "" : "disabled"}
+                       style="font-family: monospace; max-width: 200px;"
                        title="Expression cron 5 champs : minute heure jour mois jour-de-semaine"></td>
             <td>${nextRuns[source] ? formatDateTime(nextRuns[source]) : "—"}</td>
             <td>${sourceStateCell(source)}</td>
         </tr>`;
     }).join("");
-    const saveBtn = document.getElementById("cron-save-btn");
-    if (saveBtn) saveBtn.classList.toggle("hidden", !isAdmin);
 }
 
 // État vivant d'une source, lu dans les opérations de fond déjà collectées
@@ -1831,25 +1863,38 @@ function sourceStateCell(source) {
     </div>`;
 }
 
+// Enregistre l'ensemble du panneau en un appel : interrupteur général,
+// sources participantes et expressions cron. Le serveur applique à chaud.
 async function saveCronSchedules() {
     const schedules = {};
+    const sources_enabled = {};
     for (const source of Object.keys(CRON_SOURCE_KEYS)) {
-        const el = document.getElementById(`cron-${source}`);
-        if (el) schedules[source] = el.value.trim();
+        const cronEl = document.getElementById(`cron-${source}`);
+        if (cronEl) schedules[source] = cronEl.value.trim();
+        const autoEl = document.getElementById(`auto-${source}`);
+        if (autoEl) sources_enabled[source] = autoEl.checked;
     }
+    const auto_enabled = !!document.getElementById("sync-auto-enabled")?.checked;
+    const network = {
+        timeout_seconds: parseFloat(document.getElementById("net-timeout")?.value) || 60,
+        download_timeout_seconds: parseFloat(document.getElementById("net-dl-timeout")?.value) || 120,
+        retries: parseInt(document.getElementById("net-retries")?.value, 10) || 0,
+        backoff_seconds: parseFloat(document.getElementById("net-backoff")?.value) || 0,
+        user_agent: document.getElementById("net-user-agent")?.value || "",
+    };
     try {
         const response = await apiFetch("/api/settings/sync", {
             method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ schedules }),
+            body: JSON.stringify({ schedules, sources_enabled, auto_enabled, network }),
         });
         const data = await response.json();
         if (!response.ok) {
-            showToast("Erreur : " + (data.detail || "planification refusée."), "error");
+            showToast("Erreur : " + (data.detail || "réglage refusé."), "error");
             return;
         }
         showToast(data.message, "success");
         fetchSyncConfig();
-    } catch (e) { console.error("Cron schedules save error:", e); }
+    } catch (e) { console.error("Sync automation save error:", e); }
 }
 
 // Handle Delta Snapshot Comparison
@@ -3546,6 +3591,29 @@ async function fetchIngestionSettings() {
         const autoBtEl = document.getElementById("setting-auto-backtest");
         if (autoBtEl) autoBtEl.checked = ingestionSettings.auto_backtest_enabled !== false;
         populateAutoBacktestPanelSelect(ingestionSettings.auto_backtest_panel || "");
+        // Familles de config.yaml pilotables ici (état effectif servi par l'API)
+        const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ""; };
+        const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        const inst = ingestionSettings.institution || {};
+        setVal("inst-name", inst.name); setVal("inst-siren", inst.siren);
+        setVal("inst-corr-name", inst.correspondent_name);
+        setVal("inst-corr-email", inst.correspondent_email);
+        setVal("inst-corr-phone", inst.correspondent_phone);
+        const am = ingestionSettings.adverse_media || {};
+        setChk("am-enabled", am.enabled); setVal("am-language", am.language);
+        setVal("am-max-results", am.max_results);
+        setVal("am-keywords", (am.keywords || []).join("\n"));
+        const nllm = ingestionSettings.narrative_llm || {};
+        setChk("llm-narrative-enabled", nllm.llm_enabled); setVal("llm-narrative-model", nllm.llm_model);
+        const fllm = ingestionSettings.fprules_llm || {};
+        setChk("llm-fprules-enabled", fllm.llm_enabled); setVal("llm-fprules-model", fllm.llm_model);
+        const sec = ingestionSettings.security_access || {};
+        setVal("sec-max-failures", sec.max_login_failures); setVal("sec-lockout", sec.lockout_minutes);
+        setVal("sec-min-password", sec.min_password_length); setVal("sec-session-hours", sec.session_hours);
+        const inbox = ingestionSettings.batch_inbox || {};
+        setVal("inbox-dir", inbox.inbox_dir); setVal("inbox-poll", inbox.inbox_poll_seconds);
+        setVal("inbox-archive", inbox.archive_dir);
+        setVal("notif-webhooks", (ingestionSettings.notification_webhooks || []).join("\n"));
         const qualityMinEl = document.getElementById("setting-quality-min");
         if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
         // SLA par priorité + notifications métier
@@ -3574,6 +3642,70 @@ async function fetchIngestionSettings() {
     } catch (e) {
         console.error("Error fetching ingestion settings:", e);
     }
+}
+
+// Enregistre UNE famille de réglages (PUT partiel : le reste est inchangé)
+async function saveSettingsFamily(payload, okMessage) {
+    try {
+        const response = await apiFetch("/api/settings/ingestion", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "réglage refusé."), "error"); return; }
+        showToast(okMessage, "success");
+        fetchIngestionSettings();
+    } catch (e) { showToast("Erreur réseau de communication.", "error"); }
+}
+
+function saveInstitutionSettings() {
+    saveSettingsFamily({ institution: {
+        name: document.getElementById("inst-name")?.value || "",
+        siren: document.getElementById("inst-siren")?.value || "",
+        correspondent_name: document.getElementById("inst-corr-name")?.value || "",
+        correspondent_email: document.getElementById("inst-corr-email")?.value || "",
+        correspondent_phone: document.getElementById("inst-corr-phone")?.value || "",
+    } }, "Établissement déclarant enregistré.");
+}
+
+function saveAdverseMediaSettings() {
+    saveSettingsFamily({ adverse_media: {
+        enabled: !!document.getElementById("am-enabled")?.checked,
+        language: document.getElementById("am-language")?.value || "fr",
+        max_results: parseInt(document.getElementById("am-max-results")?.value, 10) || 10,
+        keywords: (document.getElementById("am-keywords")?.value || "")
+            .split("\n").map(k => k.trim()).filter(Boolean),
+    } }, "Réglages adverse media enregistrés.");
+}
+
+function saveLlmSettings() {
+    saveSettingsFamily({
+        narrative_llm: {
+            llm_enabled: !!document.getElementById("llm-narrative-enabled")?.checked,
+            llm_model: document.getElementById("llm-narrative-model")?.value || "",
+        },
+        fprules_llm: {
+            llm_enabled: !!document.getElementById("llm-fprules-enabled")?.checked,
+            llm_model: document.getElementById("llm-fprules-model")?.value || "",
+        },
+    }, "Réglages IA enregistrés.");
+}
+
+function saveSecurityAccessSettings() {
+    saveSettingsFamily({ security_access: {
+        max_login_failures: parseInt(document.getElementById("sec-max-failures")?.value, 10) || 5,
+        lockout_minutes: parseInt(document.getElementById("sec-lockout")?.value, 10) || 15,
+        min_password_length: parseInt(document.getElementById("sec-min-password")?.value, 10) || 12,
+        session_hours: parseInt(document.getElementById("sec-session-hours")?.value, 10) || 8,
+    } }, "Politique d'accès enregistrée (effet immédiat).");
+}
+
+function saveBatchInboxSettings() {
+    saveSettingsFamily({ batch_inbox: {
+        inbox_dir: document.getElementById("inbox-dir")?.value || "",
+        inbox_poll_seconds: parseInt(document.getElementById("inbox-poll")?.value, 10) || 60,
+        archive_dir: document.getElementById("inbox-archive")?.value || "",
+    } }, "Inbox CFT enregistrée.");
 }
 
 // Options du panel d'auto-backtest : les panels utilisables du cahier de tests
@@ -3618,6 +3750,8 @@ async function saveIngestionSettings() {
             enabled: !!document.getElementById("setting-digest-enabled")?.checked,
             cron: (document.getElementById("setting-digest-cron")?.value || "").trim(),
         },
+        notification_webhooks: (document.getElementById("notif-webhooks")?.value || "")
+            .split("\n").map(u => u.trim()).filter(Boolean),
     };
     try {
         const response = await apiFetch("/api/settings/ingestion", {
@@ -3767,12 +3901,19 @@ async function flushNotificationDigest() {
     }
 }
 
+// Journal des notifications GÉRÉ : filtre serveur par statut, suppression
+// unitaire, purge en masse et renvoi d'un échec — plus un journal subi.
 async function fetchNotificationLog() {
     const container = document.getElementById("notif-log");
     if (!container) return;
-    container.innerHTML = '<small style="color: var(--text-muted);">Chargement du journal…</small>';
+    if (!container.dataset.ready) {
+        container.innerHTML = '<small style="color: var(--text-muted);">Chargement du journal…</small>';
+    }
+    const statusFilter = document.getElementById("notif-log-status")?.value || "";
     try {
-        const response = await apiFetch("/api/notifications/log?limit=30");
+        const params = new URLSearchParams({ limit: "50" });
+        if (statusFilter) params.set("status", statusFilter);
+        const response = await apiFetch(`/api/notifications/log?${params}`);
         if (!response.ok) { container.innerHTML = ""; return; }
         const data = await response.json();
         const badge = (status) => ({
@@ -3788,16 +3929,75 @@ async function fetchNotificationLog() {
                 <td>${badge(item.status)}</td>
                 <td><small>${escapeHtml(item.recipients || "—")}</small>
                     ${item.error ? `<br><small style="color: var(--color-alert);">${escapeHtml(item.error)}</small>` : ""}</td>
+                <td style="white-space: nowrap;">
+                    ${["FAILED", "SKIPPED"].includes(item.status)
+                        ? `<button class="btn btn-sm btn-secondary" onclick="resendNotification(${item.id})" title="Recomposer et renvoyer maintenant">🔁</button> `
+                        : ""}
+                    <button class="btn btn-sm" style="background: var(--surface-3);" onclick="deleteNotificationEntry(${item.id})" title="Supprimer cette entrée du journal">🗑</button>
+                </td>
             </tr>`).join("");
+        container.dataset.ready = "1";
         container.innerHTML = `
-            <p class="section-desc" style="margin: 0.5rem 0;">${data.queued} évènement(s) en file pour le prochain récapitulatif.</p>
+            <div class="filter-bar" style="margin: 0.5rem 0;">
+                <select id="notif-log-status" onchange="fetchNotificationLog()" title="Filtrer le journal par statut (côté serveur)">
+                    <option value="">Tous statuts</option>
+                    <option value="SENT">Envoyées</option>
+                    <option value="QUEUED">En file</option>
+                    <option value="FAILED">Échecs</option>
+                    <option value="SKIPPED">Ignorées</option>
+                </select>
+                <span style="align-self: center; color: var(--text-muted); font-size: 0.82rem;">
+                    ${data.total} entrée(s) · ${data.queued} en file pour le prochain récapitulatif</span>
+                <button class="btn btn-sm" style="background: var(--surface-3); margin-left: auto;"
+                        onclick="purgeNotificationLog()" title="Vider le journal (les entrées EN FILE sont conservées)">🧹 Purger le journal</button>
+            </div>
             <div class="table-container" style="max-height: 280px; overflow-y: auto;">
-                <table><thead><tr><th>Date</th><th>Étape</th><th>Statut</th><th>Destinataires</th></tr></thead>
-                <tbody>${rows || '<tr><td colspan="4" style="color: var(--text-muted); text-align:center;">Aucun envoi enregistré.</td></tr>'}</tbody></table>
+                <table><thead><tr><th>Date</th><th>Étape</th><th>Statut</th><th>Destinataires</th><th></th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="5" style="color: var(--text-muted); text-align:center;">Aucun envoi enregistré.</td></tr>'}</tbody></table>
             </div>`;
+        const sel = document.getElementById("notif-log-status");
+        if (sel) sel.value = statusFilter;
     } catch (e) {
         container.innerHTML = "";
     }
+}
+
+async function deleteNotificationEntry(id) {
+    if (!await confirmDialog("Supprimer cette entrée du journal des notifications ?",
+                             { title: "Suppression" })) return;
+    try {
+        const response = await apiFetch(`/api/notifications/log/${id}`, { method: "DELETE" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "suppression refusée."), "error"); return; }
+        showToast(data.message, "success");
+        fetchNotificationLog();
+    } catch (e) { showToast("Erreur réseau de communication.", "error"); }
+}
+
+async function purgeNotificationLog() {
+    if (!await confirmDialog(
+        "Vider le journal des notifications ? Les entrées EN FILE (récapitulatif non envoyé) sont conservées.",
+        { title: "Purge du journal" })) return;
+    try {
+        const response = await apiFetch("/api/notifications/log/purge", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "purge refusée."), "error"); return; }
+        showToast(data.message, "success");
+        fetchNotificationLog();
+    } catch (e) { showToast("Erreur réseau de communication.", "error"); }
+}
+
+async function resendNotification(id) {
+    try {
+        const response = await apiFetch(`/api/notifications/log/${id}/resend`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "renvoi refusé."), "error"); return; }
+        showToast(data.message, "success");
+        fetchNotificationLog();
+    } catch (e) { showToast("Erreur réseau de communication.", "error"); }
 }
 
 async function fetchPendingReviews() {
@@ -8455,7 +8655,47 @@ async function fetchScoringSettings() {
                            placeholder="global" value="${data.cut_off_overrides[t] ?? ""}">
                 </div>`).join("");
         }
+        // Réglages fins du moteur (pondérations + bonus/malus), eux aussi à chaud
+        const w = data.weights || {};
+        const setNum = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ""; };
+        setNum("w-jaro", w.jaro_winkler); setNum("w-damerau", w.damerau_levenshtein);
+        setNum("w-token", w.token_sort);
+        const cr = data.contextual_rules || {};
+        setNum("cr-dob-window", cr.dob_tolerance_window); setNum("cr-dob-exact", cr.dob_exact_bonus);
+        setNum("cr-dob-tol", cr.dob_tolerance_bonus); setNum("cr-dob-out", cr.dob_out_of_window_malus);
+        setNum("cr-gender", cr.gender_conflict_malus); setNum("cr-geo-match", cr.geography_match_bonus);
+        setNum("cr-geo-nomatch", cr.geography_no_match_malus);
     } catch (e) { console.error("Scoring settings error:", e); }
+}
+
+async function saveScoringEngineTuning() {
+    const num = (id) => parseFloat(document.getElementById(id)?.value);
+    const payload = {
+        weights: {
+            jaro_winkler: num("w-jaro") || 0,
+            damerau_levenshtein: num("w-damerau") || 0,
+            token_sort: num("w-token") || 0,
+        },
+        contextual_rules: {
+            dob_tolerance_window: num("cr-dob-window") || 0,
+            dob_exact_bonus: num("cr-dob-exact") || 0,
+            dob_tolerance_bonus: num("cr-dob-tol") || 0,
+            dob_out_of_window_malus: num("cr-dob-out") || 0,
+            gender_conflict_malus: num("cr-gender") || 0,
+            geography_match_bonus: num("cr-geo-match") || 0,
+            geography_no_match_malus: num("cr-geo-nomatch") || 0,
+        },
+    };
+    try {
+        const response = await apiFetch("/api/settings/scoring", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) { showToast("Erreur : " + (data.detail || "réglage refusé."), "error"); return; }
+        showToast("Réglages fins du moteur enregistrés (effet immédiat).", "success");
+        fetchScoringSettings();
+    } catch (e) { showToast("Erreur réseau de communication.", "error"); }
 }
 
 async function saveScoringSettings() {

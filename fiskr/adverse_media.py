@@ -28,15 +28,14 @@ DEFAULT_KEYWORDS = [
 ]
 
 
-def get_adverse_media_config() -> Dict[str, Any]:
-    cfg = config.get("adverse_media", {}) or {}
-    return {
-        "enabled": bool(cfg.get("enabled", True)),
-        "provider": cfg.get("provider", "google_news_rss"),
-        "language": cfg.get("language", "fr"),
-        "max_results": int(cfg.get("max_results", 10)),
-        "keywords": cfg.get("keywords") or DEFAULT_KEYWORDS,
-    }
+def get_adverse_media_config(db=None) -> Dict[str, Any]:
+    """Etat effectif (reglage a chaud > config.yaml). Une liste de mots-cles
+    vide retombe sur les mots-cles LCB-FT par defaut."""
+    from fiskr.settings import adverse_media_settings
+    cfg = adverse_media_settings(db)
+    if not cfg["keywords"]:
+        cfg["keywords"] = list(DEFAULT_KEYWORDS)
+    return cfg
 
 
 def build_google_news_query(name: str, keywords: List[str]) -> str:

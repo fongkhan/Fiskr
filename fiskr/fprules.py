@@ -208,12 +208,10 @@ def validate_rule_code(code: str) -> Dict[str, Any]:
 # Generation de regle en langage naturel (IA optionnelle, cle Anthropic)
 # ---------------------------------------------------------------------------
 
-def get_fprules_llm_config() -> Dict[str, Any]:
-    cfg = config.get("fprules", {}) or {}
-    return {
-        "llm_enabled": bool(cfg.get("llm_enabled", False)),
-        "llm_model": cfg.get("llm_model", "claude-sonnet-5"),
-    }
+def get_fprules_llm_config(db=None) -> Dict[str, Any]:
+    """Etat effectif (reglage a chaud > config.yaml)."""
+    from fiskr.settings import fprules_llm_settings
+    return fprules_llm_settings(db)
 
 
 class RuleGenerationUnavailable(RuntimeError):
@@ -285,7 +283,7 @@ def generate_rule_code(instruction: str, channel: str,
     cfg = get_fprules_llm_config()
     if not cfg["llm_enabled"]:
         raise RuleGenerationUnavailable(
-            "La génération par IA est désactivée (fprules.llm_enabled dans config.yaml). "
+            "La génération par IA est désactivée (Paramètres → Intégrations → IA). "
             "Utilisez le formulaire structuré ou l'éditeur Python."
         )
     if not os.environ.get("ANTHROPIC_API_KEY"):

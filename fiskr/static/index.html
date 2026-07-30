@@ -634,7 +634,7 @@
                             <h2>Collecteurs de Sources Officielles</h2>
                             <p class="section-desc">Récupérez les listes directement auprès des émetteurs : le delta (ADDED / MODIFIED / REMOVED) est calculé puis appliqué au référentiel actif, et un rapport de suivi est émis (in-app + email si SMTP configuré).</p>
 
-                            <p class="section-desc" style="margin-bottom: 0.75rem;">Les sources sont groupées par nature. Activez-les dans <code>config.yaml</code> (<code>sync.&lt;source&gt;.enabled</code>) ; une source désactivée reste listée mais grisée. « Synchroniser » lance une récupération immédiate ; la planification quotidienne se règle plus bas.</p>
+                            <p class="section-desc" style="margin-bottom: 0.75rem;">Les sources sont groupées par nature. La colonne « Automatique » indique si la source participe aux récupérations planifiées : un administrateur l'active depuis la carte <strong>Synchronisation Automatique</strong> plus bas, sans toucher au serveur. « Synchroniser » lance une récupération immédiate et reste disponible même pour une source exclue de l'automatique.</p>
                             <div class="filter-bar" style="margin-bottom: 0.75rem;">
                                 <input type="text" id="sources-search" placeholder="Filtrer les sources (nom, pays…)" aria-label="Filtrer les sources">
                                 <select id="sources-family-filter" aria-label="Filtrer par famille">
@@ -653,7 +653,7 @@
                             <div class="table-container">
                                 <table id="sources-table">
                                     <thead><tr>
-                                        <th>Source</th><th>Activée</th><th>Dernière / prochaine</th><th class="no-sort"></th>
+                                        <th>Source</th><th>Automatique</th><th>Dernière / prochaine</th><th class="no-sort"></th>
                                     </tr></thead>
                                     <tbody><!-- Généré depuis SOURCE_CATALOG (renderSourcesTable) --></tbody>
                                 </table>
@@ -663,17 +663,42 @@
                             <p id="sync-schedule-info" class="section-desc" style="margin-top: 1rem;"></p>
                         </div>
 
-                        <!-- Planification cron par source -->
-                        <div class="card result-card">
-                            <h2>⏰ Planification par Source (cron)</h2>
-                            <p class="section-desc">Chaque source suit sa propre expression cron 5 champs (<code>minute heure jour mois jour-de-semaine</code>), modifiable à chaud (admin). Vide = retour au défaut (<code>config.yaml</code> ou horaire quotidien global). Exemples : <code>0 6 * * *</code> (tous les jours à 6h), <code>0 */4 * * *</code> (toutes les 4 h), <code>30 7 * * 1-5</code> (7h30 en semaine). Une même source ne se chevauche jamais.</p>
+                        <!-- Synchronisation automatique (ADMIN uniquement) -->
+                        <div class="card result-card hidden" id="sync-automation-card">
+                            <h2>⏰ Synchronisation Automatique <span class="status-badge warning" style="font-size: 0.68rem; vertical-align: middle;">ADMIN</span></h2>
+                            <p class="section-desc">Pilotage complet des récupérations planifiées, <strong>modifiable à chaud</strong> : aucun accès au serveur ni redémarrage. L'interrupteur général coupe ou relance l'ensemble ; chaque source décide ensuite si elle y participe et suit sa propre expression cron 5 champs (<code>minute heure jour mois jour-de-semaine</code>). Vide = retour au défaut (<code>config.yaml</code> ou horaire quotidien global). Exemples : <code>0 6 * * *</code> (tous les jours à 6h), <code>0 */4 * * *</code> (toutes les 4 h), <code>30 7 * * 1-5</code> (7h30 en semaine). Une même source ne se chevauche jamais, et couper l'automatique n'empêche jamais un lancement manuel.</p>
+                            <div class="form-group" style="margin-bottom: 1rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="sync-auto-enabled" style="width: 18px; height: 18px;">
+                                    <strong>Activer la synchronisation automatique</strong>
+                                </label>
+                                <small id="sync-auto-origin" style="color: var(--text-muted);"></small>
+                            </div>
                             <div class="table-container">
                                 <table id="cron-schedules-table">
-                                    <thead><tr><th>Source</th><th>Expression cron</th><th>Prochaine exécution</th><th>État</th></tr></thead>
+                                    <thead><tr><th>Source</th><th>Automatique</th><th>Expression cron</th><th>Prochaine exécution</th><th>État</th></tr></thead>
                                     <tbody><!-- Populated dynamically --></tbody>
                                 </table>
                             </div>
-                            <button id="cron-save-btn" class="btn btn-primary hidden" style="margin-top: 1rem;" onclick="saveCronSchedules()">Enregistrer la planification</button>
+                            <div class="accordion-section" style="margin-top: 1rem;">
+                                <button type="button" class="accordion-header" onclick="toggleAccordion('sync-network-tuning')">
+                                    🌐 Réseau des synchronisations (avancé) <span class="accordion-arrow">▼</span>
+                                </button>
+                                <div id="sync-network-tuning" class="accordion-content hidden" style="padding-top: 1rem;">
+                                    <p class="section-desc">Paramètres réseau communs à toutes les sources, appliqués à chaud : délais, reprises sur erreur transitoire et User-Agent. Les surcharges par source de <code>config.yaml</code> (<code>sync.&lt;source&gt;.network</code>) continuent de primer — une source lente garde son budget propre.</p>
+                                    <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+                                        <div class="form-group"><label for="net-timeout">Timeout requêtes (s)</label><input type="number" id="net-timeout" min="5" max="600" step="1"></div>
+                                        <div class="form-group"><label for="net-dl-timeout">Timeout téléchargements (s)</label><input type="number" id="net-dl-timeout" min="5" max="1800" step="1"></div>
+                                        <div class="form-group"><label for="net-retries">Reprises</label><input type="number" id="net-retries" min="0" max="20" step="1"></div>
+                                        <div class="form-group"><label for="net-backoff">Attente entre reprises (s)</label><input type="number" id="net-backoff" min="0" max="120" step="1"></div>
+                                    </div>
+                                    <div class="form-group" style="max-width: 640px;">
+                                        <label for="net-user-agent">User-Agent</label>
+                                        <input type="text" id="net-user-agent" maxlength="300">
+                                    </div>
+                                </div>
+                            </div>
+                            <button id="cron-save-btn" class="btn btn-primary" style="margin-top: 1rem;" onclick="saveCronSchedules()">Enregistrer la synchronisation automatique</button>
                         </div>
 
                         <!-- Sync Reports History Card -->
@@ -1887,6 +1912,33 @@
                         <button class="btn btn-primary" onclick="saveIngestionSettings()">Enregistrer les réglages</button>
                     </div>
 
+                    <!-- Établissement déclarant TRACFIN (Admin) -->
+                    <div class="card form-card hidden" id="institution-card">
+                        <h2>🏛 Établissement Déclarant (Admin)</h2>
+                        <p class="section-desc">Identité de l'établissement assujetti : elle pré-remplit la rubrique « déclarant » des projets de déclaration de soupçon TRACFIN. Réglable à chaud — plus besoin d'éditer <code>config.yaml</code> sur le serveur.</p>
+                        <div class="form-group" style="max-width: 480px;"><label for="inst-name">Raison sociale</label><input type="text" id="inst-name"></div>
+                        <div class="form-group" style="max-width: 240px;"><label for="inst-siren">SIREN (9 chiffres)</label><input type="text" id="inst-siren" maxlength="9" inputmode="numeric"></div>
+                        <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 640px;">
+                            <div class="form-group"><label for="inst-corr-name">Correspondant TRACFIN</label><input type="text" id="inst-corr-name"></div>
+                            <div class="form-group"><label for="inst-corr-email">Email du correspondant</label><input type="email" id="inst-corr-email"></div>
+                        </div>
+                        <div class="form-group" style="max-width: 240px;"><label for="inst-corr-phone">Téléphone du correspondant</label><input type="text" id="inst-corr-phone"></div>
+                        <button class="btn btn-primary" onclick="saveInstitutionSettings()">Enregistrer l'établissement</button>
+                    </div>
+
+                    <!-- Politique d'accès (Admin) -->
+                    <div class="card form-card hidden" id="security-access-card">
+                        <h2>🔐 Sécurité des Accès (Admin)</h2>
+                        <p class="section-desc">Politique d'accès effective immédiatement : verrouillage après échecs de connexion, longueur minimale des mots de passe humains, durée de session. Les propriétés du déploiement (cookies <code>Secure</code>, <code>SameSite</code>) restent dans <code>config.yaml</code> : elles dépendent du HTTPS, pas de l'exploitation.</p>
+                        <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+                            <div class="form-group"><label for="sec-max-failures">Échecs avant verrouillage</label><input type="number" id="sec-max-failures" min="1" max="100"></div>
+                            <div class="form-group"><label for="sec-lockout">Verrouillage (minutes)</label><input type="number" id="sec-lockout" min="1" max="1440"></div>
+                            <div class="form-group"><label for="sec-min-password">Mot de passe (min. caractères)</label><input type="number" id="sec-min-password" min="8" max="128"></div>
+                            <div class="form-group"><label for="sec-session-hours">Session (heures)</label><input type="number" id="sec-session-hours" min="1" max="168"></div>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveSecurityAccessSettings()">Enregistrer la politique d'accès</button>
+                    </div>
+
                     <!-- Double authentification TOTP (tous les utilisateurs) -->
                     <div class="card form-card hidden" id="retention-card">
                         <h2>🗄 Rétention des Données (Admin)</h2>
@@ -1952,6 +2004,11 @@
                             <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchNotificationLog()">🧾 Journal des envois</button>
                         </div>
                         <div id="notif-log"></div>
+                        <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">📡 Webhooks sortants</h3>
+                        <p class="section-desc" style="margin-bottom: 0.75rem;">Chaque évènement actif est aussi poussé en POST JSON (<code>{event, label, at, data}</code>) vers ces URLs — une par ligne, http(s) uniquement, 20 maximum. Réglable à chaud.</p>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <textarea id="notif-webhooks" rows="3" placeholder="https://hooks.example.com/fiskr"></textarea>
+                        </div>
                         <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">📈 Digest conformité périodique</h3>
                         <p class="section-desc" style="margin-bottom: 0.75rem;">Synthèse envoyée par email/webhooks à heure fixe (expression cron 5 champs) : files ouvertes par canal, retards SLA, 4-yeux en attente, homologations, volumétrie 24 h et santé des synchronisations.</p>
                         <div class="form-group" style="margin-bottom: 0.5rem;">
@@ -1986,6 +2043,31 @@
                             <button class="btn btn-secondary" onclick="simulateScoringImpact()" title="Rejoue l'historique récent avec les seuils saisis, sans rien modifier">🧪 Simuler l'impact (30 j)</button>
                         </div>
                         <div id="scoring-simulate-result" style="margin-top: 1rem;"></div>
+                        <div class="accordion-section" style="margin-top: 1rem;">
+                            <button type="button" class="accordion-header" onclick="toggleAccordion('scoring-engine-tuning')">
+                                ⚙️ Pondérations &amp; bonus/malus contextuels (avancé) <span class="accordion-arrow">▼</span>
+                            </button>
+                            <div id="scoring-engine-tuning" class="accordion-content hidden" style="padding-top: 1rem;">
+                                <p class="section-desc">Réglages fins du moteur, appliqués à chaud comme les seuils. Les pondérations composent le score de nom (leur somme doit rester positive) ; les bonus/malus ajustent le score selon la date de naissance, le genre et la géographie. Chiffrez tout changement avec la simulation d'impact ou le cahier de tests avant de produire.</p>
+                                <h4 style="margin: 0.5rem 0 0.4rem;">Pondérations des métriques de nom</h4>
+                                <div class="form-row" style="grid-template-columns: repeat(3, 1fr); max-width: 560px;">
+                                    <div class="form-group"><label for="w-jaro">Jaro-Winkler</label><input type="number" id="w-jaro" min="0" max="1" step="0.05"></div>
+                                    <div class="form-group"><label for="w-damerau">Damerau-Levenshtein</label><input type="number" id="w-damerau" min="0" max="1" step="0.05"></div>
+                                    <div class="form-group"><label for="w-token">Token sort</label><input type="number" id="w-token" min="0" max="1" step="0.05"></div>
+                                </div>
+                                <h4 style="margin: 0.75rem 0 0.4rem;">Bonus / malus contextuels</h4>
+                                <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+                                    <div class="form-group"><label for="cr-dob-window">Tolérance DDN (années)</label><input type="number" id="cr-dob-window" min="0" max="20" step="1"></div>
+                                    <div class="form-group"><label for="cr-dob-exact">DDN exacte (bonus)</label><input type="number" id="cr-dob-exact" min="-100" max="100" step="1"></div>
+                                    <div class="form-group"><label for="cr-dob-tol">DDN dans la fenêtre</label><input type="number" id="cr-dob-tol" min="-100" max="100" step="1"></div>
+                                    <div class="form-group"><label for="cr-dob-out">DDN hors fenêtre</label><input type="number" id="cr-dob-out" min="-100" max="100" step="1"></div>
+                                    <div class="form-group"><label for="cr-gender">Conflit de genre</label><input type="number" id="cr-gender" min="-100" max="100" step="1"></div>
+                                    <div class="form-group"><label for="cr-geo-match">Géographie concordante</label><input type="number" id="cr-geo-match" min="-100" max="100" step="1"></div>
+                                    <div class="form-group"><label for="cr-geo-nomatch">Géographie discordante</label><input type="number" id="cr-geo-nomatch" min="-100" max="100" step="1"></div>
+                                </div>
+                                <button class="btn btn-primary" onclick="saveScoringEngineTuning()">Enregistrer les réglages fins</button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Checklist d'instruction (admin) -->
@@ -2041,6 +2123,60 @@
                             <input type="file" id="config-import-file" accept=".json,application/json" style="display: none;" onchange="importAppConfig(this)">
                         </div>
                         <p id="config-import-result" class="section-desc" style="margin-top: 0.75rem;"></p>
+                    </div>
+
+                    <!-- Adverse media (Admin) -->
+                    <div class="card form-card hidden" id="adverse-media-card">
+                        <h2>📰 Adverse Media (Admin)</h2>
+                        <p class="section-desc">Revue de presse négative proposée à l'analyste dans le dossier d'alerte : purement informative, elle ne modifie jamais un score ni un statut de criblage. Réglable à chaud ; une liste de mots-clés vide reprend les mots-clés LCB-FT par défaut.</p>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="am-enabled" style="width: 18px; height: 18px;">
+                                Activer la recherche adverse media
+                            </label>
+                        </div>
+                        <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 480px;">
+                            <div class="form-group"><label for="am-language">Langue (fr, en…)</label><input type="text" id="am-language" maxlength="8"></div>
+                            <div class="form-group"><label for="am-max-results">Résultats max (1-50)</label><input type="number" id="am-max-results" min="1" max="50"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="am-keywords">Mots-clés LCB-FT (un par ligne, vide = liste par défaut)</label>
+                            <textarea id="am-keywords" rows="4" placeholder="sanctions&#10;blanchiment&#10;fraude"></textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveAdverseMediaSettings()">Enregistrer l'adverse media</button>
+                    </div>
+
+                    <!-- IA Claude : narratifs + règles anti-FP (Admin) -->
+                    <div class="card form-card hidden" id="llm-card">
+                        <h2>🤖 IA — Narratifs &amp; Règles (Admin)</h2>
+                        <p class="section-desc">Deux usages optionnels de l'API Claude, réglables à chaud : la reformulation en prose des narratifs d'alertes, et la génération de brouillons de règles anti-faux positifs en langage naturel. Les deux exigent la variable d'environnement <code>ANTHROPIC_API_KEY</code> sur le serveur (jamais saisie ici) et la décision reste toujours humaine.</p>
+                        <div class="form-group" style="margin-bottom: 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="llm-narrative-enabled" style="width: 18px; height: 18px;">
+                                Reformulation des narratifs d'alertes
+                            </label>
+                        </div>
+                        <div class="form-group" style="max-width: 320px;"><label for="llm-narrative-model">Modèle (narratifs)</label><input type="text" id="llm-narrative-model" placeholder="claude-opus-4-8"></div>
+                        <div class="form-group" style="margin: 0.75rem 0 0.5rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="llm-fprules-enabled" style="width: 18px; height: 18px;">
+                                Génération de règles anti-FP en langage naturel
+                            </label>
+                        </div>
+                        <div class="form-group" style="max-width: 320px;"><label for="llm-fprules-model">Modèle (règles)</label><input type="text" id="llm-fprules-model" placeholder="claude-sonnet-5"></div>
+                        <button class="btn btn-primary" onclick="saveLlmSettings()">Enregistrer les réglages IA</button>
+                    </div>
+
+                    <!-- Inbox CFT (Admin) -->
+                    <div class="card form-card hidden" id="batch-inbox-card">
+                        <h2>📥 Inbox CFT (Admin)</h2>
+                        <p class="section-desc">Répertoire du serveur où le moniteur de transfert (CFT/SFTP) dépose les fichiers clients CSV : chaque fichier stable devient une campagne criblée automatiquement puis est archivé. Chemins absolus sur le serveur ; vide = scrutation désactivée. Ces chemins sont propres à chaque machine et ne voyagent pas dans l'export de configuration.</p>
+                        <div class="form-group"><label for="inbox-dir">Répertoire de dépôt (absolu, vide = désactivé)</label><input type="text" id="inbox-dir" placeholder="/home/fiskr/inbox"></div>
+                        <div class="form-row" style="grid-template-columns: 1fr 2fr; max-width: 640px;">
+                            <div class="form-group"><label for="inbox-poll">Scrutation (secondes)</label><input type="number" id="inbox-poll" min="5" max="3600"></div>
+                            <div class="form-group"><label for="inbox-archive">Répertoire d'archive (vide = <code>&lt;dépôt&gt;/archive</code>)</label><input type="text" id="inbox-archive"></div>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveBatchInboxSettings()">Enregistrer l'inbox CFT</button>
                     </div>
 
                     <!-- Clés d'API techniques (comptes de service) -->
