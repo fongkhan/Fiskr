@@ -371,25 +371,45 @@ def test_api_sync_run_invalid_date_is_refused_synchronously(client):
 def test_api_sync_run_refuses_a_second_run_of_the_same_source(client, monkeypatch):
     """
     Une source deja en cours ne se relance pas : deux ingestions concurrentes
-    de la meme liste se marcheraient dessus.
+    de la meme liste se marcheraient dessus. L'exclusivite est portee par le
+    dedupe_key de la file de travaux (ligne QUEUED/RUNNING en base) : elle vaut
+    donc entre TOUS les processus, pas seulement dans celui qui a lance la sync.
     """
-    from fiskr import api as api_module
+    from fiskr.database import SessionLocal, Job
 
-    api_module._running_syncs.add("ofac")
+    session = SessionLocal()
+    try:
+        live = Job(token="sync:ofac", kind="sync", label="Synchronisation OFAC",
+                   params={}, status="RUNNING", dedupe_key="sync:ofac",
+                   created_by="test")
+        session.add(live)
+        session.commit()
+        live_id = live.id
+    finally:
+        session.close()
     try:
         response = client.post("/api/sync/run", json={"source": "OFAC"})
         assert response.status_code == 409
     finally:
-        api_module._running_syncs.discard("ofac")
+        session = SessionLocal()
+        try:
+            session.query(Job).filter(Job.id == live_id).delete()
+            session.commit()
+        finally:
+            session.close()
 
 
 def test_api_sync_run_answers_202_without_waiting(client, monkeypatch):
     """
     Le POST rend la main tout de suite : il ne doit PAS attendre la fin du
     cycle. On le prouve en rendant le cycle lent — la reponse arrive avant.
+    Force le mode `thread` : la suite tourne en `eager` (execution inline),
+    qui attend par construction — c'est le mode de production qu'on teste ici.
     """
     import time as _time
     from fiskr import api as api_module
+
+    monkeypatch.setenv("FISKR_JOBS_MODE", "thread")
 
     def _slow_sync(db, **kwargs):
         _time.sleep(1.5)

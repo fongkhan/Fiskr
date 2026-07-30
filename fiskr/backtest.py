@@ -75,7 +75,12 @@ def _universe_snapshot_ids(db, pending_snap: Snapshot) -> Tuple[List[str], List[
 
 
 def _panel_clients(db, panel_snapshot_id: str) -> List[Dict[str, Any]]:
-    rows = db.query(ClientEntity).filter(ClientEntity.snapshot_id == panel_snapshot_id).all()
+    # Ordre deterministe par id : le chemin parallele decoupe le panel par
+    # bornes d'id, l'ordre sequentiel doit etre le meme pour que les deux
+    # chemins produisent des restitutions identiques (listes bornees a 200)
+    rows = db.query(ClientEntity).filter(
+        ClientEntity.snapshot_id == panel_snapshot_id
+    ).order_by(ClientEntity.id).all()
     return [{c.name: getattr(r, c.name) for c in r.__table__.columns} for r in rows]
 
 
@@ -130,10 +135,12 @@ def _active_whitelist_keys(db) -> Set[Tuple[str, str]]:
     return {(r[0], r[1]) for r in rows}
 
 
-def _dry_run_screen(db, clients: List[Dict[str, Any]],
+def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
                     entities: List[Dict[str, Any]],
                     rule_set: Optional[List[Any]] = None,
-                    progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+                    progress: Optional[Callable[[int, int], None]] = None,
+                    panel_snapshot_id: Optional[str] = None,
+                    processes: Optional[int] = None) -> Dict[str, Any]:
     """
     Crible le panel contre un univers d'entites via un index de blocking local.
     Memes seuils par liste, meme liste blanche, meme layout de blocking et
@@ -146,16 +153,22 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     tests sur une vraie base clients dure plusieurs minutes, l'utilisateur doit
     voir ou il en est. Jamais bloquant (meme motif que persist_pivot_items).
 
-    DISPONIBILITE DE L'APPLICATION PENDANT LE CALCUL — deux precautions, car
-    cette boucle dure plusieurs minutes et gelait tout le reste :
-    - la base n'est plus interrogee DANS la boucle (liste blanche prechargee)
-      et la transaction de lecture est refermee avant de commencer : plus rien
-      ne retient la base pendant le criblage ;
-    - le GIL est rendu a chaque tick de progression, sans quoi ce calcul en
-      Python pur affame la boucle d'evenements et l'API cesse de repondre.
+    PARALLELISME : avec `panel_snapshot_id` et un dimensionnement > 1
+    (jobs.screen_processes, auto par defaut), le panel est decoupe en tranches
+    de clients criblees par un pool de processus fork() — l'index est partage
+    en copy-on-write, jamais copie. Le corps du criblage (screenpool.screen_one)
+    est LE MEME dans les deux chemins : ils ne peuvent pas diverger, et un
+    test d'egalite parallele == sequentiel le verrouille.
+
+    DISPONIBILITE DE L'APPLICATION PENDANT LE CALCUL :
+    - la base n'est pas interrogee dans la boucle (liste blanche prechargee)
+      et la transaction de lecture est refermee avant de commencer ;
+    - en chemin sequentiel execute dans le processus API (mode thread), le
+      GIL est rendu periodiquement — en processus dedie, c'est sans objet
+      mais sans cout.
     """
+    from fiskr import screenpool
     from fiskr.settings import blocking_layout, blocking_config_for
-    from fiskr.fprules import build_screening_ctx, run_rule
     screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
 
     index: Dict[str, List[Dict[str, Any]]] = {}
@@ -168,6 +181,19 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     # expire les objets ORM, et la boucle rechargerait alors chaque regle depuis
     # la base a chaque client — exactement ce qu'on cherche a eviter.
     rules = [_RuleSnapshot(r.id, r.name, r.code) for r in (rule_set or [])]
+
+    resolved = screenpool.resolve_processes(len(entities), processes)
+    if resolved > 1 and panel_snapshot_id:
+        # Tout ce dont les tranches ont besoin est en memoire ou recharge par
+        # elles ; parallel_dry_run fait son propre rollback avant le fork.
+        result = screenpool.parallel_dry_run(
+            db, panel_snapshot_id, index, screening_cfg, whitelist_keys, rules,
+            total_clients=(len(clients) if clients is not None else _panel_count(db, panel_snapshot_id)),
+            processes=resolved, progress=progress)
+        return result
+
+    if clients is None:
+        clients = _panel_clients(db, panel_snapshot_id)
     # Tout ce dont la boucle a besoin est en memoire : on rend la base a
     # l'application. Sans ce rollback, la transaction de lecture ouverte par les
     # requetes ci-dessus resterait ouverte pendant toute la duree du criblage.
@@ -176,92 +202,28 @@ def _dry_run_screen(db, clients: List[Dict[str, Any]],
     except Exception:  # session deja libre : sans consequence
         pass
 
-    pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    whitelisted_suppressed = 0
-    alerts_before_rules = 0
-    rule_suppressed = 0
-    rule_suppressed_pairs: List[Dict[str, Any]] = []
+    agg = screenpool.new_partial()
     total_clients = len(clients)
-
     for done, client in enumerate(clients, start=1):
         if progress and (done % _PROGRESS_EVERY == 0 or done == total_clients):
             try:
                 progress(done, total_clients)
             except Exception:
                 pass  # une progression cassee n'interrompt jamais un criblage
-        # Cession explicite du GIL : un thread de calcul en Python pur ne rend
-        # la main que toutes les 5 ms, ce qui suffit a rendre l'API
-        # inexploitable. Ce point de respiration la garde joignable. Il est
-        # d'autant plus necessaire ici que la boucle n'interroge plus la base :
-        # ce sont ces lectures qui, involontairement, rendaient la main.
+        # Cession explicite du GIL : utile quand cette boucle tourne dans le
+        # processus API (mode thread) ; sans objet mais sans cout en processus
+        # dedie.
         if done % _YIELD_EVERY == 0:
             time.sleep(0)
-        candidates: Dict[str, Dict[str, Any]] = {}
-        for key in lookup_blocking_keys(client, screening_cfg):
-            for ent in index.get(key, []):
-                candidates[ent["entity_id"]] = ent
-        if not candidates:
-            continue
+        screenpool.apply_outcome(
+            agg, screenpool.screen_one(client, index, screening_cfg,
+                                       whitelist_keys, rules))
+    return screenpool.merge_partials([agg])
 
-        best = None
-        best_ent = None
-        for ent in candidates.values():
-            score = match_entities(client, ent, config)
-            if best is None or score["final_score"] > best["final_score"]:
-                best = score
-                best_ent = ent
 
-        if not best or best.get("status") != "ALERT":
-            continue
-
-        if (client.get("client_id"), best_ent.get("entity_id")) in whitelist_keys:
-            whitelisted_suppressed += 1
-            continue
-
-        alerts_before_rules += 1
-
-        matched_rule = None
-        if rules:
-            ctx = build_screening_ctx(client, best_ent, best)
-            for r in rules:
-                result, error = run_rule(r.code, ctx)
-                if error:
-                    continue  # fail-open : une regle en erreur conserve l'alerte
-                if result:
-                    matched_rule = r
-                    break
-        if matched_rule is not None:
-            rule_suppressed += 1
-            if len(rule_suppressed_pairs) < MAX_PAIR_DETAILS:
-                rule_suppressed_pairs.append({
-                    "client_id": client.get("client_id"),
-                    "client_name": _client_label(client),
-                    "entity_id": best_ent.get("entity_id"),
-                    "entity_name": best_ent.get("primary_name"),
-                    "list_type": best_ent.get("_list_type"),
-                    "score": round(float(best.get("final_score", 0)), 2),
-                    "rule_id": matched_rule.id,
-                    "rule_name": matched_rule.name,
-                })
-            continue
-
-        pairs[(client.get("client_id"), best_ent.get("entity_id"))] = {
-            "client_id": client.get("client_id"),
-            "client_name": _client_label(client),
-            "entity_id": best_ent.get("entity_id"),
-            "entity_name": best_ent.get("primary_name"),
-            "list_type": best_ent.get("_list_type"),
-            "score": round(float(best.get("final_score", 0)), 2),
-        }
-
-    return {
-        "alerts": len(pairs),
-        "pairs": pairs,
-        "whitelisted_suppressed": whitelisted_suppressed,
-        "alerts_before_rules": alerts_before_rules,
-        "rule_suppressed": rule_suppressed,
-        "rule_suppressed_pairs": rule_suppressed_pairs,
-    }
+def _panel_count(db, panel_snapshot_id: str) -> int:
+    return db.query(ClientEntity).filter(
+        ClientEntity.snapshot_id == panel_snapshot_id).count()
 
 
 def validate_candidate_rule(db, candidate_rule_id: Optional[int]):
@@ -307,12 +269,13 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     Leve ValueError si la regle candidate est invalide (l'endpoint valide en
     amont pour repondre 400 avant de lancer le job).
     """
+    import gc as _gc
+
+    from fiskr import screenpool
     from fiskr.fprules import active_rules
 
-    clients = _panel_clients(db, panel_snapshot_id)
     current_ids, candidate_ids = _universe_snapshot_ids(db, pending_snap)
-    current_entities = _entity_dicts(db, current_ids) if current_ids else []
-    candidate_entities = _entity_dicts(db, candidate_ids) if candidate_ids else []
+    panel_size = _panel_count(db, panel_snapshot_id)
 
     current_rules = active_rules(db, "SCREENING")
     candidate_rules = list(current_rules)
@@ -338,12 +301,27 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             return None
         return lambda done, total: progress(phase, done, total)
 
-    current = _dry_run_screen(db, clients, current_entities, rule_set=current_rules,
-                              progress=_phase_progress("SCREEN_CURRENT"))
-    candidate = _dry_run_screen(db, clients, candidate_entities, rule_set=candidate_rules,
-                                progress=_phase_progress("SCREEN_CANDIDATE"))
+    # Projection memoire derivee des regles reellement evaluees : les colonnes
+    # que le moteur lit, plus celles que le code d'une regle mentionne. C'est
+    # ce qui fait passer un univers de 750 000 fiches de 6,3 Go a ~2,8 Go.
+    projection = screenpool.projection_for(list(current_rules) + list(candidate_rules))
 
-    panel_size = len(clients)
+    # PASSES SEQUENTIELLES : jamais deux univers en memoire en meme temps.
+    # A 750 000 fiches, tenir production ET candidat simultanement (~12,6 Go)
+    # etait la cause premiere du cahier de tests qui ne se terminait pas.
+    current_entities = _entity_dicts(db, current_ids, projection=projection) if current_ids else []
+    current = _dry_run_screen(db, None, current_entities, rule_set=current_rules,
+                              progress=_phase_progress("SCREEN_CURRENT"),
+                              panel_snapshot_id=panel_snapshot_id)
+    del current_entities
+    _gc.collect()
+
+    candidate_entities = _entity_dicts(db, candidate_ids, projection=projection) if candidate_ids else []
+    candidate = _dry_run_screen(db, None, candidate_entities, rule_set=candidate_rules,
+                                progress=_phase_progress("SCREEN_CANDIDATE"),
+                                panel_snapshot_id=panel_snapshot_id)
+    del candidate_entities
+    _gc.collect()
 
     def _rate(alerts: int) -> float:
         return round(alerts * 100.0 / panel_size, 2) if panel_size else 0.0

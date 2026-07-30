@@ -163,6 +163,29 @@ def set_setting(db, key: str, value: Any, updated_by: Optional[str] = None) -> A
     return row
 
 
+# ------------------ EPOQUE DU CACHE DE PRODUCTION ------------------
+
+# Compteur incremente a CHAQUE changement des listes en production (approbation,
+# synchronisation appliquee, import direct, exclusion, equivalence decidee...).
+# C'est le signal inter-processus : le demon travailleur ne peut pas recharger
+# le cache memoire d'un processus API ; il bump l'epoque, et chaque processus
+# API la surveille (verification throttlee) pour recharger SON cache.
+SETTING_WATCHLIST_EPOCH = "watchlist.epoch"
+
+
+def watchlist_epoch(db) -> int:
+    try:
+        return int(get_setting(db, SETTING_WATCHLIST_EPOCH, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_watchlist_epoch(db) -> int:
+    epoch = watchlist_epoch(db) + 1
+    set_setting(db, SETTING_WATCHLIST_EPOCH, epoch)
+    return epoch
+
+
 def require_approval_enabled(db) -> bool:
     """True si le mode homologation est actif (base d'abord, sinon config.yaml)."""
     return bool(get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)["value"])

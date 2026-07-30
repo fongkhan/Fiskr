@@ -49,6 +49,11 @@ def _cleanup_db():
             db.query(ClientEntity).filter(ClientEntity.snapshot_id.in_(ids)).delete(synchronize_session=False)
             db.query(Snapshot).filter(Snapshot.snapshot_id.in_(ids)).delete(synchronize_session=False)
         db.query(BatchCampaign).filter(BatchCampaign.name.like("test_ops_%")).delete(synchronize_session=False)
+        # La file de travaux persistee est fusionnee dans /api/progress/active
+        # (fenetre de 2 min apres la fin) : l'etat « vide » testé ici exige de
+        # purger les lignes laissees par les tests precedents
+        from fiskr.database import Job
+        db.query(Job).delete(synchronize_session=False)
         db.commit()
     finally:
         db.close()
@@ -340,12 +345,20 @@ def test_approval_refusals_stay_synchronous(client, ab_setup):
 
 
 def test_failing_job_is_reported_not_swallowed(client):
-    """Un job qui casse est marqué ERROR dans le registre — jamais silencieux."""
-    def _boom(job_token):
+    """Un job qui casse est marqué ERROR — jamais silencieux. Le contrat est
+    porté par la file de travaux persistée (fiskr.jobs) : l'échec est visible
+    dans le registre ET sur la ligne jobs, y compris après redémarrage."""
+    from fiskr import jobs as job_queue
+
+    @job_queue.task("test_boom")
+    def _boom(ctx):
         raise RuntimeError("panne simulée")
 
-    api._start_job("test-ops-boom", "import", "Job qui casse", _boom,
-                   started_by="testeur")
-    state = wait_for_job(client, "test-ops-boom", timeout=10)
-    assert state["status"] == "ERROR"
-    assert "panne simulée" in state["error"]
+    try:
+        job_queue.submit("test_boom", params={}, token="test-ops-boom",
+                         label="Job qui casse", created_by="testeur")
+        state = wait_for_job(client, "test-ops-boom", timeout=10)
+        assert state["status"] == "ERROR"
+        assert "panne simulée" in state["error"]
+    finally:
+        job_queue.TASKS.pop("test_boom", None)

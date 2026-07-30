@@ -30,16 +30,40 @@ _PROGRESS_EVERY = 500
 _YIELD_EVERY = 25
 
 
-def _entity_dicts(db, snapshot_ids: List[str]) -> List[Dict[str, Any]]:
+def _entity_dicts(db, snapshot_ids: List[str],
+                  projection: Optional[tuple] = None) -> List[Dict[str, Any]]:
+    """
+    Fiches listees des snapshots demandes, en dicts.
+
+    `projection` : liste de colonnes a charger (cf. screenpool.ENTITY_PROJECTION).
+    A 750 000 fiches, le dict complet pese ~8,4 Ko/fiche (6,3 Go l'univers) ;
+    la projection reduit a ~3,8 Ko/fiche en ne chargeant que ce que le moteur
+    lit — ET evite la materialisation d'objets ORM (tuples directs).
+    None = comportement historique, toutes colonnes.
+    """
     snapshot_types = {
         s.snapshot_id: s.file_type
         for s in db.query(Snapshot).filter(Snapshot.snapshot_id.in_(snapshot_ids)).all()
     }
+    out = []
+    if projection:
+        fields = [f for f in projection if f != "_list_type"]
+        if "snapshot_id" not in fields:
+            fields.append("snapshot_id")
+        columns = [getattr(WatchlistEntity, f) for f in fields]
+        rows = db.query(*columns).filter(
+            WatchlistEntity.snapshot_id.in_(snapshot_ids),
+            WatchlistEntity.excluded.isnot(True)
+        ).yield_per(5000)
+        for row in rows:
+            d = dict(zip(fields, row))
+            d["_list_type"] = snapshot_types.get(d.get("snapshot_id"))
+            out.append(d)
+        return out
     rows = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True)
     ).all()
-    out = []
     for r in rows:
         d = {c.name: getattr(r, c.name) for c in r.__table__.columns}
         # Type de liste d'origine : seuils de cut-off par liste
@@ -91,7 +115,12 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         for key in generate_blocking_keys(ent, screening_cfg):
             index.setdefault(key, []).append(ent)
 
-    from fiskr.api import watchlist_version, watchlist_hash  # valeurs de version du cache actif
+    # Reference des listes en production DERIVEE DE LA BASE : ce re-criblage
+    # tourne desormais dans le demon travailleur, qui ne voit pas le cache
+    # memoire du processus API — importer ses globales y trace « N/A » au
+    # journal d'audit immuable, ce qui est faux. La base fait foi partout.
+    from fiskr.database import production_watchlist_reference
+    watchlist_version, watchlist_hash = production_watchlist_reference(db)
 
     clients = _client_dicts(db)
     total_clients = len(clients)
@@ -187,12 +216,15 @@ def rescreen_after_snapshot_change(db, file_type: str, new_snapshot_id: str,
     )
 
 
-def rescreen_lookback(db, file_type: Optional[str] = None) -> Dict[str, int]:
+def rescreen_lookback(db, file_type: Optional[str] = None,
+                      progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, int]:
     """
     Lookback manuel : re-crible le referentiel clients contre TOUTES les
     entites en production (d'un type de liste, ou de tous les types watchlist).
+    Instrumente (`progress`) : c'est l'operation la plus lourde du produit,
+    elle est desormais executee en tache de fond et suivie par jeton.
     """
-    from fiskr.api import WATCHLIST_FILE_TYPES
+    from fiskr.database import WATCHLIST_FILE_TYPES
     types = [file_type] if file_type else WATCHLIST_FILE_TYPES
     snap_ids = [
         s.snapshot_id for s in db.query(Snapshot).filter(
@@ -204,4 +236,6 @@ def rescreen_lookback(db, file_type: Optional[str] = None) -> Dict[str, int]:
         return {"changed_entities": 0, "clients_screened": 0, "new_alerts": 0, "whitelisted_suppressed": 0}
     entities = _entity_dicts(db, snap_ids)
     label = file_type or "toutes listes"
-    return _screen_clients_against(db, entities, trigger_detail=f"[Lookback manuel {label}]")
+    return _screen_clients_against(db, entities,
+                                   trigger_detail=f"[Lookback manuel {label}]",
+                                   progress=progress)

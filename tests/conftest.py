@@ -8,9 +8,16 @@ fin du job avant d'observer son resultat.
 Ce module pose aussi le FILET DE SECURITE qui empeche la suite de sedimenter
 dans la base de developpement (voir `_isolate_database` plus bas).
 """
+import os
 import time
 
 import pytest
+
+# Mode d'execution de la file de travaux : INLINE pour les tests. Un endpoint
+# 202 termine ainsi son job avant de repondre — wait_for_job et post_and_wait
+# fonctionnent tels quels, et aucun thread/demon ne survit a un test. Pose
+# AVANT tout import de fiskr (conftest est charge par pytest en premier).
+os.environ.setdefault("FISKR_JOBS_MODE", "eager")
 
 
 def wait_for_job(client, token, timeout=60.0):
@@ -76,7 +83,7 @@ _INT_PK_TABLES = (
     "BatchResult", "BatchCampaign",
     "NotificationDelivery", "HookDelivery", "LearnedEquivalence",
     "WhitelistPair", "SavedView", "ApiKey", "SyncReport", "AdminAuditLog",
-    "ClientEntity", "WatchlistEntity",
+    "ClientEntity", "WatchlistEntity", "Job",
 )
 
 

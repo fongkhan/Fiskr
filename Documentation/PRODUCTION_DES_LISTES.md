@@ -103,6 +103,23 @@ Le rapport est **archivé avec le snapshot** (auditable après promotion) via
 liste, liste blanche) que la production est appliqué : le taux mesuré prédit
 le comportement réel.
 
+### Exécution et reprise automatique
+
+Le cahier de tests s'exécute dans le **démon travailleur** (processus séparé
+de l'API) : l'application reste pleinement réactive pendant tout le criblage,
+même sur un univers de 750 000 fiches, et le calcul est **parallélisé** sur
+plusieurs processus (tranches de pseudo-clients, résultats identiques au
+séquentiel). La progression est visible dans la pastille ⚙ et survit à un
+rechargement de page.
+
+Si le serveur ou le démon est arrêté en plein criblage (recyclage de
+l'hébergeur, redémarrage), le job est **repris automatiquement de zéro** au
+redémarrage suivant — c'est la ligne de la file de travaux qui fait foi, pas
+un thread en mémoire. La reprise est plafonnée (2 tentatives) ; au-delà,
+l'opération apparaît **en échec dans la section « Travaux »** du centre de
+notifications (🔔), avec un bouton **↻ Relancer** (réservé aux
+administrateurs, tracé au journal d'administration).
+
 ## Étape 5 — Good Guys (liste blanche) si écart élevé
 
 Si le verdict est `WARN`, examinez les **nouvelles alertes** : pour chaque

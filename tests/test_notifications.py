@@ -296,8 +296,14 @@ def test_emit_unknown_event_is_ignored(db):
 
 def _spy_emit(monkeypatch):
     calls = []
+    spy = lambda db, key, payload=None, **kw: calls.append((key, payload or {}, kw))
+    # Deux points d'accroche : api.py lie `emit` a l'import (nom local), tandis
+    # que les taches de fond (fiskr/tasks.py) le resolvent dans fiskr.notifier
+    # au moment de l'appel — les deux doivent etre espionnes.
     import fiskr.api as api_mod
-    monkeypatch.setattr(api_mod, "emit", lambda db, key, payload=None, **kw: calls.append((key, payload or {}, kw)))
+    import fiskr.notifier as notifier_mod
+    monkeypatch.setattr(api_mod, "emit", spy)
+    monkeypatch.setattr(notifier_mod, "emit", spy)
     return calls
 
 

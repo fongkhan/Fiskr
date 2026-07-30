@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import uuid
 import json
 import re
@@ -106,24 +108,25 @@ from fiskr.settings import (
     investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST,
     resource_fields, resources_active, SETTING_RESOURCE_FIELDS, DEFAULT_RESOURCE_FIELDS,
     mining_settings, SETTING_MINING, DEFAULT_MINING,
-    engine_capabilities, SETTING_ENGINE_CAPABILITIES
+    engine_capabilities, SETTING_ENGINE_CAPABILITIES,
+    watchlist_epoch, bump_watchlist_epoch
 )
 from fiskr import resources as resource_tables
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
+from fiskr import jobs as job_queue
+from fiskr.jobs import JobConflict
+import fiskr.tasks  # noqa: F401 — enregistre les taches nommees dans la file
 
 
 
 logger = logging.getLogger("fiskr.api")
 
-# Snapshot file types persisted as WatchlistEntity records
-WATCHLIST_FILE_TYPES = [
-    "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
-    "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
-    "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL", "WATCHLIST_CANADA", "WATCHLIST_DFAT",
-    "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK"
-]
+# Snapshot file types persisted as WatchlistEntity records — la definition
+# vit dans fiskr.database (le demon travailleur en a besoin sans importer
+# l'application) ; re-export pour tous les importeurs historiques.
+from fiskr.database import WATCHLIST_FILE_TYPES
 
 # Champs etendus des listes (schema pivot -> colonnes WatchlistEntity) :
 # EXTENDED_ENTITY_FIELDS et _extended_entity_kwargs sont importes de fiskr.sync,
@@ -344,88 +347,62 @@ _SYNC_RUNNERS = {
     "canada": run_canada_sync, "dfat": run_dfat_sync,
     "hk_sfc": run_hk_sfc_sync, "amf": run_amf_sync, "worldbank": run_worldbank_sync,
 }
-# Sources en cours d'execution : une meme source ne se chevauche jamais
-_running_syncs: set = set()
 
-def _run_source_sync(source: str) -> None:
-    """
-    Synchronise UNE source (declenchement cron), avec re-criblage post-delta.
 
-    L'operation est inscrite au registre de progression sous `sync:<source>` :
-    une synchronisation planifiee devient visible dans la pastille et le centre
-    de notifications, au meme titre qu'un import lance a la main. Le cycle
-    generique (`_run_generic_sync`) affine ensuite les phases sur ce meme jeton
-    ; les sources a implementation propre (OFAC, DGT) restent au moins
-    signalees comme en cours.
+def _cron_sync_tick(tick=None) -> None:
     """
-    token = f"sync:{source.lower()}"
-    progress_registry.update(token, phase="DOWNLOAD", kind="sync",
-                             label=f"Synchronisation {source.upper()}",
-                             started_by="système")
-    db = next(get_db())
-    try:
-        report = _SYNC_RUNNERS[source](db, trigger="SCHEDULED",
-                                       reload_cache=lambda: load_watchlist_cache(db))
-        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
-            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
-            if snap:
-                # Le cycle de sync a deja marque le jeton termine : cet update
-                # le remet en cours pour couvrir aussi le re-criblage
-                rescreen_after_snapshot_change(
-                    db, snap.file_type, report.snapshot_id, report.previous_snapshot_id,
-                    progress=lambda done, total: progress_registry.update(
-                        token, phase="RESCREEN", processed=done, total=total,
-                        snapshot_id=report.snapshot_id),
-                )
-    except Exception as e:
-        progress_registry.finish(token, status="ERROR", error=str(e)[:500])
-        raise
-    else:
-        progress_registry.finish(token)
-    finally:
-        db.close()
+    UN tic du planificateur de sources : chaque source activee dont
+    l'expression cron effective matche est SOUMISE A LA FILE DE TRAVAUX.
+    L'exclusivite passe par le dedupe_key de la file — elle vaut entre
+    processus et entre declencheurs (manuel comme planifie), la ou l'ancien
+    jeu en memoire ne voyait que son propre processus.
 
-async def _cron_sync_scheduler():
-    """
-    Planificateur cron par source : chaque minute, les sources activees dont
-    l'expression cron effective (reglage a chaud > config > horaire global)
-    matche sont synchronisees, chacune dans son thread, sans chevauchement
-    d'une meme source.
+    Fonction synchrone : appelee par la boucle asyncio de l'API (mode thread)
+    OU par le demon travailleur (mode worker), qui est alors le seul a
+    planifier — fin des tics dupliques sous Passenger multi-processus.
     """
     from fiskr.cron import cron_matches, CronError
 
-    async def _launch(source: str):
-        _running_syncs.add(source)
+    tick = tick or datetime.now()
+    sync_cfg = get_sync_config()
+    if not sync_cfg.get("auto_enabled"):
+        return
+    db = next(get_db())
+    try:
+        schedules = sync_schedules(db)
+    finally:
+        db.close()
+    for source, expr in schedules.items():
+        if not sync_cfg.get(source, {}).get("enabled"):
+            continue
         try:
-            await asyncio.to_thread(_run_source_sync, source)
-        except Exception as e:
-            logger.error(f"Echec de la synchronisation planifiee de {source}: {e}")
-        finally:
-            _running_syncs.discard(source)
+            if not cron_matches(expr, tick):
+                continue
+        except CronError as bad:
+            logger.error(f"Cron invalide pour {source} ({expr}) : {bad}")
+            continue
+        engine_source = _RUNKEY_TO_ENGINE.get(source, source.upper())
+        token = f"sync:{engine_source.lower()}"
+        try:
+            job_queue.submit("sync", token=token,
+                             label=f"Synchronisation {engine_source}",
+                             params={"run_key": source, "engine_source": engine_source,
+                                     "for_date": None, "username": "système"},
+                             created_by="système", dedupe_key=token)
+            logger.info(f"Cron {source} ({expr}) : synchronisation soumise à la file.")
+        except JobConflict:
+            continue  # la precedente execution n'est pas terminee
 
+
+async def _cron_sync_scheduler():
+    """Boucle minute du planificateur de sources (mode thread/eager : quand
+    aucun demon travailleur ne porte les planificateurs)."""
     while True:
         now = datetime.now()
         # Reveil a la prochaine minute pleine (evaluation une fois par minute)
         await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
-        tick = datetime.now()
         try:
-            sync_cfg = get_sync_config()
-            db = next(get_db())
-            try:
-                schedules = sync_schedules(db)
-            finally:
-                db.close()
-            for source, expr in schedules.items():
-                if not sync_cfg.get(source, {}).get("enabled"):
-                    continue
-                if source in _running_syncs:
-                    continue  # la precedente execution n'est pas terminee
-                try:
-                    if cron_matches(expr, tick):
-                        logger.info(f"Cron {source} ({expr}) : synchronisation declenchee.")
-                        asyncio.create_task(_launch(source))
-                except CronError as bad:
-                    logger.error(f"Cron invalide pour {source} ({expr}) : {bad}")
+            await asyncio.to_thread(_cron_sync_tick, datetime.now())
         except Exception as e:
             logger.error(f"Planificateur cron en echec sur ce tick : {e}")
 
@@ -523,83 +500,87 @@ def run_resource_mining(db, started_by: str = "système",
         progress_registry.finish(token)
         return report
     except Exception:
-        # `_start_job` marque deja l'echec quand la passe vient de la ; on le
-        # fait aussi ici pour l'appel direct (planificateur), sans doublon nuisible
+        # La file de travaux marque deja l'echec quand la passe vient d'elle ;
+        # on le fait aussi ici pour l'appel direct (planificateur), sans doublon nuisible
         progress_registry.finish(token, status="ERROR")
         raise
 
-async def _resource_mining_scheduler():
+def _mining_tick(tick=None) -> None:
     """
-    Fouille quotidienne d'homonymes : chaque minute, si le reglage est actif et
-    que son expression cron matche, une passe complete est lancee dans un
-    thread (le parcours des listes est bloquant et ne doit jamais tenir la
-    boucle d'evenements). Une passe sans rien de neuf ne notifie personne.
+    UN tic de la fouille quotidienne d'homonymes : si le reglage est actif et
+    que son cron matche, une passe est SOUMISE A LA FILE DE TRAVAUX (dedupe :
+    jamais deux passes en parallele). La notification des decouvertes est
+    emise par la tache elle-meme (fiskr.tasks.mining_task).
     """
     from fiskr.cron import cron_matches, CronError
 
+    tick = tick or datetime.now()
+    db = next(get_db())
+    try:
+        cfg = mining_settings(db)
+        if not cfg["enabled"]:
+            return
+        try:
+            if not cron_matches(cfg["cron"], tick):
+                return
+        except CronError as bad:
+            logger.error(f"Cron de la fouille invalide ({cfg['cron']}) : {bad}")
+            return
+    finally:
+        db.close()
+    try:
+        job_queue.submit("mining", token=f"mining-{uuid.uuid4().hex[:8]}",
+                         label="Fouille d'homonymes", params={"username": "système"},
+                         created_by="système", dedupe_key="mining")
+        logger.info("Fouille quotidienne d'homonymes : soumise à la file.")
+    except JobConflict:
+        pass
+
+
+async def _resource_mining_scheduler():
+    """Boucle minute de la fouille (mode thread/eager, sans demon)."""
     while True:
         now = datetime.now()
         await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
-        tick = datetime.now()
         try:
-            db = next(get_db())
-            try:
-                cfg = mining_settings(db)
-                if not cfg["enabled"]:
-                    continue
-                try:
-                    if not cron_matches(cfg["cron"], tick):
-                        continue
-                except CronError as bad:
-                    logger.error(f"Cron de la fouille invalide ({cfg['cron']}) : {bad}")
-                    continue
-            finally:
-                db.close()
-            logger.info("Fouille quotidienne d'homonymes : démarrage.")
-            report = await asyncio.to_thread(_mining_pass)
-            if report and (report["created"] or report["auto_approved"]):
-                notify_event("resource_mining", report)
+            await asyncio.to_thread(_mining_tick, datetime.now())
         except Exception as e:
             logger.error(f"Fouille d'homonymes en échec sur ce tick : {e}")
 
-def _mining_pass() -> Optional[Dict[str, Any]]:
-    """Passe de fouille avec sa propre session (executee hors boucle d'evenements)."""
-    db = next(get_db())
-    try:
-        return run_resource_mining(db, started_by="système")
-    finally:
-        db.close()
-
-async def _digest_scheduler():
-    """
-    Digest KPI periodique : chaque minute, si le reglage est actif et que son
-    expression cron matche, la synthese part par email/webhooks (notify.py,
-    fire-and-forget). Independant du planificateur de synchronisation : il
-    tourne meme quand les syncs automatiques sont desactivees.
-    """
+def _digest_tick(tick=None) -> None:
+    """UN tic du digest KPI : si le reglage est actif et que son cron matche,
+    la synthese part par email/webhooks. Synchrone : appelable par la boucle
+    de l'API comme par le demon travailleur."""
     from fiskr.cron import cron_matches, CronError
 
+    tick = tick or datetime.now()
+    db = next(get_db())
+    try:
+        digest_cfg = digest_settings(db)
+        if not digest_cfg["enabled"]:
+            return
+        try:
+            if not cron_matches(digest_cfg["cron"], tick):
+                return
+        except CronError as bad:
+            logger.error(f"Cron du digest invalide ({digest_cfg['cron']}) : {bad}")
+            return
+        payload = build_kpi_digest(db)
+    finally:
+        db.close()
+    logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
+    notify_event("kpi_digest", payload)
+
+
+async def _digest_scheduler():
+    """Boucle minute du digest KPI (mode thread/eager, sans demon).
+    Independant du planificateur de synchronisation : il tourne meme quand
+    les syncs automatiques sont desactivees."""
     while True:
         now = datetime.now()
         await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
-        tick = datetime.now()
         try:
-            db = next(get_db())
-            try:
-                digest_cfg = digest_settings(db)
-                if not digest_cfg["enabled"]:
-                    continue
-                try:
-                    if not cron_matches(digest_cfg["cron"], tick):
-                        continue
-                except CronError as bad:
-                    logger.error(f"Cron du digest invalide ({digest_cfg['cron']}) : {bad}")
-                    continue
-                payload = build_kpi_digest(db)
-            finally:
-                db.close()
-            logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
-            notify_event("kpi_digest", payload)
+            await asyncio.to_thread(_digest_tick, datetime.now())
         except Exception as e:
             logger.error(f"Digest KPI en échec sur ce tick : {e}")
 
@@ -683,78 +664,82 @@ def _detect_expiring_whitelist(db, horizon_days: int = 7) -> int:
     return len(signaled)
 
 
-async def _notification_batch_scheduler():
-    """
-    Recapitulatif periodique des etapes a fort volume : chaque minute, si le
-    cron du regroupement matche, les evenements en file partent en UN SEUL
-    mail par destinataire. Detecte au passage les echeances SLA depassees et
-    les paires de liste blanche arrivant a revue, puis purge le journal.
-    """
+def _notification_batch_tick(tick=None) -> None:
+    """UN tic du recapitulatif : detections SLA/liste blanche puis envoi
+    groupe et purge du journal. Synchrone (API ou demon)."""
     from fiskr.cron import cron_matches, CronError
 
+    tick = tick or datetime.now()
+    db = next(get_db())
+    try:
+        batch_cfg = notification_batch_settings(db)
+        if not batch_cfg["enabled"]:
+            return
+        try:
+            if not cron_matches(batch_cfg["cron"], tick):
+                return
+        except CronError as bad:
+            logger.error(f"Cron du récapitulatif invalide ({batch_cfg['cron']}) : {bad}")
+            return
+        # Detections avant l'envoi : leurs evenements partent dans ce recap
+        _detect_overdue_alerts(db)
+        _detect_expiring_whitelist(db)
+        report = flush_digest(db)
+        if report["events"]:
+            logger.info(f"Récapitulatif des notifications : {report['events']} évènement(s) "
+                        f"vers {report['recipients']} destinataire(s).")
+        purge_deliveries(db)
+    finally:
+        db.close()
+
+
+async def _notification_batch_scheduler():
+    """Boucle minute du recapitulatif (mode thread/eager, sans demon)."""
     while True:
         now = datetime.now()
         await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
-        tick = datetime.now()
         try:
-            db = next(get_db())
-            try:
-                batch_cfg = notification_batch_settings(db)
-                if not batch_cfg["enabled"]:
-                    continue
-                try:
-                    if not cron_matches(batch_cfg["cron"], tick):
-                        continue
-                except CronError as bad:
-                    logger.error(f"Cron du récapitulatif invalide ({batch_cfg['cron']}) : {bad}")
-                    continue
-                # Detections avant l'envoi : leurs evenements partent dans ce recap
-                await asyncio.to_thread(_detect_overdue_alerts, db)
-                await asyncio.to_thread(_detect_expiring_whitelist, db)
-                report = await asyncio.to_thread(flush_digest, db)
-                if report["events"]:
-                    logger.info(f"Récapitulatif des notifications : {report['events']} évènement(s) "
-                                f"vers {report['recipients']} destinataire(s).")
-                await asyncio.to_thread(purge_deliveries, db)
-            finally:
-                db.close()
+            await asyncio.to_thread(_notification_batch_tick, datetime.now())
         except Exception as e:
             logger.error(f"Récapitulatif des notifications en échec sur ce tick : {e}")
 
 
-async def _retention_scheduler():
-    """
-    Purge de retention quotidienne : chaque minute, si au moins une famille a
-    une duree de conservation non nulle et que l'expression cron de la
-    politique matche, la purge s'execute (tracee RETENTION_PURGE au journal).
-    """
+def _retention_tick(tick=None) -> None:
+    """UN tic de la purge de retention : si une famille au moins conserve et
+    que le cron de la politique matche, la purge s'execute (tracee
+    RETENTION_PURGE au journal). Synchrone (API ou demon)."""
     from fiskr.cron import cron_matches, CronError
 
+    tick = tick or datetime.now()
+    db = next(get_db())
+    try:
+        policy = retention_policy(db)
+        if not any(int(policy[f] or 0) > 0 for f in RETENTION_FAMILIES):
+            return
+        try:
+            if not cron_matches(policy["cron"], tick):
+                return
+        except CronError as bad:
+            logger.error(f"Cron de rétention invalide ({policy['cron']}) : {bad}")
+            return
+        deleted = run_retention(db)
+        if any(deleted.values()):
+            logger.info(f"Purge de rétention planifiée : {deleted}")
+            emit(db, "retention_purge_done", {
+                "Lignes purgées": sum(int(v or 0) for v in deleted.values()),
+                **{f"Famille {k}": v for k, v in deleted.items() if v},
+            })
+    finally:
+        db.close()
+
+
+async def _retention_scheduler():
+    """Boucle minute de la purge de retention (mode thread/eager, sans demon)."""
     while True:
         now = datetime.now()
         await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
-        tick = datetime.now()
         try:
-            db = next(get_db())
-            try:
-                policy = retention_policy(db)
-                if not any(int(policy[f] or 0) > 0 for f in RETENTION_FAMILIES):
-                    continue
-                try:
-                    if not cron_matches(policy["cron"], tick):
-                        continue
-                except CronError as bad:
-                    logger.error(f"Cron de rétention invalide ({policy['cron']}) : {bad}")
-                    continue
-                deleted = await asyncio.to_thread(run_retention, db)
-                if any(deleted.values()):
-                    logger.info(f"Purge de rétention planifiée : {deleted}")
-                    emit(db, "retention_purge_done", {
-                        "Lignes purgées": sum(int(v or 0) for v in deleted.values()),
-                        **{f"Famille {k}": v for k, v in deleted.items() if v},
-                    })
-            finally:
-                db.close()
+            await asyncio.to_thread(_retention_tick, datetime.now())
         except Exception as e:
             logger.error(f"Purge de rétention en échec sur ce tick : {e}")
 
@@ -821,6 +806,110 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
     return summary
 
 
+def ensure_worker(db=None) -> bool:
+    """
+    Demarre le demon travailleur s'il est absent (battement de coeur manquant
+    ou perime). C'est le seul moyen d'avoir un demon en hebergement mutualise
+    Passenger (pas de systemd) : l'API le lance, DETACHE de son groupe de
+    processus (il survit au recyclage Passenger), et le verrou flock du demon
+    rend toute course inoffensive — N processus API peuvent tenter, un seul
+    demon vivra. Retourne True si un demon est deja vivant.
+    """
+    from fiskr.worker import HEARTBEAT_SETTING
+
+    own_session = db is None
+    if own_session:
+        from fiskr.database import SessionLocal
+        db = SessionLocal()
+    try:
+        hb = get_setting(db, HEARTBEAT_SETTING, None) or {}
+        at = hb.get("at")
+        if at:
+            try:
+                last = datetime.fromisoformat(str(at).rstrip("Z"))
+                if datetime.utcnow() - last < timedelta(seconds=120):
+                    return True
+            except ValueError:
+                pass
+    finally:
+        if own_session:
+            db.close()
+    try:
+        log_path = PROJECT_ROOT / "worker.log"
+        with open(log_path, "ab") as log_fh:
+            subprocess.Popen([sys.executable, "-m", "fiskr.worker"],
+                             cwd=str(PROJECT_ROOT), stdout=log_fh,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+        logger.info("Demon travailleur absent : demarrage automatique lance.")
+    except Exception as e:
+        logger.error(f"Demarrage automatique du demon impossible : {e} — "
+                     f"les jobs resteront en file jusqu'a son lancement manuel.")
+    return False
+
+
+async def _worker_watchdog():
+    """Toutes les 60 s : si le demon est mort (tue par l'hebergeur), le
+    relancer. Ses jobs interrompus seront repris a SON redemarrage."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await asyncio.to_thread(ensure_worker)
+        except Exception as e:
+            logger.warning(f"Watchdog du demon en echec : {e}")
+
+
+_last_epoch_seen: Optional[int] = None
+
+
+async def _watchlist_epoch_watcher():
+    """
+    Toutes les 5 s : si l'EPOQUE du cache de production a change en base
+    (bumpee par le demon apres une approbation, une synchronisation ou un
+    import), recharge le cache memoire de CE processus API. C'est le canal
+    d'invalidation inter-processus : le demon ne peut pas toucher la memoire
+    d'un processus API, il ne fait que changer un entier en base.
+    """
+    global _last_epoch_seen
+    while True:
+        await asyncio.sleep(5)
+        try:
+            db = next(get_db())
+            try:
+                epoch = watchlist_epoch(db)
+            finally:
+                db.close()
+            if _last_epoch_seen is None:
+                _last_epoch_seen = epoch
+                continue
+            if epoch != _last_epoch_seen:
+                _last_epoch_seen = epoch
+                logger.info("Époque du cache de production changée : rechargement du cache local.")
+                db = next(get_db())
+                try:
+                    await asyncio.to_thread(load_watchlist_cache, db)
+                finally:
+                    db.close()
+        except Exception as e:
+            logger.warning(f"Veilleur d'époque du cache en échec : {e}")
+
+
+def _ensure_watchlist_cache(db: Session) -> None:
+    """
+    Garantit un cache de listes charge ET a jour dans CE processus, avant un
+    criblage unitaire hors requete HTTP (campagne batch, banc d'essai).
+    Dans un processus API le cache est charge au demarrage et rafraichi par le
+    veilleur d'epoque : cet appel ne coute qu'une lecture d'AppSetting.
+    Dans le demon travailleur il n'y a ni demarrage-lifespan ni veilleur :
+    c'est ici que le cache se charge (premiere campagne) puis se recharge
+    quand l'epoque bumpee par une sync/approbation/import a change.
+    """
+    global _last_epoch_seen
+    epoch = watchlist_epoch(db)
+    if not watchlist_index or (_last_epoch_seen is not None and epoch != _last_epoch_seen):
+        load_watchlist_cache(db)
+    _last_epoch_seen = epoch
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -833,29 +922,39 @@ async def lifespan(app: FastAPI):
     # production alors que leurs fiches sont en base)
     _repair_stuck_snapshots(db)
     load_watchlist_cache(db)
-    # Start the per-source cron synchronization scheduler if enabled
-    scheduler_task = None
-    if get_sync_config()["auto_enabled"]:
-        scheduler_task = asyncio.create_task(_cron_sync_scheduler())
-    # Inbox CFT surveillee (auto-desactivee si batch.inbox_dir est vide)
-    inbox_task = asyncio.create_task(_inbox_poller())
-    # Digest KPI periodique (reglage a chaud notifications.digest)
-    digest_task = asyncio.create_task(_digest_scheduler())
-    # Purge de retention quotidienne (reglage a chaud retention.policy)
-    retention_task = asyncio.create_task(_retention_scheduler())
-    # Recapitulatif des notifications groupees + detection SLA/echeances
-    notif_task = asyncio.create_task(_notification_batch_scheduler())
-    # Fouille quotidienne d'homonymes (reglage a chaud resources.mining)
-    mining_task = asyncio.create_task(_resource_mining_scheduler())
+
+    mode = job_queue.jobs_mode()
+    background_tasks = []
+    if mode == "worker":
+        # Le demon travailleur porte les jobs ET les planificateurs : un seul
+        # tic quel que soit le nombre de processus API (Passenger en lance N).
+        job_queue.on_submit_hook = ensure_worker
+        try:
+            ensure_worker(db)
+        except Exception as e:
+            logger.warning(f"Autostart du demon au demarrage impossible : {e}")
+        if (config.get("jobs") or {}).get("autostart", True):
+            background_tasks.append(asyncio.create_task(_worker_watchdog()))
+        background_tasks.append(asyncio.create_task(_watchlist_epoch_watcher()))
+    else:
+        # Sans demon : reprise de la file ici (les orphelins passent en ERROR
+        # relancable — personne ne prendrait un QUEUED), puis planificateurs
+        # historiques dans ce processus.
+        try:
+            job_queue.requeue_stale(db, worker_present=False)
+        except Exception as e:
+            logger.warning(f"Reprise de la file de travaux impossible : {e}")
+        if get_sync_config()["auto_enabled"]:
+            background_tasks.append(asyncio.create_task(_cron_sync_scheduler()))
+        background_tasks.append(asyncio.create_task(_inbox_poller()))
+        background_tasks.append(asyncio.create_task(_digest_scheduler()))
+        background_tasks.append(asyncio.create_task(_retention_scheduler()))
+        background_tasks.append(asyncio.create_task(_notification_batch_scheduler()))
+        background_tasks.append(asyncio.create_task(_resource_mining_scheduler()))
     yield
     # Shutdown
-    if scheduler_task:
-        scheduler_task.cancel()
-    inbox_task.cancel()
-    digest_task.cancel()
-    retention_task.cancel()
-    notif_task.cancel()
-    mining_task.cancel()
+    for task in background_tasks:
+        task.cancel()
     logger.info("Stopping Fiskr application...")
 
 app = FastAPI(
@@ -2280,32 +2379,42 @@ def adverse_media_lookup(
 _INGEST_COMMIT_EVERY = 1000
 
 
-def _start_job(token: str, kind: str, label: str, target, args: tuple = (),
-               started_by: str = "système") -> str:
+def _submit_job(kind: str, *, params: Dict[str, Any], token: Optional[str] = None,
+                label: Optional[str] = None, started_by: str = "système",
+                dedupe_key: Optional[str] = None, priority: int = 100,
+                snapshot_id: Optional[str] = None):
     """
-    Lance une operation longue en tache de fond et l'inscrit au registre de
-    progression (elle apparait alors dans GET /api/progress/active, donc dans
-    la pastille et le centre de notifications du dashboard).
-
-    `target(job_token)` recoit le jeton pour publier ses propres etapes ; il
-    ouvre SA session (les sessions SQLAlchemy ne se partagent pas entre
-    threads). Toute exception est capturee et marquee ERROR dans le registre :
-    un job qui casse ne casse jamais l'appelant, et son echec reste visible.
+    Depose une operation longue dans la file de travaux persistee
+    (fiskr.jobs) et traduit un conflit d'exclusivite en 409. Selon le mode,
+    elle est executee par le demon travailleur (production), par un thread de
+    ce processus (repli) ou inline (tests). Elle apparait dans
+    GET /api/progress/active, donc dans la pastille et le centre de
+    notifications, et SURVIT a un redemarrage : c'est la ligne `jobs` qui
+    fait foi, plus un thread anonyme.
     """
-    progress_registry.update(token, phase="PARSE", kind=kind, label=label,
-                             started_by=started_by)
+    try:
+        return job_queue.submit(kind, params=params, token=token, label=label,
+                                created_by=started_by, dedupe_key=dedupe_key,
+                                priority=priority, snapshot_id=snapshot_id)
+    except JobConflict as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
-    def _runner():
-        try:
-            target(token, *args)
-        except Exception as e:
-            logger.error(f"Job {kind} « {label} » en erreur : {e}")
-            progress_registry.finish(token, status="ERROR", error=str(e)[:500])
-        else:
-            progress_registry.finish(token)
 
-    threading.Thread(target=_runner, daemon=True).start()
-    return token
+def _job_response_or_202(job, accepted_payload: Dict[str, Any]):
+    """
+    Reponse d'un endpoint qui vient de soumettre un job :
+    - job deja DONE (mode eager : execution inline, tests) → la charge utile
+      HISTORIQUE du resultat, en 200 — les appelants existants restent valides ;
+    - job deja ERROR (eager) → 500 avec l'erreur, comme l'endpoint synchrone
+      d'origine ;
+    - sinon (production : le demon ou un thread l'executera) → 202 + jeton.
+    """
+    if job.status == "DONE" and job.result is not None:
+        return job.result
+    if job.status == "ERROR":
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=job.error or "Opération en échec.")
+    return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=accepted_payload)
 
 
 def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
@@ -2323,6 +2432,11 @@ def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
     snap = db.merge(snap)
     progress_registry.update(progress_id, phase="PERSIST", processed=count,
                              snapshot_id=snap.snapshot_id)
+    # Miroir sur la ligne de la file : quand l'import tourne dans le demon,
+    # le registre memoire ci-dessus est invisible du processus API — la ligne
+    # jobs est le canal que GET /api/progress sait lire en repli
+    job_queue.mirror_progress(progress_id, phase="PERSIST", processed=count,
+                              snapshot_id=snap.snapshot_id)
     return snap
 
 @app.post("/api/snapshots/ingest")
@@ -2362,6 +2476,8 @@ def ingest_snapshot(
     temp_dir = PROJECT_ROOT / "temp_ingestion"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_file_path = temp_dir / file.filename
+    keep_temp_file = False
+    original_filename = file.filename
     
     try:
         # 1+2. Copie du televersement ET empreinte SHA-256 en une seule passe
@@ -2414,11 +2530,72 @@ def ingest_snapshot(
         db.add(snap)
         db.commit()
         
+        # Parsing + persistance en TACHE DE FOND : seul l'upload (deja fait) et
+        # les refus (hash connu, selecteurs invalides) restent synchrones. Le
+        # front suit le jeton — le meme progress_id qu'il fournissait deja.
+        token = progress_id or snap_id
+        job = _submit_job("ingest", token=token,
+                          label=f"Import {file_type} — {original_filename}",
+                          params={"snapshot_id": snap_id,
+                                  "temp_path": str(temp_file_path),
+                                  "original_filename": original_filename,
+                                  "file_type": file_type,
+                                  "delimiter": delimiter,
+                                  "ssie_selector_overrides": ssie_selector_overrides,
+                                  "ssie_source_format": ssie_source_format,
+                                  "progress_id": progress_id,
+                                  "username": current_user.get("username") or "?"},
+                          started_by=current_user.get("username") or "?",
+                          dedupe_key=f"ingest:{snap_id}", snapshot_id=snap_id)
+        keep_temp_file = True
+        return _job_response_or_202(job, {
+            "message": "Import lancé. La progression est suivie dans les opérations en cours.",
+            "snapshot_id": snap_id,
+            "job_token": token,
+            "record_count": 0,
+            "status": "PROCESSING",
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to ingest file: {e}")
+        progress_registry.finish(progress_id, status="ERROR", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ingestion failed: {str(e)}"
+        )
+    finally:
+        # Le fichier temporaire appartient desormais au job ; on ne le detruit
+        # ici que si la soumission n'a pas eu lieu (refus, echec d'upload)
+        if not keep_temp_file and temp_file_path.exists():
+            os.remove(temp_file_path)
+
+
+def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
+                               original_filename: str, file_type: str,
+                               delimiter: str, ssie_selector_overrides,
+                               ssie_source_format, progress_id: Optional[str],
+                               username: str) -> Dict[str, Any]:
+    """
+    Corps de l'import d'un fichier deja televerse : parsing, Quality Gate,
+    persistance par lots, bascule de statut (homologation ou production),
+    rafraichissement du cache et re-criblage post-import. Execute en TACHE DE
+    FOND (tache `ingest` de la file de travaux) : seul l'upload + l'empreinte
+    restent dans la requete HTTP. Retourne la charge utile historique de
+    l'endpoint (message, snapshot_id, record_count, status, rescreen).
+
+    En echec : snapshot marque ERROR + notification, puis exception relayee a
+    la file (le job apparait ERROR, relancable). Le fichier temporaire est
+    toujours supprime.
+    """
+    snap_id = snap.snapshot_id
+    try:
         record_count = 0
         ofac_relations = None  # liens entre profils (OFAC uniquement)
 
         # 3. Parse contents based on File Type
-        eu_fsf_upload = file_type == "WATCHLIST_EU" and file.filename.lower().endswith(".xml")
+        eu_fsf_upload = file_type == "WATCHLIST_EU" and original_filename.lower().endswith(".xml")
         if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
                          "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL",
                          "WATCHLIST_CANADA", "WATCHLIST_DFAT",
@@ -2460,7 +2637,7 @@ def ingest_snapshot(
                 # Liste consolidee suisse : export officiel SESAM (XML) ou jeu
                 # OpenSanctions (CSV). L'extension du fichier tranche, pour que
                 # les deux voies s'importent a la main sans reglage prealable.
-                if file.filename.lower().endswith(".csv"):
+                if original_filename.lower().endswith(".csv"):
                     parser_stream = parse_seco_opensanctions_csv(str(temp_file_path))
                 else:
                     parser_stream = parse_seco_xml(str(temp_file_path))
@@ -2550,7 +2727,7 @@ def ingest_snapshot(
 
         elif file_type == "WATCHLIST_EU":
             # PDF or CSV
-            if file.filename.endswith(".pdf"):
+            if original_filename.endswith(".pdf"):
                 extracted = parse_pdf_watchlist(str(temp_file_path))
                 for item in extracted:
                     item = ensure_parsed_name(item)
@@ -2740,7 +2917,8 @@ def ingest_snapshot(
         if file_type in WATCHLIST_FILE_TYPES and not staging:
             progress_registry.update(progress_id, phase="RELOAD", processed=record_count,
                                      snapshot_id=snap_id)
-            load_watchlist_cache(db)
+            from fiskr.tasks import _refresh_production_cache
+            _refresh_production_cache(db)
             snap.phase = "DONE"
             db.commit()
             # Surveillance continue : re-criblage du referentiel clients
@@ -2754,20 +2932,26 @@ def ingest_snapshot(
                 "(pointage humain requis avant mise en production)."
             )
             emit(db, "snapshot_pending_review", {
-                "Liste": file_type, "Fichier": file.filename, "Fiches": record_count,
-                "Importé par": current_user["username"], "Snapshot": snap_id,
+                "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
+                "Importé par": username, "Snapshot": snap_id,
             })
         else:
             message = f"Successfully imported {record_count} items."
             emit(db, "list_import_done", {
-                "Liste": file_type, "Fichier": file.filename, "Fiches": record_count,
-                "Importé par": current_user["username"], "Snapshot": snap_id,
+                "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
+                "Importé par": username, "Snapshot": snap_id,
             })
         if file_type == "CLIENT_BASE" and snap.status == "READY":
             # Contrôle de complétude en tâche de fond : hors de la requête
             # (un référentiel volumineux doublerait le temps d'import perçu)
-            threading.Thread(target=_client_quality_post_import,
-                             args=(snap_id,), daemon=True).start()
+            try:
+                job_queue.submit("quality_check", token=f"quality:{snap_id}",
+                                 label="Contrôle qualité clients",
+                                 params={"snapshot_id": snap_id},
+                                 created_by=username, dedupe_key=f"quality:{snap_id}",
+                                 snapshot_id=snap_id)
+            except JobConflict:
+                pass
         if rescreen_result and rescreen_result.get("new_alerts"):
             # Le re-criblage a produit des alertes : etape structurante, mail immediat
             emit(db, "rescreen_completed", {
@@ -2789,24 +2973,25 @@ def ingest_snapshot(
         logger.error(f"Failed to ingest file: {e}")
         progress_registry.finish(progress_id, status="ERROR", error=str(e))
         # Mark snapshot as ERROR
-        if 'snap_id' in locals():
+        if snap_id:
             error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
             if error_snap:
                 error_snap.status = "ERROR"
                 db.commit()
         emit(db, "list_import_failed", {
-            "Liste": file_type, "Fichier": getattr(file, "filename", "—"),
-            "Erreur": str(e)[:500], "Importé par": current_user.get("username"),
-            "Snapshot": locals().get("snap_id") or "—",
+            "Liste": file_type, "Fichier": original_filename,
+            "Erreur": str(e)[:500], "Importé par": username,
+            "Snapshot": snap_id,
         })
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ingestion failed: {str(e)}"
-        )
+        raise RuntimeError(f"Ingestion failed: {e}")
     finally:
         # Delete temp file
-        if temp_file_path.exists():
-            os.remove(temp_file_path)
+        try:
+            if temp_file_path and Path(temp_file_path).exists():
+                os.remove(temp_file_path)
+        except OSError:
+            pass
+
 
 @app.get("/api/snapshots")
 async def get_snapshots(
@@ -3630,6 +3815,9 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
         if campaign is None:
             return
+        # Execute desormais dans le demon travailleur : son cache de listes
+        # demarre vide et n'est pas rafraichi par le veilleur du processus API
+        _ensure_watchlist_cache(db)
         for profile in profiles:
             try:
                 result = screen_client_profile(db, profile, username, requested_lists)
@@ -3702,7 +3890,6 @@ def _launch_batch_campaign(db: Session, name: str, file_name: Optional[str],
                            profiles: List[Dict[str, Any]], username: str,
                            requested_lists: Optional[List[str]],
                            trigger: str = "manual") -> BatchCampaign:
-    import threading
     campaign = BatchCampaign(
         name=name, file_name=file_name, trigger=trigger, status="RUNNING",
         screening_lists=requested_lists, total_clients=len(profiles),
@@ -3711,11 +3898,31 @@ def _launch_batch_campaign(db: Session, name: str, file_name: Optional[str],
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
-    threading.Thread(
-        target=_run_batch_campaign,
-        args=(campaign.id, profiles, username, requested_lists),
-        daemon=True,
-    ).start()
+    # Les profils partent dans un fichier temporaire : la ligne `jobs` ne porte
+    # que des parametres bornes, et le demon travailleur (autre processus)
+    # recharge les profils depuis le disque. Le fichier appartient au job, qui
+    # le supprime en fin de course.
+    profiles_path = PROJECT_ROOT / "temp_ingestion" / f"batch_profiles_{campaign.id}.json"
+    profiles_path.parent.mkdir(parents=True, exist_ok=True)
+    profiles_path.write_text(json.dumps(profiles, ensure_ascii=False, default=str),
+                             encoding="utf-8")
+    try:
+        _submit_job(
+            "batch_campaign",
+            params={"campaign_id": campaign.id, "profiles_path": str(profiles_path),
+                    "username": username, "requested_lists": requested_lists},
+            token=f"batch:{campaign.id}",
+            label=f"Campagne batch — {name}",
+            started_by=username,
+        )
+    except Exception as e:
+        # File indisponible : pas de campagne RUNNING fantome
+        campaign.status = "ERROR"
+        campaign.error_message = str(e)
+        campaign.finished_at = datetime.utcnow()
+        db.commit()
+        profiles_path.unlink(missing_ok=True)
+        raise
     return campaign
 
 @app.post("/api/batch/campaigns")
@@ -4710,6 +4917,12 @@ _SYNC_SOURCE_ALIASES: Dict[str, Tuple[str, str]] = {
     "WORLDBANK": ("worldbank", "WORLDBANK"),
 }
 
+# Cle d'execution (_SYNC_RUNNERS / planificateur) -> nom de source du moteur,
+# celui des jetons `sync:<source>` publies par SyncProgress
+_RUNKEY_TO_ENGINE: Dict[str, str] = {
+    run_key: engine for (run_key, engine) in _SYNC_SOURCE_ALIASES.values()
+}
+
 
 @app.post("/api/sync/run")
 def run_source_sync(
@@ -4756,51 +4969,19 @@ def run_source_sync(
                 detail="Format de date invalide (attendu: YYYY-MM-DD)."
             )
 
-    if run_key in _running_syncs:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Une synchronisation {engine_source} est déjà en cours."
-        )
-
     # Meme jeton que celui publie par le moteur (`SyncProgress`) et que celui
-    # interroge par le tableau de bord.
+    # interroge par le tableau de bord. Le dedupe_key de la file refuse une
+    # relance concurrente de la meme source (409), y compris entre un
+    # declenchement manuel et le planificateur, et QUEL QUE SOIT le processus
+    # qui l'a lancee — la ou l'ancien jeu en memoire ne voyait que le sien.
     token = f"sync:{engine_source.lower()}"
     username = current_user.get("username") or "?"
-    _running_syncs.add(run_key)
-
-    def _job(job_token: str):
-        session = next(get_db())
-        try:
-            kwargs: Dict[str, Any] = {
-                "trigger": "MANUAL",
-                "reload_cache": lambda: load_watchlist_cache(session),
-            }
-            if run_key == "eurlex":
-                kwargs["for_date"] = for_date
-            report = _SYNC_RUNNERS[run_key](session, **kwargs)
-            result = _serialize_sync_report(report)
-            # Surveillance continue : re-criblage du referentiel clients contre
-            # les entites nouvelles/modifiees du snapshot applique
-            if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(session):
-                snap = session.query(Snapshot).filter(
-                    Snapshot.snapshot_id == report.snapshot_id).first()
-                if snap:
-                    result["rescreen"] = rescreen_after_snapshot_change(
-                        session, snap.file_type, report.snapshot_id,
-                        report.previous_snapshot_id,
-                        progress=lambda done, total: progress_registry.update(
-                            job_token, phase="RESCREEN", processed=done, total=total,
-                            snapshot_id=report.snapshot_id),
-                    )
-            progress_registry.finish(job_token, result=result)
-        finally:
-            session.close()
-            _running_syncs.discard(run_key)
-
-    # `started_by` n'etant jamais ecrase, la pastille affiche le demandeur reel
-    # et non « système » (valeur par defaut des declenchements planifies)
-    _start_job(token, kind="sync", label=f"Synchronisation {engine_source}",
-               target=_job, started_by=username)
+    _submit_job("sync", token=token,
+                label=f"Synchronisation {engine_source}",
+                params={"run_key": run_key, "engine_source": engine_source,
+                        "for_date": for_date.isoformat() if for_date else None,
+                        "username": username},
+                started_by=username, dedupe_key=token)
     return JSONResponse(status_code=202, content={
         "message": f"Synchronisation {engine_source} lancée.",
         "source": engine_source,
@@ -4838,8 +5019,13 @@ async def get_sync_configuration(
             next_runs[source] = None
     cfg["next_runs"] = next_runs
     # Synchronisations en cours d'execution (le front peut alors interroger
-    # GET /api/progress?id=sync:<source> pour afficher la progression)
-    cfg["running"] = sorted(_running_syncs)
+    # GET /api/progress?id=sync:<source> pour afficher la progression) —
+    # lues dans la file de travaux : elles y sont quel que soit le processus
+    # qui les execute (demon travailleur compris)
+    from fiskr.database import Job
+    running_tokens = [row[0] for row in db.query(Job.token).filter(
+        Job.kind == "sync", Job.status.in_(("QUEUED", "RUNNING"))).all()]
+    cfg["running"] = sorted({t.split(":", 1)[1] for t in running_tokens if ":" in t})
     return cfg
 
 @app.get("/api/progress")
@@ -4850,13 +5036,17 @@ async def get_operation_progress(
 ):
     """Etat d'avancement d'une operation longue (import de liste, synchronisation).
 
-    Source primaire : le registre memoire (fiskr.progress), alimente pendant que
-    la requete d'origine est encore en vol. Repli : si le jeton correspond a un
-    snapshot_id connu (ex. apres redemarrage du processus), l'etat est reconstruit
-    depuis les colonnes persistees Snapshot.processed_count/total_hint/phase."""
+    Trois sources, dans l'ordre : le registre memoire (fiskr.progress,
+    alimente quand l'operation tourne dans CE processus), puis la ligne de la
+    file de travaux persistee (jobs — seul canal qui traverse les processus
+    et les redemarrages, elle porte aussi le rapport final `result`), puis
+    les colonnes persistees du Snapshot (imports historiques)."""
     state = progress_registry.get(id)
     if state is not None:
         return {"id": id, **state}
+    job = job_queue.latest_by_token(db, id)
+    if job is not None:
+        return {"id": id, **_job_progress_view(job)}
     snap = db.query(Snapshot).filter(Snapshot.snapshot_id == id).first()
     if snap is not None:
         processed = snap.processed_count or 0
@@ -4888,6 +5078,38 @@ _OPERATION_LINKS = {
 }
 
 
+def _job_progress_view(job) -> Dict[str, Any]:
+    """
+    Vue « progression » d'une ligne de la file de travaux, au format du
+    registre memoire : le front n'a pas a savoir d'ou vient l'etat.
+    QUEUED est presente comme RUNNING (phase QUEUED) : pour l'utilisateur,
+    l'operation est en cours des le 202.
+    """
+    if job.status in ("DONE", "ERROR", "CANCELLED"):
+        status_out = "DONE" if job.status == "DONE" else "ERROR"
+    else:
+        status_out = "RUNNING"
+    total = job.total
+    processed = job.processed or 0
+    pct = round(100.0 * processed / total, 1) if total and processed <= total else None
+    return {
+        "kind": job.kind,
+        "label": job.label,
+        "started_by": job.created_by,
+        "phase": job.phase or ("DONE" if status_out == "DONE" else "PARSE"),
+        "processed": processed,
+        "total": total,
+        "pct": pct,
+        "snapshot_id": job.snapshot_id,
+        "status": status_out,
+        "error": job.error or ("Opération annulée." if job.status == "CANCELLED" else None),
+        "result": job.result,
+        "started_at": job.started_at.timestamp() if job.started_at else (
+            job.created_at.timestamp() if job.created_at else None),
+        "updated_at": job.heartbeat_at.timestamp() if job.heartbeat_at else None,
+    }
+
+
 @app.get("/api/progress/active")
 async def list_active_operations(
     db: Session = Depends(get_db),
@@ -4905,13 +5127,38 @@ async def list_active_operations(
     libelles et compteurs uniquement.
     """
     items = []
+    seen_tokens = set()
     for state in progress_registry.list_active():
         kind = state.get("kind") or "import"
+        seen_tokens.add(state.get("token"))
         items.append({
             **state,
             "kind": kind,
             "label": state.get("label") or state.get("token"),
             "link": _OPERATION_LINKS.get(kind, ""),
+        })
+
+    # File de travaux persistee : les jobs executes dans le demon travailleur
+    # n'existent pas dans le registre memoire de CE processus — la table est
+    # leur seul canal. Dedupliques par jeton (en modes thread/eager, la meme
+    # operation vit dans les deux sources ; le registre, plus frais, gagne).
+    from fiskr.database import Job
+    cutoff = datetime.utcnow() - timedelta(seconds=120)
+    job_rows = db.query(Job).filter(
+        (Job.status.in_(("QUEUED", "RUNNING")))
+        | ((Job.status.in_(("DONE", "ERROR"))) & (Job.finished_at >= cutoff))
+    ).order_by(Job.id.desc()).limit(50).all()
+    for job in job_rows:
+        if job.token in seen_tokens:
+            continue
+        seen_tokens.add(job.token)
+        view = _job_progress_view(job)
+        view.pop("result", None)  # pas de donnees metier dans la liste globale
+        items.append({
+            "token": job.token,
+            **view,
+            "label": job.label or job.token,
+            "link": _OPERATION_LINKS.get(job.kind, ""),
         })
 
     # Campagnes batch : deja persistees avec leur progression, on les fusionne
@@ -4939,6 +5186,109 @@ async def list_active_operations(
     items.sort(key=lambda item: item.get("started_at") or 0)
     running = [i for i in items if i["status"] == "RUNNING"]
     return {"items": items, "running": len(running)}
+
+
+def _job_row_view(job) -> Dict[str, Any]:
+    duration = None
+    if job.started_at and job.finished_at:
+        duration = round((job.finished_at - job.started_at).total_seconds(), 1)
+    return {
+        "id": job.id, "token": job.token, "kind": job.kind, "label": job.label,
+        "status": job.status, "attempts": job.attempts, "max_attempts": job.max_attempts,
+        "phase": job.phase, "processed": job.processed, "total": job.total,
+        "snapshot_id": job.snapshot_id, "error": job.error,
+        "created_by": job.created_by,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "duration_s": duration,
+        "retryable": job.status == "ERROR" and job.kind in job_queue.TASKS,
+    }
+
+
+@app.get("/api/jobs")
+async def list_jobs(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Historique de la file de travaux : chaque operation longue, son etat,
+    sa duree, son auteur — et si elle est relancable."""
+    from fiskr.database import Job, JOB_STATUSES
+    query = db.query(Job)
+    if status_filter:
+        key = status_filter.strip().upper()
+        if key not in JOB_STATUSES:
+            raise HTTPException(status_code=400, detail=f"Statut inconnu : {status_filter}.")
+        query = query.filter(Job.status == key)
+    rows = query.order_by(Job.id.desc()).limit(limit).all()
+    return {"items": [_job_row_view(j) for j in rows]}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Relance un job en erreur : remis en file, compteur de tentatives remis a
+    zero. Reserve aux administrateurs — relancer une operation de production
+    est un acte d'exploitation, trace au journal d'administration.
+    """
+    from fiskr.database import Job
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job introuvable.")
+    if job.status != "ERROR":
+        raise HTTPException(status_code=400, detail="Seul un job en erreur se relance.")
+    if job.kind not in job_queue.TASKS:
+        raise HTTPException(status_code=400, detail="Ce type de job n'est pas relançable.")
+    job.status = "QUEUED"
+    job.attempts = 0
+    job.error = None
+    job.not_before = None
+    job.claimed_by = None
+    job.phase = "QUEUED"
+    job.finished_at = None
+    log_admin_action(db, admin_user["username"], "JOB_RETRIED",
+                     target=f"{job.kind}:{job.token}", before={"status": "ERROR"},
+                     after={"status": "QUEUED"})
+    db.commit()
+    mode = job_queue.jobs_mode()
+    if mode == "eager":
+        job_queue.run_job(job.id)
+    elif mode == "thread":
+        threading.Thread(target=job_queue.run_job, args=(job.id,), daemon=True).start()
+    elif job_queue.on_submit_hook is not None:
+        job_queue.on_submit_hook()
+    db.refresh(job)
+    return {"message": "Job remis en file.", **_job_row_view(job)}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Annule un job encore en file (QUEUED uniquement : l'annulation
+    cooperative d'un job en cours n'est pas supportee)."""
+    from fiskr.database import Job
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job introuvable.")
+    if job.status != "QUEUED":
+        raise HTTPException(status_code=400, detail="Seul un job en attente s'annule.")
+    job.status = "CANCELLED"
+    job.finished_at = datetime.utcnow()
+    log_admin_action(db, admin_user["username"], "JOB_CANCELLED",
+                     target=f"{job.kind}:{job.token}", before={"status": "QUEUED"},
+                     after={"status": "CANCELLED"})
+    db.commit()
+    progress_registry.finish(job.token, status="ERROR", error="Opération annulée.")
+    return {"message": "Job annulé.", **_job_row_view(job)}
 
 
 class SyncSchedulesUpdate(BaseModel):
@@ -5455,27 +5805,13 @@ async def simulate_engine_impact_endpoint(
                                    "en vigueur : il n'y a aucun écart à mesurer.")
     channel = payload.channel
 
-    def _job(job_token: str):
-        session = next(get_db())
-        try:
-            report = engine_impact.simulate_engine_impact(
-                session, payload.panel_snapshot_id, candidate,
-                baseline_capabilities=baseline, channel=channel,
-                progress=lambda phase, done, total: progress_registry.update(
-                    job_token, phase=phase, kind="engine_simulation",
-                    label="Impact des capacités du moteur",
-                    started_by=param_user["username"], processed=done, total=total),
-            )
-            progress_registry.update(job_token, phase="DONE", kind="engine_simulation",
-                                     label="Impact des capacités du moteur",
-                                     started_by=param_user["username"])
-            progress_registry.finish(job_token, result=report)
-        finally:
-            session.close()
-
     token = f"engsim-{uuid.uuid4().hex[:8]}"
-    _start_job(token, kind="engine_simulation", label="Impact des capacités du moteur",
-               target=_job, started_by=param_user["username"])
+    _submit_job("engine_simulation", token=token,
+                label="Impact des capacités du moteur",
+                params={"panel_snapshot_id": payload.panel_snapshot_id,
+                        "candidate": sorted(candidate), "baseline": sorted(baseline),
+                        "channel": channel, "username": param_user["username"]},
+                started_by=param_user["username"])
     return JSONResponse(status_code=202, content={
         "message": "Mesure d'impact lancée.", "job_token": token})
 
@@ -5629,27 +5965,15 @@ async def simulate_resource_impact_endpoint(
     baseline = set(payload.baseline_fields) if payload.baseline_fields is not None else None
     pending = list(payload.include_pending_ids or [])
 
-    def _job(job_token: str):
-        session = next(get_db())
-        try:
-            report = resource_impact.simulate_resource_impact(
-                session, payload.panel_snapshot_id, candidate,
-                baseline_fields=baseline, include_pending_ids=pending,
-                progress=lambda phase, done, total: progress_registry.update(
-                    job_token, phase=phase, kind="resource_simulation",
-                    label="Impact des équivalences", started_by=admin_user["username"],
-                    processed=done, total=total),
-            )
-            progress_registry.update(job_token, phase="DONE", kind="resource_simulation",
-                                     label="Impact des équivalences",
-                                     started_by=admin_user["username"])
-            progress_registry.finish(job_token, result=report)
-        finally:
-            session.close()
-
     token = f"ressim-{uuid.uuid4().hex[:8]}"
-    _start_job(token, kind="resource_simulation", label="Impact des équivalences",
-               target=_job, started_by=admin_user["username"])
+    _submit_job("resource_simulation", token=token,
+                label="Impact des équivalences",
+                params={"panel_snapshot_id": payload.panel_snapshot_id,
+                        "candidate": sorted(candidate),
+                        "baseline": sorted(baseline) if baseline is not None else None,
+                        "include_pending_ids": pending,
+                        "username": admin_user["username"]},
+                started_by=admin_user["username"])
     return JSONResponse(status_code=202, content={
         "message": "Mesure d'impact lancée.", "job_token": token})
 
@@ -5731,20 +6055,11 @@ async def trigger_resource_mining(
     des listes se compte en dizaines de secondes sur un referentiel reel, il
     n'a rien a faire dans le cycle d'une requete HTTP.
     """
-    def _job(job_token: str):
-        session = next(get_db())
-        try:
-            report = run_resource_mining(session, started_by=admin_user["username"],
-                                         token=job_token)
-            log_admin_action(session, admin_user["username"], "RESOURCE_MINING_RUN",
-                             target="resources", after=report)
-            session.commit()
-        finally:
-            session.close()
-
     token = f"mining-{uuid.uuid4().hex[:8]}"
-    _start_job(token, kind="mining", label="Fouille d'homonymes", target=_job,
-               started_by=admin_user["username"])
+    _submit_job("mining", token=token, label="Fouille d'homonymes",
+                params={"username": admin_user["username"]},
+                started_by=admin_user["username"],
+                dedupe_key="mining")
     return JSONResponse(status_code=202, content={
         "message": "Fouille d'homonymes lancée.", "job_token": token})
 
@@ -6319,6 +6634,77 @@ async def run_fp_rule_tests(
     return report
 
 
+def _fprules_bench_panel(db: Session, rule_id: int, panel_snapshot_id: str,
+                         progress: Optional[Any] = None) -> Dict[str, Any]:
+    """
+    Banc d'essai par panel : criblage a blanc du panel de pseudo-clients contre
+    TOUTES les listes en production, la regle candidate jugee sur chaque hit.
+    C'est un calcul O(panel × univers) — execute en tache de fond par la file
+    de travaux, y compris dans le demon travailleur : le layout de blocking est
+    donc derive de la base (pas du cache du processus API).
+    """
+    import time
+    from fiskr.backtest import _panel_clients, _client_label
+    from fiskr.rescreen import _entity_dicts
+    from fiskr.settings import blocking_layout
+
+    rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
+    if rule is None:
+        raise ValueError("Règle introuvable (supprimée pendant le banc d'essai ?).")
+
+    suppressed, kept, errors = 0, 0, 0
+    samples: List[Dict[str, Any]] = []
+
+    prod_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES), Snapshot.status == "READY").all()]
+    entities = _entity_dicts(db, prod_ids) if prod_ids else []
+    screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
+    index: Dict[str, List[Dict[str, Any]]] = {}
+    for ent in entities:
+        for key in generate_blocking_keys(ent, screening_cfg):
+            index.setdefault(key, []).append(ent)
+    clients = _panel_clients(db, panel_snapshot_id)
+    total = len(clients)
+    for done, client in enumerate(clients, start=1):
+        if progress and (done % 200 == 0 or done == total):
+            try:
+                progress(done, total)
+            except Exception:
+                pass
+        if done % 25 == 0:
+            time.sleep(0)  # cession du GIL (mode thread : l'API doit respirer)
+        cands = {}
+        for key in lookup_blocking_keys(client, screening_cfg):
+            for ent in index.get(key, []):
+                cands[ent["entity_id"]] = ent
+        best, best_ent = None, None
+        for ent in cands.values():
+            sc = match_entities(client, ent, config)
+            if best is None or sc["final_score"] > best["final_score"]:
+                best, best_ent = sc, ent
+        if not best or best.get("status") != "ALERT":
+            continue
+        ctx = build_screening_ctx(client, best_ent, best)
+        result, error = run_rule(rule.code, ctx)
+        if error:
+            errors += 1
+        elif result:
+            suppressed += 1
+            if len(samples) < 50:
+                samples.append({"client_name": _client_label(client), "entity_name": best_ent.get("primary_name"),
+                                "final_score": round(best["final_score"], 1)})
+        else:
+            kept += 1
+    return {
+        "source": "panel",
+        "suppressed": suppressed,
+        "kept": kept,
+        "errors": errors,
+        "true_positive_hits": [],
+        "samples": samples,
+    }
+
+
 @app.post("/api/fprules/{rule_id}/bench")
 async def bench_fp_rule(
     rule_id: int,
@@ -6329,9 +6715,10 @@ async def bench_fp_rule(
     """
     Banc d'essai a blanc d'une regle (mode DEV, sans toucher la production) :
     - source 'history' : rejeu des N dernieres alertes reelles du canal, avec
-      garde-fou VRAIS POSITIFS (alertes CLOSED_CONFIRMED qui seraient supprimees) ;
+      garde-fou VRAIS POSITIFS (alertes CLOSED_CONFIRMED qui seraient supprimees) —
+      synchrone (borne a 2000 alertes) ;
     - source 'panel' : criblage a blanc d'un panel de pseudo-clients (canal
-      SCREENING uniquement) — chaque hit devient un contexte de test.
+      SCREENING uniquement) — O(panel × univers), donc tache de fond en 202.
     """
     rule = db.query(FpRule).filter(FpRule.id == rule_id).first()
     if not rule:
@@ -6350,39 +6737,20 @@ async def bench_fp_rule(
         panel = db.query(Snapshot).filter(Snapshot.snapshot_id == payload.panel_snapshot_id).first()
         if not panel or panel.file_type not in PANEL_FILE_TYPES or panel.status != "READY":
             raise HTTPException(status_code=400, detail="Panel introuvable (base clients ou panel de test généré).")
-        from fiskr.backtest import _panel_clients, _client_label
-        from fiskr.rescreen import _entity_dicts
-        prod_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
-            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES), Snapshot.status == "READY").all()]
-        entities = _entity_dicts(db, prod_ids) if prod_ids else []
-        screening_cfg = blocking_config_for(watchlist_index_layout)
-        index: Dict[str, List[Dict[str, Any]]] = {}
-        for ent in entities:
-            for key in generate_blocking_keys(ent, screening_cfg):
-                index.setdefault(key, []).append(ent)
-        for client in _panel_clients(db, panel.snapshot_id):
-            cands = {}
-            for key in lookup_blocking_keys(client, screening_cfg):
-                for ent in index.get(key, []):
-                    cands[ent["entity_id"]] = ent
-            best, best_ent = None, None
-            for ent in cands.values():
-                sc = match_entities(client, ent, config)
-                if best is None or sc["final_score"] > best["final_score"]:
-                    best, best_ent = sc, ent
-            if not best or best.get("status") != "ALERT":
-                continue
-            ctx = build_screening_ctx(client, best_ent, best)
-            result, error = run_rule(rule.code, ctx)
-            if error:
-                errors += 1
-            elif result:
-                suppressed += 1
-                if len(samples) < 50:
-                    samples.append({"client_name": _client_label(client), "entity_name": best_ent.get("primary_name"),
-                                    "final_score": round(best["final_score"], 1)})
-            else:
-                kept += 1
+        job = _submit_job(
+            "fprules_bench",
+            params={"rule_id": rule_id, "panel_snapshot_id": panel.snapshot_id,
+                    "username": param_user["username"]},
+            token=f"fpbench-{uuid.uuid4().hex[:4]}",
+            label=f"Banc d'essai règle — {rule.name}",
+            started_by=param_user["username"],
+            dedupe_key=f"fpbench:{rule_id}",
+        )
+        return _job_response_or_202(job, {
+            "message": "Banc d'essai lancé en tâche de fond.",
+            "progress_token": job.token,
+            "kind": "fprules_bench",
+        })
     else:
         # Rejeu de l'historique reel du canal
         alerts = db.query(Alert).filter(
@@ -6492,50 +6860,6 @@ class BacktestRequest(BaseModel):
     # l'ecart chiffre montre l'effet de la regle avant sa validation 4-yeux
     candidate_rule_id: Optional[int] = None
 
-def _run_backtest_job(job_token: str, snapshot_id: str, panel_snapshot_id: str,
-                      candidate_rule_id: Optional[int], username: str) -> None:
-    """
-    Corps du cahier de tests, execute en tache de fond (session dediee : une
-    session SQLAlchemy ne se partage pas entre threads). Publie sa progression
-    sur `job_token` et persiste le rapport sur le snapshot — le front le
-    recupere ensuite par GET /api/review/snapshots/{id}, y compris apres un
-    rechargement de page.
-    """
-    from fiskr.database import SessionLocal
-    session = SessionLocal()
-    try:
-        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
-        if snap is None:
-            raise ValueError("Snapshot introuvable.")
-
-        def _tick(phase: str, done: int, total: int) -> None:
-            progress_registry.update(job_token, phase=phase, processed=done,
-                                     total=total, snapshot_id=snapshot_id)
-
-        report = run_backtest(session, snap, panel_snapshot_id,
-                              threshold_pct=backtest_max_gap_pct(session),
-                              executed_by=username,
-                              candidate_rule_id=candidate_rule_id,
-                              progress=_tick)
-        snap.backtest_report = report
-        snap.backtest_at = datetime.utcnow()
-        snap.backtest_by = username
-        session.commit()
-        # Un ecart eleve doit remonter tout de suite (il bloque l'approbation) ;
-        # un verdict OK part dans le recapitulatif periodique
-        emit(session, "backtest_completed", {
-            "Snapshot": snap.snapshot_id, "Liste": snap.file_type,
-            "Verdict": report.get("verdict"),
-            "Écart": f"{report.get('gap_pct')} % (seuil {report.get('threshold_pct')} %)",
-            "Alertes production": (report.get("current") or {}).get("alerts"),
-            "Alertes candidate": (report.get("candidate") or {}).get("alerts"),
-            "Nouvelles paires": report.get("new_pairs_count"),
-            "Exécuté par": username,
-        }, urgency_override="immediate" if report.get("verdict") != "OK" else None)
-    finally:
-        session.close()
-
-
 @app.post("/api/review/snapshots/{snapshot_id}/backtest", status_code=status.HTTP_202_ACCEPTED)
 async def run_review_backtest(
     snapshot_id: str,
@@ -6573,12 +6897,14 @@ async def run_review_backtest(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     job_token = f"backtest:{snap.snapshot_id}"
-    _start_job(job_token, "backtest",
-               f"Cahier de tests — {snap.file_type}",
-               _run_backtest_job,
-               (snap.snapshot_id, panel.snapshot_id, payload.candidate_rule_id,
-                reviewer["username"]),
-               started_by=reviewer["username"])
+    _submit_job("backtest", token=job_token,
+                label=f"Cahier de tests — {snap.file_type}",
+                params={"snapshot_id": snap.snapshot_id,
+                        "panel_snapshot_id": panel.snapshot_id,
+                        "candidate_rule_id": payload.candidate_rule_id,
+                        "username": reviewer["username"]},
+                started_by=reviewer["username"],
+                dedupe_key=job_token, snapshot_id=snap.snapshot_id)
     return {
         "message": "Cahier de tests lancé. La progression est suivie dans les opérations en cours.",
         "job_token": job_token,
@@ -6648,21 +6974,27 @@ async def generate_test_panel_endpoint(
             Snapshot.status == "READY"
         ).all()
     )
-    try:
-        snap = generate_test_panel(db, source_ids, size=payload.size,
-                                   seed=payload.seed, created_by=reviewer["username"])
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    emit(db, "test_panel_generated", {
-        "Panel": snap.file_name, "Pseudo-clients": snap.record_count,
-        "Snapshot": snap.snapshot_id, "Généré par": reviewer["username"],
+    # Refus immediat (400, comme l'endpoint synchrone d'origine) si aucune
+    # entite exploitable : inutile de mettre en file un echec certain
+    if not source_ids or not db.query(WatchlistEntity.id).filter(
+            WatchlistEntity.snapshot_id.in_(source_ids),
+            WatchlistEntity.excluded.isnot(True)).first():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Aucune entité exploitable dans les snapshots sources pour générer le panel.")
+    job = _submit_job(
+        "testpanel_generate",
+        params={"source_ids": source_ids, "size": payload.size,
+                "seed": payload.seed, "username": reviewer["username"]},
+        token=f"panelgen-{uuid.uuid4().hex[:4]}",
+        label=f"Génération de panel ({payload.size} pseudo-clients)",
+        started_by=reviewer["username"],
+        dedupe_key="testpanel_generate",
+    )
+    return _job_response_or_202(job, {
+        "message": "Génération du panel lancée en tâche de fond.",
+        "progress_token": job.token,
+        "kind": "testpanel_generate",
     })
-    return {
-        "message": f"Panel de {snap.record_count} pseudo-clients généré.",
-        "snapshot_id": snap.snapshot_id,
-        "file_name": snap.file_name,
-        "record_count": snap.record_count,
-    }
 
 @app.get("/api/review/snapshots/{snapshot_id}/entities")
 async def list_review_entities(
@@ -6823,47 +7155,6 @@ async def download_exclusion_evidence(
         raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
     return FileResponse(str(file_path), filename=row.exclusion_file_name or file_path.name)
 
-def _run_approval_job(job_token: str, snapshot_id: str, previous_snapshot_id: Optional[str],
-                      excluded_count: int, username: str) -> None:
-    """
-    Suites d'une approbation, en tache de fond : rechargement du cache de
-    production puis re-criblage post-delta du referentiel clients (plusieurs
-    minutes sur un gros referentiel — il gelait l'application entiere quand il
-    tournait dans la requete). La promotion elle-meme, acte de gouvernance, a
-    deja ete commitee de facon synchrone par l'endpoint.
-    """
-    from fiskr.database import SessionLocal
-    session = SessionLocal()
-    try:
-        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
-        if snap is None:
-            raise ValueError("Snapshot introuvable.")
-
-        progress_registry.update(job_token, phase="RELOAD", snapshot_id=snapshot_id)
-        load_watchlist_cache(session)
-
-        rescreen_result = None
-        if auto_rescreen_enabled(session):
-            rescreen_result = rescreen_after_snapshot_change(
-                session, snap.file_type, snap.snapshot_id, previous_snapshot_id,
-                progress=lambda done, total: progress_registry.update(
-                    job_token, phase="RESCREEN", processed=done, total=total,
-                    snapshot_id=snapshot_id),
-            )
-        # Étape structurante de la production des listes : mail immédiat
-        report = snap.backtest_report or {}
-        emit(session, "snapshot_approved", {
-            "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
-            "Fiches": snap.record_count, "Exclusions": excluded_count,
-            "Approuvé par": username,
-            "Commentaire": snap.review_comment or "—",
-            "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
-            "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
-        })
-    finally:
-        session.close()
-
-
 @app.post("/api/review/snapshots/{snapshot_id}/approve", status_code=status.HTTP_202_ACCEPTED)
 async def approve_pending_snapshot(
     snapshot_id: str,
@@ -6926,12 +7217,14 @@ async def approve_pending_snapshot(
     db.commit()
 
     job_token = f"approve:{snap.snapshot_id}"
-    _start_job(job_token, "approve",
-               f"Mise en production — {snap.file_type}",
-               _run_approval_job,
-               (snap.snapshot_id, previous_prod.snapshot_id if previous_prod else None,
-                len(excluded_rows), reviewer["username"]),
-               started_by=reviewer["username"])
+    _submit_job("approve", token=job_token,
+                label=f"Mise en production — {snap.file_type}",
+                params={"snapshot_id": snap.snapshot_id,
+                        "previous_snapshot_id": previous_prod.snapshot_id if previous_prod else None,
+                        "excluded_count": len(excluded_rows),
+                        "username": reviewer["username"]},
+                started_by=reviewer["username"],
+                dedupe_key=job_token, snapshot_id=snap.snapshot_id)
     return {
         "message": "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours.",
         "snapshot_id": snapshot_id,
@@ -9172,12 +9465,25 @@ async def run_manual_rescreen(
     """
     Lookback manuel (guidance Wolfsberg) : re-crible tout le referentiel
     clients contre les listes en production (un type donne, ou toutes).
+
+    C'etait la plus lourde operation du produit encore executee DANS la
+    requete : elle part desormais dans la file de travaux (202 + jeton, suivi
+    par la pastille), le refus d'un type inconnu restant synchrone (400).
     """
     file_type = (payload.file_type or "").strip().upper() or None
     if file_type and file_type not in WATCHLIST_FILE_TYPES:
         raise HTTPException(status_code=400, detail=f"Type de liste inconnu ({', '.join(WATCHLIST_FILE_TYPES)}).")
-    result = rescreen_lookback(db, file_type)
-    return {"message": "Lookback exécuté.", **result}
+    token = f"lookback-{uuid.uuid4().hex[:8]}"
+    job = _submit_job("lookback", token=token,
+                      label="Lookback du référentiel clients"
+                            + (f" — {file_type}" if file_type else ""),
+                      params={"file_type": file_type,
+                              "username": admin_user["username"]},
+                      started_by=admin_user["username"], dedupe_key="lookback")
+    return _job_response_or_202(job, {
+        "message": "Lookback lancé. La progression est suivie dans les opérations en cours.",
+        "job_token": token,
+    })
 
 # ------------------ KPI CONFORMITE (PILOTAGE) ------------------
 
