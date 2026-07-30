@@ -26,9 +26,18 @@ Exclusions → Cahier de Tests → Décision**.
 
 Deux voies, toutes deux aboutissant au même parcours :
 
-- **Sources automatiques** (OFAC SDN et Non-SDN, EUR-Lex, UE FSF, DGT, ONU, PEP, OFSI, SECO, US CSL, Canada, Australie, HK SFC, AMF, Banque mondiale) :
+- **Sources automatiques** (OFAC SDN et Non-SDN, UE FSF, DGT, ONU, PEP, OFSI,
+  SECO, US CSL, Canada, Australie, HK SFC, AMF, Banque mondiale) :
   synchronisation quotidienne planifiée ou manuelle (*Sources Automatiques*).
 - **Import manuel** : fichier XML / CSV / JSON / PDF (*Import de Fichiers*).
+
+> **EUR-Lex n'est pas une source de désignations.** Dans son mode par défaut
+> (`sync.eurlex.mode: alert`), la surveillance du Journal Officiel **signale**
+> qu'un acte de mesures restrictives est paru et en archive le PDF officiel —
+> elle n'inscrit aucune fiche. Pour l'Union européenne, c'est la **liste
+> consolidée UE FSF** qui fait autorité : elle est structurée et **porte les
+> radiations**, que le Journal Officiel n'appliquait pas. Le signal EUR-Lex
+> sert à savoir qu'une mise à jour arrive ; la liste, elle, vient du FSF.
 
 > **La synchronisation travaille en tâche de fond.** `POST /api/sync/run`
 > répond **202** avec un jeton et rend la main aussitôt : le cycle complet

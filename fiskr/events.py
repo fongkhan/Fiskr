@@ -91,6 +91,13 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_LISTS, audience=("admin",),
         urgency=IMMEDIATE, link="#watchlists/watchlists-snapshots",
     ),
+    "eurlex_act_published": Event(
+        label="Acte de mesures restrictives paru au Journal Officiel de l'UE",
+        category=CATEGORY_LISTS, audience=("reviewer", "admin"),
+        # Immediat par construction : c'est un signal d'alerte precoce, il
+        # perd tout interet dans un recapitulatif du lendemain.
+        urgency=IMMEDIATE, link="#watchlists/watchlists-sources",
+    ),
     "sync_completed": Event(
         label="Synchronisation de source terminée",
         category=CATEGORY_LISTS, audience=("admin",),
