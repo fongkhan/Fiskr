@@ -82,7 +82,7 @@ _INT_PK_TABLES = (
     "WatchlistEntityChange", "EntityRelationship",
     "BatchResult", "BatchCampaign",
     "NotificationDelivery", "HookDelivery", "LearnedEquivalence",
-    "WhitelistPair", "SavedView", "ApiKey", "SyncReport", "AdminAuditLog",
+    "WhitelistPair", "SavedView", "UserDashboard", "ApiKey", "SyncReport", "AdminAuditLog",
     "ClientEntity", "WatchlistEntity", "Job",
 )
 

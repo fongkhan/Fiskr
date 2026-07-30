@@ -15,6 +15,66 @@
 
     // ---- Dictionnaire : « chaîne française » -> { en, de, es, zh, ar } ----
     const T = {
+        // Accueil personnalisable (grille de panneaux)
+        "🎛 Personnaliser": { en: "🎛 Customize", de: "🎛 Anpassen", es: "🎛 Personalizar", zh: "🎛 自定义", ar: "🎛 تخصيص" },
+        "＋ Ajouter un panneau": { en: "＋ Add a panel", de: "＋ Panel hinzufügen", es: "＋ Añadir un panel", zh: "＋ 添加面板", ar: "＋ إضافة لوحة" },
+        "↺ Réinitialiser": { en: "↺ Reset", de: "↺ Zurücksetzen", es: "↺ Restablecer", zh: "↺ 重置", ar: "↺ إعادة الضبط" },
+        "💾 Enregistrer": { en: "💾 Save", de: "💾 Speichern", es: "💾 Guardar", zh: "💾 保存", ar: "💾 حفظ" },
+        "Ajouter un panneau": { en: "Add a panel", de: "Panel hinzufügen", es: "Añadir un panel", zh: "添加面板", ar: "إضافة لوحة" },
+        "Glissez les panneaux pour les réordonner · ◧ change la taille · ✕ retire": { en: "Drag panels to reorder · ◧ changes the size · ✕ removes", de: "Panels per Drag & Drop ordnen · ◧ ändert die Größe · ✕ entfernt", es: "Arrastre los paneles para reordenarlos · ◧ cambia el tamaño · ✕ quita", zh: "拖动面板以重新排序 · ◧ 更改大小 · ✕ 移除", ar: "اسحب اللوحات لإعادة ترتيبها · ◧ يغيّر الحجم · ✕ يزيل" },
+        "Choisissez un panneau à ajouter à votre accueil. Les panneaux déjà présents sont grisés.": { en: "Choose a panel to add to your home page. Panels already displayed are greyed out.", de: "Wählen Sie ein Panel für Ihre Startseite. Bereits angezeigte Panels sind ausgegraut.", es: "Elija un panel para añadir a su inicio. Los paneles ya presentes aparecen atenuados.", zh: "选择要添加到首页的面板。已显示的面板呈灰色。", ar: "اختر لوحة لإضافتها إلى صفحتك الرئيسية. اللوحات المعروضة بالفعل تظهر باهتة." },
+        "Graphiques": { en: "Charts", de: "Diagramme", es: "Gráficos", zh: "图表", ar: "رسوم بيانية" },
+        "Tableaux": { en: "Tables", de: "Tabellen", es: "Tablas", zh: "表格", ar: "جداول" },
+        "déjà affiché": { en: "already displayed", de: "bereits angezeigt", es: "ya mostrado", zh: "已显示", ar: "معروض بالفعل" },
+        "Aucun panneau : ajoutez-en avec « Ajouter un panneau », ou réinitialisez la disposition.": { en: "No panel: add some with “Add a panel”, or reset the layout.", de: "Kein Panel: fügen Sie welche über „Panel hinzufügen“ hinzu oder setzen Sie das Layout zurück.", es: "Ningún panel: añada alguno con «Añadir un panel» o restablezca la disposición.", zh: "没有面板：使用“添加面板”添加，或重置布局。", ar: "لا لوحات: أضف بعضها عبر «إضافة لوحة» أو أعد ضبط التخطيط." },
+        "Disposition de l'accueil enregistrée.": { en: "Home layout saved.", de: "Startseiten-Layout gespeichert.", es: "Disposición del inicio guardada.", zh: "首页布局已保存。", ar: "تم حفظ تخطيط الصفحة الرئيسية." },
+        "Disposition par défaut restaurée.": { en: "Default layout restored.", de: "Standard-Layout wiederhergestellt.", es: "Disposición por defecto restaurada.", zh: "已恢复默认布局。", ar: "تمت استعادة التخطيط الافتراضي." },
+        "Revenir à la disposition par défaut de l'accueil ?": { en: "Return to the default home layout?", de: "Zum Standard-Layout der Startseite zurückkehren?", es: "¿Volver a la disposición por defecto del inicio?", zh: "恢复首页默认布局？", ar: "هل تريد العودة إلى التخطيط الافتراضي للصفحة الرئيسية؟" },
+        "Erreur réseau pendant l'enregistrement.": { en: "Network error while saving.", de: "Netzwerkfehler beim Speichern.", es: "Error de red al guardar.", zh: "保存时网络错误。", ar: "خطأ في الشبكة أثناء الحفظ." },
+        // Tuiles KPI (libellé avec pictogramme = un seul nœud texte)
+        "🚨 Criblage": { en: "🚨 Screening", de: "🚨 Screening", es: "🚨 Cribado", zh: "🚨 筛查", ar: "🚨 الفحص" },
+        "💸 Filtrage": { en: "💸 Filtering", de: "💸 Filterung", es: "💸 Filtrado", zh: "💸 过滤", ar: "💸 الترشيح" },
+        "👁 4 yeux": { en: "👁 4 eyes", de: "👁 4 Augen", es: "👁 4 ojos", zh: "👁 四眼复核", ar: "👁 أربع أعين" },
+        "📥 Homologation": { en: "📥 Approval", de: "📥 Freigabe", es: "📥 Homologación", zh: "📥 审批", ar: "📥 الاعتماد" },
+        "⏰ Retards SLA": { en: "⏰ SLA overdue", de: "⏰ SLA-Verzug", es: "⏰ Retrasos SLA", zh: "⏰ SLA 逾期", ar: "⏰ تجاوز SLA" },
+        "📉 Faux positifs": { en: "📉 False positives", de: "📉 Fehlalarme", es: "📉 Falsos positivos", zh: "📉 误报", ar: "📉 إنذارات كاذبة" },
+        "⏱ Délai moyen": { en: "⏱ Average time", de: "⏱ Durchschnittsdauer", es: "⏱ Plazo medio", zh: "⏱ 平均时长", ar: "⏱ متوسط المدة" },
+        "4 yeux": { en: "4 eyes", de: "4 Augen", es: "4 ojos", zh: "四眼复核", ar: "أربع أعين" },
+        "Retards SLA": { en: "SLA overdue", de: "SLA-Verzug", es: "Retrasos SLA", zh: "SLA 逾期", ar: "تجاوز SLA" },
+        "Faux positifs": { en: "False positives", de: "Fehlalarme", es: "Falsos positivos", zh: "误报", ar: "إنذارات كاذبة" },
+        "alertes ouvertes": { en: "open alerts", de: "offene Alarme", es: "alertas abiertas", zh: "未结警报", ar: "تنبيهات مفتوحة" },
+        "décisions à valider": { en: "decisions to validate", de: "zu bestätigende Entscheidungen", es: "decisiones por validar", zh: "待确认决定", ar: "قرارات بانتظار التحقق" },
+        "snapshots en attente": { en: "pending snapshots", de: "wartende Snapshots", es: "instantáneas pendientes", zh: "待处理快照", ar: "لقطات معلقة" },
+        "alertes en dépassement": { en: "alerts past due", de: "überfällige Alarme", es: "alertas vencidas", zh: "逾期警报", ar: "تنبيهات متأخرة" },
+        "taux sur alertes closes": { en: "rate on closed alerts", de: "Quote geschlossener Alarme", es: "tasa sobre alertas cerradas", zh: "已结警报占比", ar: "النسبة على التنبيهات المغلقة" },
+        "création → décision": { en: "creation → decision", de: "Erstellung → Entscheidung", es: "creación → decisión", zh: "创建 → 决定", ar: "الإنشاء ← القرار" },
+        // Panneaux graphiques et tableaux (titres avec et sans pictogramme)
+        "🔄 Dernières synchronisations": { en: "🔄 Latest synchronizations", de: "🔄 Letzte Synchronisationen", es: "🔄 Últimas sincronizaciones", zh: "🔄 最近同步", ar: "🔄 آخر عمليات المزامنة" },
+        "Dernières synchronisations": { en: "Latest synchronizations", de: "Letzte Synchronisationen", es: "Últimas sincronizaciones", zh: "最近同步", ar: "آخر عمليات المزامنة" },
+        "⚙ Travaux récents": { en: "⚙ Recent jobs", de: "⚙ Letzte Aufgaben", es: "⚙ Trabajos recientes", zh: "⚙ 近期任务", ar: "⚙ الأعمال الأخيرة" },
+        "Travaux récents": { en: "Recent jobs", de: "Letzte Aufgaben", es: "Trabajos recientes", zh: "近期任务", ar: "الأعمال الأخيرة" },
+        "🧑\u200d💼 Charge par analyste": { en: "🧑\u200d💼 Workload per analyst", de: "🧑\u200d💼 Auslastung je Analyst", es: "🧑\u200d💼 Carga por analista", zh: "🧑\u200d💼 分析员工作量", ar: "🧑\u200d💼 عبء العمل لكل محلل" },
+        "Charge par analyste": { en: "Workload per analyst", de: "Auslastung je Analyst", es: "Carga por analista", zh: "分析员工作量", ar: "عبء العمل لكل محلل" },
+        "🩺 Qualité des données clients": { en: "🩺 Client data quality", de: "🩺 Kundendatenqualität", es: "🩺 Calidad de datos de clientes", zh: "🩺 客户数据质量", ar: "🩺 جودة بيانات العملاء" },
+        "Qualité des données clients": { en: "Client data quality", de: "Kundendatenqualität", es: "Calidad de datos de clientes", zh: "客户数据质量", ar: "جودة بيانات العملاء" },
+        "Alertes sur 30 jours": { en: "Alerts over 30 days", de: "Alarme über 30 Tage", es: "Alertas en 30 días", zh: "近30天警报", ar: "التنبيهات خلال 30 يومًا" },
+        "Fiches en production par liste": { en: "Production records per list", de: "Produktive Einträge je Liste", es: "Fichas en producción por lista", zh: "各名单在产记录", ar: "السجلات المنشورة حسب القائمة" },
+        "Répartition des alertes": { en: "Alert breakdown", de: "Alarmverteilung", es: "Distribución de alertas", zh: "警报分布", ar: "توزيع التنبيهات" },
+        "À traiter en priorité": { en: "Handle first", de: "Zuerst bearbeiten", es: "Prioritarias", zh: "优先处理", ar: "أولوية المعالجة" },
+        // États vides et notes des panneaux
+        "✅ Aucune alerte en attente.": { en: "✅ No pending alert.", de: "✅ Kein wartender Alarm.", es: "✅ Ninguna alerta pendiente.", zh: "✅ 无待处理警报。", ar: "✅ لا تنبيهات معلقة." },
+        "✅ Aucune alerte ouverte : file à jour.": { en: "✅ No open alert: queue is clear.", de: "✅ Kein offener Alarm: Liste ist leer.", es: "✅ Sin alertas abiertas: cola al día.", zh: "✅ 无未结警报：队列已清。", ar: "✅ لا تنبيهات مفتوحة: القائمة فارغة." },
+        "Aucune synchronisation exécutée.": { en: "No synchronization run yet.", de: "Noch keine Synchronisation ausgeführt.", es: "Ninguna sincronización ejecutada.", zh: "尚未执行同步。", ar: "لم تُنفذ أي مزامنة." },
+        "Historique indisponible.": { en: "History unavailable.", de: "Verlauf nicht verfügbar.", es: "Historial no disponible.", zh: "历史记录不可用。", ar: "السجل غير متاح." },
+        "Aucun travail exécuté.": { en: "No job executed yet.", de: "Noch keine Aufgabe ausgeführt.", es: "Ningún trabajo ejecutado.", zh: "尚未执行任务。", ar: "لم يُنفذ أي عمل." },
+        "Charge indisponible.": { en: "Workload unavailable.", de: "Auslastung nicht verfügbar.", es: "Carga no disponible.", zh: "工作量不可用。", ar: "عبء العمل غير متاح." },
+        "Qualité indisponible.": { en: "Quality unavailable.", de: "Qualität nicht verfügbar.", es: "Calidad no disponible.", zh: "质量不可用。", ar: "الجودة غير متاحة." },
+        "Aucune base clients en production.": { en: "No client base in production.", de: "Keine Kundenbasis produktiv.", es: "Sin base de clientes en producción.", zh: "无在产客户库。", ar: "لا قاعدة عملاء قيد الإنتاج." },
+        "(non assignées)": { en: "(unassigned)", de: "(nicht zugewiesen)", es: "(sin asignar)", zh: "（未指派）", ar: "(غير مسندة)" },
+        // Centre de notifications : travaux récents
+        "Annulé": { en: "Cancelled", de: "Abgebrochen", es: "Anulado", zh: "已取消", ar: "أُلغي" },
+        "↻ Relancer": { en: "↻ Retry", de: "↻ Neu starten", es: "↻ Relanzar", zh: "↻ 重试", ar: "↻ إعادة التشغيل" },
+        "à l'instant": { en: "just now", de: "gerade eben", es: "ahora mismo", zh: "刚刚", ar: "الآن" },
         // Navigation & header
         "Vue d'ensemble": { en: "Overview", de: "Übersicht", es: "Resumen", zh: "总览", ar: "نظرة عامة" },
         "Gestion des Watchlists": { en: "Watchlist Management", de: "Watchlist-Verwaltung", es: "Gestión de listas", zh: "监控名单管理", ar: "إدارة قوائم المراقبة" },
@@ -617,6 +677,29 @@
         [/^(\d+) alerte\(s\) détectée\(s\)$/, {
             en: "$1 alert(s) detected", de: "$1 Alarm(e) erkannt",
             es: "$1 alerta(s) detectada(s)", zh: "检测到 $1 条警报", ar: "تم رصد $1 تنبيه" }],
+        [/^il y a (\d+) min$/, {
+            en: "$1 min ago", de: "vor $1 Min.", es: "hace $1 min",
+            zh: "$1 分钟前", ar: "منذ $1 دقيقة" }],
+        [/^il y a (\d+) h$/, {
+            en: "$1 h ago", de: "vor $1 Std.", es: "hace $1 h",
+            zh: "$1 小时前", ar: "منذ $1 ساعة" }],
+        [/^(\d+) ouverte\(s\)$/, {
+            en: "$1 open", de: "$1 offen", es: "$1 abierta(s)",
+            zh: "$1 条未结", ar: "$1 مفتوحة" }],
+        [/^(\d+) ouverte\(s\) ·$/, {
+            en: "$1 open ·", de: "$1 offen ·", es: "$1 abierta(s) ·",
+            zh: "$1 条未结 ·", ar: "$1 مفتوحة ·" }],
+        [/^(\d+) en retard$/, {
+            en: "$1 overdue", de: "$1 überfällig", es: "$1 con retraso",
+            zh: "$1 逾期", ar: "$1 متأخرة" }],
+        [/^Score global de complétude · (.+) fiches$/, {
+            en: "Overall completeness score · $1 records", de: "Gesamt-Vollständigkeit · $1 Datensätze",
+            es: "Puntuación global de completitud · $1 fichas", zh: "总体完整度评分 · $1 条记录",
+            ar: "الدرجة الإجمالية للاكتمال · $1 سجل" }],
+        [/^⚠️ Sous le seuil d'alerte · (.+) fiches$/, {
+            en: "⚠️ Below the alert threshold · $1 records", de: "⚠️ Unter der Alarmschwelle · $1 Datensätze",
+            es: "⚠️ Bajo el umbral de alerta · $1 fichas", zh: "⚠️ 低于警戒阈值 · $1 条记录",
+            ar: "⚠️ دون عتبة التنبيه · $1 سجل" }],
     ];
 
     // Locale d'affichage des dates/nombres par langue (chiffres latins en arabe)

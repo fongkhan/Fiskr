@@ -42,7 +42,7 @@ from fiskr.database import (
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
-    BatchCampaign, BatchResult, ApiKey, SavedView, AppSetting, HookDelivery,
+    BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
     NotificationDelivery, LearnedEquivalence
 )
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
@@ -9659,6 +9659,86 @@ async def delete_saved_view(
     db.delete(view)
     db.commit()
     return {"message": f"Vue « {view.name} » supprimée."}
+
+# ------------------ VUE D'ENSEMBLE PERSONNALISABLE ------------------
+# Chaque utilisateur compose son accueil : le serveur stocke la disposition
+# (panneaux, ordre, tailles) et la restitue telle quelle ; le rendu et le
+# catalogue des panneaux vivent cote client. widgets absent = defaut livre.
+
+DASHBOARD_WIDGET_SIZES = ("sm", "md", "lg")
+DASHBOARD_MAX_WIDGETS = 30
+_DASHBOARD_WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+class DashboardLayoutPayload(BaseModel):
+    widgets: List[Dict[str, Any]]
+
+def _normalize_dashboard_widgets(widgets: Any) -> List[Dict[str, str]]:
+    """Valide et normalise une disposition : identifiants sains, tailles
+    connues, pas de doublon — un layout corrompu ne doit jamais etre stocke
+    (il reviendrait a chaque chargement de l'accueil)."""
+    if not isinstance(widgets, list):
+        raise HTTPException(status_code=400, detail="widgets doit être une liste de panneaux.")
+    if len(widgets) > DASHBOARD_MAX_WIDGETS:
+        raise HTTPException(status_code=400,
+                            detail=f"Au plus {DASHBOARD_MAX_WIDGETS} panneaux par tableau de bord.")
+    normalized, seen = [], set()
+    for item in widgets:
+        widget_id = item.get("id") if isinstance(item, dict) else None
+        size = (item.get("size") or "md") if isinstance(item, dict) else None
+        if not isinstance(widget_id, str) or not _DASHBOARD_WIDGET_ID_RE.match(widget_id):
+            raise HTTPException(status_code=400, detail="Identifiant de panneau invalide.")
+        if widget_id in seen:
+            raise HTTPException(status_code=400, detail=f"Panneau en double : {widget_id}.")
+        if size not in DASHBOARD_WIDGET_SIZES:
+            raise HTTPException(status_code=400,
+                                detail="Taille de panneau inconnue (sm, md ou lg).")
+        seen.add(widget_id)
+        normalized.append({"id": widget_id, "size": size})
+    return normalized
+
+@app.get("/api/me/dashboard")
+async def get_my_dashboard(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Disposition d'accueil de l'utilisateur courant (null = defaut)."""
+    row = db.query(UserDashboard).filter(
+        UserDashboard.username == current_user["username"]).first()
+    return {"widgets": row.widgets if row else None,
+            "updated_at": row.updated_at.isoformat() if row and row.updated_at else None}
+
+@app.put("/api/me/dashboard")
+async def save_my_dashboard(
+    payload: DashboardLayoutPayload,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Enregistre la disposition d'accueil de l'utilisateur courant."""
+    widgets = _normalize_dashboard_widgets(payload.widgets)
+    if not widgets:
+        raise HTTPException(status_code=400,
+                            detail="Au moins un panneau (utilisez la remise à zéro pour revenir au défaut).")
+    row = db.query(UserDashboard).filter(
+        UserDashboard.username == current_user["username"]).first()
+    if row:
+        row.widgets = widgets
+        row.updated_at = datetime.utcnow()
+    else:
+        row = UserDashboard(username=current_user["username"], widgets=widgets)
+        db.add(row)
+    db.commit()
+    return {"message": "Disposition enregistrée.", "widgets": widgets}
+
+@app.delete("/api/me/dashboard")
+async def reset_my_dashboard(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Remise a zero : retour a la disposition par defaut (suppression de la ligne)."""
+    deleted = db.query(UserDashboard).filter(
+        UserDashboard.username == current_user["username"]).delete(synchronize_session=False)
+    db.commit()
+    return {"message": "Disposition réinitialisée.", "reset": bool(deleted)}
 
 # Pieces jointes des alertes (justificatifs d'instruction)
 ALERT_EVIDENCE_DIR = PROJECT_ROOT / "alert_evidence"
