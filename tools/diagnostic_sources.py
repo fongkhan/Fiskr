@@ -108,19 +108,23 @@ def probe(key, label, method, url, headers, expect):
 
     all_headers = {"User-Agent": _user_agent(), **headers}
     started = time.monotonic()
+    body = b""
     try:
         with httpx.Client(follow_redirects=True, timeout=45.0) as client:
             if method == "HEAD":
                 r = client.head(url, headers=all_headers)
-                # Certains portails refusent HEAD : repli GET en streaming
-                if r.status_code in (403, 405, 501):
+                status, resp_headers = r.status_code, dict(r.headers)
+                # Certains portails refusent HEAD : repli GET en streaming, en
+                # ne lisant que le debut du corps (ces fichiers pesent des Mo)
+                if status in (403, 405, 501):
                     with client.stream("GET", url, headers=all_headers) as sr:
-                        r = sr
-                        body = sr.read(2048) if expect else b""
-                else:
-                    body = b""
+                        status, resp_headers = sr.status_code, dict(sr.headers)
+                        for chunk in sr.iter_bytes(chunk_size=2048):
+                            body = chunk
+                            break
             else:
                 r = client.get(url, headers=all_headers)
+                status, resp_headers = r.status_code, dict(r.headers)
                 body = r.content[:4096]
     except Exception as e:
         return {"key": key, "label": label, "url": url, "verdict": "ECHEC RESEAU",
@@ -128,27 +132,27 @@ def probe(key, label, method, url, headers, expect):
                 "elapsed_s": round(time.monotonic() - started, 2)}
 
     elapsed = round(time.monotonic() - started, 2)
-    size = int(r.headers.get("content-length") or len(body) or 0)
+    size = int(resp_headers.get("content-length") or len(body) or 0)
     text = body.decode("utf-8", "replace").lower() if body else ""
 
-    if r.status_code == 202:
+    if status == 202:
         verdict, detail = "ANTI-ROBOT", "HTTP 202 : interstitiel d'attente servi au client"
-    elif r.status_code == 429:
-        retry_after = r.headers.get("retry-after", "non precise")
+    elif status == 429:
+        retry_after = resp_headers.get("retry-after", "non precise")
         verdict, detail = "LIMITE DE DEBIT", f"HTTP 429, Retry-After: {retry_after}"
-    elif r.status_code == 403:
+    elif status == 403:
         verdict, detail = "REFUSE", "HTTP 403 : client rejete (filtrage ou IP bloquee)"
-    elif r.status_code >= 400:
-        verdict, detail = "ERREUR", f"HTTP {r.status_code}"
+    elif status >= 400:
+        verdict, detail = "ERREUR", f"HTTP {status}"
     elif expect and expect.lower() not in text:
         verdict, detail = "CONTENU INATTENDU", f"HTTP 200 mais « {expect} » absent du debut du corps"
     else:
-        verdict, detail = "OK", f"HTTP {r.status_code}"
+        verdict, detail = "OK", f"HTTP {status}"
 
     return {"key": key, "label": label, "url": url, "verdict": verdict,
-            "detail": detail, "status": r.status_code, "size": size,
+            "detail": detail, "status": status, "size": size,
             "elapsed_s": elapsed,
-            "content_type": r.headers.get("content-type", "")}
+            "content_type": resp_headers.get("content-type", "")}
 
 
 def main():
