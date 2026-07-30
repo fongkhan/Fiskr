@@ -7,6 +7,7 @@ Tests du perimetre par type de liste :
 - compteurs legers /api/counters (badges de la barre laterale).
 """
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -145,6 +146,45 @@ def test_list_type_persisted_and_filterable(client):
     unknown = client.get("/api/history", params={"list_type": "UNKNOWN", "page_size": 10})
     assert unknown.status_code == 200
     assert {"total", "page", "page_size", "items"} <= set(unknown.json().keys())
+
+
+def test_alerts_assigned_to_filter(client):
+    # Filtre serveur `assigned_to` de /api/alerts, expose au front (F2).
+    cid = _new_client_id()
+    data = client.post("/api/screen", json=_putin_payload(cid)).json()
+    alert_id = data["alert_id"]
+    assert alert_id is not None
+    # Assignation a soi-meme (l'utilisateur de la fixture est reviewer1)
+    assert client.post(f"/api/alerts/{alert_id}/assign", json={}).status_code == 200
+
+    mine = client.get("/api/alerts", params={"assigned_to": "reviewer1", "page_size": 200}).json()
+    assert alert_id in [i["id"] for i in mine["items"]]
+    other = client.get("/api/alerts", params={"assigned_to": "personne_dautre", "page_size": 200}).json()
+    assert alert_id not in [i["id"] for i in other["items"]]
+
+
+def test_history_date_window_filter(client):
+    # Fenetre de dates `date_from`/`date_to` de /api/history (F2/F3).
+    cid = _new_client_id()
+    data = client.post("/api/screen", json=_putin_payload(cid)).json()
+    audit_id = data["audit_trail_id"]
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    incl = client.get("/api/history", params={"date_from": today, "date_to": today, "page_size": 200}).json()
+    assert audit_id in [i["id"] for i in incl["items"]]
+
+    past = client.get("/api/history", params={"date_from": "2000-01-01", "date_to": yesterday, "page_size": 200}).json()
+    assert audit_id not in [i["id"] for i in past["items"]]
+
+    # Date malformee -> 400 explicite, pas de plantage SQL
+    assert client.get("/api/history", params={"date_from": "pas-une-date"}).status_code == 400
+    assert client.get("/api/history", params={"date_to": "31/12/2026"}).status_code == 400
+
+    # L'export CSV honore la meme fenetre (coherence ecran <-> export)
+    csv_incl = client.get("/api/export/history.csv", params={"date_from": today, "date_to": today})
+    assert csv_incl.status_code == 200
+    assert str(audit_id) in csv_incl.text
 
 
 def test_whitelist_pair_derives_list_type(client):

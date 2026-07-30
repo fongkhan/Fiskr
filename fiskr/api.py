@@ -4367,21 +4367,36 @@ async def browse_watchlist_db(
 async def get_audit_history(
     list_type: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Journal d'audit pagine, filtrable par statut de decision et type de liste.
-    Les enregistrements anterieurs a la colonne list_type sont restitues via
-    le decision_tree quand il porte le type (fallback lecture, le journal
-    immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
+    Journal d'audit pagine, filtrable par statut de decision, type de liste et
+    fenetre de dates (`date_from`/`date_to` au format AAAA-MM-JJ, bornes
+    incluses). Les enregistrements anterieurs a la colonne list_type sont
+    restitues via le decision_tree quand il porte le type (fallback lecture, le
+    journal immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
     """
     query = db.query(AuditTrail)
     if status_filter:
         statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
         query = query.filter(AuditTrail.status.in_(statuses))
+    if date_from:
+        try:
+            start = datetime.strptime(date_from, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_from invalide (attendu AAAA-MM-JJ).")
+        query = query.filter(AuditTrail.timestamp >= start)
+    if date_to:
+        try:
+            end = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_to invalide (attendu AAAA-MM-JJ).")
+        query = query.filter(AuditTrail.timestamp < end)
     query = _apply_list_type_filter(query, AuditTrail.list_type, list_type)
     total = query.count()
     rows = query.order_by(AuditTrail.timestamp.desc()) \
@@ -4539,6 +4554,8 @@ async def export_alerts_csv(
 async def export_history_csv(
     list_type: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -4547,6 +4564,16 @@ async def export_history_csv(
     if status_filter:
         statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
         query = query.filter(AuditTrail.status.in_(statuses))
+    if date_from:
+        try:
+            query = query.filter(AuditTrail.timestamp >= datetime.strptime(date_from, "%Y-%m-%d"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_from invalide (attendu AAAA-MM-JJ).")
+    if date_to:
+        try:
+            query = query.filter(AuditTrail.timestamp < datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_to invalide (attendu AAAA-MM-JJ).")
     query = _apply_list_type_filter(query, AuditTrail.list_type, list_type)
     rows = query.order_by(AuditTrail.timestamp.desc()).limit(_EXPORT_MAX_ROWS).all()
     header = ["id", "horodatage", "client_id", "client", "type_client", "fiche_listee_id",

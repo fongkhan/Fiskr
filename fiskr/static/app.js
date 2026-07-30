@@ -747,10 +747,10 @@ async function checkAuthUser() {
             const canRules = isAdmin || roles.includes("rules");
             const blockingBtn = document.getElementById("sub-btn-alerts-blocking");
             if (blockingBtn) blockingBtn.classList.toggle("hidden", !canBlocking);
-            // Meme role que le blocking : c'est le meme paramétrage moteur,
-            // decoupe en deux ecrans pour ne pas en allonger un seul.
-            const engineBtn = document.getElementById("sub-btn-alerts-engine");
-            if (engineBtn) engineBtn.classList.toggle("hidden", !canBlocking);
+            // Meme role que le blocking : les ressources linguistiques sont le
+            // second volet du meme parametrage moteur, sur un ecran separe.
+            const resourcesBtn = document.getElementById("sub-btn-alerts-resources");
+            if (resourcesBtn) resourcesBtn.classList.toggle("hidden", !canBlocking);
             const rulesBtn = document.getElementById("sub-btn-alerts-rules");
             if (rulesBtn) rulesBtn.classList.toggle("hidden", !canRules);
         }
@@ -810,6 +810,7 @@ function switchTab(tabId) {
         fetchHomeDashboard();
     }
     if (tabId === "alerts") {
+        populateAssigneeFilters();
         fetchAlerts("SCREENING");
         fetchAlerts("FILTERING");
         fetchWhitelist();
@@ -817,10 +818,10 @@ function switchTab(tabId) {
         fetchSavedViews("FILTERING");
     }
     if (tabId === "kpi") {
+        // Sous-onglets KPI : seule la « Vue d'ensemble » charge à l'arrivée ;
+        // Charge & SLA, Qualité et Rapport se chargent à l'ouverture de leur onglet.
         fetchKpis();
         initActivityReportDates();
-        fetchWorkload();
-        fetchClientQuality();
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
@@ -901,15 +902,25 @@ function switchSubTab(sectionId, subTabId) {
     } else if (subTabId === "alerts-whitelist") {
         fetchWhitelist();
     } else if (subTabId === "alerts-blocking") {
+        // Paramétrage moteur : clés de blocking + capacités du moteur
         fetchBlockingSettings();
+        fetchEngineSettings();
+        loadSimulationPanels();
+    } else if (subTabId === "alerts-resources") {
+        // Ressources linguistiques : équivalences + homonymes minés
         fetchResources();
         fetchLearnedEquivalences();
         loadSimulationPanels();
-    } else if (subTabId === "alerts-engine") {
-        fetchEngineSettings();
-        loadSimulationPanels();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
+    } else if (subTabId === "kpi-overview") {
+        fetchKpis();
+    } else if (subTabId === "kpi-workload") {
+        fetchWorkload();
+    } else if (subTabId === "kpi-quality") {
+        fetchClientQuality();
+    } else if (subTabId === "kpi-activity") {
+        initActivityReportDates();
     } else if (subTabId === "screening-batch") {
         fetchBatchCampaigns();
     } else if (subTabId === "audit-screening") {
@@ -2494,6 +2505,10 @@ async function fetchAuditHistory(page = null) {
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const statusFilterEl = document.getElementById("audit-status-filter");
         if (statusFilterEl && statusFilterEl.value) params.set("status", statusFilterEl.value);
+        const fromEl = document.getElementById("audit-date-from");
+        if (fromEl && fromEl.value) params.set("date_from", fromEl.value);
+        const toEl = document.getElementById("audit-date-to");
+        if (toEl && toEl.value) params.set("date_to", toEl.value);
 
         const response = await apiFetch(`/api/history?${params}`);
         const data = await response.json();
@@ -4393,9 +4408,11 @@ let currentAlertId = null;
 
 const ALERT_CHANNEL_CONF = {
     SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter",
-                 priorityFilter: "screening-priority-filter", section: "alerts-screening" },
+                 priorityFilter: "screening-priority-filter", assigneeFilter: "screening-assignee-filter",
+                 section: "alerts-screening" },
     FILTERING: { table: "filtering-alerts-table", listFilter: "filtering-list-filter",
-                 priorityFilter: "filtering-priority-filter", section: "alerts-filtering" },
+                 priorityFilter: "filtering-priority-filter", assigneeFilter: "filtering-assignee-filter",
+                 section: "alerts-filtering" },
 };
 
 // Badge de priorité (case management) + indicateur de retard SLA
@@ -4470,6 +4487,8 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const prioFilterEl = document.getElementById(conf.priorityFilter);
         if (prioFilterEl && prioFilterEl.value) params.set("priority", prioFilterEl.value);
+        const assigneeFilterEl = document.getElementById(conf.assigneeFilter);
+        if (assigneeFilterEl && assigneeFilterEl.value) params.set("assigned_to", assigneeFilterEl.value);
         tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
         const response = await apiFetch(`/api/alerts?${params}`);
         if (!response.ok) return;
@@ -4483,6 +4502,26 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
     } catch (e) {
         console.error("Error fetching alerts:", e);
     }
+}
+
+// Peuple les filtres « analyste assigné » des deux files depuis l'annuaire.
+// Conserve la sélection courante et ajoute « Non assignées ».
+async function populateAssigneeFilters() {
+    const selects = ["screening-assignee-filter", "filtering-assignee-filter"]
+        .map(id => document.getElementById(id)).filter(Boolean);
+    if (!selects.length) return;
+    try {
+        const response = await apiFetch("/api/users/directory", { silent: true });
+        if (!response.ok) return;
+        const items = (await response.json()).items || [];
+        const opts = `<option value="">Tous analystes</option>`
+            + items.map(u => `<option value="${escapeHtml(u.username)}">@${escapeHtml(u.username)}${u.full_name ? " — " + escapeHtml(u.full_name) : ""}</option>`).join("");
+        for (const sel of selects) {
+            const prev = sel.value;
+            sel.innerHTML = opts;
+            if (prev && sel.querySelector(`option[value="${CSS.escape(prev)}"]`)) sel.value = prev;
+        }
+    } catch (e) { console.error("Assignee filter error:", e); }
 }
 
 function setAlertFilter(channel, filter) {
@@ -5614,7 +5653,8 @@ function engineChannel() {
 }
 
 async function fetchEngineSettings() {
-    const card = document.getElementById("sub-sec-alerts-engine");
+    // Les capacités du moteur vivent désormais dans le sous-onglet « Paramétrage moteur ».
+    const card = document.getElementById("sub-sec-alerts-blocking");
     if (!card || card.classList.contains("hidden")) return;
     try {
         const response = await apiFetch("/api/settings/engine");
@@ -6691,6 +6731,10 @@ function exportHistoryCsv() {
     if (listEl && listEl.value) params.set("list_type", listEl.value);
     const statusEl = document.getElementById("audit-status-filter");
     if (statusEl && statusEl.value) params.set("status", statusEl.value);
+    const fromEl = document.getElementById("audit-date-from");
+    if (fromEl && fromEl.value) params.set("date_from", fromEl.value);
+    const toEl = document.getElementById("audit-date-to");
+    if (toEl && toEl.value) params.set("date_to", toEl.value);
     window.open(`/api/export/history.csv?${params.toString()}`, "_blank");
 }
 
