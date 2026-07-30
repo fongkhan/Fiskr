@@ -949,3 +949,51 @@ def test_validators_round_trip_through_the_database(db):
     remember_validators(db, "UN", 'W/"un1"', None)
     assert stored_validators(db, "UN") == {"etag": 'W/"un1"'}
     assert stored_validators(db, "OFAC") == {}
+
+
+def test_custom_headers_reach_the_request(tmp_path, monkeypatch):
+    """
+    Les en-tetes d'authentification (sync.<source>.auth_headers) partent avec
+    la requete et PRIMENT sur les en-tetes navigateur : c'est la porte
+    d'entree des fournisseurs a cle d'API (Authorization: Bearer...).
+    """
+    from fiskr import sync as sync_module
+
+    sent_headers = {}
+
+    class _FakeStream:
+        status_code = 200
+        headers = {"content-length": "2"}
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def raise_for_status(self): pass
+        def iter_bytes(self, chunk_size=None): return iter((b"ok",))
+
+    def fake_stream(method, url, **kwargs):
+        sent_headers.update(kwargs.get("headers") or {})
+        return _FakeStream()
+
+    import httpx as _httpx
+    monkeypatch.setattr(_httpx, "stream", fake_stream)
+
+    sync_module.download_to_file(
+        "http://premium.example/feed.xml", tmp_path / "feed.xml",
+        headers={"Authorization": "Bearer secret-123", "User-Agent": "Fiskr-Premium"})
+
+    assert sent_headers.get("Authorization") == "Bearer secret-123"
+    # L'en-tete passe en argument PRIME sur celui du navigateur
+    assert sent_headers.get("User-Agent") == "Fiskr-Premium"
+
+
+def test_opensanctions_config_carries_auth_headers(monkeypatch):
+    """Les auth_headers declares en config arrivent jusqu'au cycle generique
+    pour les sources du registre — le jour d'un flux sous cle, tout est deja
+    cable, il ne manque que le contrat."""
+    from fiskr import sync as sync_module
+
+    monkeypatch.setitem(
+        sync_module.config.setdefault("sync", {}), "adb",
+        {"enabled": False, "auth_headers": {"Authorization": "Bearer os-key"}})
+    cfg = sync_module.get_sync_config()
+    assert cfg["adb"]["auth_headers"] == {"Authorization": "Bearer os-key"}

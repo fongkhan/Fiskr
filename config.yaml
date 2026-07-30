@@ -218,6 +218,53 @@ sync:
     format: "xml"
     url: "https://www.sesam.search.admin.ch/sesam-search-web/pages/downloadXmlGesamtliste.xhtml?lang=en&action=downloadXmlGesamtlisteAction"
 
+  # ---- Sources du registre OpenSanctions (fiskr/sources.py) ----------------
+  # Onze listes publiques servies par le meme lecteur targets.simple.csv que
+  # PEP : exclusions des banques multilaterales de developpement (meme logique
+  # que la Banque mondiale), gels Asie-Pacifique, listes nationales de gel
+  # terrorisme, sanctions ukrainiennes. Toutes opt-in.
+  #
+  # LIMITE DU FORMAT PLAT (deja actee pour PEP et la voie de secours SECO) :
+  # pas de base legale ni de reference officielle. L'URL de la source
+  # officielle native est notee en commentaire pour une future voie
+  # « official » (pattern SECO). LICENCE : usage non commercial libre ;
+  # en production commerciale, licence OpenSanctions requise
+  # (opensanctions.org/licensing — self-service).
+  #
+  # `url` vide = derivee du dataset declare au registre. Si la sonde
+  # (tools/diagnostic_sources.py) montre qu'un slug est faux, corrigez l'URL
+  # ICI — aucun changement de code n'est necessaire.
+  #
+  # Exclusions des banques multilaterales (fraude/corruption averee — risque
+  # de contrepartie sur financements de projets, pas un gel) :
+  adb:          # officiel : adb.org/site/integrity/sanctions
+    enabled: false
+  iadb:         # officiel : iadb.org/en/transparency/sanctioned-firms-and-individuals
+    enabled: false
+  ebrd:         # officiel : ebrd.com/ineligible-entities.html
+    enabled: false
+  afdb:         # officiel : afdb.org (debarment and sanctions procedures)
+    enabled: false
+  # Asie-Pacifique :
+  japan_mof:    # officiel : mof.go.jp (economic sanctions list, XLS)
+    enabled: false
+  mas:          # officiel : mas.gov.sg (TSOFA targeted financial sanctions)
+    enabled: false
+  nz_russia:    # officiel : mfat.govt.nz (Russia Sanctions Act register)
+    enabled: false
+  # Listes nationales de gel terrorisme (completent ONU/UE pour les
+  # designations purement nationales) :
+  nl_terror:    # officiel : government.nl (national terrorism list)
+    enabled: false
+  be_terror:    # officiel : finances.belgium.be (sanctions financieres)
+    enabled: false
+  il_nbctf:     # officiel : nbctf.mod.gov.il (designations)
+    enabled: false
+  # Ukraine — sanctions NSDC (signal riche : flotte fantome, contournement ;
+  # source non occidentale, a croiser — d'ou son type et son seuil propres) :
+  ua_nsdc:      # officiel : sanctions.nsdc.gov.ua
+    enabled: false
+
 # Recherche adverse media (revue de presse negative) : purement informative
 # pour l'analyste, ne modifie jamais un score ni un statut de criblage.
 adverse_media:

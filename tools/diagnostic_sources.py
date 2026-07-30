@@ -111,6 +111,20 @@ PROBES = [
      "https://api.trade.gov/static/consolidated_screening_list/consolidated.json", {}, None),
 ]
 
+# Sources du registre OpenSanctions (fiskr/sources.py) : une sonde par
+# dataset, generee depuis le registre. Le verdict porte sur le CONTENU
+# (en-tete targets.simple.csv) : c'est ainsi qu'un slug faux se detecte —
+# et il se corrige dans config.yaml (sync.<cle>.url), pas dans le code.
+try:
+    from fiskr.sources import OPENSANCTIONS_SOURCES, opensanctions_default_url
+    for _src in OPENSANCTIONS_SOURCES:
+        PROBES.append((
+            f"os_{_src.run_key}",
+            f"OpenSanctions — {_src.label} ({_src.dataset})",
+            "GET", opensanctions_default_url(_src.dataset), {}, "os_csv"))
+except Exception:  # registre absent (vieille version) : la sonde reste utilisable
+    pass
+
 EURLEX_KEYS = {"eurlex_html", "cellar_sparql", "cellar_notice", "cellar_formex",
                "eurlex_rss", "eu_fsf"}
 
@@ -150,6 +164,16 @@ def check_content(expect, text: str):
         if low.lstrip().startswith(("<?xml", "<rdf", "<notice", "<work")):
             return True, "XML reçu"
         return False, "la réponse ne commence pas par du XML"
+
+    if expect == "os_csv":
+        # En-tete du format targets.simple.csv : les colonnes que le lecteur
+        # de fiskr/ingest.py exige. Un slug faux renvoie du HTML (page 404).
+        first_line = text.splitlines()[0].lower() if text.strip() else ""
+        if "id" in first_line and "schema" in first_line and "name" in first_line:
+            return True, "en-tête targets.simple.csv reconnu"
+        if "<html" in low or "not found" in low:
+            return False, "slug de dataset inconnu (page d'erreur reçue) — corriger sync.<clé>.url"
+        return False, "la réponse n'a pas l'en-tête id/schema/name attendu"
 
     if expect == "feed":
         items = low.count("<item") + low.count("<entry")

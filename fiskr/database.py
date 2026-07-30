@@ -259,12 +259,16 @@ class SyncReport(Base):
 # Types de snapshots persistes en WatchlistEntity (listes officielles).
 # Vit ici (et non dans api.py) pour que le demon travailleur et les modules
 # moteur n'aient pas a importer l'application FastAPI ; api.py re-exporte.
+# Les sources branchees sur le lecteur OpenSanctions declarent leur type dans
+# le registre fiskr/sources.py : une seule source de verite, derivee ici.
+from fiskr.sources import OPENSANCTIONS_SOURCES as _OS_SOURCES
+
 WATCHLIST_FILE_TYPES = [
     "WATCHLIST_OFAC", "WATCHLIST_EU", "WATCHLIST_SSIE", "WATCHLIST_DGT",
     "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
     "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL", "WATCHLIST_CANADA", "WATCHLIST_DFAT",
-    "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK"
-]
+    "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK",
+] + [s.file_type for s in _OS_SOURCES]
 
 
 def production_watchlist_reference(db) -> tuple:

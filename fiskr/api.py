@@ -70,12 +70,14 @@ from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     run_pep_sync, run_ofsi_sync, run_seco_sync, run_ofac_nonsdn_sync, run_csl_sync,
     run_canada_sync, run_dfat_sync, run_hk_sfc_sync, run_amf_sync, run_worldbank_sync,
+    OPENSANCTIONS_RUNNERS,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
+from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
 from fiskr.transactions import parse_iso20022_payment, screen_payment_message
 from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
@@ -336,6 +338,9 @@ def _run_scheduled_syncs():
             _apply_rescreen(run_amf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["worldbank"]["enabled"]:
             _apply_rescreen(run_worldbank_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        for _os_key, _os_runner in OPENSANCTIONS_RUNNERS.items():
+            if sync_cfg[_os_key]["enabled"]:
+                _apply_rescreen(_os_runner(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -346,6 +351,8 @@ _SYNC_RUNNERS = {
     "seco": run_seco_sync, "ofac_nonsdn": run_ofac_nonsdn_sync, "csl": run_csl_sync,
     "canada": run_canada_sync, "dfat": run_dfat_sync,
     "hk_sfc": run_hk_sfc_sync, "amf": run_amf_sync, "worldbank": run_worldbank_sync,
+    # Sources du registre OpenSanctions (fiskr/sources.py) : runners fabriques
+    **OPENSANCTIONS_RUNNERS,
 }
 
 
@@ -2599,10 +2606,20 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
                          "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL",
                          "WATCHLIST_CANADA", "WATCHLIST_DFAT",
-                         "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK") or eu_fsf_upload:
+                         "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK") \
+                or file_type in OPENSANCTIONS_BY_FILE_TYPE or eu_fsf_upload:
             if eu_fsf_upload:
                 # Liste consolidee UE au format FSF XML officiel
                 parser_stream = parse_eu_fsf_xml(str(temp_file_path))
+            elif file_type in OPENSANCTIONS_BY_FILE_TYPE:
+                # Sources du registre OpenSanctions : UNE branche pour toutes,
+                # le parseur est parametre d'apres le registre
+                _os_src = OPENSANCTIONS_BY_FILE_TYPE[file_type]
+                from fiskr.ingest import parse_opensanctions_simple_csv
+                parser_stream = parse_opensanctions_simple_csv(
+                    str(temp_file_path), id_prefix=_os_src.id_prefix,
+                    origin=_os_src.origin,
+                    designation_reasons=_os_src.designation_reasons)
             elif file_type == "WATCHLIST_PEP":
                 # Dataset PEP OpenSanctions (targets.simple.csv)
                 parser_stream = parse_pep_targets_csv(str(temp_file_path))
@@ -4915,6 +4932,8 @@ _SYNC_SOURCE_ALIASES: Dict[str, Tuple[str, str]] = {
     "HKSFC": ("hk_sfc", "HKSFC"),
     "AMF": ("amf", "AMF"),
     "WORLDBANK": ("worldbank", "WORLDBANK"),
+    # Alias des sources du registre OpenSanctions : le nom court sert d'alias
+    **{src.source: (key, src.source) for key, src in OPENSANCTIONS_BY_KEY.items()},
 }
 
 # Cle d'execution (_SYNC_RUNNERS / planificateur) -> nom de source du moteur,
@@ -4955,7 +4974,9 @@ def run_source_sync(
     if alias is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, OFACNONSDN, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO, CSL, CANADA, DFAT, HKSFC, AMF, WORLDBANK)."
+            # Enumeration derivee des alias : une source ajoutee au registre
+            # apparait ici sans mise a jour manuelle
+            detail=f"Source inconnue (valeurs possibles: {', '.join(sorted(_SYNC_SOURCE_ALIASES))})."
         )
     run_key, engine_source = alias
 

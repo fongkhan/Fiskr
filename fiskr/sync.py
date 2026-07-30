@@ -37,12 +37,14 @@ from fiskr.delta import calculate_delta
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
     parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
+    parse_opensanctions_simple_csv,
     parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES,
     parse_canada_sema_csv, parse_dfat_consolidated,
     parse_hk_sfc_alert_list, parse_amf_blacklist, parse_worldbank_debarred_json
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
 from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
+from fiskr.sources import OPENSANCTIONS_BY_KEY, opensanctions_default_url
 from fiskr.settings import require_approval_enabled
 
 logger = logging.getLogger("fiskr.sync")
@@ -282,6 +284,20 @@ def get_sync_config() -> Dict[str, Any]:
         # Une URL laissee vide prend le defaut correspondant au format, pour
         # qu'un simple basculement de format suffise a changer de source.
         "seco": _seco_source_config(sync_cfg.get("seco") or {}),
+        # Sources du registre OpenSanctions (fiskr/sources.py) : une entree
+        # generee par source — opt-in, URL vide = defaut derive du dataset
+        # (meme logique que SECO : un slug se corrige dans config.yaml).
+        **{
+            key: {
+                "enabled": bool((sync_cfg.get(key) or {}).get("enabled", False)),
+                "url": str((sync_cfg.get(key) or {}).get("url", "") or "")
+                       or opensanctions_default_url(src.dataset),
+                # En-tetes d'authentification optionnels (fournisseur a cle) ;
+                # valeurs ${VAR} interpolees depuis .env par fiskr/config.py
+                "auth_headers": dict((sync_cfg.get(key) or {}).get("auth_headers") or {}),
+            }
+            for key, src in OPENSANCTIONS_BY_KEY.items()
+        },
     }
 
 
@@ -441,7 +457,8 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
 
 def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
                      retries: Optional[int] = None, progress=None,
-                     validators: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                     validators: Optional[Dict[str, str]] = None,
+                     headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Telecharge un fichier volumineux en streaming vers dest_path, avec
     reprises sur erreurs de transport, User-Agent navigateur (les portails
@@ -456,6 +473,13 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
     de bande passante economisee ET autant de sollicitations en moins, donc
     moins de risque de se faire limiter par un portail officiel.
 
+    `headers` : en-tetes supplementaires (fusionnes apres ceux du navigateur,
+    donc prioritaires). C'est la porte d'entree des fournisseurs a cle d'API
+    (Authorization: Bearer...) — cf. sync.<source>.auth_headers et
+    Documentation/SOURCES_PREMIUM.md ; les valeurs ${VAR} de config.yaml sont
+    interpolees depuis .env par fiskr/config.py, le secret ne vit jamais
+    dans un fichier versionne.
+
     Retourne {"not_modified": bool, "etag": ..., "last_modified": ...} :
     dest_path n'est PAS ecrit quand `not_modified` est vrai.
     """
@@ -465,16 +489,18 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
     max_retries = retries if retries is not None else network["retries"]
     granular_timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
 
-    headers = _browser_headers()
+    request_headers = _browser_headers()
+    if headers:
+        request_headers.update(headers)
     if validators:
         if validators.get("etag"):
-            headers["If-None-Match"] = validators["etag"]
+            request_headers["If-None-Match"] = validators["etag"]
         if validators.get("last_modified"):
-            headers["If-Modified-Since"] = validators["last_modified"]
+            request_headers["If-Modified-Since"] = validators["last_modified"]
 
     def _attempt():
         with httpx.stream("GET", url, timeout=granular_timeout, follow_redirects=True,
-                          headers=headers) as response:
+                          headers=request_headers) as response:
             if response.status_code in _RETRYABLE_STATUS:
                 raise _retryable_from_response(response)
             if response.status_code == 304:
@@ -535,7 +561,8 @@ def warm_up_session(base_url: str) -> None:
 
 
 def http_get_text(url: str, timeout: Optional[float] = None,
-                  retries: Optional[int] = None) -> str:
+                  retries: Optional[int] = None,
+                  headers: Optional[Dict[str, str]] = None) -> str:
     """
     Recupere le contenu textuel d'une page web avec reprises couvrant les
     erreurs de transport ET les reponses transitoires. EUR-Lex repond parfois
@@ -552,7 +579,13 @@ def http_get_text(url: str, timeout: Optional[float] = None,
     max_retries = retries if retries is not None else network["retries"]
 
     def _attempt():
-        response = _get_shared_client().get(url, timeout=page_timeout)
+        # En-tetes par requete : httpx les fusionne avec ceux du client
+        # partage (la requete prime cle par cle). Passes seulement s'ils
+        # existent — les doubles de test du client n'exposent pas ce kwarg.
+        kwargs = {"timeout": page_timeout}
+        if headers:
+            kwargs["headers"] = headers
+        response = _get_shared_client().get(url, **kwargs)
         if response.status_code in _RETRYABLE_STATUS:
             raise _retryable_from_response(response)
         if response.status_code == 200 and not response.text.strip():
@@ -1237,6 +1270,7 @@ def _run_list_replacement_sync(
     trigger: str = "MANUAL",
     fetcher: Optional[Callable[[str, Path], None]] = None,
     reload_cache: Optional[Callable[[], None]] = None,
+    auth_headers: Optional[Dict[str, str]] = None,
 ) -> SyncReport:
     """
     Cycle generique de synchronisation d'une liste officielle a remplacement
@@ -1244,6 +1278,9 @@ def _run_list_replacement_sync(
     attente d'homologation), ingestion, delta par rapport a la liste active,
     puis application (supersede + rechargement du cache) ou attente de
     pointage humain si le mode homologation est actif.
+
+    `auth_headers` : en-tetes d'authentification d'un flux sous cle
+    (sync.<source>.auth_headers) — transmis au telechargement uniquement.
     """
     tracker = SyncProgress(source)
     fetch = fetcher or download_to_file
@@ -1261,7 +1298,8 @@ def _run_list_replacement_sync(
             # CONDITIONNEL : si la source n'a pas bouge, elle repond 304 et
             # rien n'est retelecharge.
             outcome = download_to_file(url, temp_file, progress=tracker.downloading(),
-                                       validators=stored_validators(db, source)) or {}
+                                       validators=stored_validators(db, source),
+                                       headers=auth_headers) or {}
             if outcome.get("not_modified"):
                 logger.info(f"Sync {source}: source inchangee (HTTP 304), aucun telechargement.")
                 return _finalize_report(
@@ -1581,6 +1619,46 @@ def run_worldbank_sync(
         parser=parse_worldbank_debarred_json, file_label="WorldBank_Debarred",
         temp_suffix=".json", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
+
+
+# ------------------ SOURCES DU REGISTRE OPENSANCTIONS ------------------
+# Onze listes publiques (exclusions des banques multilaterales, Asie-
+# Pacifique, gels terrorisme nationaux, Ukraine) branchees sur le lecteur
+# `parse_opensanctions_simple_csv` deja utilise par PEP et SECO : UN chemin
+# de code, teste, au lieu de onze parseurs de formats officiels exotiques.
+# Le registre (fiskr/sources.py) est la seule source de verite ; ici, une
+# fabrique produit les onze runners — pas onze copies.
+
+def make_opensanctions_runner(run_key: str) -> Callable:
+    """Fabrique le runner de synchronisation d'une source du registre."""
+    import functools
+    src = OPENSANCTIONS_BY_KEY[run_key]
+    parser = functools.partial(
+        parse_opensanctions_simple_csv,
+        id_prefix=src.id_prefix, origin=src.origin,
+        designation_reasons=src.designation_reasons,
+    )
+
+    def runner(db, trigger: str = "MANUAL",
+               fetcher: Optional[Callable[[str, Path], None]] = None,
+               reload_cache: Optional[Callable[[], None]] = None) -> SyncReport:
+        cfg = get_sync_config()[run_key]
+        return _run_list_replacement_sync(
+            db, source=src.source, file_type=src.file_type, url=cfg["url"],
+            parser=parser, file_label=f"{src.source}_OpenSanctions",
+            temp_suffix=".csv", trigger=trigger, fetcher=fetcher,
+            reload_cache=reload_cache, auth_headers=cfg.get("auth_headers") or None,
+        )
+
+    runner.__name__ = f"run_{run_key}_sync"
+    runner.__doc__ = (f"{src.label} — dataset OpenSanctions `{src.dataset}` "
+                      f"(format plat ; source officielle native : {src.official_url}).")
+    return runner
+
+
+OPENSANCTIONS_RUNNERS: Dict[str, Callable] = {
+    key: make_opensanctions_runner(key) for key in OPENSANCTIONS_BY_KEY
+}
 
 
 def run_canada_sync(
