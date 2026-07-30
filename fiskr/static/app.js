@@ -364,6 +364,112 @@ function tableEmpty(target, cols, message, icon = "📭") {
     tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
 }
 
+// ------------------ FILTRES GÉNÉRIQUES DE TABLEAU (côté client) ------------------
+// Une barre de filtres au-dessus d'un tableau rendu en mémoire : une
+// recherche plein texte + des menus déroulants dont les valeurs sont DÉDUITES
+// des colonnes. Filtre les <tr> du DOM (jamais les lignes d'en-tête de
+// groupe), se combine au tri générique, et affiche un compteur « N / M ».
+// Pour les tableaux paginés côté serveur, le filtre doit être serveur (il
+// porterait sinon sur la seule page affichée) — ne pas utiliser ici.
+//
+// attachTableFilters("ma-table", { search: true, columns: [{ index: 2, label: "Statut" }] })
+const _tableFilterSpecs = {};
+
+function attachTableFilters(tableId, spec) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    _tableFilterSpecs[tableId] = spec;
+    if (document.getElementById(`${tableId}-filterbar`)) {
+        refreshTableFilters(tableId);
+        return;
+    }
+    const bar = document.createElement("div");
+    bar.id = `${tableId}-filterbar`;
+    bar.className = "filter-bar table-filter-bar";
+    let html = "";
+    if (spec.search !== false) {
+        html += `<input type="text" id="${tableId}-filter-search" placeholder="${escapeHtml(spec.searchPlaceholder || "Filtrer…")}" aria-label="Filtrer le tableau">`;
+    }
+    for (const col of (spec.columns || [])) {
+        html += `<select id="${tableId}-filter-col-${col.index}" data-col="${col.index}" aria-label="${escapeHtml(col.label || "")}">
+            <option value="">${escapeHtml(col.label || "Tous")} : tous</option>
+        </select>`;
+    }
+    html += `<span id="${tableId}-filter-count" class="filter-count" aria-live="polite"></span>`;
+    bar.innerHTML = html;
+    // Insérée juste avant le conteneur du tableau (ou le tableau lui-même)
+    const anchor = table.closest(".table-container") || table;
+    anchor.parentNode.insertBefore(bar, anchor);
+
+    bar.addEventListener("input", () => applyTableFilter(tableId));
+
+    // Tout re-rendu du tableau rafraîchit les menus et réapplique le filtre.
+    // On observe childList (ajout/retrait de lignes), jamais les attributs :
+    // refreshTableFilters ne fait que poser des classes, pas de boucle.
+    const tbody = table.querySelector("tbody");
+    if (tbody && window.MutationObserver) {
+        new MutationObserver(() => refreshTableFilters(tableId))
+            .observe(tbody, { childList: true });
+    }
+    refreshTableFilters(tableId);
+}
+
+// Repeuple les menus (valeurs distinctes des colonnes) et réapplique le
+// filtre. À appeler après chaque rendu de données du tableau.
+function refreshTableFilters(tableId) {
+    const spec = _tableFilterSpecs[tableId];
+    const table = document.getElementById(tableId);
+    if (!spec || !table) return;
+    const rows = Array.from(table.querySelectorAll("tbody tr"))
+        .filter(tr => !tr.classList.contains("table-group-row") && !tr.querySelector(".empty-state"));
+    for (const col of (spec.columns || [])) {
+        const select = document.getElementById(`${tableId}-filter-col-${col.index}`);
+        if (!select) continue;
+        const current = select.value;
+        const values = [...new Set(rows.map(tr => (tr.children[col.index]?.textContent || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "fr"));
+        select.innerHTML = `<option value="">${escapeHtml(col.label || "Tous")} : tous</option>`
+            + values.map(v => `<option value="${escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(v.length > 40 ? v.slice(0, 40) + "…" : v)}</option>`).join("");
+    }
+    applyTableFilter(tableId);
+}
+
+function applyTableFilter(tableId) {
+    const spec = _tableFilterSpecs[tableId];
+    const table = document.getElementById(tableId);
+    if (!spec || !table) return;
+    const search = (document.getElementById(`${tableId}-filter-search`)?.value || "").trim().toLowerCase();
+    const colFilters = (spec.columns || []).map(col => ({
+        index: col.index,
+        value: document.getElementById(`${tableId}-filter-col-${col.index}`)?.value || "",
+    })).filter(f => f.value);
+
+    let shown = 0, total = 0;
+    for (const tr of table.querySelectorAll("tbody tr")) {
+        if (tr.classList.contains("table-group-row") || tr.querySelector(".empty-state")) continue;
+        total++;
+        const rowText = tr.textContent.toLowerCase();
+        let ok = (!search || rowText.includes(search));
+        if (ok) {
+            for (const f of colFilters) {
+                if ((tr.children[f.index]?.textContent || "").trim() !== f.value) { ok = false; break; }
+            }
+        }
+        tr.classList.toggle("filtered-out", !ok);
+        if (ok) shown++;
+    }
+    // Lignes d'en-tête de groupe : masquées si leur groupe n'a plus de ligne visible
+    let lastGroup = null, groupHasVisible = false;
+    const flush = () => { if (lastGroup) lastGroup.classList.toggle("filtered-out", !groupHasVisible); };
+    for (const tr of table.querySelectorAll("tbody tr")) {
+        if (tr.classList.contains("table-group-row")) { flush(); lastGroup = tr; groupHasVisible = false; }
+        else if (!tr.classList.contains("filtered-out") && !tr.querySelector(".empty-state")) groupHasVisible = true;
+    }
+    flush();
+
+    const counter = document.getElementById(`${tableId}-filter-count`);
+    if (counter) counter.textContent = (search || colFilters.length) ? `${shown} / ${total}` : "";
+}
+
 // ------------------ TRI DES COLONNES (côté client) ------------------
 
 // Tri générique de toutes les tables rendues en mémoire : clic sur un <th>.
@@ -545,6 +651,21 @@ document.addEventListener("DOMContentLoaded", () => {
         const el = document.getElementById(id);
         if (el) el.addEventListener("input", () => renderSourcesTable());
     });
+    // Filtres génériques : les tableaux qui n'en avaient aucun reçoivent une
+    // recherche plein texte + des menus par colonne (valeurs déduites). Les
+    // tableaux paginés côté serveur en sont exclus (le filtre client ne
+    // verrait que la page affichée) — ils passent par des filtres serveur.
+    attachTableFilters("sync-reports-table", { search: true, searchPlaceholder: "Filtrer les rapports…", columns: [{ index: 1, label: "Source" }, { index: 2, label: "Statut" }] });
+    attachTableFilters("users-table", { search: true, searchPlaceholder: "Filtrer les comptes…", columns: [{ index: 4, label: "Rôle" }] });
+    attachTableFilters("apikeys-table", { search: true, searchPlaceholder: "Filtrer les clés…", columns: [{ index: 5, label: "État" }] });
+    attachTableFilters("admin-log-table", { search: true, searchPlaceholder: "Filtrer le journal…", columns: [{ index: 1, label: "Utilisateur" }, { index: 2, label: "Action" }] });
+    attachTableFilters("batch-campaigns-table", { search: true, searchPlaceholder: "Filtrer les campagnes…", columns: [{ index: 2, label: "Origine" }, { index: 3, label: "Statut" }] });
+    attachTableFilters("kpi-lists-table", { search: true, searchPlaceholder: "Filtrer les listes…" });
+    attachTableFilters("kpi-analysts-table", { search: true, searchPlaceholder: "Filtrer les analystes…" });
+    attachTableFilters("workload-table", { search: true, searchPlaceholder: "Filtrer les analystes…" });
+    attachTableFilters("quality-segments-table", { search: true, searchPlaceholder: "Filtrer les segments…" });
+    attachTableFilters("mining-table", { search: true, searchPlaceholder: "Filtrer les équivalences…", columns: [{ index: 1, label: "Champ" }, { index: 2, label: "Source" }] });
+    attachTableFilters("fprules-table", { search: true, searchPlaceholder: "Filtrer les règles…", columns: [{ index: 2, label: "Statut" }] });
     // Initial data loading — l'accueil d'abord (onglet par défaut)
     fetchHomeDashboard();
     fetchWatchlist();

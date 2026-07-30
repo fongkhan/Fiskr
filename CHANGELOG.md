@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — eleven more public sources, from a registry instead of eleven copies
+Coverage grew from 15 to 26 official lists: multilateral development bank debarments (ADB, IADB, EBRD, AfDB), Asia-Pacific freezes (Japan MOF, Singapore MAS, New Zealand), national counter-terrorism freeze lists (Netherlands, Belgium, Israel NBCTF) and Ukrainian NSDC sanctions.
+
+- **One declarative registry, not eleven connectors.** All eleven ride the `targets.simple.csv` reader that PEP and SECO already use — so `fiskr/sources.py` declares each source (dataset slug, short name, list type, id prefix, family, legal-basis note) and everything else derives from it: the sync config, the runner (`make_opensanctions_runner`), the API alias, the scheduler entry, the manual-upload branch, and the 400 error message that used to hard-code the source list. Adding a twelfth is one registry line.
+- **Each source keeps its own list type**, so a bank debarment, a national terrorism designation and a Ukrainian sanction can be thresholded apart — the same design point as the HK SFC / AMF / World Bank alert lists.
+- **The flat-format limit is stated, not hidden** (as it already was for PEP and SECO): the OpenSanctions simple format carries no legal basis or official reference. Each registry entry records the issuer's native official URL for a future "official" path (the SECO pattern), and the config, README and premium-sources doc say so.
+- **Slugs are verified from the deployment, not guessed here.** `tools/diagnostic_sources.py` now probes each dataset and judges on content (the `id,schema,name` header); a wrong slug is a one-line URL fix in `config.yaml`, never a code change. 17 tests run parameterized over the whole registry, so a source added tomorrow inherits every guarantee with no new test.
+
+### Added — a path for paid data sources, documented and technically primed
+`Documentation/SOURCES_PREMIUM.md` covers what Dow Jones/Factiva, LSEG World-Check, LexisNexis, Moody's GRID, ComplyAdvantage and the OpenSanctions commercial licence each add beyond the public lists, what to buy and whom to contact, and the state of the wiring. The one immediately actionable item is the OpenSanctions commercial licence (self-service) — the connector already exists. For the API-key providers, the common prerequisite ships now: `download_to_file`/`http_get_text` accept custom headers, and `sync.<source>.auth_headers` reads `${VAR}` secrets from `.env` — the day a contract lands, only the connector remains to write.
+
+### Changed — the sources screen and generic table filters
+- **The sources screen stopped being the worst screen in the app.** It stacked one card per source (16, heading for 27); it is now a single table grouped by nature (official sanctions / regulator alerts / multilateral debarments / aggregated data), filterable by search, family and enablement state. A shared `SOURCE_CATALOG` in the front end became the single source of truth for source labels and the cron scheduler; `handleSourceSync` no longer depends on per-source static buttons, and the EUR-Lex date is offered on click rather than as a permanent field. Verified live with a browser: 26 sources across 4 groups, family and search filters working.
+- **A generic client-side table filter** (`attachTableFilters`) gives a full-text search plus column drop-downs (values inferred from the columns) to the tables that had none — sync reports, users, API keys, the admin journal, batch campaigns, several KPI tables, the mining and rules tables — with a "shown / total" counter and a `MutationObserver` so any re-render refreshes the options. It combines with the existing generic column sort and hides group headers whose group is emptied by the filter. Paginated tables keep server-side filters instead (a client filter would only see the loaded page): `GET /api/sync/reports` now accepts `source` and `status`, locked by test.
+
 ### Changed — EUR-Lex became an early-warning signal instead of a source of designations
 Reported symptom: "I still have trouble retrieving some sources, EUR-Lex in particular — is there a workaround for the anti-bot?" A diagnostic run **from the production server** answered the question differently than expected, and the answer changed the design.
 

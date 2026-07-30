@@ -5012,11 +5012,26 @@ def run_source_sync(
 @app.get("/api/sync/reports")
 async def get_sync_reports(
     limit: int = Query(50, ge=1, le=200),
+    source: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Historique des rapports de synchronisation des sources (suivi in-app)."""
-    reports = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(limit).all()
+    """
+    Historique des rapports de synchronisation des sources (suivi in-app).
+
+    Filtres serveur `source` et `status` : `limit` borne l'historique renvoye,
+    donc un filtre porte cote serveur voit TOUT l'historique et pas seulement
+    les N derniers rapports affiches (un filtre client ne verrait que la page).
+    """
+    query = db.query(SyncReport)
+    if source:
+        query = query.filter(SyncReport.source == source.strip().upper())
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        if statuses:
+            query = query.filter(SyncReport.status.in_(statuses))
+    reports = query.order_by(SyncReport.executed_at.desc()).limit(limit).all()
     return [_serialize_sync_report(r) for r in reports]
 
 @app.get("/api/sync/config")

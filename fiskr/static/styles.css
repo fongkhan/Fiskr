@@ -849,6 +849,17 @@ textarea {
 }
 .table-group-row:hover td { background: var(--surface-hover); }
 
+/* Filtres génériques de tableau (attachTableFilters) */
+.table-filter-bar { margin-bottom: 0.6rem; }
+tr.filtered-out { display: none; }
+.filter-count {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    align-self: center;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
