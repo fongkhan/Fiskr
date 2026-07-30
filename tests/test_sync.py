@@ -191,7 +191,8 @@ def test_eurlex_sync_long_act_title_clamped_to_column(db, tmp_path):
     <tr><td>Mohammad AKBARZADEH</td><td>Born on 1.1.1980</td><td>Logistical support</td></tr>
     </table></body></html>
     """
-    report = run_eurlex_sync(db, for_date=date(2026, 6, 8), http_get=make_http_get(daily_html, act_html),
+    report = run_eurlex_sync(db, for_date=date(2026, 6, 8), mode="extract",
+                             http_get=make_http_get(daily_html, act_html),
                              pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path / "archives")
 
     assert report.status == "SUCCESS"
@@ -306,7 +307,8 @@ def test_eurlex_sync_no_publication(db):
 def test_eurlex_sync_scrape_then_incremental_merge(db, tmp_path):
     archive_dir = tmp_path / "archives"
     # Jour 1 : 3 listes extraits de l'acte
-    report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
+    report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), mode="extract",
+                              http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
                               pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
     assert report1.status == "SUCCESS"
     assert report1.added_count == 3
@@ -324,7 +326,8 @@ def test_eurlex_sync_scrape_then_incremental_merge(db, tmp_path):
     <tr><td>DIMA KUZNETSOV</td><td>Born on 5.5.1985</td><td>Financing of the regime</td><td>9.7.2026</td></tr>
     </table></body></html>
     """
-    report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
+    report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), mode="extract",
+                              http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
                               pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
     assert report2.status == "SUCCESS"
     # Fusion : PETROV inchange, KUZNETSOV ajoute, ZARYA/VOLGA reconduits (pas de suppression)
@@ -493,7 +496,8 @@ def test_eurlex_sync_staging_merge_base_includes_pending(db, tmp_path):
     archive_dir = tmp_path / "archives"
 
     # Jour 1 : 3 listes -> snapshot pending
-    report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
+    report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), mode="extract",
+                              http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
                               pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
     assert report1.status == "PENDING_REVIEW"
 
@@ -504,7 +508,8 @@ def test_eurlex_sync_staging_merge_base_includes_pending(db, tmp_path):
     <tr><td>DIMA KUZNETSOV</td><td>Born on 5.5.1985</td><td>Financing of the regime</td><td>9.7.2026</td></tr>
     </table></body></html>
     """
-    report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
+    report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), mode="extract",
+                              http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
                               pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
     assert report2.status == "PENDING_REVIEW"
 
@@ -722,7 +727,7 @@ def _flaky_getter(failing_fragment):
 
 def test_eurlex_partial_failure_is_success_with_visible_failures(db, tmp_path):
     report = run_eurlex_sync(
-        db, for_date=date(2026, 7, 10),
+        db, for_date=date(2026, 7, 10), mode="extract",
         http_get=_flaky_getter("L_2026_2222"),
         pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
     )
@@ -736,7 +741,7 @@ def test_eurlex_partial_failure_is_success_with_visible_failures(db, tmp_path):
 
 def test_eurlex_total_failure_is_error_not_no_change(db, tmp_path):
     report = run_eurlex_sync(
-        db, for_date=date(2026, 7, 11),
+        db, for_date=date(2026, 7, 11), mode="extract",
         http_get=_flaky_getter("legal-content"),  # tous les actes en echec
         pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
     )
@@ -745,3 +750,202 @@ def test_eurlex_total_failure_is_error_not_no_change(db, tmp_path):
     assert "erreurs de connexion" in report.message
     failures = (report.delta_report or {}).get("fetch_failures") or []
     assert len(failures) == 2
+
+
+# ------------------ EUR-LEX EN SIGNAL D'ALERTE PRECOCE (mode par defaut) ------------------
+
+def test_eurlex_alert_mode_signals_without_inventing_designations(db, tmp_path, monkeypatch):
+    """
+    Le mode par defaut signale l'acte et n'ecrit AUCUNE fiche : les
+    designations viennent de la liste consolidee (EUFSF), qui fait autorite.
+    C'est la garantie centrale du mode alerte — ne jamais deduire une identite
+    d'un texte juridique par expression reguliere.
+    """
+    from fiskr import sync as sync_module
+    calls = []
+    monkeypatch.setattr(sync_module, "scrape_act_entities",
+                        lambda *a, **k: calls.append(a) or [])
+
+    report = run_eurlex_sync(
+        db, for_date=date(2026, 7, 8),
+        http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+    )
+
+    assert report.status == "SUCCESS"
+    assert calls == [], "le mode alerte ne doit jamais scraper les annexes"
+    # Aucun snapshot, donc aucune fiche listee creee
+    assert report.snapshot_id is None
+    assert db.query(WatchlistEntity).count() == 0
+    assert db.query(Snapshot).count() == 0
+    # L'acte detecte est restitue, avec son titre
+    acts = (report.delta_report or {}).get("acts") or []
+    assert len(acts) == 1 and "restrictive measures" in acts[0]["title"]
+    assert (report.delta_report or {}).get("mode") == "alert"
+
+
+def test_eurlex_alert_mode_archives_the_official_pdf(db, tmp_path):
+    """La valeur probante est conservee : le PDF officiel reste archive avec
+    son empreinte, c'est lui qui fait foi devant un auditeur."""
+    report = run_eurlex_sync(
+        db, for_date=date(2026, 7, 8),
+        http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+    )
+    acts = (report.delta_report or {}).get("acts") or []
+    assert acts[0]["pdf_file"], "le PDF officiel doit etre archive"
+    assert len(acts[0]["pdf_sha256"]) == 64
+    assert (tmp_path / acts[0]["pdf_file"]).exists()
+
+
+def test_eurlex_alert_mode_warns_when_consolidated_source_is_off(db, tmp_path):
+    """
+    Sans EUFSF actif, ce signal ne debouche sur rien : la liste UE se
+    perimerait en silence. Le rapport doit le DIRE — un trou de couverture
+    tacite est le pire des deux mondes.
+    """
+    report = run_eurlex_sync(
+        db, for_date=date(2026, 7, 8),
+        http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+    )
+    assert "EUFSF" in report.message and "désactivée" in report.message
+    assert (report.delta_report or {}).get("eu_fsf_enabled") is False
+
+
+def test_eurlex_alert_mode_stays_quiet_without_acts(db, tmp_path):
+    html_without_measures = '<html><body><a href="/x">Regulation on bananas</a></body></html>'
+    report = run_eurlex_sync(
+        db, for_date=date(2026, 7, 8),
+        http_get=make_http_get(html_without_measures, ""),
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+    )
+    assert report.status == "NO_PUBLICATION"
+
+
+def test_eurlex_alert_mode_makes_one_request_for_the_daily_page(db, tmp_path):
+    """Une requete pour la page du jour, et c'est tout : le mode extract en
+    faisait une par acte en plus. Moins solliciter, c'est moins se faire
+    limiter par le portail."""
+    seen = []
+
+    def counting_getter(url):
+        seen.append(url)
+        return MOCK_DAILY_OJ_HTML
+
+    run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=counting_getter,
+                    pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path)
+    assert len(seen) == 1, f"une seule requete attendue, obtenu {seen}"
+
+
+# ------------------ COUCHE RESEAU : RETRY-AFTER + REQUETES CONDITIONNELLES ------------------
+
+def test_retry_after_accepts_seconds_and_http_dates():
+    from fiskr.sync import parse_retry_after
+    assert parse_retry_after("120") == 120.0
+    assert parse_retry_after("  45  ") == 45.0
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("pas une valeur") is None
+    # Une date deja passee ne doit jamais produire une attente negative
+    assert parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
+    # Une date future donne un delai positif
+    from email.utils import format_datetime
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    future = format_datetime(_dt.now(_tz.utc) + _td(seconds=60))
+    assert 50 <= parse_retry_after(future) <= 61
+
+
+def test_retry_after_is_honoured_and_capped(monkeypatch):
+    """Le serveur decide de l'attente — mais un Retry-After delirant ne doit
+    pas immobiliser un job de synchronisation."""
+    from fiskr import sync as sync_module
+
+    # sync.py importe `time` DANS _with_retries : c'est le module reel qu'il
+    # faut instrumenter, pas un attribut de fiskr.sync (qui n'existe pas).
+    import time as _time
+    slept = []
+    monkeypatch.setattr(_time, "sleep", lambda s: slept.append(s))
+
+    attempts = {"n": 0}
+
+    def failing():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise sync_module._RetryableHTTP("HTTP 429", retry_after=90.0)
+        if attempts["n"] == 2:
+            raise sync_module._RetryableHTTP("HTTP 429", retry_after=99999.0)
+        return "ok"
+
+    assert sync_module._with_retries(failing, "http://x", retries=3, backoff=2.0) == "ok"
+    # 1re attente : le delai du serveur (90) prime sur le backoff local (2)
+    assert slept[0] == 90.0
+    # 2e : plafonnee, sans quoi le job dormirait des heures
+    assert slept[1] == sync_module.MAX_RETRY_AFTER_SECONDS
+
+
+def test_retryable_http_carries_the_server_delay():
+    from fiskr.sync import _retryable_from_response
+
+    class _Resp:
+        status_code = 429
+        headers = {"retry-after": "30"}
+
+    err = _retryable_from_response(_Resp())
+    assert err.retry_after == 30.0
+    assert "Retry-After: 30s" in str(err)
+
+
+def test_conditional_request_sends_validators_and_handles_304(db, tmp_path, monkeypatch):
+    """
+    Une source inchangee doit repondre 304 et ne rien faire telecharger :
+    c'est autant de sollicitations en moins d'un portail officiel.
+    """
+    from fiskr import sync as sync_module
+
+    sent_headers = {}
+
+    class _FakeStream:
+        status_code = 304
+        headers = {}
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def raise_for_status(self): pass
+        def iter_bytes(self, chunk_size=None): return iter(())
+
+    def fake_stream(method, url, **kwargs):
+        sent_headers.update(kwargs.get("headers") or {})
+        return _FakeStream()
+
+    # Meme motif : httpx est importe dans download_to_file
+    import httpx as _httpx
+    monkeypatch.setattr(_httpx, "stream", fake_stream)
+
+    dest = tmp_path / "unused.xml"
+    outcome = sync_module.download_to_file(
+        "http://source.example/list.xml", dest,
+        validators={"etag": 'W/"abc123"', "last_modified": "Wed, 01 Jul 2026 10:00:00 GMT"})
+
+    assert sent_headers.get("If-None-Match") == 'W/"abc123"'
+    assert sent_headers.get("If-Modified-Since") == "Wed, 01 Jul 2026 10:00:00 GMT"
+    assert outcome["not_modified"] is True
+    assert not dest.exists(), "un 304 ne doit rien ecrire sur disque"
+
+
+def test_validators_round_trip_through_the_database(db):
+    """Les validateurs vivent en base : le demon travailleur, les processus
+    API et une relance manuelle partagent le meme etat de fraicheur."""
+    from fiskr.sync import stored_validators, remember_validators
+
+    assert stored_validators(db, "OFAC") == {}
+    remember_validators(db, "OFAC", 'W/"v1"', "Wed, 01 Jul 2026 10:00:00 GMT")
+    assert stored_validators(db, "OFAC") == {
+        "etag": 'W/"v1"', "last_modified": "Wed, 01 Jul 2026 10:00:00 GMT"}
+    # Une source qui cesse d'annoncer des validateurs perd les anciens :
+    # mieux vaut retelecharger que conditionner sur un validateur perime
+    remember_validators(db, "OFAC", None, None)
+    assert stored_validators(db, "OFAC") == {}
+    # Cloisonnement par source
+    remember_validators(db, "UN", 'W/"un1"', None)
+    assert stored_validators(db, "UN") == {"etag": 'W/"un1"'}
+    assert stored_validators(db, "OFAC") == {}

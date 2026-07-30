@@ -206,8 +206,18 @@ def get_sync_config() -> Dict[str, Any]:
             "enabled": bool((sync_cfg.get("ofac") or {}).get("enabled", True)),
             "url": (sync_cfg.get("ofac") or {}).get("url", DEFAULT_OFAC_URL),
         },
+        # `mode` choisit ce que EUR-Lex EST pour le produit :
+        #   "alert"   (defaut) : un signal d'alerte precoce — « un acte de
+        #             mesures restrictives est paru aujourd'hui ». Les
+        #             designations viennent de la liste consolidee officielle
+        #             (EUFSF), qui fait autorite et porte les radiations.
+        #   "extract" : comportement historique — extraction heuristique des
+        #             noms depuis le HTML des annexes. Conserve pour ne pas
+        #             priver de source une installation sans token FSF, mais
+        #             les designations qui en sortent sont des SUPPOSITIONS.
         "eurlex": {
             "enabled": bool((sync_cfg.get("eurlex") or {}).get("enabled", True)),
+            "mode": str((sync_cfg.get("eurlex") or {}).get("mode", "alert") or "alert").lower(),
             "daily_journal_url": (sync_cfg.get("eurlex") or {}).get("daily_journal_url", DEFAULT_EURLEX_DAILY_URL),
             "keyword": (sync_cfg.get("eurlex") or {}).get("keyword", DEFAULT_EURLEX_KEYWORD),
         },
@@ -339,7 +349,56 @@ def _get_shared_client():
 
 
 class _RetryableHTTP(RuntimeError):
-    """Reponse HTTP recue mais a retenter (statut transitoire ou corps vide)."""
+    """
+    Reponse HTTP recue mais a retenter (statut transitoire ou corps vide).
+
+    Porte le delai demande par le serveur (`Retry-After`) quand il en a
+    fourni un : c'est le serveur qui sait quand il acceptera de nouveau, pas
+    nous. L'ignorer, c'est se faire bloquer plus durement et plus longtemps.
+    """
+
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+# Plafond de l'attente imposee par un serveur : un Retry-After de plusieurs
+# heures ne doit pas immobiliser un job de synchronisation. Au-dela, mieux
+# vaut echouer proprement et laisser la planification reprendre plus tard.
+MAX_RETRY_AFTER_SECONDS = 300.0
+
+
+def parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """
+    Interprete l'en-tete `Retry-After` (RFC 9110) : soit un nombre de
+    secondes, soit une date HTTP. Retourne des secondes, ou None si absent
+    ou illisible. Jamais negatif (une date deja passee vaut 0).
+    """
+    if not value:
+        return None
+    raw = value.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(raw)
+        if when is None:
+            return None
+        from datetime import timezone
+        now = datetime.now(timezone.utc) if when.tzinfo else datetime.utcnow()
+        return max(0.0, (when - now).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _retryable_from_response(response) -> _RetryableHTTP:
+    """Construit l'exception de reprise d'une reponse transitoire, en
+    conservant le delai que le serveur a demande."""
+    delay = parse_retry_after(response.headers.get("retry-after"))
+    suffix = f", Retry-After: {delay:.0f}s" if delay is not None else ""
+    return _RetryableHTTP(f"HTTP {response.status_code}{suffix}", retry_after=delay)
 
 
 def _with_retries(operation, url: str, retries: int, backoff: float):
@@ -349,6 +408,10 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
     ET sur les reponses transitoires (_RetryableHTTP levee par l'operation).
     C'est le correctif du « probleme de connexions » : la boucle historique
     ne couvrait que les statuts HTTP, jamais les exceptions de transport.
+
+    Quand le serveur a precise `Retry-After`, c'est LUI qui fixe l'attente
+    (plafonnee) : un client qui respecte ce delai se fait nettement moins
+    bloquer qu'un client qui rejoue selon son propre calendrier.
     """
     import time
     import httpx
@@ -360,7 +423,11 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
             last_error = e
             logger.warning(f"{url}: {e} — tentative {attempt + 1}/{retries + 1}")
             if attempt < retries:
-                time.sleep(backoff * (attempt + 1))
+                wait = backoff * (attempt + 1)
+                asked = getattr(e, "retry_after", None)
+                if asked is not None:
+                    wait = min(max(wait, asked), MAX_RETRY_AFTER_SECONDS)
+                time.sleep(wait)
     hint = ""
     if isinstance(last_error, _RetryableHTTP) and "HTTP 202" in str(last_error):
         # 202 persistant = interstitiel anti-robot jamais franchi : l'exploitant
@@ -373,13 +440,24 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
 
 
 def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
-                     retries: Optional[int] = None, progress=None) -> None:
+                     retries: Optional[int] = None, progress=None,
+                     validators: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Telecharge un fichier volumineux en streaming vers dest_path, avec
     reprises sur erreurs de transport, User-Agent navigateur (les portails
     officiels filtrent l'UA httpx par defaut) et timeouts granulaires : le
     timeout de lecture s'applique PAR CHUNK, pas au telechargement entier.
     `progress(octets_recus, taille_totale_ou_None)` est appele ~tous les Mo.
+
+    `validators` : {"etag": ..., "last_modified": ...} du dernier
+    telechargement reussi. Fournis, ils partent en requete CONDITIONNELLE
+    (If-None-Match / If-Modified-Since) : si la source n'a pas change, elle
+    repond 304 sans corps — rien n'est retelecharge ni analyse. C'est autant
+    de bande passante economisee ET autant de sollicitations en moins, donc
+    moins de risque de se faire limiter par un portail officiel.
+
+    Retourne {"not_modified": bool, "etag": ..., "last_modified": ...} :
+    dest_path n'est PAS ecrit quand `not_modified` est vrai.
     """
     import httpx
     network = get_sync_config()["network"]
@@ -387,11 +465,23 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
     max_retries = retries if retries is not None else network["retries"]
     granular_timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
 
+    headers = _browser_headers()
+    if validators:
+        if validators.get("etag"):
+            headers["If-None-Match"] = validators["etag"]
+        if validators.get("last_modified"):
+            headers["If-Modified-Since"] = validators["last_modified"]
+
     def _attempt():
         with httpx.stream("GET", url, timeout=granular_timeout, follow_redirects=True,
-                          headers=_browser_headers()) as response:
+                          headers=headers) as response:
             if response.status_code in _RETRYABLE_STATUS:
-                raise _RetryableHTTP(f"HTTP {response.status_code}")
+                raise _retryable_from_response(response)
+            if response.status_code == 304:
+                # Source inchangee depuis le dernier passage : rien a lire
+                return {"not_modified": True,
+                        "etag": (validators or {}).get("etag"),
+                        "last_modified": (validators or {}).get("last_modified")}
             response.raise_for_status()
             total = None
             try:
@@ -415,8 +505,11 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
                     progress(received, total)
                 except Exception:
                     pass
+            return {"not_modified": False,
+                    "etag": response.headers.get("etag"),
+                    "last_modified": response.headers.get("last-modified")}
 
-    _with_retries(_attempt, url, max_retries, network["backoff_seconds"])
+    return _with_retries(_attempt, url, max_retries, network["backoff_seconds"])
 
 
 def _portal_root(url: str) -> str:
@@ -460,9 +553,10 @@ def http_get_text(url: str, timeout: Optional[float] = None,
 
     def _attempt():
         response = _get_shared_client().get(url, timeout=page_timeout)
-        if response.status_code in _RETRYABLE_STATUS or (
-                response.status_code == 200 and not response.text.strip()):
-            raise _RetryableHTTP(f"HTTP {response.status_code} ({len(response.text)} octets)")
+        if response.status_code in _RETRYABLE_STATUS:
+            raise _retryable_from_response(response)
+        if response.status_code == 200 and not response.text.strip():
+            raise _RetryableHTTP(f"HTTP {response.status_code} (corps vide)")
         if response.status_code != 200:
             raise RuntimeError(f"Reponse invalide de {url} (HTTP {response.status_code})")
         return response.text
@@ -471,6 +565,47 @@ def http_get_text(url: str, timeout: Optional[float] = None,
 
 
 # ------------------ PERSISTANCE DES SNAPSHOTS ------------------
+
+# ------------------ VALIDATEURS DE CACHE HTTP (par source) ------------------
+# Stockes en base plutot qu'en memoire : le demon travailleur, les processus
+# API et une relance manuelle doivent partager le meme etat de fraicheur.
+
+SETTING_HTTP_VALIDATORS = "sync.http_validators"
+
+
+def stored_validators(db, source: str) -> Dict[str, str]:
+    """ETag / Last-Modified du dernier telechargement reussi de cette source."""
+    from fiskr.settings import get_setting
+    try:
+        all_validators = get_setting(db, SETTING_HTTP_VALIDATORS, {}) or {}
+        return dict(all_validators.get(source.upper(), {}) or {})
+    except Exception as e:  # un cache illisible ne bloque jamais une sync
+        logger.debug(f"Validateurs HTTP illisibles pour {source}: {e}")
+        return {}
+
+
+def remember_validators(db, source: str, etag: Optional[str],
+                        last_modified: Optional[str]) -> None:
+    """Memorise les validateurs pour la prochaine requete conditionnelle.
+    Sans etag ni date, l'entree est effacee : mieux vaut retelecharger que
+    conditionner sur un validateur perime."""
+    from fiskr.settings import get_setting, set_setting
+    try:
+        all_validators = dict(get_setting(db, SETTING_HTTP_VALIDATORS, {}) or {})
+        key = source.upper()
+        if etag or last_modified:
+            entry = {}
+            if etag:
+                entry["etag"] = etag
+            if last_modified:
+                entry["last_modified"] = last_modified
+            all_validators[key] = entry
+        else:
+            all_validators.pop(key, None)
+        set_setting(db, SETTING_HTTP_VALIDATORS, all_validators)
+    except Exception as e:
+        logger.debug(f"Validateurs HTTP non memorises pour {source}: {e}")
+
 
 def _clamp_to_column_lengths(values: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -1122,8 +1257,20 @@ def _run_list_replacement_sync(
     try:
         logger.info(f"Sync {source}: telechargement de {url}")
         if fetcher is None:
-            # Telechargement instrumente : octets recus / taille annoncee
-            download_to_file(url, temp_file, progress=tracker.downloading())
+            # Telechargement instrumente (octets recus / taille annoncee) et
+            # CONDITIONNEL : si la source n'a pas bouge, elle repond 304 et
+            # rien n'est retelecharge.
+            outcome = download_to_file(url, temp_file, progress=tracker.downloading(),
+                                       validators=stored_validators(db, source)) or {}
+            if outcome.get("not_modified"):
+                logger.info(f"Sync {source}: source inchangee (HTTP 304), aucun telechargement.")
+                return _finalize_report(
+                    db, source=source, trigger=trigger, status="NO_CHANGE",
+                    message=f"Source {source} inchangee depuis le dernier passage "
+                            f"(réponse 304 du serveur, aucun téléchargement).",
+                    previous_snapshot_id=previous_id
+                )
+            remember_validators(db, source, outcome.get("etag"), outcome.get("last_modified"))
         else:
             fetch(url, temp_file)
 
@@ -1864,6 +2011,26 @@ def _archive_act_pdf(act: Dict[str, str], pdf_fetcher: Callable[[str, Path], Non
         return False
 
 
+def fetch_eurlex_acts(
+    for_date: date,
+    http_get: Callable[[str], str],
+    daily_url_template: str,
+    keyword: str,
+) -> List[Dict[str, str]]:
+    """
+    Actes du Journal Officiel du jour dont le titre porte le mot-cle
+    (« mesures restrictives »). UNE seule requete, sur la page du jour :
+    c'est tout ce dont le mode « signal d'alerte precoce » a besoin.
+    """
+    daily_url = daily_url_template.format(date=for_date.strftime("%d%m%Y"))
+    logger.info(f"Sync EUR-Lex: lecture du Journal Officiel {daily_url}")
+    # Cookie de session avant la page du jour : sans lui, EUR-Lex sert son
+    # interstitiel HTTP 202 et la lecture n'aboutit jamais
+    warm_up_session(_portal_root(daily_url))
+    daily_html = http_get(daily_url)
+    return extract_daily_acts(daily_html, daily_url, keyword)
+
+
 def fetch_eurlex_entities(
     for_date: date,
     http_get: Callable[[str], str],
@@ -1881,14 +2048,10 @@ def fetch_eurlex_entities(
     ou passe le temps d'une synchronisation EUR-Lex (une requete par acte),
     donc la seule progression qui ait du sens ici — un scraping n'annonce
     aucune taille de fichier.
+
+    N'est utilise que par le mode `extract` (heuristique, cf. get_sync_config).
     """
-    daily_url = daily_url_template.format(date=for_date.strftime("%d%m%Y"))
-    logger.info(f"Sync EUR-Lex: lecture du Journal Officiel {daily_url}")
-    # Cookie de session avant la page du jour : sans lui, EUR-Lex sert son
-    # interstitiel HTTP 202 et le scraping n'aboutit jamais
-    warm_up_session(_portal_root(daily_url))
-    daily_html = http_get(daily_url)
-    acts = extract_daily_acts(daily_html, daily_url, keyword)
+    acts = fetch_eurlex_acts(for_date, http_get, daily_url_template, keyword)
 
     all_entities: Dict[str, Dict[str, Any]] = {}
     failed_acts: List[Dict[str, str]] = []
@@ -1909,6 +2072,81 @@ def fetch_eurlex_entities(
     return acts, list(all_entities.values()), failed_acts
 
 
+def _run_eurlex_alert(db, for_date: date, trigger: str, getter, pdf_getter,
+                      archive_dir: Path, cfg: Dict[str, Any]) -> SyncReport:
+    """
+    Mode « signal d'alerte precoce » : detecte les actes de mesures
+    restrictives parus au JO, archive leur PDF officiel, previent les
+    homologateurs — et n'ecrit AUCUNE fiche listee.
+
+    Le raisonnement : la liste consolidee (EUFSF) fait autorite sur les
+    designations et porte les radiations ; le JO, lui, arrive en premier.
+    Fiskr exploite donc chaque source pour ce qu'elle sait faire, au lieu de
+    deduire des identites du texte juridique par expression reguliere.
+    """
+    tracker = SyncProgress("EURLEX")
+    try:
+        acts = fetch_eurlex_acts(for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
+        tracker.phase("DOWNLOAD", processed=0, total=len(acts))
+
+        journal_day = for_date.strftime("%d/%m/%Y")
+        if not acts:
+            return _finalize_report(
+                db, source="EURLEX", trigger=trigger, status="NO_PUBLICATION",
+                message=f"Aucun acte mentionnant \"{cfg['keyword']}\" au JO du {journal_day}."
+            )
+
+        # Piece probante : le PDF officiel de chaque acte, empreinte SHA-256
+        # a l'appui. Un echec d'archivage est une anomalie visible, jamais
+        # silencieuse — c'est ce PDF qui fait foi devant un auditeur.
+        pdf_failures = []
+        for done, act in enumerate(acts, start=1):
+            tracker.phase("DOWNLOAD", processed=done, total=len(acts))
+            if not _archive_act_pdf(act, pdf_getter, archive_dir):
+                pdf_failures.append(act["url"])
+
+        # Sans source consolidee active, ce signal ne debouche sur rien : le
+        # dire ICI, dans le rapport que l'exploitant lit, plutot que de
+        # laisser la liste UE se perimer en silence.
+        fsf_enabled = get_sync_config()["eu_fsf"]["enabled"]
+        titles = "; ".join(a.get("title", "").strip()[:120] for a in acts[:3])
+        message = (f"{len(acts)} acte(s) \"{cfg['keyword']}\" au JO du {journal_day} : {titles}"
+                   + (" …" if len(acts) > 3 else "") + ".")
+        if pdf_failures:
+            message += f" ⚠ {len(pdf_failures)} PDF officiel(s) non archivé(s)."
+        if not fsf_enabled:
+            message += (" ⚠ La source consolidée EUFSF est désactivée : les désignations "
+                        "de ces actes n'entreront donc dans aucune liste. Renseignez "
+                        "sync.eu_fsf.token puis activez sync.eu_fsf.enabled.")
+
+        from fiskr.notifier import emit
+        emit(db, "eurlex_act_published", {
+            "Journal Officiel": journal_day,
+            "Actes": len(acts),
+            "Titres": titles + (" …" if len(acts) > 3 else ""),
+            "Liste consolidée EUFSF": "active" if fsf_enabled
+                                      else "DÉSACTIVÉE — les désignations ne seront pas importées",
+            "PDF archivés": f"{len(acts) - len(pdf_failures)} / {len(acts)}",
+        })
+        return _finalize_report(
+            db, source="EURLEX", trigger=trigger, status="SUCCESS",
+            message=message,
+            delta_report={"mode": "alert", "acts": acts,
+                          "pdf_failures": pdf_failures,
+                          "eu_fsf_enabled": fsf_enabled}
+        )
+    except Exception as e:
+        db.rollback()
+        tracker.failed(e)
+        logger.error(f"Echec de la surveillance EUR-Lex: {e}")
+        return _finalize_report(
+            db, source="EURLEX", trigger=trigger, status="ERROR",
+            message=f"Echec: {e}"
+        )
+    finally:
+        tracker.done()
+
+
 def run_eurlex_sync(
     db,
     for_date: Optional[date] = None,
@@ -1917,19 +2155,36 @@ def run_eurlex_sync(
     reload_cache: Optional[Callable[[], None]] = None,
     pdf_fetcher: Optional[Callable[[str, Path], None]] = None,
     archive_dir: Optional[Path] = None,
+    mode: Optional[str] = None,
 ) -> SyncReport:
     """
-    Scrape le Journal Officiel de l'UE du jour (version anglaise, qui fait
-    reference), archive les PDF officiels des actes retenus (valeur probante
-    en audit) et fusionne les listes trouves avec la liste EU active (mode
-    incremental : le JO amende la liste, les suppressions explicites ne sont
-    pas encore detectees automatiquement).
+    Surveillance du Journal Officiel de l'UE (version anglaise, qui fait
+    reference), avec archivage des PDF officiels des actes retenus (valeur
+    probante en audit). Deux modes, regles par `sync.eurlex.mode` (ou par
+    l'argument `mode`, qui prime — utile pour forcer une passe ponctuelle) :
+
+    - **alert** (defaut) : SIGNAL D'ALERTE PRECOCE. Signale qu'un acte de
+      mesures restrictives est paru, et s'arrete la. Aucune designation n'est
+      deduite du texte : elles viennent de la liste consolidee officielle
+      (EUFSF), qui fait autorite et porte les radiations. Une seule requete
+      HTTP pour la page du jour, plus une par PDF archive.
+
+    - **extract** : comportement historique. Scrape les annexes de chaque
+      acte et en deduit des listes par heuristique. Conserve pour ne pas
+      priver de source une installation sans token FSF — mais ce qui en sort
+      sont des SUPPOSITIONS : `_looks_like_name` decide par expression
+      reguliere si une chaine est un nom, et les radiations ne sont jamais
+      appliquees. A n'utiliser qu'en attendant le token FSF.
     """
     cfg = get_sync_config()["eurlex"]
     for_date = for_date or date.today()
     getter = http_get or http_get_text
     pdf_getter = pdf_fetcher or download_to_file
     archive_dir = archive_dir or EURLEX_ARCHIVE_DIR
+
+    effective_mode = (mode or cfg.get("mode") or "alert").lower()
+    if effective_mode != "extract":
+        return _run_eurlex_alert(db, for_date, trigger, getter, pdf_getter, archive_dir, cfg)
 
     # Base de fusion : inclut un eventuel snapshot en attente d'homologation pour
     # que les amendements de jours successifs s'enchainent sans perte.

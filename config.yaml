@@ -114,6 +114,17 @@ sync:
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONS_ADVANCED.XML"
   eurlex:
     enabled: true
+    # alert   : signal d'alerte precoce — « un acte de mesures restrictives est
+    #           paru aujourd'hui ». Le PDF officiel est archive (valeur probante)
+    #           et les homologateurs sont prevenus, mais AUCUNE fiche n'est
+    #           deduite du texte : les designations viennent de eu_fsf, qui fait
+    #           autorite et porte les radiations. Une seule requete par jour.
+    # extract : comportement historique — extraction heuristique des noms dans
+    #           les annexes HTML. Ce qui en sort sont des SUPPOSITIONS (une
+    #           expression reguliere decide si une chaine est un nom) et les
+    #           radiations ne sont jamais appliquees. A n'utiliser que tant que
+    #           eu_fsf n'est pas configure.
+    mode: "alert"
     # Version anglaise du Journal Officiel : reference reglementaire retenue.
     # {date} est remplace par la date du jour au format DDMMYYYY
     daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
