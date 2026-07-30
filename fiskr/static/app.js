@@ -343,6 +343,23 @@ function formatDate(value) {
     return isNaN(d.getTime()) ? String(value) : d.toLocaleDateString(uiLocale());
 }
 
+// Temps relatif compact (« il y a 4 min ») pour les listes denses ; l'heure
+// exacte reste accessible en infobulle. `value` est un horodatage UTC naïf
+// du serveur (sans suffixe Z) ou déjà zoné.
+function relativeTime(value) {
+    if (!value) return "";
+    const iso = /Z$|[+-]\d\d:\d\d$/.test(value) ? value : value + "Z";
+    const then = new Date(iso).getTime();
+    if (isNaN(then)) return String(value);
+    const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+    if (seconds < 60) return "à l'instant";
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `il y a ${minutes} min`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `il y a ${hours} h`;
+    return new Date(iso).toLocaleDateString(uiLocale());
+}
+
 // ------------------ ÉTATS DE TABLES (chargement / vide) ------------------
 
 function _tbodyOf(target) {
@@ -5370,71 +5387,379 @@ function renderStatusDonut(containerId, legendId, byStatus) {
     }
 }
 
+// ------------------ VUE D'ENSEMBLE PERSONNALISABLE ------------------
+// L'accueil est une grille de panneaux que chaque utilisateur compose :
+// catalogue ci-dessous (indicateurs, graphiques, tableaux), disposition
+// persistée par utilisateur via GET/PUT/DELETE /api/me/dashboard. Le rendu
+// réutilise les briques existantes (tuiles, graphiques SVG, listes).
+
+const DASHBOARD_WIDGET_CATEGORIES = { kpi: "Indicateurs", charts: "Graphiques", tables: "Tableaux" };
+
+const DASHBOARD_WIDGETS = {
+    "tile-screening": { cat: "kpi", icon: "🚨", title: "Criblage", sub: "alertes ouvertes",
+        value: d => d.counters.open_alerts_screening ?? 0,
+        go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+    "tile-filtering": { cat: "kpi", icon: "💸", title: "Filtrage", sub: "alertes ouvertes",
+        value: d => d.counters.open_alerts_filtering ?? 0,
+        go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-filtering')" },
+    "tile-4eyes": { cat: "kpi", icon: "👁", title: "4 yeux", sub: "décisions à valider",
+        value: d => (d.alerts.by_status || {}).PENDING_VALIDATION || 0,
+        go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+    "tile-review": { cat: "kpi", icon: "📥", title: "Homologation", sub: "snapshots en attente",
+        value: d => d.counters.pending_reviews ?? 0,
+        go: "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')" },
+    "tile-overdue": { cat: "kpi", icon: "⏰", title: "Retards SLA", sub: "alertes en dépassement",
+        value: d => d.counters.overdue_alerts ?? 0,
+        go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+    "tile-fp-rate": { cat: "kpi", icon: "📉", title: "Faux positifs", sub: "taux sur alertes closes",
+        value: d => (d.alerts.false_positive_rate_pct ?? null) === null ? "—" : d.alerts.false_positive_rate_pct + " %",
+        go: "switchTab('kpi')" },
+    "tile-avg-delay": { cat: "kpi", icon: "⏱", title: "Délai moyen", sub: "création → décision",
+        value: d => (d.alerts.avg_decision_hours ?? null) === null ? "—" : d.alerts.avg_decision_hours + " h",
+        go: "switchTab('kpi')" },
+
+    "chart-alerts-30d": { cat: "charts", icon: "📈", title: "Alertes sur 30 jours",
+        render: (body, d) => renderAlertsTimeseriesChart(body.id, d.alerts.timeseries_30d || []) },
+    "chart-lists": { cat: "charts", icon: "📊", title: "Fiches en production par liste",
+        render: (body, d) => renderListsBarChart(body.id, (d.kpi.lists || {}).production_entities_by_type || {}) },
+    "chart-status": { cat: "charts", icon: "🗂", title: "Répartition des alertes",
+        render: (body, d) => {
+            body.innerHTML = `<div id="${body.id}-donut" style="display: flex; justify-content: center;"></div><div id="${body.id}-legend"></div>`;
+            renderStatusDonut(`${body.id}-donut`, `${body.id}-legend`, d.alerts.by_status || {});
+        } },
+
+    "table-todo": { cat: "tables", icon: "⏳", title: "À traiter en priorité", render: renderTodoWidget },
+    "table-syncs": { cat: "tables", icon: "🔄", title: "Dernières synchronisations", render: renderSyncsWidget },
+    "table-jobs": { cat: "tables", icon: "⚙", title: "Travaux récents", render: renderJobsWidget },
+    "table-workload": { cat: "tables", icon: "🧑\u200d💼", title: "Charge par analyste", render: renderWorkloadWidget },
+    "table-quality": { cat: "tables", icon: "🩺", title: "Qualité des données clients", render: renderQualityWidget },
+};
+
+// Disposition par défaut : l'accueil historique (tuiles + graphiques + listes)
+const DASHBOARD_DEFAULT_LAYOUT = [
+    { id: "tile-screening", size: "sm" }, { id: "tile-filtering", size: "sm" },
+    { id: "tile-4eyes", size: "sm" }, { id: "tile-review", size: "sm" },
+    { id: "tile-fp-rate", size: "sm" }, { id: "tile-avg-delay", size: "sm" },
+    { id: "chart-alerts-30d", size: "md" }, { id: "chart-status", size: "md" },
+    { id: "chart-lists", size: "md" }, { id: "table-todo", size: "md" },
+    { id: "table-syncs", size: "md" },
+];
+
+let _dashLayout = null;        // disposition affichée [{id, size}]
+let _dashEditing = false;
+let _dashEditBackup = null;    // pour « Annuler »
+let _dashData = { kpi: null, counters: null };
+
+function _defaultDashboardLayout() {
+    return DASHBOARD_DEFAULT_LAYOUT.map(w => ({ ...w }));
+}
+
+async function loadDashboardLayout() {
+    try {
+        const response = await apiFetch("/api/me/dashboard", { silent: true });
+        if (response.ok) {
+            const data = await response.json();
+            // Les panneaux inconnus (disposition d'une version antérieure) sont ignorés au rendu
+            _dashLayout = (data.widgets && data.widgets.length) ? data.widgets : _defaultDashboardLayout();
+            return;
+        }
+    } catch (e) { /* repli sur le défaut */ }
+    _dashLayout = _defaultDashboardLayout();
+}
+
 async function fetchHomeDashboard() {
-    const tiles = document.getElementById("home-tiles");
-    if (!tiles) return;
+    if (!document.getElementById("dash-grid")) return;
+    if (_dashEditing) return;   // un rafraîchissement ne doit pas écraser une édition en cours
+    if (!_dashLayout) await loadDashboardLayout();
     try {
         const [kpiResp, countersResp] = await Promise.all([
             apiFetch("/api/kpi", { silent: true }),
             apiFetch("/api/counters", { silent: true }),
         ]);
-        if (!kpiResp.ok) return;
-        const k = await kpiResp.json();
-        const c = countersResp.ok ? await countersResp.json() : {};
-        const a = k.alerts || {};
-        const byStatus = a.by_status || {};
-
-        const tile = (icon, label, value, sub, onclick) => `
-            <div class="home-tile" ${onclick ? `onclick="${onclick}"` : ""} role="button" tabindex="0">
-                <div class="tile-label">${icon} ${label}</div>
-                <div class="tile-value">${value}</div>
-                ${sub ? `<div class="tile-sub">${sub}</div>` : ""}
-            </div>`;
-        const fpRate = (a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined)
-            ? a.false_positive_rate_pct + " %" : "—";
-        const avgH = (a.avg_decision_hours !== null && a.avg_decision_hours !== undefined)
-            ? a.avg_decision_hours + " h" : "—";
-        tiles.innerHTML =
-            tile("🚨", "Criblage", c.open_alerts_screening ?? 0, "alertes ouvertes",
-                 "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')") +
-            tile("💸", "Filtrage", c.open_alerts_filtering ?? 0, "alertes ouvertes",
-                 "switchTab('alerts'); switchSubTab('alerts', 'alerts-filtering')") +
-            tile("👁", "4 yeux", byStatus.PENDING_VALIDATION || 0, "décisions à valider",
-                 "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')") +
-            tile("📥", "Homologation", c.pending_reviews ?? 0, "snapshots en attente",
-                 "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')") +
-            tile("📉", "Faux positifs", fpRate, "taux sur alertes closes", "switchTab('kpi')") +
-            tile("⏱", "Délai moyen", avgH, "création → décision", "switchTab('kpi')");
-
-        renderAlertsTimeseriesChart("home-chart-alerts", a.timeseries_30d || []);
-        renderListsBarChart("home-chart-lists", (k.lists || {}).production_entities_by_type || {});
-        renderStatusDonut("home-chart-status", "home-chart-status-legend", byStatus);
-
-        // Liste « à traiter » : alertes ouvertes les plus anciennes
-        const todo = document.getElementById("home-todo-list");
-        if (todo) {
-            const oldest = a.oldest_open || [];
-            todo.innerHTML = oldest.length
-                ? oldest.map(al => `
-                    <li onclick="switchTab('alerts'); switchSubTab('alerts', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
-                        <span class="item-main">#${al.id} — ${escapeHtml(al.client_name || "?")} × ${escapeHtml(al.watchlist_name || "?")}</span>
-                        <span class="item-meta">${escapeHtml(statusLabel(al.status))} · ${formatDate(al.created_at)}</span>
-                    </li>`).join("")
-                : '<li style="cursor: default;"><span class="item-main" style="color: var(--text-muted);">✅ Aucune alerte en attente.</span></li>';
-        }
-
-        // Dernière synchronisation
-        const lastSyncEl = document.getElementById("home-last-sync");
-        const lastSync = (k.recent_syncs || [])[0];
-        if (lastSyncEl) {
-            lastSyncEl.innerHTML = lastSync
-                ? `<strong>${escapeHtml(SYNC_SOURCE_LABELS[lastSync.source] || lastSync.source)}</strong> — ${escapeHtml(statusLabel(lastSync.status))}
-                   <br><small style="color: var(--text-muted);">${formatDateTime(lastSync.executed_at)} · +${lastSync.added} / ~${lastSync.modified} / -${lastSync.removed}</small>`
-                : "Aucune synchronisation exécutée.";
-        }
+        if (kpiResp.ok) _dashData.kpi = await kpiResp.json();
+        if (countersResp.ok) _dashData.counters = await countersResp.json();
     } catch (e) {
         console.error("Erreur de chargement de la vue d'ensemble :", e);
     }
+    renderDashboard();
+}
+
+function _widgetShellHtml(w) {
+    const def = DASHBOARD_WIDGETS[w.id];
+    if (!def) return "";
+    const tools = _dashEditing ? `
+        <span class="dash-widget-tools">
+            <button class="dash-tool-btn" onclick="event.stopPropagation(); cycleWidgetSize('${w.id}')" title="Changer la taille (petit / moyen / large)">◧</button>
+            <button class="dash-tool-btn danger" onclick="event.stopPropagation(); removeDashboardWidget('${w.id}')" title="Retirer ce panneau">✕</button>
+        </span>` : "";
+    const drag = _dashEditing ? ' draggable="true"' : "";
+    if (def.cat === "kpi") {
+        const nav = _dashEditing ? "" : ` onclick="${def.go}" role="button" tabindex="0"`;
+        return `<div class="dash-widget size-${w.size} home-tile" data-widget="${w.id}"${drag}${nav}>
+            ${tools}
+            <div class="tile-label">${def.icon} ${def.title}</div>
+            <div class="tile-value" id="dw-value-${w.id}">…</div>
+            <div class="tile-sub">${def.sub}</div>
+        </div>`;
+    }
+    return `<div class="dash-widget size-${w.size} card" data-widget="${w.id}"${drag}>
+        ${tools}
+        <h3>${def.icon} ${def.title}</h3>
+        <div class="dash-widget-body" id="dw-body-${w.id}"></div>
+    </div>`;
+}
+
+function renderDashboard() {
+    const grid = document.getElementById("dash-grid");
+    if (!grid || !_dashLayout) return;
+    grid.classList.toggle("editing", _dashEditing);
+    const html = _dashLayout.map(_widgetShellHtml).join("");
+    grid.innerHTML = html
+        || '<div class="dash-empty">Aucun panneau : ajoutez-en avec « Ajouter un panneau », ou réinitialisez la disposition.</div>';
+    if (_dashEditing) _wireDashboardDrag();
+    _hydrateDashboardWidgets();
+}
+
+function _hydrateDashboardWidgets() {
+    const d = { kpi: _dashData.kpi || {}, counters: _dashData.counters || {},
+                alerts: (_dashData.kpi || {}).alerts || {} };
+    for (const w of _dashLayout) {
+        const def = DASHBOARD_WIDGETS[w.id];
+        if (!def) continue;
+        try {
+            if (def.cat === "kpi") {
+                const el = document.getElementById(`dw-value-${w.id}`);
+                if (el) el.textContent = String(def.value(d));
+            } else {
+                const body = document.getElementById(`dw-body-${w.id}`);
+                if (body) def.render(body, d);
+            }
+        } catch (e) {
+            console.error(`Panneau ${w.id} :`, e);   // un panneau cassé ne casse pas l'accueil
+        }
+    }
+}
+
+// ---- Panneaux « tableaux » ----
+
+function renderTodoWidget(body, d) {
+    const oldest = d.alerts.oldest_open || [];
+    body.innerHTML = '<ul class="home-list">' + (oldest.length
+        ? oldest.map(al => `
+            <li onclick="switchTab('alerts'); switchSubTab('alerts', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
+                <span class="item-main">#${al.id} — ${escapeHtml(al.client_name || "?")} × ${escapeHtml(al.watchlist_name || "?")}</span>
+                <span class="item-meta">${escapeHtml(statusLabel(al.status))} · ${formatDate(al.created_at)}</span>
+            </li>`).join("")
+        : '<li style="cursor: default;"><span class="item-main" style="color: var(--text-muted);">✅ Aucune alerte en attente.</span></li>') + '</ul>';
+}
+
+function renderSyncsWidget(body, d) {
+    const syncs = (d.kpi.recent_syncs || []).slice(0, 5);
+    body.innerHTML = syncs.length
+        ? '<ul class="home-list">' + syncs.map(s => `
+            <li style="cursor: default;">
+                <span class="item-main">${escapeHtml(SYNC_SOURCE_LABELS[s.source] || s.source)} — ${escapeHtml(statusLabel(s.status))}</span>
+                <span class="item-meta">${formatDateTime(s.executed_at)} · +${s.added} / ~${s.modified} / -${s.removed}</span>
+            </li>`).join("") + '</ul>'
+        : '<div class="dash-widget-empty">Aucune synchronisation exécutée.</div>';
+}
+
+async function renderJobsWidget(body) {
+    try {
+        const response = await apiFetch("/api/jobs?limit=8", { silent: true });
+        if (!response.ok) { body.innerHTML = '<div class="dash-widget-empty">Historique indisponible.</div>'; return; }
+        const items = ((await response.json()).items || [])
+            .filter(j => j.status !== "RUNNING" && j.status !== "QUEUED");
+        body.innerHTML = items.length
+            ? items.map(j => _jobRowHtml(j)).join("")
+            : '<div class="dash-widget-empty">Aucun travail exécuté.</div>';
+    } catch (e) {
+        body.innerHTML = '<div class="dash-widget-empty">Historique indisponible.</div>';
+    }
+}
+
+async function renderWorkloadWidget(body) {
+    try {
+        const response = await apiFetch("/api/alerts/workload", { silent: true });
+        if (!response.ok) { body.innerHTML = '<div class="dash-widget-empty">Charge indisponible.</div>'; return; }
+        const data = await response.json();
+        const rows = (data.analysts || []).slice(0, 6);
+        const unassigned = data.unassigned || {};
+        const line = (name, b) => `
+            <li style="cursor: default;">
+                <span class="item-main">${escapeHtml(name)}</span>
+                <span class="item-meta">${b.open_total || 0} ouverte(s)${b.overdue ? ` · <span style="color: var(--color-alert);">${b.overdue} en retard</span>` : ""}</span>
+            </li>`;
+        body.innerHTML = '<ul class="home-list">'
+            + ((unassigned.open_total || 0) ? line("(non assignées)", unassigned) : "")
+            + rows.map(a => line("@" + a.username, a)).join("")
+            + (!rows.length && !(unassigned.open_total || 0)
+                ? '<li style="cursor: default;"><span class="item-main" style="color: var(--text-muted);">✅ Aucune alerte ouverte : file à jour.</span></li>' : "")
+            + '</ul>';
+    } catch (e) {
+        body.innerHTML = '<div class="dash-widget-empty">Charge indisponible.</div>';
+    }
+}
+
+async function renderQualityWidget(body) {
+    try {
+        const response = await apiFetch("/api/quality/clients", { silent: true });
+        if (!response.ok) { body.innerHTML = '<div class="dash-widget-empty">Qualité indisponible.</div>'; return; }
+        const data = await response.json();
+        if (!data.snapshot) {
+            body.innerHTML = '<div class="dash-widget-empty">Aucune base clients en production.</div>';
+            return;
+        }
+        const below = (data.threshold || {}).below;
+        const score = data.global_score_pct;
+        const worst = (data.fields || []).filter(f => f.pct !== null)
+            .sort((a, b) => a.pct - b.pct).slice(0, 3);
+        body.innerHTML = `
+            <div class="quality-score ${below ? "below" : ""}">${score === null ? "—" : score + " %"}</div>
+            <div class="dash-widget-note">${below ? "⚠️ Sous le seuil d'alerte" : "Score global de complétude"} · ${(data.snapshot.record_count || 0).toLocaleString(uiLocale())} fiches</div>
+            <ul class="home-list">${worst.map(f => `
+                <li style="cursor: default;">
+                    <span class="item-main">${escapeHtml(f.label)}</span>
+                    <span class="item-meta">${f.pct} %</span>
+                </li>`).join("")}</ul>`;
+    } catch (e) {
+        body.innerHTML = '<div class="dash-widget-empty">Qualité indisponible.</div>';
+    }
+}
+
+// ---- Mode « Personnaliser » : ajout, retrait, taille, réordonnancement ----
+
+function _setDashToolbar() {
+    document.getElementById("dash-edit-btn")?.classList.toggle("hidden", _dashEditing);
+    document.getElementById("dash-edit-actions")?.classList.toggle("hidden", !_dashEditing);
+    document.getElementById("dash-edit-hint")?.classList.toggle("hidden", !_dashEditing);
+}
+
+function enterDashboardEdit() {
+    _dashEditBackup = _dashLayout.map(w => ({ ...w }));
+    _dashEditing = true;
+    _setDashToolbar();
+    renderDashboard();
+}
+
+function cancelDashboardEdit() {
+    _dashLayout = _dashEditBackup || _dashLayout;
+    _dashEditBackup = null;
+    _dashEditing = false;
+    _setDashToolbar();
+    renderDashboard();
+}
+
+async function saveDashboardLayout() {
+    try {
+        const response = await apiFetch("/api/me/dashboard", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ widgets: _dashLayout }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showToast("Erreur : " + (data.detail || "enregistrement impossible."), "error");
+            return;
+        }
+        _dashEditBackup = null;
+        _dashEditing = false;
+        _setDashToolbar();
+        renderDashboard();
+        showToast("Disposition de l'accueil enregistrée.", "success");
+    } catch (e) {
+        showToast("Erreur réseau pendant l'enregistrement.", "error");
+    }
+}
+
+async function resetDashboardLayout() {
+    const ok = await confirmDialog("Revenir à la disposition par défaut de l'accueil ?");
+    if (!ok) return;
+    try {
+        await apiFetch("/api/me/dashboard", { method: "DELETE" });
+    } catch (e) { /* la remise à zéro locale reste faite */ }
+    _dashLayout = _defaultDashboardLayout();
+    _dashEditBackup = null;
+    _dashEditing = false;
+    _setDashToolbar();
+    renderDashboard();
+    showToast("Disposition par défaut restaurée.", "success");
+}
+
+function removeDashboardWidget(widgetId) {
+    _dashLayout = _dashLayout.filter(w => w.id !== widgetId);
+    renderDashboard();
+}
+
+function cycleWidgetSize(widgetId) {
+    const w = _dashLayout.find(x => x.id === widgetId);
+    if (!w) return;
+    const order = ["sm", "md", "lg"];
+    w.size = order[(order.indexOf(w.size) + 1) % order.length];
+    renderDashboard();
+}
+
+function addDashboardWidget(widgetId) {
+    if (!DASHBOARD_WIDGETS[widgetId] || _dashLayout.some(w => w.id === widgetId)) return;
+    _dashLayout.push({ id: widgetId, size: DASHBOARD_WIDGETS[widgetId].cat === "kpi" ? "sm" : "md" });
+    closeWidgetGallery();
+    renderDashboard();
+}
+
+function openWidgetGallery() {
+    const body = document.getElementById("widget-gallery-body");
+    if (!body) return;
+    const present = new Set(_dashLayout.map(w => w.id));
+    body.innerHTML = Object.entries(DASHBOARD_WIDGET_CATEGORIES).map(([cat, catLabel]) => {
+        const entries = Object.entries(DASHBOARD_WIDGETS).filter(([, def]) => def.cat === cat);
+        return `<h4 class="widget-gallery-cat">${catLabel}</h4>
+            <div class="widget-gallery-grid">${entries.map(([id, def]) => `
+                <button type="button" class="widget-gallery-item" ${present.has(id) ? "disabled" : ""} onclick="addDashboardWidget('${id}')">
+                    <span class="widget-gallery-icon">${def.icon}</span>
+                    <span class="widget-gallery-title">${def.title}</span>
+                    ${present.has(id) ? '<small class="widget-gallery-note">déjà affiché</small>' : ""}
+                </button>`).join("")}</div>`;
+    }).join("");
+    document.getElementById("widget-gallery-modal")?.classList.remove("hidden");
+}
+
+function closeWidgetGallery() {
+    document.getElementById("widget-gallery-modal")?.classList.add("hidden");
+}
+
+// Réordonnancement par glisser-déposer : pendant le glissement on ne déplace
+// que le DOM (re-rendre casserait le drag en cours) ; la disposition est
+// relue depuis l'ordre du DOM au lâcher.
+function _wireDashboardDrag() {
+    const grid = document.getElementById("dash-grid");
+    if (!grid) return;
+    grid.querySelectorAll(".dash-widget").forEach(el => {
+        el.addEventListener("dragstart", (e) => {
+            el.classList.add("dragging");
+            e.dataTransfer.effectAllowed = "move";
+            try { e.dataTransfer.setData("text/plain", el.dataset.widget); } catch (err) { /* IE */ }
+        });
+        el.addEventListener("dragend", () => {
+            el.classList.remove("dragging");
+            _syncDashboardLayoutFromDom();
+        });
+        el.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            const dragged = grid.querySelector(".dash-widget.dragging");
+            if (!dragged || dragged === el) return;
+            const rect = el.getBoundingClientRect();
+            const before = (e.clientX - rect.left) < rect.width / 2;
+            grid.insertBefore(dragged, before ? el : el.nextSibling);
+        });
+    });
+    grid.addEventListener("dragover", (e) => e.preventDefault());
+}
+
+function _syncDashboardLayoutFromDom() {
+    const grid = document.getElementById("dash-grid");
+    if (!grid) return;
+    const order = [...grid.querySelectorAll(".dash-widget")].map(el => el.dataset.widget);
+    _dashLayout.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 }
 
 // ------------------ P3 : FILTRAGE TRANSACTIONNEL ISO 20022 ------------------
@@ -7790,12 +8115,41 @@ async function waitForJobEnd(token, { onTick = null, intervalMs = 1500 } = {}) {
 
 // ------------------ TRAVAUX (file de travaux persistée : historique + relance) ------------------
 
+// Une ligne de travail compacte : pastille de statut + libellé sur une ligne
+// + temps relatif. L'heure exacte, la durée et le lanceur restent en
+// infobulle ; seuls les échecs déploient un détail (message + relance).
+function _jobRowHtml(j, { inGroup = false } = {}) {
+    const icon = OPERATION_KIND_ICONS[j.kind] || "⚙";
+    const cls = j.status === "ERROR" ? "err" : (j.status === "CANCELLED" ? "warn" : "ok");
+    const exact = j.finished_at ? new Date(j.finished_at + "Z").toLocaleString(uiLocale()) : "";
+    const dur = (j.duration_s !== null && j.duration_s !== undefined) ? `${j.duration_s} s` : "";
+    const tooltip = [exact, dur, j.created_by ? `@${j.created_by}` : ""].filter(Boolean).join(" · ");
+    // Chaque fragment dans son propre nœud texte : l'i18n traduit « il y a
+    // N min » par motif, ce qu'un libellé composé empêcherait.
+    const meta = [relativeTime(j.finished_at), dur].filter(Boolean)
+        .map(part => `<span>${escapeHtml(part)}</span>`).join(" · ");
+    const cancelled = j.status === "CANCELLED"
+        ? ' <span class="status-badge warning">Annulé</span>' : "";
+    const retryBtn = j.retryable
+        ? `<button class="btn-secondary job-retry-btn" onclick="event.stopPropagation(); retryJob(${j.id});">↻ Relancer</button>`
+        : "";
+    const err = j.status === "ERROR"
+        ? `<div class="job-row-error">${escapeHtml(String(j.error || "échec").slice(0, 160))} ${retryBtn}</div>`
+        : "";
+    return `<div class="job-row ${cls}${inGroup ? " in-group" : ""}" title="${escapeHtml(tooltip)}">
+        <span class="job-dot" aria-hidden="true"></span>
+        <span class="job-label">${inGroup ? "" : icon + " "}${escapeHtml(j.label || j.token)}${cancelled}</span>
+        <span class="job-meta">${meta}</span>
+        ${err}
+    </div>`;
+}
+
 async function renderJobsSection() {
     const section = document.getElementById("notif-jobs-section");
     const list = document.getElementById("notif-jobs-list");
     if (!section || !list) return;
     try {
-        const response = await apiFetch("/api/jobs?limit=12", { silent: true });
+        const response = await apiFetch("/api/jobs?limit=20", { silent: true });
         if (!response.ok) { section.classList.add("hidden"); return; }
         const items = (await response.json()).items || [];
         // Les opérations vivantes sont déjà dans « Opérations en cours » :
@@ -7805,30 +8159,50 @@ async function renderJobsSection() {
         const finished = items.filter(j => j.status !== "RUNNING" && j.status !== "QUEUED");
         if (!finished.length) { section.classList.add("hidden"); list.innerHTML = ""; return; }
         section.classList.remove("hidden");
-        const badges = {
-            DONE: '<span class="status-badge no_match">Terminé</span>',
-            ERROR: '<span class="status-badge alert">Échec</span>',
-            CANCELLED: '<span class="status-badge warning">Annulé</span>',
-        };
-        list.innerHTML = finished.slice(0, 8).map(j => {
-            const icon = OPERATION_KIND_ICONS[j.kind] || "⚙";
-            const when = j.finished_at ? new Date(j.finished_at + "Z").toLocaleString(uiLocale()) : "";
-            const dur = (j.duration_s !== null && j.duration_s !== undefined) ? ` · ${j.duration_s} s` : "";
-            const retryBtn = j.retryable
-                ? `<button class="btn-secondary" style="padding: 0.1rem 0.5rem; font-size: 0.72rem;" onclick="event.stopPropagation(); retryJob(${j.id});">↻ Relancer</button>`
-                : "";
-            const err = j.status === "ERROR" && j.error
-                ? `<div style="color: var(--color-alert); font-size: 0.72rem; margin-top: 0.15rem;">${escapeHtml(String(j.error).slice(0, 160))}</div>`
-                : "";
-            return `<div class="ops-row">
-                <div class="ops-row-head">
-                    <span>${icon} ${escapeHtml(j.label || j.token)}</span>
-                    <span>${badges[j.status] || escapeHtml(j.status)}</span>
-                </div>
-                <div class="ops-row-meta">${escapeHtml(when)}${dur}${j.created_by ? ` · @${escapeHtml(j.created_by)}` : ""} ${retryBtn}</div>
-                ${err}
-            </div>`;
-        }).join("");
+
+        // Une synchronisation ou une mise en production multi-listes produit
+        // une rafale de travaux quasi identiques : on replie les suites de
+        // même nature et même issue en une ligne dépliable, au lieu de six
+        // cartes répétitives.
+        const groups = [];
+        for (const j of finished) {
+            const last = groups[groups.length - 1];
+            if (last && last.kind === j.kind && last.status === j.status && j.status !== "ERROR") {
+                last.jobs.push(j);
+            } else {
+                groups.push({ kind: j.kind, status: j.status, jobs: [j] });
+            }
+        }
+
+        let rows = 0;
+        const html = [];
+        for (const g of groups) {
+            if (rows >= 8) break;
+            rows += 1;
+            if (g.jobs.length === 1) { html.push(_jobRowHtml(g.jobs[0])); continue; }
+            const icon = OPERATION_KIND_ICONS[g.kind] || "⚙";
+            // Libellé du lot : préfixe commun aux libellés (« Mise en
+            // production ») quand il existe, sinon le premier libellé.
+            const labels = g.jobs.map(j => (j.label || "").split(" — ")[0]).filter(Boolean);
+            const prefix = labels.length && labels.every(l => l === labels[0])
+                ? labels[0] : (g.jobs[0].label || g.kind);
+            const cls = g.status === "CANCELLED" ? "warn" : "ok";
+            html.push(`<details class="job-group">
+                <summary class="job-row ${cls}">
+                    <span class="job-dot" aria-hidden="true"></span>
+                    <span class="job-label">${icon} ${escapeHtml(prefix)} <span class="job-group-count">× ${g.jobs.length}</span></span>
+                    <span class="job-meta">${escapeHtml(relativeTime(g.jobs[0].finished_at))}</span>
+                </summary>
+                ${g.jobs.map(j => {
+                    // Dans le groupe, le préfixe commun est déjà dans l'en-tête :
+                    // n'afficher que la partie discriminante (« WATCHLIST_PEP »)
+                    const sep = `${prefix} — `;
+                    const label = (j.label || "").startsWith(sep) ? j.label.slice(sep.length) : j.label;
+                    return _jobRowHtml({ ...j, label }, { inGroup: true });
+                }).join("")}
+            </details>`);
+        }
+        list.innerHTML = html.join("");
     } catch (e) { /* le centre de notifications reste utilisable sans cette section */ }
 }
 

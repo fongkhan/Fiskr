@@ -549,6 +549,20 @@ class SavedView(Base):
     filters = Column(JSON, nullable=False)           # {status, priority, list_type}
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class UserDashboard(Base):
+    """
+    Disposition personnalisee de la vue d'ensemble : chaque utilisateur
+    compose son accueil (choix des panneaux, ordre, tailles). L'absence de
+    ligne signifie « disposition par defaut livree avec l'application » —
+    la remise a zero supprime simplement la ligne.
+    """
+    __tablename__ = "user_dashboards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    widgets = Column(JSON, nullable=False)           # [{id, size}] ordonnes
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 FP_RULE_STATUSES = ("DRAFT", "PENDING_VALIDATION", "ACTIVE", "SUPERSEDED")
 
 class FpRule(Base):
