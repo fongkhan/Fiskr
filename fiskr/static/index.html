@@ -626,130 +626,32 @@
                             <h2>Collecteurs de Sources Officielles</h2>
                             <p class="section-desc">Récupérez les listes directement auprès des émetteurs : le delta (ADDED / MODIFIED / REMOVED) est calculé puis appliqué au référentiel actif, et un rapport de suivi est émis (in-app + email si SMTP configuré).</p>
 
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇸 OFAC — SDN Advanced (XML)</h3>
-                                <p class="section-desc">Téléchargement du fichier officiel <code>SDN_ADVANCED.XML</code>, ingestion, delta et remplacement de la liste OFAC active.</p>
-                                <button id="sync-ofac-btn" class="btn btn-primary" onclick="handleSourceSync('OFAC')">
-                                    Synchroniser maintenant
-                                </button>
+                            <p class="section-desc" style="margin-bottom: 0.75rem;">Les sources sont groupées par nature. Activez-les dans <code>config.yaml</code> (<code>sync.&lt;source&gt;.enabled</code>) ; une source désactivée reste listée mais grisée. « Synchroniser » lance une récupération immédiate ; la planification quotidienne se règle plus bas.</p>
+                            <div class="filter-bar" style="margin-bottom: 0.75rem;">
+                                <input type="text" id="sources-search" placeholder="Filtrer les sources (nom, pays…)" aria-label="Filtrer les sources">
+                                <select id="sources-family-filter" aria-label="Filtrer par famille">
+                                    <option value="">Toutes les familles</option>
+                                    <option value="sanctions">Sanctions officielles</option>
+                                    <option value="regulatory">Alertes de régulateurs</option>
+                                    <option value="debarment">Exclusions de bailleurs</option>
+                                    <option value="aggregated">Données agrégées</option>
+                                </select>
+                                <select id="sources-state-filter" aria-label="Filtrer par état">
+                                    <option value="">Toutes (activées ou non)</option>
+                                    <option value="enabled">Activées seulement</option>
+                                    <option value="disabled">Désactivées seulement</option>
+                                </select>
                             </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇫🇷 DGT — Registre national des gels des avoirs (JSON)</h3>
-                                <p class="section-desc">Téléchargement du registre officiel de la Direction générale du Trésor (API publique <code>gels-avoirs.dgtresor.gouv.fr</code>), ingestion, delta et remplacement de la liste DGT active. Obligation autonome pour les établissements assujettis français (lignes directrices ACPR/DGT).</p>
-                                <button id="sync-dgt-btn" class="btn btn-primary" onclick="handleSourceSync('DGT')">
-                                    Synchroniser maintenant
-                                </button>
+                            <div class="table-container">
+                                <table id="sources-table">
+                                    <thead><tr>
+                                        <th>Source</th><th>Activée</th><th>Dernière / prochaine</th><th class="no-sort"></th>
+                                    </tr></thead>
+                                    <tbody><!-- Généré depuis SOURCE_CATALOG (renderSourcesTable) --></tbody>
+                                </table>
                             </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇳 ONU — Liste consolidée du Conseil de sécurité (XML)</h3>
-                                <p class="section-desc">Téléchargement de la liste consolidée officielle (<code>scsanctions.un.org</code>, publique), ingestion, delta et remplacement de la liste ONU active.</p>
-                                <button id="sync-un-btn" class="btn btn-primary" onclick="handleSourceSync('UN')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
-                                <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
-                                <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇸 OFAC Non-SDN — Liste consolidée (XML)</h3>
-                                <p class="section-desc">Second fichier de l'OFAC, au même format que la SDN. Il porte les régimes qui n'emportent pas de gel total des avoirs et sont pour cette raison absents de la SDN : sanctions sectorielles (SSI), FSE, NS-MBS, PLC, MEU, CMIC. Liste séparée, seuillable à part, car la conséquence opérationnelle d'une touche n'y est pas la même (<code>sync.ofac_nonsdn.enabled</code>).</p>
-                                <button id="sync-ofacnonsdn-btn" class="btn btn-primary" onclick="handleSourceSync('OFACNONSDN')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇸 US CSL — Consolidated Screening List (JSON)</h3>
-                                <p class="section-desc">Agrégat officiel du gouvernement américain, public et sans clé. Son apport propre est le contrôle des exportations, absent de toutes les autres sources branchées : Entity List, Denied Persons, Unverified et Military End User du BIS, ITAR Debarred et Nonproliferation du Département d'État. Les listes déjà récupérées à leur source sont écartées à la lecture pour ne pas doubler les alertes (<code>sync.csl.exclude_sources</code>).</p>
-                                <button id="sync-csl-btn" class="btn btn-primary" onclick="handleSourceSync('CSL')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇨🇦 Canada SEMA — Sanctions autonomes (CSV)</h3>
-                                <p class="section-desc">Liste consolidée d'Affaires mondiales Canada. Le Canada désigne de façon autonome : son périmètre ne recoupe ni celui de l'UE ni celui de l'OFAC. Le fichier n'ayant pas d'identifiant technique, la clé de rapprochement est reconstruite depuis la référence réglementaire (annexe et article), faute de quoi chaque publication paraîtrait remplacer intégralement la précédente (<code>sync.canada.enabled</code>).</p>
-                                <button id="sync-canada-btn" class="btn btn-primary" onclick="handleSourceSync('CANADA')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇦🇺 Australie DFAT — Liste consolidée</h3>
-                                <p class="section-desc">Liste consolidée du Department of Foreign Affairs and Trade, qui réunit les sanctions onusiennes transposées et les désignations autonomes australiennes. Les lignes se répètent par variante de nom et sont regroupées par référence, comme le fichier britannique. L'extension de l'URL choisit le lecteur : CSV en natif, XLSX si le paquet optionnel openpyxl est installé (<code>sync.dfat.enabled</code>).</p>
-                                <button id="sync-dfat-btn" class="btn btn-primary" onclick="handleSourceSync('DFAT')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇭🇰 Hong Kong SFC — Liste d'alerte</h3>
-                                <p class="section-desc">Entités non autorisées, sites frauduleux et usurpations d'identité d'intermédiaires agréés recensés par la Securities and Futures Commission. Ce n'est pas une liste de sanctions : une touche est un signal de risque à instruire, pas une obligation de gel — d'où un type de liste distinct, à seuiller à part dans <code>scoring.cut_off_overrides</code>. Hong Kong n'ayant pas de régime de sanctions autonome, c'est cette liste qui apporte une couverture propre (<code>sync.hk_sfc.enabled</code>).</p>
-                                <button id="sync-hksfc-btn" class="btn btn-primary" onclick="handleSourceSync('HKSFC')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇫🇷 AMF — Listes noires</h3>
-                                <p class="section-desc">Acteurs et sites proposant des services d'investissement sans y être autorisés, signalés par l'Autorité des marchés financiers. Même nature que la liste de Hong Kong : mise en garde et non gel des avoirs. C'est la liste d'alerte dont un assujetti français a l'usage le plus direct (<code>sync.amf.enabled</code>).</p>
-                                <button id="sync-amf-btn" class="btn btn-primary" onclick="handleSourceSync('AMF')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🏛️ Banque mondiale — Fournisseurs exclus (JSON)</h3>
-                                <p class="section-desc">Fournisseurs et personnes exclus des marchés financés par le Groupe de la Banque mondiale, pour fraude ou corruption avérée. Encore une autre nature : ni gel, ni mise en garde, mais une exclusion à durée déterminée — la date de fin alimente la colonne de radiation. Criblée au titre du risque de contrepartie sur le financement de projets et le trade finance (<code>sync.worldbank.enabled</code>).</p>
-                                <button id="sync-worldbank-btn" class="btn btn-primary" onclick="handleSourceSync('WORLDBANK')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇨🇭 Suisse SECO — Liste consolidée</h3>
-                                <p class="section-desc">Liste consolidée du Secrétariat d'État à l'économie. Deux voies au choix : l'export officiel SESAM de la Confédération, seul à porter la base légale suisse (ordonnance RS) et les dates d'inscription, ou le jeu OpenSanctions au format plat en secours. Opt-in selon l'exposition suisse (<code>sync.seco.enabled</code>, <code>sync.seco.format</code>).</p>
-                                <button id="sync-seco-btn" class="btn btn-primary" onclick="handleSourceSync('SECO')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">👤 PEP — Dataset OpenSanctions (CSV)</h3>
-                                <p class="section-desc">Personnes Politiquement Exposées agrégées par OpenSanctions. <strong>Licence</strong> : usage non commercial libre, licence requise pour un usage commercial (<code>sync.pep.enabled</code>, désactivé par défaut).</p>
-                                <button id="sync-pep-btn" class="btn btn-primary" onclick="handleSourceSync('PEP')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇪🇺 UE — Liste consolidée officielle (FSF XML)</h3>
-                                <p class="section-desc">Fichier consolidé des sanctions financières de l'UE (webgate FSD) : fait autorité sur le scraping du JO, les <strong>radiations</strong> y sont fiables. Nécessite un token gratuit (inscription au webgate, puis <code>sync.eu_fsf.token</code> dans <code>config.yaml</code>).</p>
-                                <button id="sync-eufsf-btn" class="btn btn-primary" onclick="handleSourceSync('EUFSF')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
-                                <h3 style="margin-top: 0;">🇪🇺 EUR-Lex — Journal Officiel du jour (version anglaise)</h3>
-                                <p class="section-desc">Recherche des actes mentionnant « restrictive measures » au Journal Officiel (édition anglaise, qui fait référence), scraping des listés (Individus, Entités, Navires, Aéronefs), fusion incrémentale avec la liste EU active et archivage du PDF officiel de chaque acte (valeur probante en audit).</p>
-                                <div class="form-group" style="max-width: 220px;">
-                                    <label for="sync-eurlex-date">Date du Journal Officiel</label>
-                                    <input type="date" id="sync-eurlex-date">
-                                </div>
-                                <button id="sync-eurlex-btn" class="btn btn-primary" onclick="handleSourceSync('EURLEX')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
+                            <!-- Options spécifiques d'une source (date EUR-Lex…), affichées au besoin -->
+                            <div id="sync-source-options" class="hidden" style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);"></div>
                             <p id="sync-schedule-info" class="section-desc" style="margin-top: 1rem;"></p>
                         </div>
 
@@ -897,19 +799,28 @@
                                         <label for="backtest-panel-select">Panel de pseudo-clients</label>
                                         <select id="backtest-panel-select"></select>
                                     </div>
-                                    <div class="form-group" style="width: 140px; margin: 0;">
-                                        <label for="backtest-panel-size">Taille (génération)</label>
-                                        <input type="number" id="backtest-panel-size" value="500" min="50" max="5000">
-                                    </div>
-                                    <button class="btn" id="generate-panel-btn" onclick="generateTestPanel()" style="background: var(--surface-3);">⚙️ Générer un panel</button>
                                     <button class="btn btn-primary" id="run-backtest-btn" onclick="runReviewBacktest()">▶ Lancer le cahier de tests</button>
                                 </div>
-                                <div style="display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; margin-top: 0.75rem;">
-                                    <div class="form-group" style="flex: 1; min-width: 260px; margin: 0;">
-                                        <label for="backtest-candidate-rule">Règle anti-FP candidate à évaluer (facultatif)</label>
-                                        <select id="backtest-candidate-rule"><option value="">Aucune — règles actives uniquement</option></select>
+                                <div class="accordion-section" style="margin-top: 0.75rem;">
+                                    <button type="button" class="accordion-header" onclick="toggleAccordion('backtest-advanced')">
+                                        ⚙️ Options avancées — générer un panel, règle candidate <span class="accordion-arrow">▼</span>
+                                    </button>
+                                    <div id="backtest-advanced" class="accordion-content hidden" style="padding-top: 1rem;">
+                                        <div style="display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap;">
+                                            <div class="form-group" style="width: 140px; margin: 0;">
+                                                <label for="backtest-panel-size">Taille (génération)</label>
+                                                <input type="number" id="backtest-panel-size" value="500" min="50" max="5000">
+                                            </div>
+                                            <button class="btn" id="generate-panel-btn" onclick="generateTestPanel()" style="background: var(--surface-3);">⚙️ Générer un panel</button>
+                                        </div>
+                                        <div style="display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; margin-top: 0.75rem;">
+                                            <div class="form-group" style="flex: 1; min-width: 260px; margin: 0;">
+                                                <label for="backtest-candidate-rule">Règle anti-FP candidate à évaluer (facultatif)</label>
+                                                <select id="backtest-candidate-rule"><option value="">Aucune — règles actives uniquement</option></select>
+                                            </div>
+                                            <a href="#" onclick="showTab('alerts'); return false;" style="font-size: 0.85rem;">✏️ Créer une règle (onglet Alertes → Paramétrage &amp; Règles)</a>
+                                        </div>
                                     </div>
-                                    <a href="#" onclick="showTab('alerts'); return false;" style="font-size: 0.85rem;">✏️ Créer une règle (onglet Alertes → Paramétrage &amp; Règles)</a>
                                 </div>
                                 <div id="backtest-results" class="hidden" style="margin-top: 1.25rem;"></div>
                             </div>
@@ -1364,10 +1275,10 @@
                         Liste Blanche
                     </button>
                     <button id="sub-btn-alerts-blocking" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-blocking')">
-                        🔑 Blocking Keys
+                        🔑 Paramétrage moteur
                     </button>
-                    <button id="sub-btn-alerts-engine" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-engine')">
-                        🧠 Algorithmes du Moteur
+                    <button id="sub-btn-alerts-resources" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-resources')">
+                        🗣 Ressources linguistiques
                     </button>
                     <button id="sub-btn-alerts-rules" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-rules')">
                         ⚖️ Règles Faux Positifs
@@ -1394,6 +1305,7 @@
                                     <option value="LOW">Basse</option>
                                 </select>
                                 <select id="screening-list-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par type de liste"></select>
+                                <select id="screening-assignee-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
                                 <select id="screening-views" onchange="applySavedView('SCREENING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
                                 <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('SCREENING')" title="Sauvegarder les filtres courants comme vue">💾</button>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
@@ -1448,6 +1360,7 @@
                                     <option value="LOW">Basse</option>
                                 </select>
                                 <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
+                                <select id="filtering-assignee-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
                                 <select id="filtering-views" onchange="applySavedView('FILTERING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
                                 <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue">💾</button>
                                 <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
@@ -1482,7 +1395,7 @@
                     </div>
                 </div>
 
-                <!-- BLOCKING KEYS (rôle blocking/admin) -->
+                <!-- PARAMÉTRAGE MOTEUR : clés de blocking + capacités (rôle blocking/admin) -->
                 <div id="sub-sec-alerts-blocking" class="sub-tab-content hidden">
                     <div class="grid-layout" style="grid-template-columns: 1fr 1fr;">
                         <div class="card form-card">
@@ -1498,7 +1411,37 @@
                             <button class="btn btn-primary" onclick="saveBlocking('FILTERING')" style="margin-top: 1rem;">Enregistrer</button>
                         </div>
                     </div>
+                    <!-- ALGORITHMES DU MOTEUR (fusionné dans le paramétrage moteur) -->
                     <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+                        <div class="card result-card">
+                            <h2>🧠 Algorithmes du Moteur</h2>
+                            <p class="section-desc">Chaque mécanisme de rapprochement du moteur peut être activé ou coupé, canal par canal. Tout est actif à la livraison : votre installation ne change de comportement que si vous décidez d'en changer. Couper une capacité rend le moteur aveugle sur ce qu'elle couvrait — chaque bascule affiche donc ce que vous perdez, chaque changement part au journal d'administration, et l'écart se chiffre avant de décider avec <em>Mesurer l'impact</em>. Les capacités pilotent la comparaison, pas la normalisation faite à l'import : une capacité d'écriture agit tout de suite sur le client, et sur les fiches listées au prochain rechargement complet de leur liste.</p>
+                            <div style="display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
+                                <label>Canal :
+                                    <select id="engine-channel-select" onchange="fetchEngineSettings()">
+                                        <option value="SCREENING">🧍 Criblage Clients</option>
+                                        <option value="FILTERING">💸 Filtrage Transactionnel</option>
+                                    </select>
+                                </label>
+                                <button class="btn btn-primary" id="engine-save-btn" onclick="saveEngineCapabilities()">Enregistrer (recharge le cache)</button>
+                                <button class="btn btn-secondary" id="engine-reset-btn" onclick="resetEngineDraft()">↻ Annuler mes modifications</button>
+                            </div>
+                            <div id="engine-capabilities"></div>
+                            <div style="display: flex; gap: 0.5rem; align-items: flex-end; flex-wrap: wrap; margin-top: 1rem; padding: 0.75rem; border: 1px solid var(--border-color); border-radius: 6px;">
+                                <label>Mesurer l'impact sur le panel<br>
+                                    <select id="engine-sim-panel" style="min-width: 260px;"></select>
+                                </label>
+                                <button class="btn btn-secondary" id="engine-sim-btn" onclick="simulateEngineImpact()">📊 Mesurer avant d'appliquer</button>
+                                <small style="color: var(--text-muted); flex-basis: 100%;">Deux criblages à blanc du même panel contre les mêmes listes : un sous le paramétrage en vigueur, un sous les cases cochées ci-dessus. Aucune écriture.</small>
+                            </div>
+                            <div id="engine-sim-result" style="margin-top: 0.75rem;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RESSOURCES LINGUISTIQUES (rôle blocking/admin) -->
+                <div id="sub-sec-alerts-resources" class="sub-tab-content hidden">
+                    <div class="grid-layout" style="grid-template-columns: 1fr;">
                         <div class="card result-card">
                             <h2>📚 Ressources Linguistiques — Équivalences</h2>
                             <p class="section-desc">Tables d'équivalences déclarées : homonymes et variantes de translittération (Mohammad / Mohammed / Muhammad), équivalents entre langues (Henri / Harry / Heinrich), exonymes de villes et de pays (Londres / London, Allemagne / Germany / DE). Aucune métrique de chaîne ne peut déduire ces rapprochements : ils se déclarent. Les équivalences agissent au <strong>blocking</strong> (les termes équivalents deviennent candidats) <strong>et</strong> au <strong>scoring</strong>. Elles élargissent mécaniquement le périmètre des alertes : <strong>prénoms et noms sont actifs à la livraison</strong> — impact mesuré, +6 vrais positifs et 0 faux positif sur un panel de 716 clients — tandis que villes, pays et états restent inactifs faute de mesure. Chiffrez toute activation avec <em>Mesurer l'impact</em> avant de produire.</p>
@@ -1556,35 +1499,6 @@
                                     <tbody><!-- Populated dynamically --></tbody>
                                 </table>
                             </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- ALGORITHMES DU MOTEUR (rôle blocking/admin) -->
-                <div id="sub-sec-alerts-engine" class="sub-tab-content hidden">
-                    <div class="grid-layout" style="grid-template-columns: 1fr;">
-                        <div class="card result-card">
-                            <h2>🧠 Algorithmes du Moteur</h2>
-                            <p class="section-desc">Chaque mécanisme de rapprochement du moteur peut être activé ou coupé, canal par canal. Tout est actif à la livraison : votre installation ne change de comportement que si vous décidez d'en changer. Couper une capacité rend le moteur aveugle sur ce qu'elle couvrait — chaque bascule affiche donc ce que vous perdez, chaque changement part au journal d'administration, et l'écart se chiffre avant de décider avec <em>Mesurer l'impact</em>. Les capacités pilotent la comparaison, pas la normalisation faite à l'import : une capacité d'écriture agit tout de suite sur le client, et sur les fiches listées au prochain rechargement complet de leur liste.</p>
-                            <div style="display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
-                                <label>Canal :
-                                    <select id="engine-channel-select" onchange="fetchEngineSettings()">
-                                        <option value="SCREENING">🧍 Criblage Clients</option>
-                                        <option value="FILTERING">💸 Filtrage Transactionnel</option>
-                                    </select>
-                                </label>
-                                <button class="btn btn-primary" id="engine-save-btn" onclick="saveEngineCapabilities()">Enregistrer (recharge le cache)</button>
-                                <button class="btn btn-secondary" id="engine-reset-btn" onclick="resetEngineDraft()">↻ Annuler mes modifications</button>
-                            </div>
-                            <div id="engine-capabilities"></div>
-                            <div style="display: flex; gap: 0.5rem; align-items: flex-end; flex-wrap: wrap; margin-top: 1rem; padding: 0.75rem; border: 1px solid var(--border-color); border-radius: 6px;">
-                                <label>Mesurer l'impact sur le panel<br>
-                                    <select id="engine-sim-panel" style="min-width: 260px;"></select>
-                                </label>
-                                <button class="btn btn-secondary" id="engine-sim-btn" onclick="simulateEngineImpact()">📊 Mesurer avant d'appliquer</button>
-                                <small style="color: var(--text-muted); flex-basis: 100%;">Deux criblages à blanc du même panel contre les mêmes listes : un sous le paramétrage en vigueur, un sous les cases cochées ci-dessus. Aucune écriture.</small>
-                            </div>
-                            <div id="engine-sim-result" style="margin-top: 0.75rem;"></div>
                         </div>
                     </div>
                 </div>
@@ -1655,6 +1569,14 @@
 
             <!-- SECTION: PILOTAGE (KPI conformité) -->
             <section id="sec-kpi" class="tab-content">
+                <div class="sub-tabs">
+                    <button id="sub-btn-kpi-overview" class="sub-tab-btn active" onclick="switchSubTab('kpi', 'kpi-overview')">📊 Vue d'ensemble</button>
+                    <button id="sub-btn-kpi-workload" class="sub-tab-btn" onclick="switchSubTab('kpi', 'kpi-workload')">👥 Charge &amp; SLA</button>
+                    <button id="sub-btn-kpi-quality" class="sub-tab-btn" onclick="switchSubTab('kpi', 'kpi-quality')">🧪 Qualité données</button>
+                    <button id="sub-btn-kpi-activity" class="sub-tab-btn" onclick="switchSubTab('kpi', 'kpi-activity')">📄 Rapport d'activité</button>
+                </div>
+
+                <div id="sub-sec-kpi-overview" class="sub-tab-content active">
                 <div class="grid-layout" style="grid-template-columns: 1fr;">
                     <div class="card result-card">
                         <h2>Indicateurs de Pilotage du Dispositif</h2>
@@ -1701,7 +1623,11 @@
                             </div>
                         </div>
                     </div>
+                </div>
+                </div>
 
+                <div id="sub-sec-kpi-workload" class="sub-tab-content hidden">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
                     <!-- Charge de travail des analystes (échéances SLA) -->
                     <div class="card result-card" id="workload-card">
                         <h2>👥 Charge de Travail des Analystes</h2>
@@ -1725,6 +1651,11 @@
                         </div>
                     </div>
 
+                </div>
+                </div>
+
+                <div id="sub-sec-kpi-quality" class="sub-tab-content hidden">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
                     <!-- Qualité des données du référentiel clients -->
                     <div class="card result-card" id="quality-card">
                         <h2>🧪 Qualité des Données Clients</h2>
@@ -1749,6 +1680,11 @@
                         </div>
                     </div>
 
+                </div>
+                </div>
+
+                <div id="sub-sec-kpi-activity" class="sub-tab-content hidden">
+                <div class="grid-layout" style="grid-template-columns: 1fr;">
                     <!-- Rapport d'activité réglementaire sur période -->
                     <div class="card result-card" id="activity-report-card">
                         <h2>📄 Rapport d'Activité (période)</h2>
@@ -1769,6 +1705,7 @@
                             </table>
                         </div>
                     </div>
+                </div>
                 </div>
             </section>
 
@@ -1795,6 +1732,10 @@
                             <option value="NO_MATCH">Aucun match</option>
                             <option value="WHITELISTED">Liste blanche</option>
                         </select>
+                        <label for="audit-date-from" style="align-self: center;">Du</label>
+                        <input type="date" id="audit-date-from" onchange="fetchAuditHistory(1)" title="Date de début (incluse)">
+                        <label for="audit-date-to" style="align-self: center;">au</label>
+                        <input type="date" id="audit-date-to" onchange="fetchAuditHistory(1)" title="Date de fin (incluse)">
                         <button class="btn btn-sm btn-secondary" onclick="exportHistoryCsv()" title="Exporter le journal filtré en CSV">⬇ CSV</button>
                     </div>
 

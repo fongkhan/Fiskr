@@ -29,23 +29,51 @@ const LIST_TYPE_LABELS = {
     CLIENT_BASE: "Base clients",
 };
 
-const SYNC_SOURCE_LABELS = {
-    OFAC: "OFAC SDN",
-    EURLEX: "EUR-Lex JO",
-    EUFSF: "UE FSF",
-    DGT: "DGT Gels",
-    UN: "ONU",
-    PEP: "PEP OpenSanctions",
-    OFSI: "UK OFSI",
-    SECO: "Suisse SECO",
-    OFACNONSDN: "OFAC Non-SDN",
-    CSL: "US CSL",
-    CANADA: "Canada SEMA",
-    DFAT: "Australie DFAT",
-    HKSFC: "Hong Kong SFC",
-    AMF: "AMF listes noires",
-    WORLDBANK: "Banque mondiale",
+// ------------------ CATALOGUE DES SOURCES OFFICIELLES ------------------
+// La seule source de vérité du front : l'écran Sources, les libellés des
+// rapports et la planification cron s'en dérivent. `key` = clé de
+// configuration (sync.<key>), `alias` = alias de POST /api/sync/run.
+// Familles : sanctions (gel des avoirs) / regulatory (mise en garde) /
+// debarment (exclusion de bailleur) / aggregated (données agrégées).
+const SOURCE_FAMILIES = {
+    sanctions: "⚖️ Sanctions officielles (gel des avoirs)",
+    regulatory: "📢 Alertes de régulateurs (signal, pas de gel)",
+    debarment: "🏛️ Exclusions de bailleurs multilatéraux",
+    aggregated: "🧩 Données agrégées (PEP, OpenSanctions)",
 };
+
+const SOURCE_CATALOG = [
+    { key: "ofac",        alias: "OFAC",       label: "OFAC SDN",           family: "sanctions",  desc: "SDN Advanced XML officiel du Trésor américain." },
+    { key: "ofac_nonsdn", alias: "OFACNONSDN", label: "OFAC Non-SDN",       family: "sanctions",  desc: "Régimes sans gel total (SSI, FSE, NS-MBS, PLC, MEU, CMIC) — liste séparée, seuillable à part." },
+    { key: "eurlex",      alias: "EURLEX",     label: "EUR-Lex JO",         family: "sanctions",  desc: "Signal d'alerte précoce du Journal Officiel de l'UE (mode alert) ; les désignations viennent du FSF." },
+    { key: "eu_fsf",      alias: "EUFSF",      label: "UE FSF",             family: "sanctions",  desc: "Liste consolidée officielle de l'UE — fait autorité, radiations fiables. Token gratuit requis (sync.eu_fsf.token)." },
+    { key: "dgt",         alias: "DGT",        label: "DGT Gels",           family: "sanctions",  desc: "Registre national des gels (Trésor français) — obligation autonome des assujettis français." },
+    { key: "un",          alias: "UN",         label: "ONU",                family: "sanctions",  desc: "Liste consolidée du Conseil de sécurité." },
+    { key: "ofsi",        alias: "OFSI",       label: "UK OFSI",            family: "sanctions",  desc: "Liste consolidée du HM Treasury (format 2022)." },
+    { key: "seco",        alias: "SECO",       label: "Suisse SECO",        family: "sanctions",  desc: "Liste consolidée suisse — voie officielle SESAM (base légale) ou OpenSanctions en secours (sync.seco.format)." },
+    { key: "csl",         alias: "CSL",        label: "US CSL",             family: "sanctions",  desc: "Agrégat américain : contrôle des exportations (Entity List, Denied Persons, ITAR…)." },
+    { key: "canada",      alias: "CANADA",     label: "Canada SEMA",        family: "sanctions",  desc: "Sanctions autonomes canadiennes (Affaires mondiales Canada)." },
+    { key: "dfat",        alias: "DFAT",       label: "Australie DFAT",     family: "sanctions",  desc: "Liste consolidée australienne : ONU transposée + désignations autonomes." },
+    { key: "japan_mof",   alias: "JAPANMOF",   label: "Japon MOF",          family: "sanctions",  desc: "Gels des avoirs du Ministère des finances japonais (via OpenSanctions)." },
+    { key: "mas",         alias: "MAS",        label: "Singapour MAS",      family: "sanctions",  desc: "Désignations TSOFA de la Monetary Authority of Singapore (via OpenSanctions)." },
+    { key: "nz_russia",   alias: "NZRUSSIA",   label: "Nouvelle-Zélande",   family: "sanctions",  desc: "Registre néo-zélandais des sanctions Russie (via OpenSanctions)." },
+    { key: "nl_terror",   alias: "NLTERROR",   label: "Pays-Bas terrorisme", family: "sanctions", desc: "Liste nationale néerlandaise de gel terrorisme (via OpenSanctions)." },
+    { key: "be_terror",   alias: "BETERROR",   label: "Belgique gels",      family: "sanctions",  desc: "Liste nationale belge de gel (via OpenSanctions)." },
+    { key: "il_nbctf",    alias: "ILNBCTF",    label: "Israël NBCTF",       family: "sanctions",  desc: "Désignations du bureau israélien de lutte contre le financement du terrorisme (via OpenSanctions)." },
+    { key: "ua_nsdc",     alias: "UANSDC",     label: "Ukraine NSDC",       family: "sanctions",  desc: "Sanctions du Conseil de sécurité ukrainien — signal riche, à croiser (via OpenSanctions)." },
+    { key: "hk_sfc",      alias: "HKSFC",      label: "Hong Kong SFC",      family: "regulatory", desc: "Liste d'alerte de la SFC : entités non autorisées, usurpations — signal à instruire, pas un gel." },
+    { key: "amf",         alias: "AMF",        label: "AMF listes noires",  family: "regulatory", desc: "Acteurs non autorisés signalés par l'AMF — la liste d'alerte du marché domestique." },
+    { key: "worldbank",   alias: "WORLDBANK",  label: "Banque mondiale",    family: "debarment",  desc: "Fournisseurs exclus des marchés financés (fraude/corruption avérée)." },
+    { key: "adb",         alias: "ADB",        label: "BAsD exclusions",    family: "debarment",  desc: "Exclusions de la Banque asiatique de développement (via OpenSanctions)." },
+    { key: "iadb",        alias: "IADB",       label: "BID exclusions",     family: "debarment",  desc: "Exclusions de la Banque interaméricaine de développement (via OpenSanctions)." },
+    { key: "ebrd",        alias: "EBRD",       label: "BERD exclusions",    family: "debarment",  desc: "Entités inéligibles aux financements BERD (via OpenSanctions)." },
+    { key: "afdb",        alias: "AFDB",       label: "BAfD exclusions",    family: "debarment",  desc: "Exclusions de la Banque africaine de développement (via OpenSanctions)." },
+    { key: "pep",         alias: "PEP",        label: "PEP OpenSanctions",  family: "aggregated", desc: "Personnes Politiquement Exposées agrégées — licence OpenSanctions requise en usage commercial." },
+];
+
+// Dérivés du catalogue (les autres écrans consomment ces deux formes)
+const SYNC_SOURCE_LABELS = Object.fromEntries(
+    SOURCE_CATALOG.map(s => [s.alias, s.label]));
 
 function listTypeLabel(t) {
     if (!t) return "Inconnue";
@@ -336,6 +364,112 @@ function tableEmpty(target, cols, message, icon = "📭") {
     tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
 }
 
+// ------------------ FILTRES GÉNÉRIQUES DE TABLEAU (côté client) ------------------
+// Une barre de filtres au-dessus d'un tableau rendu en mémoire : une
+// recherche plein texte + des menus déroulants dont les valeurs sont DÉDUITES
+// des colonnes. Filtre les <tr> du DOM (jamais les lignes d'en-tête de
+// groupe), se combine au tri générique, et affiche un compteur « N / M ».
+// Pour les tableaux paginés côté serveur, le filtre doit être serveur (il
+// porterait sinon sur la seule page affichée) — ne pas utiliser ici.
+//
+// attachTableFilters("ma-table", { search: true, columns: [{ index: 2, label: "Statut" }] })
+const _tableFilterSpecs = {};
+
+function attachTableFilters(tableId, spec) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    _tableFilterSpecs[tableId] = spec;
+    if (document.getElementById(`${tableId}-filterbar`)) {
+        refreshTableFilters(tableId);
+        return;
+    }
+    const bar = document.createElement("div");
+    bar.id = `${tableId}-filterbar`;
+    bar.className = "filter-bar table-filter-bar";
+    let html = "";
+    if (spec.search !== false) {
+        html += `<input type="text" id="${tableId}-filter-search" placeholder="${escapeHtml(spec.searchPlaceholder || "Filtrer…")}" aria-label="Filtrer le tableau">`;
+    }
+    for (const col of (spec.columns || [])) {
+        html += `<select id="${tableId}-filter-col-${col.index}" data-col="${col.index}" aria-label="${escapeHtml(col.label || "")}">
+            <option value="">${escapeHtml(col.label || "Tous")} : tous</option>
+        </select>`;
+    }
+    html += `<span id="${tableId}-filter-count" class="filter-count" aria-live="polite"></span>`;
+    bar.innerHTML = html;
+    // Insérée juste avant le conteneur du tableau (ou le tableau lui-même)
+    const anchor = table.closest(".table-container") || table;
+    anchor.parentNode.insertBefore(bar, anchor);
+
+    bar.addEventListener("input", () => applyTableFilter(tableId));
+
+    // Tout re-rendu du tableau rafraîchit les menus et réapplique le filtre.
+    // On observe childList (ajout/retrait de lignes), jamais les attributs :
+    // refreshTableFilters ne fait que poser des classes, pas de boucle.
+    const tbody = table.querySelector("tbody");
+    if (tbody && window.MutationObserver) {
+        new MutationObserver(() => refreshTableFilters(tableId))
+            .observe(tbody, { childList: true });
+    }
+    refreshTableFilters(tableId);
+}
+
+// Repeuple les menus (valeurs distinctes des colonnes) et réapplique le
+// filtre. À appeler après chaque rendu de données du tableau.
+function refreshTableFilters(tableId) {
+    const spec = _tableFilterSpecs[tableId];
+    const table = document.getElementById(tableId);
+    if (!spec || !table) return;
+    const rows = Array.from(table.querySelectorAll("tbody tr"))
+        .filter(tr => !tr.classList.contains("table-group-row") && !tr.querySelector(".empty-state"));
+    for (const col of (spec.columns || [])) {
+        const select = document.getElementById(`${tableId}-filter-col-${col.index}`);
+        if (!select) continue;
+        const current = select.value;
+        const values = [...new Set(rows.map(tr => (tr.children[col.index]?.textContent || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "fr"));
+        select.innerHTML = `<option value="">${escapeHtml(col.label || "Tous")} : tous</option>`
+            + values.map(v => `<option value="${escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(v.length > 40 ? v.slice(0, 40) + "…" : v)}</option>`).join("");
+    }
+    applyTableFilter(tableId);
+}
+
+function applyTableFilter(tableId) {
+    const spec = _tableFilterSpecs[tableId];
+    const table = document.getElementById(tableId);
+    if (!spec || !table) return;
+    const search = (document.getElementById(`${tableId}-filter-search`)?.value || "").trim().toLowerCase();
+    const colFilters = (spec.columns || []).map(col => ({
+        index: col.index,
+        value: document.getElementById(`${tableId}-filter-col-${col.index}`)?.value || "",
+    })).filter(f => f.value);
+
+    let shown = 0, total = 0;
+    for (const tr of table.querySelectorAll("tbody tr")) {
+        if (tr.classList.contains("table-group-row") || tr.querySelector(".empty-state")) continue;
+        total++;
+        const rowText = tr.textContent.toLowerCase();
+        let ok = (!search || rowText.includes(search));
+        if (ok) {
+            for (const f of colFilters) {
+                if ((tr.children[f.index]?.textContent || "").trim() !== f.value) { ok = false; break; }
+            }
+        }
+        tr.classList.toggle("filtered-out", !ok);
+        if (ok) shown++;
+    }
+    // Lignes d'en-tête de groupe : masquées si leur groupe n'a plus de ligne visible
+    let lastGroup = null, groupHasVisible = false;
+    const flush = () => { if (lastGroup) lastGroup.classList.toggle("filtered-out", !groupHasVisible); };
+    for (const tr of table.querySelectorAll("tbody tr")) {
+        if (tr.classList.contains("table-group-row")) { flush(); lastGroup = tr; groupHasVisible = false; }
+        else if (!tr.classList.contains("filtered-out") && !tr.querySelector(".empty-state")) groupHasVisible = true;
+    }
+    flush();
+
+    const counter = document.getElementById(`${tableId}-filter-count`);
+    if (counter) counter.textContent = (search || colFilters.length) ? `${shown} / ${total}` : "";
+}
+
 // ------------------ TRI DES COLONNES (côté client) ------------------
 
 // Tri générique de toutes les tables rendues en mémoire : clic sur un <th>.
@@ -512,6 +646,26 @@ document.addEventListener("DOMContentLoaded", () => {
     // Check authentication and load user info
     checkAuthUser();
     initListTypeControls();
+    // Filtres du tableau des sources (recherche + famille + état)
+    ["sources-search", "sources-family-filter", "sources-state-filter"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener("input", () => renderSourcesTable());
+    });
+    // Filtres génériques : les tableaux qui n'en avaient aucun reçoivent une
+    // recherche plein texte + des menus par colonne (valeurs déduites). Les
+    // tableaux paginés côté serveur en sont exclus (le filtre client ne
+    // verrait que la page affichée) — ils passent par des filtres serveur.
+    attachTableFilters("sync-reports-table", { search: true, searchPlaceholder: "Filtrer les rapports…", columns: [{ index: 1, label: "Source" }, { index: 2, label: "Statut" }] });
+    attachTableFilters("users-table", { search: true, searchPlaceholder: "Filtrer les comptes…", columns: [{ index: 4, label: "Rôle" }] });
+    attachTableFilters("apikeys-table", { search: true, searchPlaceholder: "Filtrer les clés…", columns: [{ index: 5, label: "État" }] });
+    attachTableFilters("admin-log-table", { search: true, searchPlaceholder: "Filtrer le journal…", columns: [{ index: 1, label: "Utilisateur" }, { index: 2, label: "Action" }] });
+    attachTableFilters("batch-campaigns-table", { search: true, searchPlaceholder: "Filtrer les campagnes…", columns: [{ index: 2, label: "Origine" }, { index: 3, label: "Statut" }] });
+    attachTableFilters("kpi-lists-table", { search: true, searchPlaceholder: "Filtrer les listes…" });
+    attachTableFilters("kpi-analysts-table", { search: true, searchPlaceholder: "Filtrer les analystes…" });
+    attachTableFilters("workload-table", { search: true, searchPlaceholder: "Filtrer les analystes…" });
+    attachTableFilters("quality-segments-table", { search: true, searchPlaceholder: "Filtrer les segments…" });
+    attachTableFilters("mining-table", { search: true, searchPlaceholder: "Filtrer les équivalences…", columns: [{ index: 1, label: "Champ" }, { index: 2, label: "Source" }] });
+    attachTableFilters("fprules-table", { search: true, searchPlaceholder: "Filtrer les règles…", columns: [{ index: 2, label: "Statut" }] });
     // Initial data loading — l'accueil d'abord (onglet par défaut)
     fetchHomeDashboard();
     fetchWatchlist();
@@ -593,10 +747,10 @@ async function checkAuthUser() {
             const canRules = isAdmin || roles.includes("rules");
             const blockingBtn = document.getElementById("sub-btn-alerts-blocking");
             if (blockingBtn) blockingBtn.classList.toggle("hidden", !canBlocking);
-            // Meme role que le blocking : c'est le meme paramétrage moteur,
-            // decoupe en deux ecrans pour ne pas en allonger un seul.
-            const engineBtn = document.getElementById("sub-btn-alerts-engine");
-            if (engineBtn) engineBtn.classList.toggle("hidden", !canBlocking);
+            // Meme role que le blocking : les ressources linguistiques sont le
+            // second volet du meme parametrage moteur, sur un ecran separe.
+            const resourcesBtn = document.getElementById("sub-btn-alerts-resources");
+            if (resourcesBtn) resourcesBtn.classList.toggle("hidden", !canBlocking);
             const rulesBtn = document.getElementById("sub-btn-alerts-rules");
             if (rulesBtn) rulesBtn.classList.toggle("hidden", !canRules);
         }
@@ -656,6 +810,7 @@ function switchTab(tabId) {
         fetchHomeDashboard();
     }
     if (tabId === "alerts") {
+        populateAssigneeFilters();
         fetchAlerts("SCREENING");
         fetchAlerts("FILTERING");
         fetchWhitelist();
@@ -663,10 +818,10 @@ function switchTab(tabId) {
         fetchSavedViews("FILTERING");
     }
     if (tabId === "kpi") {
+        // Sous-onglets KPI : seule la « Vue d'ensemble » charge à l'arrivée ;
+        // Charge & SLA, Qualité et Rapport se chargent à l'ouverture de leur onglet.
         fetchKpis();
         initActivityReportDates();
-        fetchWorkload();
-        fetchClientQuality();
     }
     if (tabId === "settings") {
         fetchIngestionSettings();
@@ -747,15 +902,25 @@ function switchSubTab(sectionId, subTabId) {
     } else if (subTabId === "alerts-whitelist") {
         fetchWhitelist();
     } else if (subTabId === "alerts-blocking") {
+        // Paramétrage moteur : clés de blocking + capacités du moteur
         fetchBlockingSettings();
+        fetchEngineSettings();
+        loadSimulationPanels();
+    } else if (subTabId === "alerts-resources") {
+        // Ressources linguistiques : équivalences + homonymes minés
         fetchResources();
         fetchLearnedEquivalences();
         loadSimulationPanels();
-    } else if (subTabId === "alerts-engine") {
-        fetchEngineSettings();
-        loadSimulationPanels();
     } else if (subTabId === "alerts-rules") {
         fetchFpRules();
+    } else if (subTabId === "kpi-overview") {
+        fetchKpis();
+    } else if (subTabId === "kpi-workload") {
+        fetchWorkload();
+    } else if (subTabId === "kpi-quality") {
+        fetchClientQuality();
+    } else if (subTabId === "kpi-activity") {
+        initActivityReportDates();
     } else if (subTabId === "screening-batch") {
         fetchBatchCampaigns();
     } else if (subTabId === "audit-screening") {
@@ -1268,29 +1433,21 @@ async function handleIngestion(event) {
 
 // ------------------ SOURCES AUTOMATIQUES (Sync OFAC / EUR-Lex) ------------------
 
-// Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
+// Déclenche une synchronisation manuelle. La progression n'est plus affichée
+// dans un bouton (le tableau des sources la montre en direct via
+// sourceStateCell, qui lit les opérations de fond) : on lance, on notifie, et
+// on suit le jeton pour restituer le rapport final.
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn", SECO: "sync-seco-btn", OFACNONSDN: "sync-ofacnonsdn-btn", CSL: "sync-csl-btn", CANADA: "sync-canada-btn", DFAT: "sync-dfat-btn", HKSFC: "sync-hksfc-btn", AMF: "sync-amf-btn", WORLDBANK: "sync-worldbank-btn" };
-    const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
-        const dateVal = document.getElementById("sync-eurlex-date").value;
-        if (dateVal) payload.date = dateVal;
+        const dateEl = document.getElementById("sync-eurlex-date");
+        if (dateEl && dateEl.value) payload.date = dateEl.value;
     }
 
-    btn.disabled = true;
-    const originalText = btn.textContent;
-    btn.textContent = "Synchronisation en cours...";
-
-    // La synchronisation répond 202 et travaille en tâche de fond : elle dure
-    // plusieurs minutes et bloquait l'application entière quand on l'attendait
-    // dans la requête. On suit son jeton, et le rapport est relu à la fin.
     let syncTimer = null;
     const stopFollowing = () => {
         if (syncTimer) clearInterval(syncTimer);
         syncTimer = null;
-        btn.disabled = false;
-        btn.textContent = originalText;
     };
 
     try {
@@ -1305,14 +1462,14 @@ async function handleSourceSync(source) {
             stopFollowing();
             return;
         }
+        const srcLabel = SYNC_SOURCE_LABELS[source] || source;
+        showToast(`Synchronisation ${srcLabel} lancée — suivi dans le tableau des sources.`, "info");
+        fetchActiveOperations();   // rafraîchit l'état vivant du tableau
 
-        // Suivi sur le jeton renvoyé par le serveur : progression dans le
-        // bouton, puis restitution du rapport à la fin.
-        //
-        // La fin est détectée SUR CE JETON, et non par le suivi global des
-        // opérations : une synchronisation sans changement se termine en moins
-        // d'un cycle de ce suivi, qui ne la verrait jamais « en cours » et ne
-        // déclencherait donc jamais la fin — le bouton resterait désactivé.
+        // Suivi sur le jeton renvoyé par le serveur, pour restituer le rapport
+        // final. La fin est détectée SUR CE JETON, et non par le suivi global
+        // des opérations : une synchronisation sans changement se termine en
+        // moins d'un cycle de ce suivi, qui ne la verrait jamais « en cours ».
         const syncToken = data.job_token;
         let finished = false;
         syncTimer = setInterval(async () => {
@@ -1320,12 +1477,8 @@ async function handleSourceSync(source) {
                 const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(syncToken)}`, { silent: true });
                 if (!resp.ok) return;
                 const p = await resp.json();
-                if (p.status === "RUNNING") {
-                    const label = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "";
-                    const count = p.processed ? ` ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}` : "";
-                    btn.textContent = `${label}${count}`;
-                    return;
-                }
+                renderSourcesTable();   // rafraîchit la ligne de la source
+                if (p.status === "RUNNING") return;
                 if (finished) return;
                 finished = true;
                 stopFollowing();
@@ -1458,12 +1611,9 @@ function showSyncReportDetail(report) {
 
 // Display the active scheduler configuration under the source cards
 // Sources planifiables (clef API -> libellé de SYNC_SOURCE_LABELS)
-const CRON_SOURCE_KEYS = {
-    ofac: "OFAC", eurlex: "EURLEX", dgt: "DGT", eu_fsf: "EUFSF",
-    un: "UN", pep: "PEP", ofsi: "OFSI", seco: "SECO",
-    ofac_nonsdn: "OFACNONSDN", csl: "CSL", canada: "CANADA", dfat: "DFAT",
-    hk_sfc: "HKSFC", amf: "AMF", worldbank: "WORLDBANK",
-};
+// Clé de configuration -> alias, dérivé du catalogue (planification cron)
+const CRON_SOURCE_KEYS = Object.fromEntries(
+    SOURCE_CATALOG.map(s => [s.key, s.alias]));
 
 async function fetchSyncConfig() {
     try {
@@ -1478,10 +1628,87 @@ async function fetchSyncConfig() {
             ? "Rapports envoyés par email (SMTP configuré)."
             : "Rapports disponibles dans l'application uniquement (SMTP non configuré).";
         if (info) info.textContent = `${autoTxt} ${mailTxt}`;
+        renderSourcesTable(cfg);
         renderCronSchedules(cfg);
     } catch (e) {
         console.error("Error fetching sync config:", e);
     }
+}
+
+// ------------------ TABLEAU DES SOURCES (groupé par famille) ------------------
+// Remplace l'ancien empilement d'une carte par source : 26 sources tiennent
+// dans un tableau filtrable, groupé par nature (une touche de sanction et une
+// mise en garde de régulateur n'ont pas la même conséquence).
+let _lastSourceState = null;   // {source: {enabled, next}}, pour re-render sans refetch
+
+function renderSourcesTable(cfg) {
+    if (cfg) _lastSourceState = cfg;
+    cfg = _lastSourceState;
+    const tbody = document.querySelector("#sources-table tbody");
+    if (!tbody || !cfg) return;
+
+    const search = (document.getElementById("sources-search")?.value || "").trim().toLowerCase();
+    const familyFilter = document.getElementById("sources-family-filter")?.value || "";
+    const stateFilter = document.getElementById("sources-state-filter")?.value || "";
+    const nextRuns = cfg.next_runs || {};
+
+    const rows = [];
+    for (const [family, familyLabel] of Object.entries(SOURCE_FAMILIES)) {
+        if (familyFilter && familyFilter !== family) continue;
+        const inFamily = SOURCE_CATALOG.filter(s => s.family === family).filter(s => {
+            const enabled = (cfg[s.key] || {}).enabled;
+            if (stateFilter === "enabled" && !enabled) return false;
+            if (stateFilter === "disabled" && enabled) return false;
+            if (search && !(`${s.label} ${s.alias} ${s.desc}`.toLowerCase().includes(search))) return false;
+            return true;
+        });
+        if (!inFamily.length) continue;
+        rows.push(`<tr class="table-group-row"><td colspan="4">${escapeHtml(familyLabel)}</td></tr>`);
+        for (const s of inFamily) {
+            const enabled = (cfg[s.key] || {}).enabled;
+            const state = sourceStateCell(s.alias);   // état vivant (sync en cours/terminée)
+            const nextRun = nextRuns[s.key] ? formatDateTime(nextRuns[s.key]) : "—";
+            rows.push(`<tr>
+                <td>
+                    <strong>${escapeHtml(s.label)}</strong>
+                    <div class="section-desc" style="margin: 0.15rem 0 0; font-size: 0.76rem;">${escapeHtml(s.desc)}</div>
+                </td>
+                <td>${enabled
+                    ? '<span class="status-badge no_match">activée</span>'
+                    : '<span class="status-badge" style="opacity: 0.6;">désactivée</span>'}</td>
+                <td>${state}<div class="section-desc" style="font-size: 0.72rem; margin-top: 0.15rem;">prochaine : ${escapeHtml(nextRun)}</div></td>
+                <td><button class="btn btn-primary" style="padding: 0.3rem 0.7rem; font-size: 0.8rem;"
+                        onclick="startSourceSync('${s.alias}')">Synchroniser</button></td>
+            </tr>`);
+        }
+    }
+    tbody.innerHTML = rows.length ? rows.join("")
+        : tableEmpty("#sources-table", 4, "Aucune source ne correspond au filtre.");
+}
+
+// EUR-Lex accepte une date de Journal Officiel : proposée au clic plutôt
+// qu'un champ permanent noyé dans le tableau. Les autres sources partent
+// directement.
+async function startSourceSync(alias) {
+    if (alias === "EURLEX") {
+        const box = document.getElementById("sync-source-options");
+        if (box) {
+            box.classList.remove("hidden");
+            box.innerHTML = `
+                <div class="filter-bar" style="align-items: flex-end;">
+                    <div class="form-group" style="max-width: 220px; margin: 0;">
+                        <label for="sync-eurlex-date">Date du Journal Officiel (EUR-Lex)</label>
+                        <input type="date" id="sync-eurlex-date">
+                    </div>
+                    <button class="btn btn-primary" onclick="handleSourceSync('EURLEX')">Lancer EUR-Lex</button>
+                    <button class="btn-secondary" onclick="document.getElementById('sync-source-options').classList.add('hidden')">Annuler</button>
+                </div>
+                <p class="section-desc" style="margin-top: 0.4rem;">Vide = Journal Officiel du jour. EUR-Lex fonctionne en signal d'alerte précoce ; les désignations viennent du FSF.</p>`;
+            box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+        return;
+    }
+    handleSourceSync(alias);
 }
 
 // ------------------ PLANIFICATION CRON PAR SOURCE ------------------
@@ -2278,6 +2505,10 @@ async function fetchAuditHistory(page = null) {
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const statusFilterEl = document.getElementById("audit-status-filter");
         if (statusFilterEl && statusFilterEl.value) params.set("status", statusFilterEl.value);
+        const fromEl = document.getElementById("audit-date-from");
+        if (fromEl && fromEl.value) params.set("date_from", fromEl.value);
+        const toEl = document.getElementById("audit-date-to");
+        if (toEl && toEl.value) params.set("date_to", toEl.value);
 
         const response = await apiFetch(`/api/history?${params}`);
         const data = await response.json();
@@ -4177,9 +4408,11 @@ let currentAlertId = null;
 
 const ALERT_CHANNEL_CONF = {
     SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter",
-                 priorityFilter: "screening-priority-filter", section: "alerts-screening" },
+                 priorityFilter: "screening-priority-filter", assigneeFilter: "screening-assignee-filter",
+                 section: "alerts-screening" },
     FILTERING: { table: "filtering-alerts-table", listFilter: "filtering-list-filter",
-                 priorityFilter: "filtering-priority-filter", section: "alerts-filtering" },
+                 priorityFilter: "filtering-priority-filter", assigneeFilter: "filtering-assignee-filter",
+                 section: "alerts-filtering" },
 };
 
 // Badge de priorité (case management) + indicateur de retard SLA
@@ -4254,6 +4487,8 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
         if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
         const prioFilterEl = document.getElementById(conf.priorityFilter);
         if (prioFilterEl && prioFilterEl.value) params.set("priority", prioFilterEl.value);
+        const assigneeFilterEl = document.getElementById(conf.assigneeFilter);
+        if (assigneeFilterEl && assigneeFilterEl.value) params.set("assigned_to", assigneeFilterEl.value);
         tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
         const response = await apiFetch(`/api/alerts?${params}`);
         if (!response.ok) return;
@@ -4267,6 +4502,26 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
     } catch (e) {
         console.error("Error fetching alerts:", e);
     }
+}
+
+// Peuple les filtres « analyste assigné » des deux files depuis l'annuaire.
+// Conserve la sélection courante et ajoute « Non assignées ».
+async function populateAssigneeFilters() {
+    const selects = ["screening-assignee-filter", "filtering-assignee-filter"]
+        .map(id => document.getElementById(id)).filter(Boolean);
+    if (!selects.length) return;
+    try {
+        const response = await apiFetch("/api/users/directory", { silent: true });
+        if (!response.ok) return;
+        const items = (await response.json()).items || [];
+        const opts = `<option value="">Tous analystes</option>`
+            + items.map(u => `<option value="${escapeHtml(u.username)}">@${escapeHtml(u.username)}${u.full_name ? " — " + escapeHtml(u.full_name) : ""}</option>`).join("");
+        for (const sel of selects) {
+            const prev = sel.value;
+            sel.innerHTML = opts;
+            if (prev && sel.querySelector(`option[value="${CSS.escape(prev)}"]`)) sel.value = prev;
+        }
+    } catch (e) { console.error("Assignee filter error:", e); }
 }
 
 function setAlertFilter(channel, filter) {
@@ -5398,7 +5653,8 @@ function engineChannel() {
 }
 
 async function fetchEngineSettings() {
-    const card = document.getElementById("sub-sec-alerts-engine");
+    // Les capacités du moteur vivent désormais dans le sous-onglet « Paramétrage moteur ».
+    const card = document.getElementById("sub-sec-alerts-blocking");
     if (!card || card.classList.contains("hidden")) return;
     try {
         const response = await apiFetch("/api/settings/engine");
@@ -6475,6 +6731,10 @@ function exportHistoryCsv() {
     if (listEl && listEl.value) params.set("list_type", listEl.value);
     const statusEl = document.getElementById("audit-status-filter");
     if (statusEl && statusEl.value) params.set("status", statusEl.value);
+    const fromEl = document.getElementById("audit-date-from");
+    if (fromEl && fromEl.value) params.set("date_from", fromEl.value);
+    const toEl = document.getElementById("audit-date-to");
+    if (toEl && toEl.value) params.set("date_to", toEl.value);
     window.open(`/api/export/history.csv?${params.toString()}`, "_blank");
 }
 

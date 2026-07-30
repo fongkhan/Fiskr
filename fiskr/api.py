@@ -70,12 +70,14 @@ from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     run_pep_sync, run_ofsi_sync, run_seco_sync, run_ofac_nonsdn_sync, run_csl_sync,
     run_canada_sync, run_dfat_sync, run_hk_sfc_sync, run_amf_sync, run_worldbank_sync,
+    OPENSANCTIONS_RUNNERS,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
+from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
 from fiskr.transactions import parse_iso20022_payment, screen_payment_message
 from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
@@ -336,6 +338,9 @@ def _run_scheduled_syncs():
             _apply_rescreen(run_amf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
         if sync_cfg["worldbank"]["enabled"]:
             _apply_rescreen(run_worldbank_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
+        for _os_key, _os_runner in OPENSANCTIONS_RUNNERS.items():
+            if sync_cfg[_os_key]["enabled"]:
+                _apply_rescreen(_os_runner(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
     finally:
         db.close()
 
@@ -346,6 +351,8 @@ _SYNC_RUNNERS = {
     "seco": run_seco_sync, "ofac_nonsdn": run_ofac_nonsdn_sync, "csl": run_csl_sync,
     "canada": run_canada_sync, "dfat": run_dfat_sync,
     "hk_sfc": run_hk_sfc_sync, "amf": run_amf_sync, "worldbank": run_worldbank_sync,
+    # Sources du registre OpenSanctions (fiskr/sources.py) : runners fabriques
+    **OPENSANCTIONS_RUNNERS,
 }
 
 
@@ -2599,10 +2606,20 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         if file_type in ("WATCHLIST_OFAC", "WATCHLIST_SSIE", "WATCHLIST_DGT", "WATCHLIST_UN", "WATCHLIST_PEP", "WATCHLIST_OFSI", "WATCHLIST_SECO",
                          "WATCHLIST_OFAC_NONSDN", "WATCHLIST_CSL",
                          "WATCHLIST_CANADA", "WATCHLIST_DFAT",
-                         "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK") or eu_fsf_upload:
+                         "WATCHLIST_HK_SFC", "WATCHLIST_AMF", "WATCHLIST_WORLDBANK") \
+                or file_type in OPENSANCTIONS_BY_FILE_TYPE or eu_fsf_upload:
             if eu_fsf_upload:
                 # Liste consolidee UE au format FSF XML officiel
                 parser_stream = parse_eu_fsf_xml(str(temp_file_path))
+            elif file_type in OPENSANCTIONS_BY_FILE_TYPE:
+                # Sources du registre OpenSanctions : UNE branche pour toutes,
+                # le parseur est parametre d'apres le registre
+                _os_src = OPENSANCTIONS_BY_FILE_TYPE[file_type]
+                from fiskr.ingest import parse_opensanctions_simple_csv
+                parser_stream = parse_opensanctions_simple_csv(
+                    str(temp_file_path), id_prefix=_os_src.id_prefix,
+                    origin=_os_src.origin,
+                    designation_reasons=_os_src.designation_reasons)
             elif file_type == "WATCHLIST_PEP":
                 # Dataset PEP OpenSanctions (targets.simple.csv)
                 parser_stream = parse_pep_targets_csv(str(temp_file_path))
@@ -4350,21 +4367,36 @@ async def browse_watchlist_db(
 async def get_audit_history(
     list_type: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Journal d'audit pagine, filtrable par statut de decision et type de liste.
-    Les enregistrements anterieurs a la colonne list_type sont restitues via
-    le decision_tree quand il porte le type (fallback lecture, le journal
-    immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
+    Journal d'audit pagine, filtrable par statut de decision, type de liste et
+    fenetre de dates (`date_from`/`date_to` au format AAAA-MM-JJ, bornes
+    incluses). Les enregistrements anterieurs a la colonne list_type sont
+    restitues via le decision_tree quand il porte le type (fallback lecture, le
+    journal immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
     """
     query = db.query(AuditTrail)
     if status_filter:
         statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
         query = query.filter(AuditTrail.status.in_(statuses))
+    if date_from:
+        try:
+            start = datetime.strptime(date_from, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_from invalide (attendu AAAA-MM-JJ).")
+        query = query.filter(AuditTrail.timestamp >= start)
+    if date_to:
+        try:
+            end = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_to invalide (attendu AAAA-MM-JJ).")
+        query = query.filter(AuditTrail.timestamp < end)
     query = _apply_list_type_filter(query, AuditTrail.list_type, list_type)
     total = query.count()
     rows = query.order_by(AuditTrail.timestamp.desc()) \
@@ -4522,6 +4554,8 @@ async def export_alerts_csv(
 async def export_history_csv(
     list_type: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -4530,6 +4564,16 @@ async def export_history_csv(
     if status_filter:
         statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
         query = query.filter(AuditTrail.status.in_(statuses))
+    if date_from:
+        try:
+            query = query.filter(AuditTrail.timestamp >= datetime.strptime(date_from, "%Y-%m-%d"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_from invalide (attendu AAAA-MM-JJ).")
+    if date_to:
+        try:
+            query = query.filter(AuditTrail.timestamp < datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date_to invalide (attendu AAAA-MM-JJ).")
     query = _apply_list_type_filter(query, AuditTrail.list_type, list_type)
     rows = query.order_by(AuditTrail.timestamp.desc()).limit(_EXPORT_MAX_ROWS).all()
     header = ["id", "horodatage", "client_id", "client", "type_client", "fiche_listee_id",
@@ -4915,6 +4959,8 @@ _SYNC_SOURCE_ALIASES: Dict[str, Tuple[str, str]] = {
     "HKSFC": ("hk_sfc", "HKSFC"),
     "AMF": ("amf", "AMF"),
     "WORLDBANK": ("worldbank", "WORLDBANK"),
+    # Alias des sources du registre OpenSanctions : le nom court sert d'alias
+    **{src.source: (key, src.source) for key, src in OPENSANCTIONS_BY_KEY.items()},
 }
 
 # Cle d'execution (_SYNC_RUNNERS / planificateur) -> nom de source du moteur,
@@ -4955,7 +5001,9 @@ def run_source_sync(
     if alias is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source inconnue (valeurs possibles: OFAC, OFACNONSDN, EURLEX, EUFSF, DGT, UN, PEP, OFSI, SECO, CSL, CANADA, DFAT, HKSFC, AMF, WORLDBANK)."
+            # Enumeration derivee des alias : une source ajoutee au registre
+            # apparait ici sans mise a jour manuelle
+            detail=f"Source inconnue (valeurs possibles: {', '.join(sorted(_SYNC_SOURCE_ALIASES))})."
         )
     run_key, engine_source = alias
 
@@ -4991,11 +5039,26 @@ def run_source_sync(
 @app.get("/api/sync/reports")
 async def get_sync_reports(
     limit: int = Query(50, ge=1, le=200),
+    source: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Historique des rapports de synchronisation des sources (suivi in-app)."""
-    reports = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(limit).all()
+    """
+    Historique des rapports de synchronisation des sources (suivi in-app).
+
+    Filtres serveur `source` et `status` : `limit` borne l'historique renvoye,
+    donc un filtre porte cote serveur voit TOUT l'historique et pas seulement
+    les N derniers rapports affiches (un filtre client ne verrait que la page).
+    """
+    query = db.query(SyncReport)
+    if source:
+        query = query.filter(SyncReport.source == source.strip().upper())
+    if status_filter:
+        statuses = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        if statuses:
+            query = query.filter(SyncReport.status.in_(statuses))
+    reports = query.order_by(SyncReport.executed_at.desc()).limit(limit).all()
     return [_serialize_sync_report(r) for r in reports]
 
 @app.get("/api/sync/config")

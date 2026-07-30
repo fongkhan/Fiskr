@@ -40,3 +40,4 @@ retention_archive/
 # Demon travailleur (runtime)
 fiskr-worker.lock
 worker.log
+uv_ux.log

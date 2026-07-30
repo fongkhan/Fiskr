@@ -34,8 +34,10 @@ SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
 SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
 # Planification cron par source de synchronisation (source -> expression 5 champs)
 SETTING_SYNC_SCHEDULES = "sync.schedules"
+from fiskr.sources import OPENSANCTIONS_BY_KEY as _OS_BY_KEY
+
 SYNC_SOURCES = ("ofac", "ofac_nonsdn", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi", "seco", "csl", "canada", "dfat",
-                "hk_sfc", "amf", "worldbank")
+                "hk_sfc", "amf", "worldbank") + tuple(_OS_BY_KEY)
 # Capacites du moteur de rapprochement, activables PAR CANAL. Le catalogue des
 # capacites vit dans fiskr/capabilities.py (source de verite unique, lue aussi
 # par le moteur, l'API et l'ecran) ; ici on ne stocke que l'activation :
