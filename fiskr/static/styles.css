@@ -836,6 +836,19 @@ textarea {
     max-height: 480px;
 }
 
+/* Ligne d'en-tête de groupe dans un tableau (familles de sources, etc.) */
+.table-group-row td {
+    background: var(--surface-hover);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+    padding-top: 0.6rem;
+    padding-bottom: 0.4rem;
+}
+.table-group-row:hover td { background: var(--surface-hover); }
+
 table {
     width: 100%;
     border-collapse: collapse;

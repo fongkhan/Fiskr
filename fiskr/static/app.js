@@ -29,23 +29,51 @@ const LIST_TYPE_LABELS = {
     CLIENT_BASE: "Base clients",
 };
 
-const SYNC_SOURCE_LABELS = {
-    OFAC: "OFAC SDN",
-    EURLEX: "EUR-Lex JO",
-    EUFSF: "UE FSF",
-    DGT: "DGT Gels",
-    UN: "ONU",
-    PEP: "PEP OpenSanctions",
-    OFSI: "UK OFSI",
-    SECO: "Suisse SECO",
-    OFACNONSDN: "OFAC Non-SDN",
-    CSL: "US CSL",
-    CANADA: "Canada SEMA",
-    DFAT: "Australie DFAT",
-    HKSFC: "Hong Kong SFC",
-    AMF: "AMF listes noires",
-    WORLDBANK: "Banque mondiale",
+// ------------------ CATALOGUE DES SOURCES OFFICIELLES ------------------
+// La seule source de vérité du front : l'écran Sources, les libellés des
+// rapports et la planification cron s'en dérivent. `key` = clé de
+// configuration (sync.<key>), `alias` = alias de POST /api/sync/run.
+// Familles : sanctions (gel des avoirs) / regulatory (mise en garde) /
+// debarment (exclusion de bailleur) / aggregated (données agrégées).
+const SOURCE_FAMILIES = {
+    sanctions: "⚖️ Sanctions officielles (gel des avoirs)",
+    regulatory: "📢 Alertes de régulateurs (signal, pas de gel)",
+    debarment: "🏛️ Exclusions de bailleurs multilatéraux",
+    aggregated: "🧩 Données agrégées (PEP, OpenSanctions)",
 };
+
+const SOURCE_CATALOG = [
+    { key: "ofac",        alias: "OFAC",       label: "OFAC SDN",           family: "sanctions",  desc: "SDN Advanced XML officiel du Trésor américain." },
+    { key: "ofac_nonsdn", alias: "OFACNONSDN", label: "OFAC Non-SDN",       family: "sanctions",  desc: "Régimes sans gel total (SSI, FSE, NS-MBS, PLC, MEU, CMIC) — liste séparée, seuillable à part." },
+    { key: "eurlex",      alias: "EURLEX",     label: "EUR-Lex JO",         family: "sanctions",  desc: "Signal d'alerte précoce du Journal Officiel de l'UE (mode alert) ; les désignations viennent du FSF." },
+    { key: "eu_fsf",      alias: "EUFSF",      label: "UE FSF",             family: "sanctions",  desc: "Liste consolidée officielle de l'UE — fait autorité, radiations fiables. Token gratuit requis (sync.eu_fsf.token)." },
+    { key: "dgt",         alias: "DGT",        label: "DGT Gels",           family: "sanctions",  desc: "Registre national des gels (Trésor français) — obligation autonome des assujettis français." },
+    { key: "un",          alias: "UN",         label: "ONU",                family: "sanctions",  desc: "Liste consolidée du Conseil de sécurité." },
+    { key: "ofsi",        alias: "OFSI",       label: "UK OFSI",            family: "sanctions",  desc: "Liste consolidée du HM Treasury (format 2022)." },
+    { key: "seco",        alias: "SECO",       label: "Suisse SECO",        family: "sanctions",  desc: "Liste consolidée suisse — voie officielle SESAM (base légale) ou OpenSanctions en secours (sync.seco.format)." },
+    { key: "csl",         alias: "CSL",        label: "US CSL",             family: "sanctions",  desc: "Agrégat américain : contrôle des exportations (Entity List, Denied Persons, ITAR…)." },
+    { key: "canada",      alias: "CANADA",     label: "Canada SEMA",        family: "sanctions",  desc: "Sanctions autonomes canadiennes (Affaires mondiales Canada)." },
+    { key: "dfat",        alias: "DFAT",       label: "Australie DFAT",     family: "sanctions",  desc: "Liste consolidée australienne : ONU transposée + désignations autonomes." },
+    { key: "japan_mof",   alias: "JAPANMOF",   label: "Japon MOF",          family: "sanctions",  desc: "Gels des avoirs du Ministère des finances japonais (via OpenSanctions)." },
+    { key: "mas",         alias: "MAS",        label: "Singapour MAS",      family: "sanctions",  desc: "Désignations TSOFA de la Monetary Authority of Singapore (via OpenSanctions)." },
+    { key: "nz_russia",   alias: "NZRUSSIA",   label: "Nouvelle-Zélande",   family: "sanctions",  desc: "Registre néo-zélandais des sanctions Russie (via OpenSanctions)." },
+    { key: "nl_terror",   alias: "NLTERROR",   label: "Pays-Bas terrorisme", family: "sanctions", desc: "Liste nationale néerlandaise de gel terrorisme (via OpenSanctions)." },
+    { key: "be_terror",   alias: "BETERROR",   label: "Belgique gels",      family: "sanctions",  desc: "Liste nationale belge de gel (via OpenSanctions)." },
+    { key: "il_nbctf",    alias: "ILNBCTF",    label: "Israël NBCTF",       family: "sanctions",  desc: "Désignations du bureau israélien de lutte contre le financement du terrorisme (via OpenSanctions)." },
+    { key: "ua_nsdc",     alias: "UANSDC",     label: "Ukraine NSDC",       family: "sanctions",  desc: "Sanctions du Conseil de sécurité ukrainien — signal riche, à croiser (via OpenSanctions)." },
+    { key: "hk_sfc",      alias: "HKSFC",      label: "Hong Kong SFC",      family: "regulatory", desc: "Liste d'alerte de la SFC : entités non autorisées, usurpations — signal à instruire, pas un gel." },
+    { key: "amf",         alias: "AMF",        label: "AMF listes noires",  family: "regulatory", desc: "Acteurs non autorisés signalés par l'AMF — la liste d'alerte du marché domestique." },
+    { key: "worldbank",   alias: "WORLDBANK",  label: "Banque mondiale",    family: "debarment",  desc: "Fournisseurs exclus des marchés financés (fraude/corruption avérée)." },
+    { key: "adb",         alias: "ADB",        label: "BAsD exclusions",    family: "debarment",  desc: "Exclusions de la Banque asiatique de développement (via OpenSanctions)." },
+    { key: "iadb",        alias: "IADB",       label: "BID exclusions",     family: "debarment",  desc: "Exclusions de la Banque interaméricaine de développement (via OpenSanctions)." },
+    { key: "ebrd",        alias: "EBRD",       label: "BERD exclusions",    family: "debarment",  desc: "Entités inéligibles aux financements BERD (via OpenSanctions)." },
+    { key: "afdb",        alias: "AFDB",       label: "BAfD exclusions",    family: "debarment",  desc: "Exclusions de la Banque africaine de développement (via OpenSanctions)." },
+    { key: "pep",         alias: "PEP",        label: "PEP OpenSanctions",  family: "aggregated", desc: "Personnes Politiquement Exposées agrégées — licence OpenSanctions requise en usage commercial." },
+];
+
+// Dérivés du catalogue (les autres écrans consomment ces deux formes)
+const SYNC_SOURCE_LABELS = Object.fromEntries(
+    SOURCE_CATALOG.map(s => [s.alias, s.label]));
 
 function listTypeLabel(t) {
     if (!t) return "Inconnue";
@@ -512,6 +540,11 @@ document.addEventListener("DOMContentLoaded", () => {
     // Check authentication and load user info
     checkAuthUser();
     initListTypeControls();
+    // Filtres du tableau des sources (recherche + famille + état)
+    ["sources-search", "sources-family-filter", "sources-state-filter"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener("input", () => renderSourcesTable());
+    });
     // Initial data loading — l'accueil d'abord (onglet par défaut)
     fetchHomeDashboard();
     fetchWatchlist();
@@ -1268,29 +1301,21 @@ async function handleIngestion(event) {
 
 // ------------------ SOURCES AUTOMATIQUES (Sync OFAC / EUR-Lex) ------------------
 
-// Trigger a manual source synchronization (OFAC download or EUR-Lex scraping)
+// Déclenche une synchronisation manuelle. La progression n'est plus affichée
+// dans un bouton (le tableau des sources la montre en direct via
+// sourceStateCell, qui lit les opérations de fond) : on lance, on notifie, et
+// on suit le jeton pour restituer le rapport final.
 async function handleSourceSync(source) {
-    const btnIds = { OFAC: "sync-ofac-btn", EURLEX: "sync-eurlex-btn", DGT: "sync-dgt-btn", UN: "sync-un-btn", EUFSF: "sync-eufsf-btn", PEP: "sync-pep-btn", OFSI: "sync-ofsi-btn", SECO: "sync-seco-btn", OFACNONSDN: "sync-ofacnonsdn-btn", CSL: "sync-csl-btn", CANADA: "sync-canada-btn", DFAT: "sync-dfat-btn", HKSFC: "sync-hksfc-btn", AMF: "sync-amf-btn", WORLDBANK: "sync-worldbank-btn" };
-    const btn = document.getElementById(btnIds[source] || "sync-ofac-btn");
     const payload = { source };
     if (source === "EURLEX") {
-        const dateVal = document.getElementById("sync-eurlex-date").value;
-        if (dateVal) payload.date = dateVal;
+        const dateEl = document.getElementById("sync-eurlex-date");
+        if (dateEl && dateEl.value) payload.date = dateEl.value;
     }
 
-    btn.disabled = true;
-    const originalText = btn.textContent;
-    btn.textContent = "Synchronisation en cours...";
-
-    // La synchronisation répond 202 et travaille en tâche de fond : elle dure
-    // plusieurs minutes et bloquait l'application entière quand on l'attendait
-    // dans la requête. On suit son jeton, et le rapport est relu à la fin.
     let syncTimer = null;
     const stopFollowing = () => {
         if (syncTimer) clearInterval(syncTimer);
         syncTimer = null;
-        btn.disabled = false;
-        btn.textContent = originalText;
     };
 
     try {
@@ -1305,14 +1330,14 @@ async function handleSourceSync(source) {
             stopFollowing();
             return;
         }
+        const srcLabel = SYNC_SOURCE_LABELS[source] || source;
+        showToast(`Synchronisation ${srcLabel} lancée — suivi dans le tableau des sources.`, "info");
+        fetchActiveOperations();   // rafraîchit l'état vivant du tableau
 
-        // Suivi sur le jeton renvoyé par le serveur : progression dans le
-        // bouton, puis restitution du rapport à la fin.
-        //
-        // La fin est détectée SUR CE JETON, et non par le suivi global des
-        // opérations : une synchronisation sans changement se termine en moins
-        // d'un cycle de ce suivi, qui ne la verrait jamais « en cours » et ne
-        // déclencherait donc jamais la fin — le bouton resterait désactivé.
+        // Suivi sur le jeton renvoyé par le serveur, pour restituer le rapport
+        // final. La fin est détectée SUR CE JETON, et non par le suivi global
+        // des opérations : une synchronisation sans changement se termine en
+        // moins d'un cycle de ce suivi, qui ne la verrait jamais « en cours ».
         const syncToken = data.job_token;
         let finished = false;
         syncTimer = setInterval(async () => {
@@ -1320,12 +1345,8 @@ async function handleSourceSync(source) {
                 const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(syncToken)}`, { silent: true });
                 if (!resp.ok) return;
                 const p = await resp.json();
-                if (p.status === "RUNNING") {
-                    const label = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "";
-                    const count = p.processed ? ` ${p.processed.toLocaleString(uiLocale())}${p.total ? " / " + p.total.toLocaleString(uiLocale()) : ""}` : "";
-                    btn.textContent = `${label}${count}`;
-                    return;
-                }
+                renderSourcesTable();   // rafraîchit la ligne de la source
+                if (p.status === "RUNNING") return;
                 if (finished) return;
                 finished = true;
                 stopFollowing();
@@ -1458,12 +1479,9 @@ function showSyncReportDetail(report) {
 
 // Display the active scheduler configuration under the source cards
 // Sources planifiables (clef API -> libellé de SYNC_SOURCE_LABELS)
-const CRON_SOURCE_KEYS = {
-    ofac: "OFAC", eurlex: "EURLEX", dgt: "DGT", eu_fsf: "EUFSF",
-    un: "UN", pep: "PEP", ofsi: "OFSI", seco: "SECO",
-    ofac_nonsdn: "OFACNONSDN", csl: "CSL", canada: "CANADA", dfat: "DFAT",
-    hk_sfc: "HKSFC", amf: "AMF", worldbank: "WORLDBANK",
-};
+// Clé de configuration -> alias, dérivé du catalogue (planification cron)
+const CRON_SOURCE_KEYS = Object.fromEntries(
+    SOURCE_CATALOG.map(s => [s.key, s.alias]));
 
 async function fetchSyncConfig() {
     try {
@@ -1478,10 +1496,87 @@ async function fetchSyncConfig() {
             ? "Rapports envoyés par email (SMTP configuré)."
             : "Rapports disponibles dans l'application uniquement (SMTP non configuré).";
         if (info) info.textContent = `${autoTxt} ${mailTxt}`;
+        renderSourcesTable(cfg);
         renderCronSchedules(cfg);
     } catch (e) {
         console.error("Error fetching sync config:", e);
     }
+}
+
+// ------------------ TABLEAU DES SOURCES (groupé par famille) ------------------
+// Remplace l'ancien empilement d'une carte par source : 26 sources tiennent
+// dans un tableau filtrable, groupé par nature (une touche de sanction et une
+// mise en garde de régulateur n'ont pas la même conséquence).
+let _lastSourceState = null;   // {source: {enabled, next}}, pour re-render sans refetch
+
+function renderSourcesTable(cfg) {
+    if (cfg) _lastSourceState = cfg;
+    cfg = _lastSourceState;
+    const tbody = document.querySelector("#sources-table tbody");
+    if (!tbody || !cfg) return;
+
+    const search = (document.getElementById("sources-search")?.value || "").trim().toLowerCase();
+    const familyFilter = document.getElementById("sources-family-filter")?.value || "";
+    const stateFilter = document.getElementById("sources-state-filter")?.value || "";
+    const nextRuns = cfg.next_runs || {};
+
+    const rows = [];
+    for (const [family, familyLabel] of Object.entries(SOURCE_FAMILIES)) {
+        if (familyFilter && familyFilter !== family) continue;
+        const inFamily = SOURCE_CATALOG.filter(s => s.family === family).filter(s => {
+            const enabled = (cfg[s.key] || {}).enabled;
+            if (stateFilter === "enabled" && !enabled) return false;
+            if (stateFilter === "disabled" && enabled) return false;
+            if (search && !(`${s.label} ${s.alias} ${s.desc}`.toLowerCase().includes(search))) return false;
+            return true;
+        });
+        if (!inFamily.length) continue;
+        rows.push(`<tr class="table-group-row"><td colspan="4">${escapeHtml(familyLabel)}</td></tr>`);
+        for (const s of inFamily) {
+            const enabled = (cfg[s.key] || {}).enabled;
+            const state = sourceStateCell(s.alias);   // état vivant (sync en cours/terminée)
+            const nextRun = nextRuns[s.key] ? formatDateTime(nextRuns[s.key]) : "—";
+            rows.push(`<tr>
+                <td>
+                    <strong>${escapeHtml(s.label)}</strong>
+                    <div class="section-desc" style="margin: 0.15rem 0 0; font-size: 0.76rem;">${escapeHtml(s.desc)}</div>
+                </td>
+                <td>${enabled
+                    ? '<span class="status-badge no_match">activée</span>'
+                    : '<span class="status-badge" style="opacity: 0.6;">désactivée</span>'}</td>
+                <td>${state}<div class="section-desc" style="font-size: 0.72rem; margin-top: 0.15rem;">prochaine : ${escapeHtml(nextRun)}</div></td>
+                <td><button class="btn btn-primary" style="padding: 0.3rem 0.7rem; font-size: 0.8rem;"
+                        onclick="startSourceSync('${s.alias}')">Synchroniser</button></td>
+            </tr>`);
+        }
+    }
+    tbody.innerHTML = rows.length ? rows.join("")
+        : tableEmpty("#sources-table", 4, "Aucune source ne correspond au filtre.");
+}
+
+// EUR-Lex accepte une date de Journal Officiel : proposée au clic plutôt
+// qu'un champ permanent noyé dans le tableau. Les autres sources partent
+// directement.
+async function startSourceSync(alias) {
+    if (alias === "EURLEX") {
+        const box = document.getElementById("sync-source-options");
+        if (box) {
+            box.classList.remove("hidden");
+            box.innerHTML = `
+                <div class="filter-bar" style="align-items: flex-end;">
+                    <div class="form-group" style="max-width: 220px; margin: 0;">
+                        <label for="sync-eurlex-date">Date du Journal Officiel (EUR-Lex)</label>
+                        <input type="date" id="sync-eurlex-date">
+                    </div>
+                    <button class="btn btn-primary" onclick="handleSourceSync('EURLEX')">Lancer EUR-Lex</button>
+                    <button class="btn-secondary" onclick="document.getElementById('sync-source-options').classList.add('hidden')">Annuler</button>
+                </div>
+                <p class="section-desc" style="margin-top: 0.4rem;">Vide = Journal Officiel du jour. EUR-Lex fonctionne en signal d'alerte précoce ; les désignations viennent du FSF.</p>`;
+            box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+        return;
+    }
+    handleSourceSync(alias);
 }
 
 // ------------------ PLANIFICATION CRON PAR SOURCE ------------------

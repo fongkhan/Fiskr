@@ -626,130 +626,32 @@
                             <h2>Collecteurs de Sources Officielles</h2>
                             <p class="section-desc">Récupérez les listes directement auprès des émetteurs : le delta (ADDED / MODIFIED / REMOVED) est calculé puis appliqué au référentiel actif, et un rapport de suivi est émis (in-app + email si SMTP configuré).</p>
 
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇸 OFAC — SDN Advanced (XML)</h3>
-                                <p class="section-desc">Téléchargement du fichier officiel <code>SDN_ADVANCED.XML</code>, ingestion, delta et remplacement de la liste OFAC active.</p>
-                                <button id="sync-ofac-btn" class="btn btn-primary" onclick="handleSourceSync('OFAC')">
-                                    Synchroniser maintenant
-                                </button>
+                            <p class="section-desc" style="margin-bottom: 0.75rem;">Les sources sont groupées par nature. Activez-les dans <code>config.yaml</code> (<code>sync.&lt;source&gt;.enabled</code>) ; une source désactivée reste listée mais grisée. « Synchroniser » lance une récupération immédiate ; la planification quotidienne se règle plus bas.</p>
+                            <div class="filter-bar" style="margin-bottom: 0.75rem;">
+                                <input type="text" id="sources-search" placeholder="Filtrer les sources (nom, pays…)" aria-label="Filtrer les sources">
+                                <select id="sources-family-filter" aria-label="Filtrer par famille">
+                                    <option value="">Toutes les familles</option>
+                                    <option value="sanctions">Sanctions officielles</option>
+                                    <option value="regulatory">Alertes de régulateurs</option>
+                                    <option value="debarment">Exclusions de bailleurs</option>
+                                    <option value="aggregated">Données agrégées</option>
+                                </select>
+                                <select id="sources-state-filter" aria-label="Filtrer par état">
+                                    <option value="">Toutes (activées ou non)</option>
+                                    <option value="enabled">Activées seulement</option>
+                                    <option value="disabled">Désactivées seulement</option>
+                                </select>
                             </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇫🇷 DGT — Registre national des gels des avoirs (JSON)</h3>
-                                <p class="section-desc">Téléchargement du registre officiel de la Direction générale du Trésor (API publique <code>gels-avoirs.dgtresor.gouv.fr</code>), ingestion, delta et remplacement de la liste DGT active. Obligation autonome pour les établissements assujettis français (lignes directrices ACPR/DGT).</p>
-                                <button id="sync-dgt-btn" class="btn btn-primary" onclick="handleSourceSync('DGT')">
-                                    Synchroniser maintenant
-                                </button>
+                            <div class="table-container">
+                                <table id="sources-table">
+                                    <thead><tr>
+                                        <th>Source</th><th>Activée</th><th>Dernière / prochaine</th><th class="no-sort"></th>
+                                    </tr></thead>
+                                    <tbody><!-- Généré depuis SOURCE_CATALOG (renderSourcesTable) --></tbody>
+                                </table>
                             </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇳 ONU — Liste consolidée du Conseil de sécurité (XML)</h3>
-                                <p class="section-desc">Téléchargement de la liste consolidée officielle (<code>scsanctions.un.org</code>, publique), ingestion, delta et remplacement de la liste ONU active.</p>
-                                <button id="sync-un-btn" class="btn btn-primary" onclick="handleSourceSync('UN')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇬🇧 UK OFSI — Liste consolidée (CSV)</h3>
-                                <p class="section-desc">Liste consolidée du HM Treasury (format 2022). Opt-in selon l'exposition UK (<code>sync.ofsi.enabled</code>).</p>
-                                <button id="sync-ofsi-btn" class="btn btn-primary" onclick="handleSourceSync('OFSI')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇸 OFAC Non-SDN — Liste consolidée (XML)</h3>
-                                <p class="section-desc">Second fichier de l'OFAC, au même format que la SDN. Il porte les régimes qui n'emportent pas de gel total des avoirs et sont pour cette raison absents de la SDN : sanctions sectorielles (SSI), FSE, NS-MBS, PLC, MEU, CMIC. Liste séparée, seuillable à part, car la conséquence opérationnelle d'une touche n'y est pas la même (<code>sync.ofac_nonsdn.enabled</code>).</p>
-                                <button id="sync-ofacnonsdn-btn" class="btn btn-primary" onclick="handleSourceSync('OFACNONSDN')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇺🇸 US CSL — Consolidated Screening List (JSON)</h3>
-                                <p class="section-desc">Agrégat officiel du gouvernement américain, public et sans clé. Son apport propre est le contrôle des exportations, absent de toutes les autres sources branchées : Entity List, Denied Persons, Unverified et Military End User du BIS, ITAR Debarred et Nonproliferation du Département d'État. Les listes déjà récupérées à leur source sont écartées à la lecture pour ne pas doubler les alertes (<code>sync.csl.exclude_sources</code>).</p>
-                                <button id="sync-csl-btn" class="btn btn-primary" onclick="handleSourceSync('CSL')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇨🇦 Canada SEMA — Sanctions autonomes (CSV)</h3>
-                                <p class="section-desc">Liste consolidée d'Affaires mondiales Canada. Le Canada désigne de façon autonome : son périmètre ne recoupe ni celui de l'UE ni celui de l'OFAC. Le fichier n'ayant pas d'identifiant technique, la clé de rapprochement est reconstruite depuis la référence réglementaire (annexe et article), faute de quoi chaque publication paraîtrait remplacer intégralement la précédente (<code>sync.canada.enabled</code>).</p>
-                                <button id="sync-canada-btn" class="btn btn-primary" onclick="handleSourceSync('CANADA')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇦🇺 Australie DFAT — Liste consolidée</h3>
-                                <p class="section-desc">Liste consolidée du Department of Foreign Affairs and Trade, qui réunit les sanctions onusiennes transposées et les désignations autonomes australiennes. Les lignes se répètent par variante de nom et sont regroupées par référence, comme le fichier britannique. L'extension de l'URL choisit le lecteur : CSV en natif, XLSX si le paquet optionnel openpyxl est installé (<code>sync.dfat.enabled</code>).</p>
-                                <button id="sync-dfat-btn" class="btn btn-primary" onclick="handleSourceSync('DFAT')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇭🇰 Hong Kong SFC — Liste d'alerte</h3>
-                                <p class="section-desc">Entités non autorisées, sites frauduleux et usurpations d'identité d'intermédiaires agréés recensés par la Securities and Futures Commission. Ce n'est pas une liste de sanctions : une touche est un signal de risque à instruire, pas une obligation de gel — d'où un type de liste distinct, à seuiller à part dans <code>scoring.cut_off_overrides</code>. Hong Kong n'ayant pas de régime de sanctions autonome, c'est cette liste qui apporte une couverture propre (<code>sync.hk_sfc.enabled</code>).</p>
-                                <button id="sync-hksfc-btn" class="btn btn-primary" onclick="handleSourceSync('HKSFC')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇫🇷 AMF — Listes noires</h3>
-                                <p class="section-desc">Acteurs et sites proposant des services d'investissement sans y être autorisés, signalés par l'Autorité des marchés financiers. Même nature que la liste de Hong Kong : mise en garde et non gel des avoirs. C'est la liste d'alerte dont un assujetti français a l'usage le plus direct (<code>sync.amf.enabled</code>).</p>
-                                <button id="sync-amf-btn" class="btn btn-primary" onclick="handleSourceSync('AMF')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🏛️ Banque mondiale — Fournisseurs exclus (JSON)</h3>
-                                <p class="section-desc">Fournisseurs et personnes exclus des marchés financés par le Groupe de la Banque mondiale, pour fraude ou corruption avérée. Encore une autre nature : ni gel, ni mise en garde, mais une exclusion à durée déterminée — la date de fin alimente la colonne de radiation. Criblée au titre du risque de contrepartie sur le financement de projets et le trade finance (<code>sync.worldbank.enabled</code>).</p>
-                                <button id="sync-worldbank-btn" class="btn btn-primary" onclick="handleSourceSync('WORLDBANK')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇨🇭 Suisse SECO — Liste consolidée</h3>
-                                <p class="section-desc">Liste consolidée du Secrétariat d'État à l'économie. Deux voies au choix : l'export officiel SESAM de la Confédération, seul à porter la base légale suisse (ordonnance RS) et les dates d'inscription, ou le jeu OpenSanctions au format plat en secours. Opt-in selon l'exposition suisse (<code>sync.seco.enabled</code>, <code>sync.seco.format</code>).</p>
-                                <button id="sync-seco-btn" class="btn btn-primary" onclick="handleSourceSync('SECO')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">👤 PEP — Dataset OpenSanctions (CSV)</h3>
-                                <p class="section-desc">Personnes Politiquement Exposées agrégées par OpenSanctions. <strong>Licence</strong> : usage non commercial libre, licence requise pour un usage commercial (<code>sync.pep.enabled</code>, désactivé par défaut).</p>
-                                <button id="sync-pep-btn" class="btn btn-primary" onclick="handleSourceSync('PEP')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
-                                <h3 style="margin-top: 0;">🇪🇺 UE — Liste consolidée officielle (FSF XML)</h3>
-                                <p class="section-desc">Fichier consolidé des sanctions financières de l'UE (webgate FSD) : fait autorité sur le scraping du JO, les <strong>radiations</strong> y sont fiables. Nécessite un token gratuit (inscription au webgate, puis <code>sync.eu_fsf.token</code> dans <code>config.yaml</code>).</p>
-                                <button id="sync-eufsf-btn" class="btn btn-primary" onclick="handleSourceSync('EUFSF')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
-                            <div class="sync-source-block" style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem;">
-                                <h3 style="margin-top: 0;">🇪🇺 EUR-Lex — Journal Officiel du jour (version anglaise)</h3>
-                                <p class="section-desc">Recherche des actes mentionnant « restrictive measures » au Journal Officiel (édition anglaise, qui fait référence), scraping des listés (Individus, Entités, Navires, Aéronefs), fusion incrémentale avec la liste EU active et archivage du PDF officiel de chaque acte (valeur probante en audit).</p>
-                                <div class="form-group" style="max-width: 220px;">
-                                    <label for="sync-eurlex-date">Date du Journal Officiel</label>
-                                    <input type="date" id="sync-eurlex-date">
-                                </div>
-                                <button id="sync-eurlex-btn" class="btn btn-primary" onclick="handleSourceSync('EURLEX')">
-                                    Synchroniser maintenant
-                                </button>
-                            </div>
-
+                            <!-- Options spécifiques d'une source (date EUR-Lex…), affichées au besoin -->
+                            <div id="sync-source-options" class="hidden" style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);"></div>
                             <p id="sync-schedule-info" class="section-desc" style="margin-top: 1rem;"></p>
                         </div>
 
