@@ -35,12 +35,10 @@ ALERT_STATUS_LABELS = {
 }
 
 
-def get_narrative_config() -> Dict[str, Any]:
-    cfg = config.get("narrative", {}) or {}
-    return {
-        "llm_enabled": bool(cfg.get("llm_enabled", False)),
-        "llm_model": cfg.get("llm_model", "claude-opus-4-8"),
-    }
+def get_narrative_config(db=None) -> Dict[str, Any]:
+    """Etat effectif (reglage a chaud > config.yaml)."""
+    from fiskr.settings import narrative_llm_settings
+    return narrative_llm_settings(db)
 
 
 def _fmt_date(value) -> str:

@@ -119,8 +119,12 @@ def _start_schedulers():
 
     # Inbox CFT : cadence propre (batch.inbox_poll_seconds), pas la minute
     def _inbox_run():
-        poll = float((config.get("batch") or {}).get("inbox_poll_seconds", 30) or 30)
-        while not _stop.wait(poll):
+        from fiskr.settings import batch_inbox_settings
+        while True:
+            # Cadence relue a chaque passe : reglable a chaud sans redemarrage
+            poll = float(batch_inbox_settings()["inbox_poll_seconds"])
+            if _stop.wait(poll):
+                return
             try:
                 api_module._process_inbox_once()
             except Exception as e:

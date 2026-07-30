@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — every operational parameter of config.yaml became a hot setting with an admin screen
+Follow-up to the automatic-synchronisation panel: an audit of `config.yaml` found eight more families that could only be changed by editing the file on the server and restarting. All eight are now **hot settings** (database over file — `config.yaml` only supplies first-boot defaults), each with an **admin-only card** and strict server-side validation, and every consumer reads the *effective* state:
+
+- **🏛 Reporting institution (TRACFIN)** — name, SIREN (9-digit check), correspondent; feeds the suspicious-transaction draft. **🔐 Access security** — lockout failures/duration, minimum password length, session hours (deployment-bound `secure_cookies`/`SameSite` deliberately stay in the file). **📰 Adverse media** — enabled, language, max results, keywords (empty list falls back to the default AML/CFT set). **🤖 AI** — narrative reformulation and NL rule drafts: enabled + model each; enabling without a model is refused; the API key stays an environment variable, never entered in the UI. **📥 CFT inbox** — drop/archive directories (absolute paths enforced) and polling cadence, re-read every polling pass by both the API poller and the worker daemon. **🌐 Sync network** — shared timeouts, retries, backoff, User-Agent (per-source `config.yaml` overrides still win); read standalone by the HTTP helpers, so no signature changed. **⚙️ Scoring fine-tuning** — name-metric weights (all-zero refused: a blind engine) and contextual bonuses/maluses, injected into the same per-screening config dict as the hot thresholds, so the effect is immediate and the existing impact simulation applies. **📡 Outgoing notification webhooks** — URL list (http(s) only, max 20).
+- **Deliberately left in the file** and stated as such: secrets (FSF token, `hooks.secret`, database credentials), process boot settings (`jobs.*`, `database.*`), per-source URLs (the diagnostic-tool workflow), deployment properties. Config export/import carries the new families **except** the CFT inbox paths — machine-specific paths must not travel between environments.
+- One generic mechanism behind all of it: `_hot_section` (per-key merge, DB over file) plus `read_setting_standalone` for readers that get no session (auth policy, notification transport, sync network) — any failure falls back to the file, a setting can never break an execution path.
+
+### Added — the notification journal is now managed: filter, delete, purge, resend
+The delivery journal (`notification_deliveries`) was read-only: 30 rows, no way to remove an entry, no way to retry a failed send.
+
+- **Server-side status/event filter** on `GET /api/notifications/log` (the filter covers the whole journal, not the loaded page), with a total count.
+- **Single-entry deletion** (`DELETE /api/notifications/log/{id}`) and **bulk purge** (`POST …/purge` by status and/or age). **QUEUED rows are protected by default** — they carry the not-yet-sent digest; purging them requires asking for them explicitly. Both admin-only and written to the admin journal (`NOTIFICATION_DELETED`, `NOTIFICATIONS_PURGED` with the count).
+- **Resend of a failure** (`POST …/{id}/resend`): recomposes the e-mail from the archived event and payload, sends now, updates the row (SENT/FAILED + timestamp). A SENT entry is refused — duplicating a step e-mail sows confusion.
+- The journal screen gained the matching controls: status filter, 🗑 per row, 🔁 on failures, a purge button with confirmation.
+- Locked by 18 tests (hot overlays reaching each consumer, validations, `403` for every non-admin role with nothing written, QUEUED protection, purge by age, resend updating the row) and a browser pass over every new card with zero console errors.
+
 ### Added — automatic synchronisation is driven from the application, admin-only
 Turning scheduled fetches on or off — or excluding a single source from them — required editing `config.yaml` **on the server** and restarting. On shared hosting that is a deployment, not an operation. It is now a control panel inside the app, reserved to administrators.
 

@@ -104,6 +104,15 @@ from fiskr.settings import (
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     sync_auto_enabled, sync_sources_enabled, sync_automation_sources,
     SETTING_SYNC_AUTO_ENABLED, SETTING_SYNC_SOURCES_ENABLED,
+    institution_config, adverse_media_settings, narrative_llm_settings,
+    fprules_llm_settings, security_access_settings, sync_network_settings,
+    batch_inbox_settings, scoring_weights, scoring_context_rules,
+    notification_webhooks,
+    SETTING_INSTITUTION, SETTING_ADVERSE_MEDIA, SETTING_NARRATIVE_LLM,
+    SETTING_FPRULES_LLM, SETTING_SECURITY_ACCESS, SETTING_SYNC_NETWORK,
+    SETTING_BATCH_INBOX, SETTING_SCORING_WEIGHTS, SETTING_SCORING_CONTEXT,
+    SETTING_NOTIFY_WEBHOOKS,
+    DEFAULT_SCORING_WEIGHTS, DEFAULT_CONTEXT_RULES,
     digest_settings, SETTING_DIGEST,
     notification_batch_settings, SETTING_NOTIFICATION_BATCH, DEFAULT_NOTIFICATION_BATCH,
     SETTING_WHITELIST_EXPIRY_NOTIFIED, get_setting,
@@ -1728,14 +1737,23 @@ async def get_users_directory(
 class ScoringSettingsUpdate(BaseModel):
     cut_off_threshold: Optional[float] = None
     cut_off_overrides: Optional[Dict[str, Optional[float]]] = None
+    # Ponderations des metriques de nom (jaro_winkler, damerau_levenshtein,
+    # token_sort) et bonus/malus contextuels — a chaud, comme les seuils
+    weights: Optional[Dict[str, float]] = None
+    contextual_rules: Optional[Dict[str, float]] = None
 
 @app.get("/api/settings/scoring")
 async def get_scoring_settings(
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Seuils de cut-off effectifs (global + surcharges par type de liste)."""
-    return score_thresholds(db)
+    """Reglages de scoring effectifs : seuils de cut-off, ponderations des
+    metriques de nom et bonus/malus contextuels (tous a chaud)."""
+    return {
+        **score_thresholds(db),
+        "weights": scoring_weights(db),
+        "contextual_rules": scoring_context_rules(db),
+    }
 
 @app.put("/api/settings/scoring")
 async def update_scoring_settings(
@@ -1764,16 +1782,52 @@ async def update_scoring_settings(
             if not (0 <= float(threshold) <= 100):
                 raise HTTPException(status_code=400, detail=f"Seuil invalide pour {key} (0-100).")
             merged["cut_off_overrides"][key] = float(threshold)
-    if payload.cut_off_threshold is None and payload.cut_off_overrides is None:
+    if (payload.cut_off_threshold is None and payload.cut_off_overrides is None
+            and payload.weights is None and payload.contextual_rules is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
+    before_engine = {"weights": scoring_weights(db), "contextual_rules": scoring_context_rules(db)}
     set_setting(db, SETTING_SCORE_THRESHOLDS, merged, updated_by=admin_user["username"])
-    after = score_thresholds(db)
-    delta = {k: after[k] for k in ("cut_off_threshold", "cut_off_overrides") if before.get(k) != after.get(k)}
+
+    if payload.weights is not None:
+        unknown = [k for k in payload.weights if k not in DEFAULT_SCORING_WEIGHTS]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"Pondération(s) inconnue(s) : {', '.join(unknown)} "
+                                       f"({', '.join(DEFAULT_SCORING_WEIGHTS)}).")
+        candidate = {**scoring_weights(db), **{k: float(v) for k, v in payload.weights.items()}}
+        if any(v < 0 for v in candidate.values()):
+            raise HTTPException(status_code=400, detail="Une pondération ne peut pas être négative.")
+        if sum(candidate.values()) <= 0:
+            raise HTTPException(status_code=400,
+                                detail="Au moins une pondération doit être strictement positive : "
+                                       "des poids tous nuls rendraient le moteur aveugle.")
+        set_setting(db, SETTING_SCORING_WEIGHTS, candidate, updated_by=admin_user["username"])
+
+    if payload.contextual_rules is not None:
+        unknown = [k for k in payload.contextual_rules if k not in DEFAULT_CONTEXT_RULES]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"Règle(s) contextuelle(s) inconnue(s) : {', '.join(unknown)} "
+                                       f"({', '.join(DEFAULT_CONTEXT_RULES)}).")
+        merged_rules = {**scoring_context_rules(db),
+                        **{k: float(v) for k, v in payload.contextual_rules.items()}}
+        if not (0 <= merged_rules["dob_tolerance_window"] <= 20):
+            raise HTTPException(status_code=400, detail="dob_tolerance_window doit être entre 0 et 20 ans.")
+        for key, value in merged_rules.items():
+            if abs(value) > 100:
+                raise HTTPException(status_code=400, detail=f"{key} : un bonus/malus reste entre -100 et 100.")
+        set_setting(db, SETTING_SCORING_CONTEXT, merged_rules, updated_by=admin_user["username"])
+
+    after = {**score_thresholds(db), "weights": scoring_weights(db),
+             "contextual_rules": scoring_context_rules(db)}
+    before_full = {**before, **before_engine}
+    delta = {k: after[k] for k in ("cut_off_threshold", "cut_off_overrides", "weights", "contextual_rules")
+             if before_full.get(k) != after.get(k)}
     if delta:
         log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="scoring",
-                         before={k: before.get(k) for k in delta}, after=delta)
+                         before={k: before_full.get(k) for k in delta}, after=delta)
         db.commit()
-    return {"message": "Seuils de score mis à jour (effet immédiat).", **after}
+    return {"message": "Réglages de scoring mis à jour (effet immédiat).", **after}
 
 class ScoringSimulateRequest(BaseModel):
     cut_off_threshold: Optional[float] = None
@@ -1875,6 +1929,12 @@ _PORTABLE_SETTINGS = {
     # Synchronisation automatique : les cles de source sont universelles,
     # ces reglages s'alignent donc entre recette et production comme le cron
     SETTING_SYNC_AUTO_ENABLED, SETTING_SYNC_SOURCES_ENABLED,
+    # Familles pilotables depuis l'application. batch.inbox est EXCLU :
+    # ses chemins sont propres a chaque machine et ne survivraient pas a un
+    # import dans un autre environnement.
+    SETTING_INSTITUTION, SETTING_ADVERSE_MEDIA, SETTING_NARRATIVE_LLM,
+    SETTING_FPRULES_LLM, SETTING_SECURITY_ACCESS, SETTING_SYNC_NETWORK,
+    SETTING_SCORING_WEIGHTS, SETTING_SCORING_CONTEXT, SETTING_NOTIFY_WEBHOOKS,
 }
 
 class ConfigImportRequest(BaseModel):
@@ -4108,14 +4168,15 @@ def _process_inbox_once() -> int:
     Retourne le nombre de campagnes lancees.
     """
     from fiskr.database import SessionLocal
-    batch_cfg = config.get("batch", {}) or {}
-    inbox_raw = (batch_cfg.get("inbox_dir") or "").strip()
+    from fiskr.settings import batch_inbox_settings
+    batch_cfg = batch_inbox_settings()   # etat effectif (reglage a chaud > config.yaml)
+    inbox_raw = batch_cfg["inbox_dir"]
     if not inbox_raw:
         return 0
     inbox = Path(inbox_raw)
     if not inbox.is_dir():
         return 0
-    archive = Path((batch_cfg.get("archive_dir") or "").strip() or (inbox / "archive"))
+    archive = Path(batch_cfg["archive_dir"] or (inbox / "archive"))
     archive.mkdir(parents=True, exist_ok=True)
     launched = 0
     import time as _time
@@ -4159,10 +4220,13 @@ def _notify_inbox_rejection(file_name: str, reason: str) -> None:
 
 async def _inbox_poller():
     """Boucle de scrutation de l'inbox CFT (desactivee si batch.inbox_dir vide)."""
+    from fiskr.settings import batch_inbox_settings
     while True:
-        batch_cfg = config.get("batch", {}) or {}
-        poll_seconds = max(10, int(batch_cfg.get("inbox_poll_seconds", 60) or 60))
-        if not (batch_cfg.get("inbox_dir") or "").strip():
+        # Relu a chaque passe : le reglage a chaud (repertoire, cadence)
+        # s'applique sans redemarrage
+        batch_cfg = await asyncio.to_thread(batch_inbox_settings)
+        poll_seconds = max(10, batch_cfg["inbox_poll_seconds"])
+        if not batch_cfg["inbox_dir"]:
             await asyncio.sleep(300)
             continue
         try:
@@ -5496,6 +5560,9 @@ class SyncSchedulesUpdate(BaseModel):
     auto_enabled: Optional[bool] = None
     # source -> participation aux synchronisations automatiques (null = inchange)
     sources_enabled: Optional[Dict[str, bool]] = None
+    # Parametres reseau communs (timeouts, retries, backoff, user_agent) ;
+    # les surcharges par source de config.yaml continuent de primer
+    network: Optional[Dict[str, Any]] = None
 
 @app.put("/api/settings/sync")
 async def update_sync_schedules(
@@ -5514,7 +5581,8 @@ async def update_sync_schedules(
     celui-ci est un acte explicite d'exploitant.
     """
     from fiskr.cron import parse_cron, CronError
-    if payload.schedules is None and payload.auto_enabled is None and payload.sources_enabled is None:
+    if (payload.schedules is None and payload.auto_enabled is None
+            and payload.sources_enabled is None and payload.network is None):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     for field, mapping in (("schedules", payload.schedules), ("sources_enabled", payload.sources_enabled)):
         unknown = [s for s in (mapping or {}) if s not in SYNC_SOURCES]
@@ -5554,6 +5622,31 @@ async def update_sync_schedules(
         merged_sources.update({s: bool(v) for s, v in payload.sources_enabled.items()})
         set_setting(db, SETTING_SYNC_SOURCES_ENABLED, merged_sources,
                     updated_by=admin_user["username"])
+
+    if payload.network is not None:
+        bounds = {"timeout_seconds": (5, 600), "download_timeout_seconds": (5, 1800),
+                  "retries": (0, 20), "backoff_seconds": (0, 120)}
+        unknown = [k for k in payload.network if k not in (*bounds, "user_agent")]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"network — champ(s) inconnu(s) : {', '.join(unknown)}.")
+        merged_net = {**sync_network_settings(db)}
+        for key, value in payload.network.items():
+            if key == "user_agent":
+                ua = str(value or "").strip()
+                if not ua:
+                    raise HTTPException(status_code=400, detail="network.user_agent ne peut pas être vide.")
+                merged_net["user_agent"] = ua[:300]
+                continue
+            lo, hi = bounds[key]
+            try:
+                value = int(value) if key == "retries" else float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"network.{key} doit être numérique.")
+            if not (lo <= value <= hi):
+                raise HTTPException(status_code=400, detail=f"network.{key} doit être entre {lo} et {hi}.")
+            merged_net[key] = value
+        set_setting(db, SETTING_SYNC_NETWORK, merged_net, updated_by=admin_user["username"])
 
     after = {
         "auto_enabled": sync_auto_enabled(db),
@@ -5625,6 +5718,14 @@ class IngestionSettingsUpdate(BaseModel):
     # Fouille quotidienne d'homonymes : {"enabled", "cron", "min_occurrences",
     # "min_similarity", "auto_approve_confidence", "sources"}
     resource_mining: Optional[Dict[str, Any]] = None
+    # Familles de config.yaml devenues pilotables ici (base > fichier) :
+    institution: Optional[Dict[str, str]] = None
+    adverse_media: Optional[Dict[str, Any]] = None
+    narrative_llm: Optional[Dict[str, Any]] = None
+    fprules_llm: Optional[Dict[str, Any]] = None
+    security_access: Optional[Dict[str, int]] = None
+    batch_inbox: Optional[Dict[str, Any]] = None
+    notification_webhooks: Optional[List[str]] = None
 
 class ReviewDecisionRequest(BaseModel):
     comment: Optional[str] = None
@@ -5667,6 +5768,14 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "digest": digest_settings(db),
         "resource_fields": resource_fields(db),
         "resource_mining": mining_settings(db),
+        # Familles pilotables depuis l'application (etat effectif)
+        "institution": institution_config(db),
+        "adverse_media": adverse_media_settings(db),
+        "narrative_llm": narrative_llm_settings(db),
+        "fprules_llm": fprules_llm_settings(db),
+        "security_access": security_access_settings(db),
+        "batch_inbox": batch_inbox_settings(db),
+        "notification_webhooks": notification_webhooks(db),
         "sources": {
             "require_approval": approval["source"],
             "exclusion_justification_required": justif["source"],
@@ -5710,12 +5819,14 @@ async def update_ingestion_settings(
         SETTING_AUTO_BACKTEST_ENABLED: payload.auto_backtest_enabled,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
-    if (not changed and payload.backtest_max_gap_pct is None
-            and payload.auto_backtest_panel is None
-            and payload.quality_min_score_pct is None
-            and payload.alert_sla_hours is None and payload.notification_events is None
-            and payload.digest is None and payload.resource_fields is None
-            and payload.resource_mining is None):
+    extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
+              payload.quality_min_score_pct, payload.alert_sla_hours,
+              payload.notification_events, payload.digest,
+              payload.resource_fields, payload.resource_mining,
+              payload.institution, payload.adverse_media, payload.narrative_llm,
+              payload.fprules_llm, payload.security_access, payload.batch_inbox,
+              payload.notification_webhooks)
+    if not changed and all(v is None for v in extras):
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     before_state = _settings_payload(db)
     before_state.pop("sources", None)
@@ -5815,13 +5926,117 @@ async def update_ingestion_settings(
             raise HTTPException(status_code=400,
                                 detail=f"Source de fouille inconnue : {', '.join(unknown)}.")
         set_setting(db, SETTING_MINING, merged_mining, updated_by=admin_user["username"])
+
+    # --- Familles de config.yaml pilotables ici (fusion cle par cle) ---
+    if payload.institution is not None:
+        allowed = ("name", "siren", "correspondent_name", "correspondent_email", "correspondent_phone")
+        unknown = [k for k in payload.institution if k not in allowed]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"institution — champ(s) inconnu(s) : {', '.join(unknown)}.")
+        merged_inst = {**institution_config(db),
+                       **{k: str(v or "").strip() for k, v in payload.institution.items()}}
+        if merged_inst["siren"] and not (merged_inst["siren"].isdigit() and len(merged_inst["siren"]) == 9):
+            raise HTTPException(status_code=400, detail="SIREN invalide : 9 chiffres attendus.")
+        set_setting(db, SETTING_INSTITUTION, merged_inst, updated_by=admin_user["username"])
+
+    if payload.adverse_media is not None:
+        allowed = ("enabled", "language", "max_results", "keywords")
+        unknown = [k for k in payload.adverse_media if k not in allowed]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"adverse_media — champ(s) inconnu(s) : {', '.join(unknown)}.")
+        current_am = adverse_media_settings(db)
+        merged_am = {k: current_am[k] for k in allowed}
+        merged_am.update(payload.adverse_media)
+        try:
+            merged_am["max_results"] = int(merged_am["max_results"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="adverse_media.max_results doit être un entier.")
+        if not (1 <= merged_am["max_results"] <= 50):
+            raise HTTPException(status_code=400, detail="adverse_media.max_results doit être entre 1 et 50.")
+        if not isinstance(merged_am.get("keywords"), list):
+            raise HTTPException(status_code=400, detail="adverse_media.keywords doit être une liste.")
+        merged_am["enabled"] = bool(merged_am["enabled"])
+        merged_am["language"] = str(merged_am["language"] or "fr").strip()[:8]
+        merged_am["keywords"] = [str(k).strip() for k in merged_am["keywords"] if str(k).strip()][:50]
+        set_setting(db, SETTING_ADVERSE_MEDIA, merged_am, updated_by=admin_user["username"])
+
+    for llm_payload, llm_key, llm_reader, llm_name in (
+        (payload.narrative_llm, SETTING_NARRATIVE_LLM, narrative_llm_settings, "narrative_llm"),
+        (payload.fprules_llm, SETTING_FPRULES_LLM, fprules_llm_settings, "fprules_llm"),
+    ):
+        if llm_payload is None:
+            continue
+        unknown = [k for k in llm_payload if k not in ("llm_enabled", "llm_model")]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"{llm_name} — champ(s) inconnu(s) : {', '.join(unknown)}.")
+        merged_llm = {**llm_reader(db), **llm_payload}
+        merged_llm["llm_enabled"] = bool(merged_llm["llm_enabled"])
+        merged_llm["llm_model"] = str(merged_llm["llm_model"] or "").strip()[:80]
+        if merged_llm["llm_enabled"] and not merged_llm["llm_model"]:
+            raise HTTPException(status_code=400, detail=f"{llm_name} : un modèle est requis quand l'IA est activée.")
+        set_setting(db, llm_key, merged_llm, updated_by=admin_user["username"])
+
+    if payload.security_access is not None:
+        bounds = {"max_login_failures": (1, 100), "lockout_minutes": (1, 24 * 60),
+                  "min_password_length": (8, 128), "session_hours": (1, 168)}
+        unknown = [k for k in payload.security_access if k not in bounds]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"security_access — champ(s) inconnu(s) : {', '.join(unknown)}.")
+        merged_sec = {**security_access_settings(db)}
+        for key, value in payload.security_access.items():
+            lo, hi = bounds[key]
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{key} doit être un entier.")
+            if not (lo <= value <= hi):
+                raise HTTPException(status_code=400, detail=f"{key} doit être entre {lo} et {hi}.")
+            merged_sec[key] = value
+        set_setting(db, SETTING_SECURITY_ACCESS, merged_sec, updated_by=admin_user["username"])
+
+    if payload.batch_inbox is not None:
+        allowed = ("inbox_dir", "inbox_poll_seconds", "archive_dir")
+        unknown = [k for k in payload.batch_inbox if k not in allowed]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"batch_inbox — champ(s) inconnu(s) : {', '.join(unknown)}.")
+        current_inbox = batch_inbox_settings(db)
+        merged_inbox = {k: current_inbox[k] for k in allowed}
+        merged_inbox.update(payload.batch_inbox)
+        try:
+            merged_inbox["inbox_poll_seconds"] = int(merged_inbox["inbox_poll_seconds"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="batch_inbox.inbox_poll_seconds doit être un entier.")
+        if not (5 <= merged_inbox["inbox_poll_seconds"] <= 3600):
+            raise HTTPException(status_code=400, detail="batch_inbox.inbox_poll_seconds doit être entre 5 et 3600.")
+        for path_key in ("inbox_dir", "archive_dir"):
+            path_value = str(merged_inbox[path_key] or "").strip()
+            if path_value and not os.path.isabs(path_value):
+                raise HTTPException(status_code=400,
+                                    detail=f"batch_inbox.{path_key} : chemin absolu attendu (ou vide pour désactiver).")
+            merged_inbox[path_key] = path_value
+        set_setting(db, SETTING_BATCH_INBOX, merged_inbox, updated_by=admin_user["username"])
+
+    if payload.notification_webhooks is not None:
+        cleaned = []
+        for url in payload.notification_webhooks:
+            url = str(url or "").strip()
+            if not url:
+                continue
+            if not url.startswith(("http://", "https://")):
+                raise HTTPException(status_code=400,
+                                    detail=f"Webhook invalide (http(s) attendu) : {url[:80]}")
+            cleaned.append(url)
+        if len(cleaned) > 20:
+            raise HTTPException(status_code=400, detail="20 webhooks maximum.")
+        set_setting(db, SETTING_NOTIFY_WEBHOOKS, cleaned, updated_by=admin_user["username"])
+
     after_state = _settings_payload(db)
     after_state.pop("sources", None)
     delta = {k: v for k, v in after_state.items() if before_state.get(k) != v}
     log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="ingestion",
                      before={k: before_state.get(k) for k in delta}, after=delta)
     db.commit()
-    return {"message": "Réglages d'homologation mis à jour.", **_settings_payload(db)}
+    return {"message": "Réglages mis à jour.", **_settings_payload(db)}
 
 # ------------------ BLOCKING KEYS PAR CANAL ------------------
 
@@ -7863,33 +8078,164 @@ async def send_notification_test(
     return {"message": f"Mail de test envoyé à {', '.join(recipients)}.", "recipients": recipients}
 
 
+_NOTIFICATION_STATUSES = ("QUEUED", "SENT", "FAILED", "SKIPPED")
+
+
+def _notification_row_view(r) -> Dict[str, Any]:
+    from fiskr.events import EVENT_CATALOG
+    return {
+        "id": r.id, "event_key": r.event_key,
+        "label": EVENT_CATALOG[r.event_key].label if r.event_key in EVENT_CATALOG else r.event_key,
+        "category": r.category, "urgency": r.urgency, "status": r.status,
+        "recipients": r.recipients, "error": r.error,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+    }
+
+
 @app.get("/api/notifications/log")
 async def list_notification_log(
     limit: int = Query(30, ge=1, le=200),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    event_key: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     admin_user: Dict[str, Any] = Depends(require_admin)
 ):
     """Journal des envois : repond a « le mail est-il parti ? » sans fouiller
-    les logs serveur (statut, destinataires, erreur eventuelle)."""
-    from fiskr.events import EVENT_CATALOG
-    rows = db.query(NotificationDelivery).order_by(
+    les logs serveur. Filtrable par statut et par evenement — le filtre porte
+    sur TOUT le journal (serveur), pas sur la page chargee."""
+    query = db.query(NotificationDelivery)
+    if status_filter:
+        wanted = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        bad = [s for s in wanted if s not in _NOTIFICATION_STATUSES]
+        if bad:
+            raise HTTPException(status_code=400,
+                                detail=f"Statut(s) inconnu(s) : {', '.join(bad)} ({', '.join(_NOTIFICATION_STATUSES)}).")
+        query = query.filter(NotificationDelivery.status.in_(wanted))
+    if event_key:
+        query = query.filter(NotificationDelivery.event_key == event_key.strip())
+    total = query.count()
+    rows = query.order_by(
         NotificationDelivery.created_at.desc(), NotificationDelivery.id.desc()
     ).limit(limit).all()
     queued = db.query(NotificationDelivery).filter(NotificationDelivery.status == "QUEUED").count()
-    return {
-        "queued": queued,
-        "items": [
-            {
-                "id": r.id, "event_key": r.event_key,
-                "label": EVENT_CATALOG[r.event_key].label if r.event_key in EVENT_CATALOG else r.event_key,
-                "category": r.category, "urgency": r.urgency, "status": r.status,
-                "recipients": r.recipients, "error": r.error,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "sent_at": r.sent_at.isoformat() if r.sent_at else None,
-            }
-            for r in rows
-        ],
-    }
+    return {"queued": queued, "total": total,
+            "items": [_notification_row_view(r) for r in rows]}
+
+
+@app.delete("/api/notifications/log/{delivery_id}")
+async def delete_notification_log_entry(
+    delivery_id: int,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """Supprime UNE entree du journal des notifications (admin, tracee).
+    Une entree QUEUED supprimee ne partira pas dans le recapitulatif."""
+    row = db.query(NotificationDelivery).filter(NotificationDelivery.id == delivery_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Entrée introuvable.")
+    log_admin_action(db, admin_user["username"], "NOTIFICATION_DELETED",
+                     target=f"notification:{row.id}",
+                     before={"event": row.event_key, "status": row.status,
+                             "recipients": row.recipients}, after=None)
+    db.delete(row)
+    db.commit()
+    return {"message": "Entrée supprimée du journal."}
+
+
+class NotificationPurgeRequest(BaseModel):
+    # Statuts a purger (vide/None = tous) et anciennete minimale en jours
+    # (0 = tout, quel que soit l'age). QUEUED n'est purge que sur demande
+    # EXPLICITE : ces lignes sont le recapitulatif en attente d'envoi.
+    statuses: Optional[List[str]] = None
+    older_than_days: int = 0
+
+
+@app.post("/api/notifications/log/purge")
+async def purge_notification_log(
+    payload: NotificationPurgeRequest,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Purge en masse du journal des notifications (admin, tracee avec le
+    decompte). Par defaut, les QUEUED sont conservees : elles portent le
+    recapitulatif non encore envoye — les purger exige de les demander
+    explicitement dans `statuses`.
+    """
+    wanted = [s.strip().upper() for s in (payload.statuses or []) if s.strip()]
+    bad = [s for s in wanted if s not in _NOTIFICATION_STATUSES]
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"Statut(s) inconnu(s) : {', '.join(bad)} ({', '.join(_NOTIFICATION_STATUSES)}).")
+    if not (0 <= payload.older_than_days <= 3650):
+        raise HTTPException(status_code=400, detail="older_than_days doit être entre 0 et 3650.")
+    query = db.query(NotificationDelivery)
+    if wanted:
+        query = query.filter(NotificationDelivery.status.in_(wanted))
+    else:
+        query = query.filter(NotificationDelivery.status != "QUEUED")
+    if payload.older_than_days:
+        cutoff = datetime.utcnow() - timedelta(days=payload.older_than_days)
+        query = query.filter(NotificationDelivery.created_at < cutoff)
+    count = query.delete(synchronize_session=False)
+    log_admin_action(db, admin_user["username"], "NOTIFICATIONS_PURGED",
+                     target="notifications.log",
+                     before={"statuses": wanted or "tous sauf QUEUED",
+                             "older_than_days": payload.older_than_days},
+                     after={"deleted": count})
+    db.commit()
+    return {"message": f"{count} entrée(s) supprimée(s) du journal.", "deleted": count}
+
+
+@app.post("/api/notifications/log/{delivery_id}/resend")
+async def resend_notification(
+    delivery_id: int,
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Renvoie une notification en echec (FAILED) ou passee sans envoi (SKIPPED) :
+    recompose le mail depuis l'evenement et le payload archives, tente l'envoi
+    maintenant et met la ligne a jour (SENT/FAILED + horodatage). Une entree
+    SENT ne se renvoie pas — dupliquer un mail d'etape seme la confusion.
+    """
+    from fiskr.events import EVENT_CATALOG
+    row = db.query(NotificationDelivery).filter(NotificationDelivery.id == delivery_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Entrée introuvable.")
+    if row.status not in ("FAILED", "SKIPPED"):
+        raise HTTPException(status_code=400,
+                            detail=f"Seule une notification FAILED ou SKIPPED se renvoie (statut : {row.status}).")
+    recipients = [r.strip() for r in (row.recipients or "").split(",") if r.strip()]
+    if not recipients:
+        raise HTTPException(status_code=400, detail="Aucun destinataire archivé sur cette entrée.")
+    if not notify_smtp_configured():
+        raise HTTPException(status_code=502, detail="SMTP non configuré : impossible d'envoyer.")
+
+    event = EVENT_CATALOG.get(row.event_key)
+    label = event.label if event else row.event_key
+    data = row.payload or {}
+    text, html = notify_render_event_email(
+        label, data if isinstance(data, dict) else {"Détail": str(data)},
+        link_url=notify_public_url(),
+        intro="Renvoi manuel depuis le journal des notifications.",
+    )
+    try:
+        notify_send_email(recipients, f"[Fiskr] {label}", text, html_body=html)
+        row.status = "SENT"
+        row.error = None
+        row.sent_at = datetime.utcnow()
+    except Exception as e:
+        row.status = "FAILED"
+        row.error = str(e)[:500]
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Renvoi en échec : {e}")
+    log_admin_action(db, admin_user["username"], "NOTIFICATION_RESENT",
+                     target=f"notification:{row.id}",
+                     before={"event": row.event_key}, after={"recipients": row.recipients})
+    db.commit()
+    return {"message": f"Notification renvoyée à {row.recipients}.", **_notification_row_view(row)}
 
 
 @app.post("/api/notifications/flush")
@@ -8007,16 +8353,10 @@ th {{ background: #f0f0f0; }} ul {{ margin: 0.5rem 0 0 1.2rem; }} .sub {{ color:
 
 # ------------------ PROJET DE DECLARATION DE SOUPCON (TRACFIN) ------------------
 
-def _institution_config() -> Dict[str, Any]:
-    """Identite de l'etablissement declarant (rubrique declarant du projet)."""
-    cfg = config.get("institution", {}) or {}
-    return {
-        "name": str(cfg.get("name") or "").strip(),
-        "siren": str(cfg.get("siren") or "").strip(),
-        "correspondent_name": str(cfg.get("correspondent_name") or "").strip(),
-        "correspondent_email": str(cfg.get("correspondent_email") or "").strip(),
-        "correspondent_phone": str(cfg.get("correspondent_phone") or "").strip(),
-    }
+def _institution_config(db=None) -> Dict[str, Any]:
+    """Identite de l'etablissement declarant (rubrique declarant du projet).
+    Reglable a chaud depuis Parametres (base > config.yaml)."""
+    return {k: v.strip() for k, v in institution_config(db).items()}
 
 
 STR_DISCLAIMER = (

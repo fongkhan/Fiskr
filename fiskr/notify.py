@@ -37,9 +37,9 @@ EVENT_LABELS = {key: event.label for key, event in EVENT_CATALOG.items()}
 
 
 def _webhook_urls() -> List[str]:
-    cfg = config.get("notifications", {}) or {}
-    urls = cfg.get("webhooks") or []
-    return [u for u in urls if isinstance(u, str) and u.startswith(("http://", "https://"))]
+    """URLs effectives (reglage a chaud > config.yaml)."""
+    from fiskr.settings import notification_webhooks
+    return notification_webhooks()
 
 
 def public_url() -> str:

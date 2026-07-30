@@ -16,14 +16,17 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 
-def security_config() -> Dict[str, Any]:
-    """Section security de config.yaml avec defauts durcis."""
+def security_config(db=None) -> Dict[str, Any]:
+    """
+    Politique de securite EFFECTIVE : verrouillage, mots de passe et duree de
+    session sont reglables a chaud (Parametres, admin — base > config.yaml).
+    `secure_cookies` et `cookie_samesite` restent au fichier : ce sont des
+    proprietes du deploiement (HTTPS), pas de l'exploitation.
+    """
+    from fiskr.settings import security_access_settings
     sec = config.get("security", {}) or {}
     return {
-        "max_login_failures": int(sec.get("max_login_failures", 5) or 5),
-        "lockout_minutes": int(sec.get("lockout_minutes", 15) or 15),
-        "min_password_length": int(sec.get("min_password_length", 12) or 12),
-        "session_hours": int(sec.get("session_hours", 8) or 8),
+        **security_access_settings(db),
         "secure_cookies": bool(sec.get("secure_cookies", False)),
         "cookie_samesite": str(sec.get("cookie_samesite", "strict") or "strict"),
     }

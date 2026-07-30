@@ -5,7 +5,7 @@ La ligne AppSetting en base gagne toujours sur la valeur de config.yaml, qui ne
 sert que de valeur par defaut tant qu'aucun admin n'a modifie le reglage.
 """
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fiskr.config import config
 from fiskr.database import AppSetting
@@ -44,6 +44,21 @@ SETTING_SYNC_SCHEDULES = "sync.schedules"
 # redemarrer pour couper ou relancer les recuperations planifiees.
 SETTING_SYNC_AUTO_ENABLED = "sync.auto_enabled"
 SETTING_SYNC_SOURCES_ENABLED = "sync.sources_enabled"
+# Familles de config.yaml devenues pilotables depuis l'application (admin).
+# Meme regle partout : base > config.yaml, le fichier ne fournit que les
+# defauts du premier demarrage. Restent VOLONTAIREMENT dans le fichier : les
+# secrets (tokens, hooks.secret, identifiants BDD), les reglages de demarrage
+# de processus (jobs.*, database.*) et le deploiement (secure_cookies...).
+SETTING_INSTITUTION = "institution"
+SETTING_ADVERSE_MEDIA = "adverse_media"
+SETTING_NARRATIVE_LLM = "narrative.llm"
+SETTING_FPRULES_LLM = "fprules.llm"
+SETTING_SECURITY_ACCESS = "security.access"
+SETTING_SYNC_NETWORK = "sync.network"
+SETTING_BATCH_INBOX = "batch.inbox"
+SETTING_SCORING_WEIGHTS = "scoring.weights"
+SETTING_SCORING_CONTEXT = "scoring.contextual_rules"
+SETTING_NOTIFY_WEBHOOKS = "notifications.webhooks"
 from fiskr.sources import OPENSANCTIONS_BY_KEY as _OS_BY_KEY
 
 SYNC_SOURCES = ("ofac", "ofac_nonsdn", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi", "seco", "csl", "canada", "dfat",
@@ -375,6 +390,188 @@ def sync_automation_sources(db) -> Dict[str, str]:
     return out
 
 
+def read_setting_standalone(key: str, default=None):
+    """
+    Lecture d'un reglage a chaud SANS session fournie — pour les lecteurs qui
+    n'en recoivent pas (transports de notification, parametres reseau des
+    synchronisations, politique de securite). Ouvre une session courte ;
+    TOUTE erreur rend le defaut : un reglage ne casse jamais un chemin
+    d'execution.
+    """
+    try:
+        from fiskr import database as _database
+        if _database.SessionLocal is None:
+            _database.init_db()
+        session = _database.SessionLocal()
+        try:
+            return get_setting(session, key, default)
+        finally:
+            session.close()
+    except Exception:
+        return default
+
+
+def _hot_section(db, key: str, file_section) -> Dict[str, Any]:
+    """Section de config effective : les cles posees en base surchargent le
+    fichier, cle par cle. Sans session, lecture standalone (courte)."""
+    merged = dict(file_section or {})
+    stored = get_setting(db, key, None) if db is not None else read_setting_standalone(key)
+    if isinstance(stored, dict):
+        merged.update(stored)
+    return merged
+
+
+def institution_config(db=None) -> Dict[str, str]:
+    """Identite de l'etablissement declarant (pre-remplit TRACFIN)."""
+    cfg = _hot_section(db, SETTING_INSTITUTION, config.get("institution", {}))
+    return {
+        "name": str(cfg.get("name") or ""),
+        "siren": str(cfg.get("siren") or ""),
+        "correspondent_name": str(cfg.get("correspondent_name") or ""),
+        "correspondent_email": str(cfg.get("correspondent_email") or ""),
+        "correspondent_phone": str(cfg.get("correspondent_phone") or ""),
+    }
+
+
+def adverse_media_settings(db=None) -> Dict[str, Any]:
+    """Recherche adverse media : activation, langue, volume, mots-cles.
+    `provider` reste au fichier (en changer exige un connecteur, pas un clic)."""
+    cfg = _hot_section(db, SETTING_ADVERSE_MEDIA, config.get("adverse_media", {}))
+    try:
+        max_results = max(1, min(50, int(cfg.get("max_results", 10))))
+    except (TypeError, ValueError):
+        max_results = 10
+    keywords = cfg.get("keywords") or []
+    return {
+        "enabled": bool(cfg.get("enabled", True)),
+        "provider": str((config.get("adverse_media", {}) or {}).get("provider", "google_news_rss")),
+        "language": str(cfg.get("language") or "fr"),
+        "max_results": max_results,
+        "keywords": [str(k).strip() for k in keywords if str(k).strip()] if isinstance(keywords, list) else [],
+    }
+
+
+def _llm_settings(db, key: str, file_section, default_model: str) -> Dict[str, Any]:
+    cfg = _hot_section(db, key, file_section)
+    return {
+        "llm_enabled": bool(cfg.get("llm_enabled", False)),
+        "llm_model": str(cfg.get("llm_model") or default_model),
+    }
+
+
+def narrative_llm_settings(db=None) -> Dict[str, Any]:
+    """Reformulation LLM des narratifs d'alertes (necessite ANTHROPIC_API_KEY)."""
+    return _llm_settings(db, SETTING_NARRATIVE_LLM, config.get("narrative", {}), "claude-opus-4-8")
+
+
+def fprules_llm_settings(db=None) -> Dict[str, Any]:
+    """Generation de regles anti-FP en langage naturel (necessite ANTHROPIC_API_KEY)."""
+    return _llm_settings(db, SETTING_FPRULES_LLM, config.get("fprules", {}), "claude-sonnet-5")
+
+
+def security_access_settings(db=None) -> Dict[str, int]:
+    """
+    Politique d'acces reglable a chaud : verrouillage, mots de passe, session.
+    `secure_cookies` et `cookie_samesite` restent au fichier — ce sont des
+    proprietes du deploiement (HTTPS), pas de l'exploitation.
+    """
+    cfg = _hot_section(db, SETTING_SECURITY_ACCESS, config.get("security", {}))
+
+    def _int(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(cfg.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+    return {
+        "max_login_failures": _int("max_login_failures", 5, 1, 100),
+        "lockout_minutes": _int("lockout_minutes", 15, 1, 24 * 60),
+        "min_password_length": _int("min_password_length", 12, 8, 128),
+        "session_hours": _int("session_hours", 8, 1, 168),
+    }
+
+
+def sync_network_settings(db=None) -> Dict[str, Any]:
+    """Parametres reseau communs des synchronisations, reglables a chaud
+    (les surcharges PAR SOURCE de config.yaml continuent de primer)."""
+    cfg = _hot_section(db, SETTING_SYNC_NETWORK, (config.get("sync", {}) or {}).get("network", {}))
+
+    def _num(key, default, lo, hi, cast=float):
+        try:
+            return max(lo, min(hi, cast(cfg.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+    return {
+        "timeout_seconds": _num("timeout_seconds", 60.0, 5.0, 600.0),
+        "download_timeout_seconds": _num("download_timeout_seconds", 120.0, 5.0, 1800.0),
+        "retries": _num("retries", 3, 0, 20, cast=int),
+        "backoff_seconds": _num("backoff_seconds", 3.0, 0.0, 120.0),
+        "user_agent": str(cfg.get("user_agent") or
+                          "Mozilla/5.0 (compatible; Fiskr-Compliance/2.4; +https://github.com/fongkhan/Fiskr)"),
+    }
+
+
+def batch_inbox_settings(db=None) -> Dict[str, Any]:
+    """Inbox CFT : repertoire de depot, cadence de scrutation, archivage.
+    NON portable entre environnements (chemins propres a chaque machine)."""
+    cfg = _hot_section(db, SETTING_BATCH_INBOX, config.get("batch", {}))
+    try:
+        poll = max(5, min(3600, int(cfg.get("inbox_poll_seconds", 60))))
+    except (TypeError, ValueError):
+        poll = 60
+    return {
+        "inbox_dir": str(cfg.get("inbox_dir") or "").strip(),
+        "inbox_poll_seconds": poll,
+        "archive_dir": str(cfg.get("archive_dir") or "").strip(),
+    }
+
+
+DEFAULT_SCORING_WEIGHTS = {"jaro_winkler": 0.4, "damerau_levenshtein": 0.4, "token_sort": 0.2}
+DEFAULT_CONTEXT_RULES = {
+    "dob_tolerance_window": 2, "dob_exact_bonus": 15, "dob_tolerance_bonus": 5,
+    "dob_out_of_window_malus": -15, "gender_conflict_malus": -20,
+    "geography_match_bonus": 10, "geography_no_match_malus": -10,
+}
+
+
+def scoring_weights(db=None) -> Dict[str, float]:
+    """Ponderations des metriques de nom (somme > 0 garantie : des poids tous
+    nuls rendraient chaque paire identique — le moteur serait aveugle)."""
+    cfg = _hot_section(db, SETTING_SCORING_WEIGHTS, (config.get("scoring", {}) or {}).get("weights", {}))
+    out = {}
+    for key, default in DEFAULT_SCORING_WEIGHTS.items():
+        try:
+            out[key] = max(0.0, float(cfg.get(key, default)))
+        except (TypeError, ValueError):
+            out[key] = default
+    if sum(out.values()) <= 0:
+        return dict(DEFAULT_SCORING_WEIGHTS)
+    return out
+
+
+def scoring_context_rules(db=None) -> Dict[str, float]:
+    """Bonus/malus contextuels (date de naissance, genre, geographie)."""
+    cfg = _hot_section(db, SETTING_SCORING_CONTEXT, (config.get("scoring", {}) or {}).get("contextual_rules", {}))
+    out = {}
+    for key, default in DEFAULT_CONTEXT_RULES.items():
+        try:
+            out[key] = float(cfg.get(key, default))
+        except (TypeError, ValueError):
+            out[key] = float(default)
+    return out
+
+
+def notification_webhooks(db=None) -> List[str]:
+    """URLs des webhooks de notification sortants (POST JSON par evenement)."""
+    stored = get_setting(db, SETTING_NOTIFY_WEBHOOKS, None) if db is not None \
+        else read_setting_standalone(SETTING_NOTIFY_WEBHOOKS)
+    if isinstance(stored, list):
+        urls = stored
+    else:
+        urls = (config.get("notifications", {}) or {}).get("webhooks") or []
+    return [str(u).strip() for u in urls
+            if isinstance(u, str) and str(u).strip().startswith(("http://", "https://"))]
+
+
 def alert_sla_hours(db) -> Dict[str, int]:
     """Delais SLA (heures) par priorite d'alerte ; 0 ou absent = pas d'echeance."""
     value = get_setting_with_source(db, SETTING_ALERT_SLA_HOURS, dict(DEFAULT_ALERT_SLA_HOURS))["value"]
@@ -495,6 +692,10 @@ def scoring_config_with_thresholds(db, channel: str = "SCREENING") -> Dict[str, 
     scoring_cfg = dict(config.get("scoring", {}) or {})
     scoring_cfg["cut_off_threshold"] = thresholds["cut_off_threshold"]
     scoring_cfg["cut_off_overrides"] = dict(thresholds["cut_off_overrides"])
+    # Ponderations des metriques et bonus/malus contextuels : eux aussi a
+    # chaud — le moteur lit ce dict, pas le fichier, donc l'effet est immediat
+    scoring_cfg["weights"] = scoring_weights(db)
+    scoring_cfg["contextual_rules"] = scoring_context_rules(db)
     cfg["scoring"] = scoring_cfg
     cfg["engine_channel"] = channel
     return cfg
