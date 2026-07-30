@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — automatic syncs stuck at QUEUED are now visible and recoverable
+In production (`jobs.mode: worker`), every heavy operation — including scheduled synchronisations — runs in a separate **worker daemon**, never in the API process. If that daemon is not alive, a submitted job sits `QUEUED` forever and **nothing on screen said why**. Reported symptom: "the automatic synchronisation goes to QUEUED but never starts." Reproduced exactly: no live daemon ⇒ `QUEUED` indefinitely; start the daemon ⇒ claimed within seconds.
+
+- **The failure is now surfaced.** `GET /api/worker/status` reports the daemon's heartbeat freshness, the queue depth, and the last autostart attempt. A red banner appears for everyone the moment a daemon is *required* (worker mode), its heartbeat is stale (> 120 s), **and** work is waiting — "The processing daemon is stopped: N queued operation(s) will not start" — polled every 30 s. Silent `QUEUED` is gone.
+- **One-click recovery.** `POST /api/worker/restart` (admin, logged to the admin journal) relaunches the daemon; the banner carries a **Restart the daemon** button for admins. The `flock` singleton makes the relaunch harmless — a surplus launch just exits.
+- **Autostart is no longer invisible when it fails.** `ensure_worker` now passes the environment explicitly and records each attempt (success/failure + interpreter used) to `jobs.worker_autostart` — a `subprocess` refused by the host is diagnosable instead of a mystery.
+- **Durable net for shared hosting (cPanel/Passenger), documented.** The API's autostart is best-effort — under Passenger the API only runs while there is traffic, so a daemon that dies overnight only restarts on the next visit. The README now gives the reliable fix: a **cron launcher every 5 minutes** (`python -m fiskr.worker`), made safe by the flock so there is never a second daemon. This decouples the daemon's life from web traffic.
+- Locked by tests: status shape, the down condition (worker mode + stale heartbeat + queued), a fresh heartbeat never being "down", and the admin gate on restart.
+
 ### Added — eleven more public sources, from a registry instead of eleven copies
 Coverage grew from 15 to 26 official lists: multilateral development bank debarments (ADB, IADB, EBRD, AfDB), Asia-Pacific freezes (Japan MOF, Singapore MAS, New Zealand), national counter-terrorism freeze lists (Netherlands, Belgium, Israel NBCTF) and Ukrainian NSDC sanctions.
 

@@ -813,7 +813,29 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
     return summary
 
 
-def ensure_worker(db=None) -> bool:
+# Au-dela de ce silence, le battement de coeur du demon est repute perime :
+# aligne sur worker.HEARTBEAT_EVERY_S (15 s) x 8, memes 120 s que la reprise.
+WORKER_STALE_AFTER_S = 120
+
+
+def _worker_heartbeat(db) -> Dict[str, Any]:
+    """Dernier battement du demon + fraicheur. `age_s` = None si jamais vu."""
+    from fiskr.worker import HEARTBEAT_SETTING
+    hb = get_setting(db, HEARTBEAT_SETTING, None) or {}
+    age_s = None
+    at = hb.get("at")
+    if at:
+        try:
+            last = datetime.fromisoformat(str(at).rstrip("Z"))
+            age_s = (datetime.utcnow() - last).total_seconds()
+        except ValueError:
+            pass
+    alive = age_s is not None and age_s < WORKER_STALE_AFTER_S
+    return {"alive": alive, "age_s": age_s, "at": at,
+            "pid": hb.get("pid"), "host": hb.get("host")}
+
+
+def ensure_worker(db=None, force: bool = False) -> bool:
     """
     Demarre le demon travailleur s'il est absent (battement de coeur manquant
     ou perime). C'est le seul moyen d'avoir un demon en hebergement mutualise
@@ -821,36 +843,60 @@ def ensure_worker(db=None) -> bool:
     processus (il survit au recyclage Passenger), et le verrou flock du demon
     rend toute course inoffensive — N processus API peuvent tenter, un seul
     demon vivra. Retourne True si un demon est deja vivant.
-    """
-    from fiskr.worker import HEARTBEAT_SETTING
 
+    `force` : tente un lancement meme si le battement parait frais (bouton de
+    relance de l'operateur). Le flock rend l'operation sans risque : si un
+    demon vit deja, le nouveau constate le verrou et sort aussitot.
+
+    L'issue de la tentative est ecrite dans `jobs.worker_autostart` pour que
+    l'ecran de supervision dise pourquoi, le cas echeant, aucun demon ne
+    demarre — un echec de `subprocess` (Passenger restreint, mauvais
+    interpreteur) ne doit plus etre invisible.
+    """
     own_session = db is None
     if own_session:
         from fiskr.database import SessionLocal
         db = SessionLocal()
     try:
-        hb = get_setting(db, HEARTBEAT_SETTING, None) or {}
-        at = hb.get("at")
-        if at:
-            try:
-                last = datetime.fromisoformat(str(at).rstrip("Z"))
-                if datetime.utcnow() - last < timedelta(seconds=120):
-                    return True
-            except ValueError:
-                pass
+        if not force and _worker_heartbeat(db)["alive"]:
+            return True
     finally:
         if own_session:
             db.close()
+
+    ok, err = False, None
     try:
         log_path = PROJECT_ROOT / "worker.log"
+        env = dict(os.environ)
+        env["FISKR_JOBS_MODE"] = "worker"
         with open(log_path, "ab") as log_fh:
             subprocess.Popen([sys.executable, "-m", "fiskr.worker"],
                              cwd=str(PROJECT_ROOT), stdout=log_fh,
-                             stderr=subprocess.STDOUT, start_new_session=True)
+                             stderr=subprocess.STDOUT, start_new_session=True,
+                             env=env)
+        ok = True
         logger.info("Demon travailleur absent : demarrage automatique lance.")
     except Exception as e:
+        err = f"{type(e).__name__}: {e}"
         logger.error(f"Demarrage automatique du demon impossible : {e} — "
                      f"les jobs resteront en file jusqu'a son lancement manuel.")
+    # Trace l'issue de la tentative (jamais bloquant)
+    rec_session = None
+    try:
+        from fiskr.database import SessionLocal
+        from fiskr.settings import set_setting
+        rec_session = SessionLocal()
+        set_setting(rec_session, "jobs.worker_autostart", {
+            "at": datetime.utcnow().isoformat() + "Z",
+            "ok": ok, "error": err, "python": sys.executable,
+        })
+        rec_session.commit()
+    except Exception:
+        if rec_session is not None:
+            rec_session.rollback()
+    finally:
+        if rec_session is not None:
+            rec_session.close()
     return False
 
 
@@ -5352,6 +5398,75 @@ async def cancel_job(
     db.commit()
     progress_registry.finish(job.token, status="ERROR", error="Opération annulée.")
     return {"message": "Job annulé.", **_job_row_view(job)}
+
+
+def _worker_status_view(db) -> Dict[str, Any]:
+    """
+    Sante du demon travailleur pour la supervision : battement de coeur, file,
+    et derniere tentative d'autostart. En mode thread/eager il n'y a pas de
+    demon (l'API porte les jobs) : `required` dit si l'absence est un probleme.
+    """
+    from fiskr.database import Job
+    mode = job_queue.jobs_mode()
+    hb = _worker_heartbeat(db)
+    queued = db.query(Job).filter(Job.status == "QUEUED").count()
+    running = db.query(Job).filter(Job.status == "RUNNING").count()
+    oldest_q = db.query(Job).filter(Job.status == "QUEUED") \
+                 .order_by(Job.created_at.asc()).first()
+    oldest_age = None
+    if oldest_q is not None and oldest_q.created_at is not None:
+        oldest_age = (datetime.utcnow() - oldest_q.created_at).total_seconds()
+    autostart = get_setting(db, "jobs.worker_autostart", None)
+    # « En panne » = un demon est requis (mode worker), il est mort, et des
+    # travaux attendent. Sans file en attente, un demon endormi n'est pas
+    # encore un incident visible pour l'operateur.
+    down = (mode == "worker") and (not hb["alive"]) and (queued > 0)
+    return {
+        "mode": mode,
+        "required": mode == "worker",
+        "alive": hb["alive"],
+        "down": down,
+        "heartbeat_age_s": hb["age_s"],
+        "heartbeat_at": hb["at"],
+        "pid": hb["pid"], "host": hb["host"],
+        "queued": queued, "running": running,
+        "oldest_queued_age_s": oldest_age,
+        "last_autostart": autostart,
+    }
+
+
+@app.get("/api/worker/status")
+async def worker_status(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Etat du demon travailleur (tous roles : le bandeau d'alerte doit
+    s'afficher pour chacun). La relance, elle, est reservee a l'admin."""
+    return _worker_status_view(db)
+
+
+@app.post("/api/worker/restart")
+async def worker_restart(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Relance le demon travailleur a la demande (admin). Le verrou flock rend
+    l'operation sans danger : si un demon vit deja, le nouveau processus sort
+    aussitot. Tracee au journal d'administration.
+    """
+    import time
+    if job_queue.jobs_mode() != "worker":
+        raise HTTPException(status_code=400,
+                            detail="Le mode de travaux n'est pas « worker » : aucun démon à relancer.")
+    ensure_worker(db, force=True)
+    log_admin_action(db, admin_user["username"], "WORKER_RESTARTED",
+                     target="fiskr.worker", before=None, after=None)
+    db.commit()
+    # Laisse au demon le temps d'ecrire son premier battement avant de rendre
+    # l'etat, pour que le front reflete le resultat immediatement.
+    time.sleep(2.0)
+    return {"message": "Relance du démon demandée.", **_worker_status_view(db)}
 
 
 class SyncSchedulesUpdate(BaseModel):

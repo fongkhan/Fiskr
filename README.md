@@ -483,6 +483,37 @@ Réglages (`config.yaml`, section `jobs:` — lus au démarrage du processus) :
 > connexion éphémère chacune, ≤ `screen_processes`) — largement sous le
 > `max_connections = 100` par défaut.
 
+### Supervision du démon : le voir s'il tombe, le relancer
+
+En mode `worker`, **rien ne s'exécute sans démon vivant** — une synchronisation
+(ou tout traitement lourd) déposée sans démon reste `QUEUED` indéfiniment. Deux
+garde-fous rendent cette panne visible et réparable :
+
+- **Bandeau d'alerte dans l'application** : dès qu'un démon est requis, absent
+  (battement de cœur périmé > 120 s) **et** que des travaux attendent, un
+  bandeau rouge s'affiche pour tous — « Le démon de traitement est arrêté :
+  N opération(s) en attente ne démarreront pas » — avec un bouton **Relancer le
+  démon** pour l'administrateur. La sonde interroge `GET /api/worker/status`
+  toutes les 30 s ; la relance (`POST /api/worker/restart`, admin, tracée au
+  journal) est sans risque grâce au flock. La dernière tentative d'autostart
+  (succès/échec + interpréteur utilisé) est mémorisée dans
+  `jobs.worker_autostart` : un `subprocess` refusé par l'hébergeur n'est plus
+  invisible.
+- **Filet cron (recommandé en mutualisé)** : l'autostart par l'API est un
+  « best-effort » — sous Passenger, le processus API ne tourne que s'il y a du
+  trafic, donc un démon mort la nuit ne redémarre qu'à la première visite. Le
+  filet durable est une tâche **cron** (cPanel → *Cron Jobs*) qui tente de
+  lancer le démon toutes les 5 minutes ; le verrou `flock` garantit qu'il n'y
+  en aura jamais deux (un lancement de trop sort aussitôt) :
+>
+> ```cron
+> */5 * * * * cd /home/UTILISATEUR/fiskr && /home/UTILISATEUR/virtualenv/fiskr/3.x/bin/python -m fiskr.worker >> worker.log 2>&1
+> ```
+>
+> Adaptez le chemin de l'interpréteur à votre virtualenv cPanel (celui affiché
+> par *Setup Python App*). Cette ligne décorrèle la vie du démon du trafic web :
+> même sans visiteur, les synchronisations planifiées partent à l'heure.
+
 ## 🚀 Installation & Lancement
 
 ### Prérequis
