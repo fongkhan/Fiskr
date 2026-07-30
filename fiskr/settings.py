@@ -29,6 +29,10 @@ SETTING_AUTO_RESCREEN = "ingestion.auto_rescreen"
 # d'interception (%) et exigence d'un backtest au verdict OK pour approuver
 SETTING_BACKTEST_MAX_GAP_PCT = "review.backtest_max_gap_pct"
 SETTING_BACKTEST_REQUIRED = "review.backtest_required"
+# Cahier de tests automatique : lance apres une synchronisation retenue en
+# homologation avec un delta non nul (panel force, ou dernier panel genere)
+SETTING_AUTO_BACKTEST_ENABLED = "review.auto_backtest_enabled"
+SETTING_AUTO_BACKTEST_PANEL = "review.auto_backtest_panel"
 # Blocking keys par canal : layouts ordonnes de composantes de cle
 SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
 SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
@@ -226,6 +230,24 @@ def backtest_max_gap_pct(db) -> float:
 def backtest_required(db) -> bool:
     """True si un cahier de tests au verdict OK est exige avant toute promotion (defaut : non)."""
     return bool(get_setting_with_source(db, SETTING_BACKTEST_REQUIRED, False)["value"])
+
+
+def auto_backtest_enabled(db) -> bool:
+    """
+    True si une synchronisation retenue en homologation avec un delta non nul
+    lance automatiquement le cahier de tests (defaut : oui). Ne fait rien sans
+    panel disponible : le declenchement est toujours silencieusement inoffensif.
+    """
+    return bool(get_setting_with_source(db, SETTING_AUTO_BACKTEST_ENABLED, True)["value"])
+
+
+def auto_backtest_panel(db):
+    """
+    Panel impose pour le cahier de tests automatique (snapshot_id), ou None
+    pour prendre le panel de pseudo-clients genere le plus recent.
+    """
+    value = get_setting_with_source(db, SETTING_AUTO_BACKTEST_PANEL, None)["value"]
+    return str(value) if value else None
 
 
 def _valid_layout(value) -> bool:

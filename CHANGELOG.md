@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — after a sync, the review opens ready to decide
+Requested flow: sync a list → delta against production → the review shows that delta **instantly**, the test book has **already run** on a test panel, and the reviewer just decides.
+
+- **The delta is served, not recomputed.** The sync already computed and stored the delta (`SyncReport.delta_report`, with the production snapshot it was compared against); the review screen nevertheless reloaded *every entity of both snapshots* to recompute it on the fly — the slowness the user felt. `GET /api/review/snapshots/{id}` now serves the stored delta directly when its comparison base is still the current production (`delta_source: "stored"` — zero entities loaded, instant on any list size). If production changed since the sync, or for a manual import that has no SyncReport, it recomputes as before (`"computed"`) — the displayed delta never lies about what approval will actually change. The screen states which of the two it is showing.
+- **The test book runs itself.** When a sync ends held for approval with a non-empty delta, the backtest job is submitted automatically (same token and dedupe key as the manual button, so the two can never run twice in parallel). The panel is the one forced by the new hot setting, else the most recent *generated* pseudo-client panel — never the real client base by default: a full A/B screening of 750k clients must not trigger itself. No usable panel, setting off, empty delta, job already running: the automatism abstains and says why in the sync report, it never breaks the sync.
+- **The pending queue shows what is ready to decide**: a "Test book" column with the verdict (✔ OK / ⚠ with the gap), "⏳ running" while the auto-run is in flight, "—" otherwise. Opening the review reconnects to a running backtest as it already did for manual runs.
+- **Settings** (hot, admin): `review.auto_backtest_enabled` (default on) and `review.auto_backtest_panel` (a READY panel, validated; empty = latest generated panel). The boolean is portable via config export; the panel id is not (it names a snapshot that only exists in one installation).
+- Locked by 10 tests: stored delta served with `calculate_delta` provably never called, stale-base and manual-import fallbacks, panel resolution (forced beats latest), the four abstention paths, dedupe key parity with the manual flow, settings exposure and validation.
+
 ### Fixed — automatic syncs stuck at QUEUED are now visible and recoverable
 In production (`jobs.mode: worker`), every heavy operation — including scheduled synchronisations — runs in a separate **worker daemon**, never in the API process. If that daemon is not alive, a submitted job sits `QUEUED` forever and **nothing on screen said why**. Reported symptom: "the automatic synchronisation goes to QUEUED but never starts." Reproduced exactly: no live daemon ⇒ `QUEUED` indefinitely; start the daemon ⇒ claimed within seconds.
 
