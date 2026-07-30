@@ -102,6 +102,8 @@ from fiskr.settings import (
     alert_sla_hours, notification_events,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
+    sync_auto_enabled, sync_sources_enabled, sync_automation_sources,
+    SETTING_SYNC_AUTO_ENABLED, SETTING_SYNC_SOURCES_ENABLED,
     digest_settings, SETTING_DIGEST,
     notification_batch_settings, SETTING_NOTIFICATION_BATCH, DEFAULT_NOTIFICATION_BATCH,
     SETTING_WHITELIST_EXPIRY_NOTIFIED, get_setting,
@@ -296,9 +298,11 @@ def seed_watchlist_json(db: Session):
         logger.error(f"Failed to seed watchlist from JSON: {e}")
 
 def _run_scheduled_syncs():
-    """Execute les synchronisations de sources activees (appel planifie quotidien)."""
-    sync_cfg = get_sync_config()
+    """Execute les synchronisations de sources activees (appel planifie quotidien).
+    L'activation lue est celle EFFECTIVE : reglage a chaud (base) par-dessus
+    config.yaml — couper une source depuis l'application suffit a l'exclure."""
     db = next(get_db())
+    sync_cfg = get_sync_config(db)
 
     def _apply_rescreen(report):
         # Surveillance continue : re-criblage post-delta apres chaque application
@@ -372,11 +376,13 @@ def _cron_sync_tick(tick=None) -> None:
     from fiskr.cron import cron_matches, CronError
 
     tick = tick or datetime.now()
-    sync_cfg = get_sync_config()
-    if not sync_cfg.get("auto_enabled"):
-        return
     db = next(get_db())
     try:
+        # Etat EFFECTIF (reglage a chaud > config.yaml) : l'interrupteur et les
+        # sources actives se pilotent depuis l'application, sans redemarrage
+        sync_cfg = get_sync_config(db)
+        if not sync_cfg.get("auto_enabled"):
+            return
         schedules = sync_schedules(db)
     finally:
         db.close()
@@ -998,8 +1004,11 @@ async def lifespan(app: FastAPI):
             job_queue.requeue_stale(db, worker_present=False)
         except Exception as e:
             logger.warning(f"Reprise de la file de travaux impossible : {e}")
-        if get_sync_config()["auto_enabled"]:
-            background_tasks.append(asyncio.create_task(_cron_sync_scheduler()))
+        # La boucle demarre TOUJOURS : c'est chaque tic qui relit l'interrupteur
+        # effectif (reglage a chaud). La demarrer sous condition figeait l'etat
+        # du demarrage — activer la synchronisation depuis l'application serait
+        # reste sans effet jusqu'au redemarrage suivant.
+        background_tasks.append(asyncio.create_task(_cron_sync_scheduler()))
         background_tasks.append(asyncio.create_task(_inbox_poller()))
         background_tasks.append(asyncio.create_task(_digest_scheduler()))
         background_tasks.append(asyncio.create_task(_retention_scheduler()))
@@ -1863,6 +1872,9 @@ _PORTABLE_SETTINGS = {
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
+    # Synchronisation automatique : les cles de source sont universelles,
+    # ces reglages s'alignent donc entre recette et production comme le cron
+    SETTING_SYNC_AUTO_ENABLED, SETTING_SYNC_SOURCES_ENABLED,
 }
 
 class ConfigImportRequest(BaseModel):
@@ -5119,8 +5131,12 @@ async def get_sync_configuration(
     """Configuration active de la synchronisation automatique des sources,
     avec la planification cron effective et la prochaine occurrence par source."""
     from fiskr.cron import next_run as cron_next_run, CronError
-    cfg = get_sync_config()
+    # Etat EFFECTIF : reglages a chaud (base) par-dessus config.yaml, plus la
+    # provenance de chaque valeur — l'ecran d'administration montre ce qui est
+    # surcharge depuis l'application et ce qui vient encore du fichier.
+    cfg = get_sync_config(db)
     cfg["email_configured"] = bool(os.getenv("SMTP_HOST") and os.getenv("SYNC_EMAIL_TO"))
+    cfg["automation_sources"] = sync_automation_sources(db)
     schedules = sync_schedules(db)
     cfg["schedules"] = schedules
     next_runs = {}
@@ -5475,7 +5491,11 @@ async def worker_restart(
 
 class SyncSchedulesUpdate(BaseModel):
     # source -> expression cron 5 champs ; chaine vide = retour au defaut
-    schedules: Dict[str, str]
+    schedules: Optional[Dict[str, str]] = None
+    # Interrupteur general des synchronisations planifiees (null = inchange)
+    auto_enabled: Optional[bool] = None
+    # source -> participation aux synchronisations automatiques (null = inchange)
+    sources_enabled: Optional[Dict[str, bool]] = None
 
 @app.put("/api/settings/sync")
 async def update_sync_schedules(
@@ -5483,32 +5503,72 @@ async def update_sync_schedules(
     db: Session = Depends(get_db),
     admin_user: Dict[str, Any] = Depends(require_admin)
 ):
-    """Planification cron par source, modifiable a chaud (admin). Une valeur
-    vide retire la surcharge (retour au defaut config/horaire global)."""
+    """
+    Reglages de la synchronisation automatique, modifiables a chaud (ADMIN
+    uniquement) : interrupteur general, sources qui y participent, et
+    planification cron par source. Une expression vide retire la surcharge
+    (retour au defaut config/horaire global).
+
+    Tout est applique sans redemarrage : le planificateur relit ces valeurs a
+    chaque tic. Couper l'interrupteur n'empeche jamais un lancement manuel —
+    celui-ci est un acte explicite d'exploitant.
+    """
     from fiskr.cron import parse_cron, CronError
-    unknown = [s for s in payload.schedules if s not in SYNC_SOURCES]
-    if unknown:
-        raise HTTPException(status_code=400,
-                            detail=f"Source(s) inconnue(s) : {', '.join(unknown)} ({', '.join(SYNC_SOURCES)}).")
-    current = get_setting_with_source(db, SETTING_SYNC_SCHEDULES, {})["value"] or {}
-    merged = dict(current) if isinstance(current, dict) else {}
-    for source, expr in payload.schedules.items():
-        expr = (expr or "").strip()
-        if expr:
-            try:
-                parse_cron(expr)
-            except CronError as bad:
-                raise HTTPException(status_code=400, detail=f"{source} : {bad}")
-            merged[source] = expr
-        else:
-            merged.pop(source, None)
-    before = dict(current) if isinstance(current, dict) else {}
-    set_setting(db, SETTING_SYNC_SCHEDULES, merged, updated_by=admin_user["username"])
-    log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="sync.schedules",
-                     before=before, after=merged)
+    if payload.schedules is None and payload.auto_enabled is None and payload.sources_enabled is None:
+        raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
+    for field, mapping in (("schedules", payload.schedules), ("sources_enabled", payload.sources_enabled)):
+        unknown = [s for s in (mapping or {}) if s not in SYNC_SOURCES]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} — source(s) inconnue(s) : {', '.join(unknown)} ({', '.join(SYNC_SOURCES)}).")
+
+    before = {
+        "auto_enabled": sync_auto_enabled(db),
+        "sources_enabled": sync_sources_enabled(db),
+        "schedules": dict(get_setting_with_source(db, SETTING_SYNC_SCHEDULES, {})["value"] or {}),
+    }
+
+    if payload.schedules is not None:
+        current = before["schedules"]
+        merged = dict(current) if isinstance(current, dict) else {}
+        for source, expr in payload.schedules.items():
+            expr = (expr or "").strip()
+            if expr:
+                try:
+                    parse_cron(expr)
+                except CronError as bad:
+                    raise HTTPException(status_code=400, detail=f"{source} : {bad}")
+                merged[source] = expr
+            else:
+                merged.pop(source, None)
+        set_setting(db, SETTING_SYNC_SCHEDULES, merged, updated_by=admin_user["username"])
+
+    if payload.auto_enabled is not None:
+        set_setting(db, SETTING_SYNC_AUTO_ENABLED, bool(payload.auto_enabled),
+                    updated_by=admin_user["username"])
+
+    if payload.sources_enabled is not None:
+        stored = get_setting(db, SETTING_SYNC_SOURCES_ENABLED, {}) or {}
+        merged_sources = dict(stored) if isinstance(stored, dict) else {}
+        merged_sources.update({s: bool(v) for s, v in payload.sources_enabled.items()})
+        set_setting(db, SETTING_SYNC_SOURCES_ENABLED, merged_sources,
+                    updated_by=admin_user["username"])
+
+    after = {
+        "auto_enabled": sync_auto_enabled(db),
+        "sources_enabled": sync_sources_enabled(db),
+        "schedules": dict(get_setting_with_source(db, SETTING_SYNC_SCHEDULES, {})["value"] or {}),
+    }
+    log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="sync.automation",
+                     before=before, after=after)
     db.commit()
-    schedules = sync_schedules(db)
-    return {"message": "Planification des synchronisations mise à jour.", "schedules": schedules}
+    return {
+        "message": "Synchronisation automatique mise à jour.",
+        "auto_enabled": after["auto_enabled"],
+        "sources_enabled": after["sources_enabled"],
+        "schedules": sync_schedules(db),
+    }
 
 @app.get("/api/sync/evidence")
 async def list_sync_evidence(

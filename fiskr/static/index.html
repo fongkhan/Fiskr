@@ -634,7 +634,7 @@
                             <h2>Collecteurs de Sources Officielles</h2>
                             <p class="section-desc">Récupérez les listes directement auprès des émetteurs : le delta (ADDED / MODIFIED / REMOVED) est calculé puis appliqué au référentiel actif, et un rapport de suivi est émis (in-app + email si SMTP configuré).</p>
 
-                            <p class="section-desc" style="margin-bottom: 0.75rem;">Les sources sont groupées par nature. Activez-les dans <code>config.yaml</code> (<code>sync.&lt;source&gt;.enabled</code>) ; une source désactivée reste listée mais grisée. « Synchroniser » lance une récupération immédiate ; la planification quotidienne se règle plus bas.</p>
+                            <p class="section-desc" style="margin-bottom: 0.75rem;">Les sources sont groupées par nature. La colonne « Automatique » indique si la source participe aux récupérations planifiées : un administrateur l'active depuis la carte <strong>Synchronisation Automatique</strong> plus bas, sans toucher au serveur. « Synchroniser » lance une récupération immédiate et reste disponible même pour une source exclue de l'automatique.</p>
                             <div class="filter-bar" style="margin-bottom: 0.75rem;">
                                 <input type="text" id="sources-search" placeholder="Filtrer les sources (nom, pays…)" aria-label="Filtrer les sources">
                                 <select id="sources-family-filter" aria-label="Filtrer par famille">
@@ -653,7 +653,7 @@
                             <div class="table-container">
                                 <table id="sources-table">
                                     <thead><tr>
-                                        <th>Source</th><th>Activée</th><th>Dernière / prochaine</th><th class="no-sort"></th>
+                                        <th>Source</th><th>Automatique</th><th>Dernière / prochaine</th><th class="no-sort"></th>
                                     </tr></thead>
                                     <tbody><!-- Généré depuis SOURCE_CATALOG (renderSourcesTable) --></tbody>
                                 </table>
@@ -663,17 +663,24 @@
                             <p id="sync-schedule-info" class="section-desc" style="margin-top: 1rem;"></p>
                         </div>
 
-                        <!-- Planification cron par source -->
-                        <div class="card result-card">
-                            <h2>⏰ Planification par Source (cron)</h2>
-                            <p class="section-desc">Chaque source suit sa propre expression cron 5 champs (<code>minute heure jour mois jour-de-semaine</code>), modifiable à chaud (admin). Vide = retour au défaut (<code>config.yaml</code> ou horaire quotidien global). Exemples : <code>0 6 * * *</code> (tous les jours à 6h), <code>0 */4 * * *</code> (toutes les 4 h), <code>30 7 * * 1-5</code> (7h30 en semaine). Une même source ne se chevauche jamais.</p>
+                        <!-- Synchronisation automatique (ADMIN uniquement) -->
+                        <div class="card result-card hidden" id="sync-automation-card">
+                            <h2>⏰ Synchronisation Automatique <span class="status-badge warning" style="font-size: 0.68rem; vertical-align: middle;">ADMIN</span></h2>
+                            <p class="section-desc">Pilotage complet des récupérations planifiées, <strong>modifiable à chaud</strong> : aucun accès au serveur ni redémarrage. L'interrupteur général coupe ou relance l'ensemble ; chaque source décide ensuite si elle y participe et suit sa propre expression cron 5 champs (<code>minute heure jour mois jour-de-semaine</code>). Vide = retour au défaut (<code>config.yaml</code> ou horaire quotidien global). Exemples : <code>0 6 * * *</code> (tous les jours à 6h), <code>0 */4 * * *</code> (toutes les 4 h), <code>30 7 * * 1-5</code> (7h30 en semaine). Une même source ne se chevauche jamais, et couper l'automatique n'empêche jamais un lancement manuel.</p>
+                            <div class="form-group" style="margin-bottom: 1rem;">
+                                <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                    <input type="checkbox" id="sync-auto-enabled" style="width: 18px; height: 18px;">
+                                    <strong>Activer la synchronisation automatique</strong>
+                                </label>
+                                <small id="sync-auto-origin" style="color: var(--text-muted);"></small>
+                            </div>
                             <div class="table-container">
                                 <table id="cron-schedules-table">
-                                    <thead><tr><th>Source</th><th>Expression cron</th><th>Prochaine exécution</th><th>État</th></tr></thead>
+                                    <thead><tr><th>Source</th><th>Automatique</th><th>Expression cron</th><th>Prochaine exécution</th><th>État</th></tr></thead>
                                     <tbody><!-- Populated dynamically --></tbody>
                                 </table>
                             </div>
-                            <button id="cron-save-btn" class="btn btn-primary hidden" style="margin-top: 1rem;" onclick="saveCronSchedules()">Enregistrer la planification</button>
+                            <button id="cron-save-btn" class="btn btn-primary" style="margin-top: 1rem;" onclick="saveCronSchedules()">Enregistrer la synchronisation automatique</button>
                         </div>
 
                         <!-- Sync Reports History Card -->

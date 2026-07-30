@@ -82,6 +82,11 @@ review:
 
 # Synchronisation automatique des sources officielles (OFAC / EUR-Lex)
 sync:
+  # Valeurs par DEFAUT au premier demarrage. La synchronisation automatique
+  # (interrupteur general et participation de chaque source) se pilote ensuite
+  # depuis l'application — ecran Listes > Sources automatiques, carte reservee
+  # aux administrateurs — et s'applique a chaud, sans redemarrage. Un reglage
+  # pose dans l'application prime sur ce fichier.
   auto_enabled: false        # true = execution automatique chaque matin
   schedule_time: "06:00"     # heure locale de declenchement quotidien (HH:MM)
   # Fiabilite reseau : les retries couvrent les erreurs de connexion/timeout

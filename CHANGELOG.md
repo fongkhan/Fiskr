@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — automatic synchronisation is driven from the application, admin-only
+Turning scheduled fetches on or off — or excluding a single source from them — required editing `config.yaml` **on the server** and restarting. On shared hosting that is a deployment, not an operation. It is now a control panel inside the app, reserved to administrators.
+
+- **A new admin card, ⏰ Automatic Synchronisation** (Lists → Automatic sources): a master switch, then per source its participation in scheduled fetches and its own cron expression, saved in one call. The whole card is **hidden for any non-admin role** and the endpoint refuses the write with `403` — the guard is on the server, not just in the UI.
+- **`sync.auto_enabled` and `sync.<source>.enabled` became hot settings** (database over `config.yaml`, which now only supplies first-boot defaults). `get_sync_config(db)` returns the effective state and is what the schedulers read; called without a session it still returns the file-only view, so internal callers (network parameters, source URLs) never touch the database.
+- **Genuinely hot, with no restart.** The thread-mode scheduler loop now always starts and re-reads the switch at each tick — starting it conditionally froze the boot-time value, so enabling synchronisation from the app would have done nothing until the next restart. The worker daemon already re-read it every tick.
+- **Provenance is shown**: each value says whether it comes from the application (overridden) or is still inherited from `config.yaml`. Every change is written to the admin journal (`SETTINGS_UPDATED`, target `sync.automation`) with before/after.
+- **Cutting the automation never amputates the operator**: "Synchronise" stays available on every source, including those excluded from the schedule — a manual run is an explicit, traced act.
+- Locked by 11 tests: hot override beats the file and falls back to it, `get_sync_config` overlay only with a session, **`403` for user / reviewer / blocking / auditor with nothing written**, partial updates leaving the rest untouched, unknown source and bad cron rejected, and the scheduler actually honouring both the switch and per-source state. Verified in a browser on both paths: admin sees the card (26 source toggles + 26 cron fields, a real save flipping the state), a non-admin analyst does not see it at all and gets `403` on a forced request.
+
 ### Changed — after a sync, the review opens ready to decide
 Requested flow: sync a list → delta against production → the review shows that delta **instantly**, the test book has **already run** on a test panel, and the reviewer just decides.
 

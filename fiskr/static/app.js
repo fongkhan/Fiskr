@@ -797,6 +797,11 @@ async function checkAuthUser() {
             if (scoringCard) scoringCard.classList.toggle("hidden", !isAdmin);
             const checklistCard = document.getElementById("checklist-card");
             if (checklistCard) checklistCard.classList.toggle("hidden", !isAdmin);
+            // Synchronisation automatique : acte d'exploitation réservé à
+            // l'administrateur — la carte entière est masquée pour les autres
+            // (le serveur refuse de toute façon l'écriture, cf. require_admin)
+            const syncAutomationCard = document.getElementById("sync-automation-card");
+            if (syncAutomationCard) syncAutomationCard.classList.toggle("hidden", !isAdmin);
             const reviewActions = document.getElementById("review-actions");
             if (reviewActions) reviewActions.classList.toggle("hidden", !isReviewer);
             const exclusionToolbar = document.getElementById("review-exclusion-toolbar");
@@ -1681,8 +1686,8 @@ async function fetchSyncConfig() {
         const cfg = await response.json();
         const info = document.getElementById("sync-schedule-info");
         const autoTxt = cfg.auto_enabled
-            ? "⏰ Planificateur cron actif : chaque source suit sa propre expression ci-dessous."
-            : "⏸️ Synchronisation automatique désactivée (sync.auto_enabled dans config.yaml).";
+            ? "⏰ Synchronisation automatique active : chaque source activée suit sa propre expression cron."
+            : "⏸️ Synchronisation automatique désactivée — aucune source ne part toute seule (un administrateur l'active plus bas).";
         const mailTxt = cfg.email_configured
             ? "Rapports envoyés par email (SMTP configuré)."
             : "Rapports disponibles dans l'application uniquement (SMTP non configuré).";
@@ -1733,8 +1738,8 @@ function renderSourcesTable(cfg) {
                     <div class="section-desc" style="margin: 0.15rem 0 0; font-size: 0.76rem;">${escapeHtml(s.desc)}</div>
                 </td>
                 <td>${enabled
-                    ? '<span class="status-badge no_match">activée</span>'
-                    : '<span class="status-badge" style="opacity: 0.6;">désactivée</span>'}</td>
+                    ? '<span class="status-badge no_match" title="Participe aux synchronisations planifiées">activée</span>'
+                    : '<span class="status-badge" style="opacity: 0.6;" title="Exclue des synchronisations planifiées — le bouton Synchroniser reste disponible">désactivée</span>'}</td>
                 <td>${state}<div class="section-desc" style="font-size: 0.72rem; margin-top: 0.15rem;">prochaine : ${escapeHtml(nextRun)}</div></td>
                 <td><button class="btn btn-primary" style="padding: 0.3rem 0.7rem; font-size: 0.8rem;"
                         onclick="startSourceSync('${s.alias}')">Synchroniser</button></td>
@@ -1776,28 +1781,43 @@ async function startSourceSync(alias) {
 // des opérations de fond sans redemander /api/sync/config
 let _lastSyncConfig = null;
 
+// Panneau de synchronisation automatique (carte réservée aux admins) :
+// interrupteur général + participation et cron par source. Tout est réglable
+// à chaud — plus besoin d'éditer config.yaml sur le serveur ni de redémarrer.
 function renderCronSchedules(cfg) {
     if (cfg) _lastSyncConfig = cfg;
     cfg = _lastSyncConfig;
     const tbody = document.querySelector("#cron-schedules-table tbody");
     if (!tbody || !cfg) return;
-    const isAdmin = currentUser && userRoles(currentUser).includes("admin");
     const schedules = cfg.schedules || {};
     const nextRuns = cfg.next_runs || {};
+    const origins = cfg.automation_sources || {};
+
+    const autoBox = document.getElementById("sync-auto-enabled");
+    if (autoBox) autoBox.checked = !!cfg.auto_enabled;
+    const originEl = document.getElementById("sync-auto-origin");
+    if (originEl) {
+        originEl.textContent = origins.auto_enabled === "database"
+            ? "Réglé depuis l'application (surcharge config.yaml)."
+            : "Valeur héritée de config.yaml — la modifier ici la surcharge à chaud.";
+    }
+
     tbody.innerHTML = Object.entries(CRON_SOURCE_KEYS).map(([source, labelKey]) => {
         const enabled = (cfg[source] || {}).enabled;
+        const overridden = origins[source] === "database";
         return `<tr>
             <td>${escapeHtml(SYNC_SOURCE_LABELS[labelKey] || labelKey)}
-                ${enabled ? "" : '<br><small style="color: var(--text-muted);">source désactivée</small>'}</td>
+                ${overridden ? '<br><small style="color: var(--text-muted);">réglé dans l\'application</small>' : ""}</td>
+            <td><input type="checkbox" id="auto-${source}" ${enabled ? "checked" : ""}
+                       style="width: 17px; height: 17px;"
+                       title="La source participe aux synchronisations planifiées"></td>
             <td><input type="text" id="cron-${source}" value="${escapeHtml(schedules[source] || "")}"
-                       style="font-family: monospace; max-width: 200px;" ${isAdmin ? "" : "disabled"}
+                       style="font-family: monospace; max-width: 200px;"
                        title="Expression cron 5 champs : minute heure jour mois jour-de-semaine"></td>
             <td>${nextRuns[source] ? formatDateTime(nextRuns[source]) : "—"}</td>
             <td>${sourceStateCell(source)}</td>
         </tr>`;
     }).join("");
-    const saveBtn = document.getElementById("cron-save-btn");
-    if (saveBtn) saveBtn.classList.toggle("hidden", !isAdmin);
 }
 
 // État vivant d'une source, lu dans les opérations de fond déjà collectées
@@ -1831,25 +1851,31 @@ function sourceStateCell(source) {
     </div>`;
 }
 
+// Enregistre l'ensemble du panneau en un appel : interrupteur général,
+// sources participantes et expressions cron. Le serveur applique à chaud.
 async function saveCronSchedules() {
     const schedules = {};
+    const sources_enabled = {};
     for (const source of Object.keys(CRON_SOURCE_KEYS)) {
-        const el = document.getElementById(`cron-${source}`);
-        if (el) schedules[source] = el.value.trim();
+        const cronEl = document.getElementById(`cron-${source}`);
+        if (cronEl) schedules[source] = cronEl.value.trim();
+        const autoEl = document.getElementById(`auto-${source}`);
+        if (autoEl) sources_enabled[source] = autoEl.checked;
     }
+    const auto_enabled = !!document.getElementById("sync-auto-enabled")?.checked;
     try {
         const response = await apiFetch("/api/settings/sync", {
             method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ schedules }),
+            body: JSON.stringify({ schedules, sources_enabled, auto_enabled }),
         });
         const data = await response.json();
         if (!response.ok) {
-            showToast("Erreur : " + (data.detail || "planification refusée."), "error");
+            showToast("Erreur : " + (data.detail || "réglage refusé."), "error");
             return;
         }
         showToast(data.message, "success");
         fetchSyncConfig();
-    } catch (e) { console.error("Cron schedules save error:", e); }
+    } catch (e) { console.error("Sync automation save error:", e); }
 }
 
 // Handle Delta Snapshot Comparison

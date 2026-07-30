@@ -38,6 +38,12 @@ SETTING_BLOCKING_SCREENING = "blocking.screening_layout"
 SETTING_BLOCKING_FILTERING = "blocking.filtering_layout"
 # Planification cron par source de synchronisation (source -> expression 5 champs)
 SETTING_SYNC_SCHEDULES = "sync.schedules"
+# Synchronisation automatique, pilotable a chaud depuis l'application (admin) :
+# interrupteur general et surcharges d'activation par source. config.yaml ne
+# fournit plus que les defauts — plus besoin d'editer un fichier et de
+# redemarrer pour couper ou relancer les recuperations planifiees.
+SETTING_SYNC_AUTO_ENABLED = "sync.auto_enabled"
+SETTING_SYNC_SOURCES_ENABLED = "sync.sources_enabled"
 from fiskr.sources import OPENSANCTIONS_BY_KEY as _OS_BY_KEY
 
 SYNC_SOURCES = ("ofac", "ofac_nonsdn", "eurlex", "dgt", "eu_fsf", "un", "pep", "ofsi", "seco", "csl", "canada", "dfat",
@@ -320,6 +326,52 @@ def sync_schedules(db) -> Dict[str, str]:
         if not expr:
             expr = str((sync_cfg.get(source) or {}).get("schedule") or "").strip()
         out[source] = expr or default_cron
+    return out
+
+
+def sync_auto_enabled(db) -> bool:
+    """
+    Interrupteur general des synchronisations planifiees :
+    reglage a chaud (base) > config.yaml (sync.auto_enabled) > False.
+    Coupe, plus aucune source ne part toute seule ; les lancements manuels
+    restent possibles (ils sont un acte explicite d'exploitant).
+    """
+    stored = get_setting(db, SETTING_SYNC_AUTO_ENABLED, None)
+    if stored is not None:
+        return bool(stored)
+    return bool((config.get("sync", {}) or {}).get("auto_enabled", False))
+
+
+def sync_sources_enabled(db) -> Dict[str, bool]:
+    """
+    Participation de chaque source aux synchronisations AUTOMATIQUES :
+    reglage a chaud (base) > config.yaml (sync.<source>.enabled).
+    Une source coupee reste synchronisable a la main — l'etat gouverne le
+    planificateur, pas le bouton.
+    """
+    sync_cfg = config.get("sync", {}) or {}
+    overrides = get_setting(db, SETTING_SYNC_SOURCES_ENABLED, {}) or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    out: Dict[str, bool] = {}
+    for source in SYNC_SOURCES:
+        if source in overrides:
+            out[source] = bool(overrides[source])
+        else:
+            out[source] = bool((sync_cfg.get(source) or {}).get("enabled", False))
+    return out
+
+
+def sync_automation_sources(db) -> Dict[str, str]:
+    """Provenance de chaque valeur (« database » / « config ») pour l'ecran
+    de reglages : l'admin voit ce qui est surcharge a chaud."""
+    stored_auto = get_setting(db, SETTING_SYNC_AUTO_ENABLED, None)
+    overrides = get_setting(db, SETTING_SYNC_SOURCES_ENABLED, {}) or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    out = {"auto_enabled": "database" if stored_auto is not None else "config"}
+    for source in SYNC_SOURCES:
+        out[source] = "database" if source in overrides else "config"
     return out
 
 
