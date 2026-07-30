@@ -129,6 +129,70 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
         session.close()
 
 
+def _resolve_auto_backtest_panel(session):
+    """
+    Panel du cahier de tests automatique : celui impose par le reglage s'il
+    est toujours utilisable (READY, non vide), sinon le panel de
+    pseudo-clients GENERE le plus recent — jamais la base clients reelle par
+    defaut : un criblage A/B de tout le referentiel ne se declenche pas seul.
+    Retourne None si aucun panel n'est utilisable (l'automatisme s'abstient).
+    """
+    from fiskr.backtest import PANEL_FILE_TYPES, TEST_PANEL_FILE_TYPE
+    from fiskr.settings import auto_backtest_panel
+
+    forced = auto_backtest_panel(session)
+    if forced:
+        panel = session.query(Snapshot).filter(
+            Snapshot.snapshot_id == forced,
+            Snapshot.file_type.in_(PANEL_FILE_TYPES),
+            Snapshot.status == "READY",
+        ).first()
+        if panel is not None and (panel.record_count or 0):
+            return panel.snapshot_id
+        logger.warning(f"Panel d'auto-backtest configure ({forced}) inutilisable : repli sur le dernier panel genere.")
+    panel = session.query(Snapshot).filter(
+        Snapshot.file_type == TEST_PANEL_FILE_TYPE,
+        Snapshot.status == "READY",
+        Snapshot.record_count > 0,
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    return panel.snapshot_id if panel is not None else None
+
+
+def _maybe_auto_backtest(session, report) -> Optional[Dict[str, Any]]:
+    """
+    Apres une synchronisation RETENUE en homologation avec un delta non nul :
+    soumet le cahier de tests automatiquement, pour que le reviseur trouve le
+    delta ET le rapport A/B deja prets et n'ait plus qu'a decider.
+    Jamais bloquant : toute impossibilite (reglage coupe, aucun panel, job
+    equivalent deja en cours) est rendue dans le rapport, pas levee.
+    """
+    from fiskr.settings import auto_backtest_enabled
+
+    if report.status != "PENDING_REVIEW" or not report.snapshot_id:
+        return None
+    delta_size = (report.added_count or 0) + (report.modified_count or 0) + (report.removed_count or 0)
+    if not delta_size:
+        return {"submitted": False, "reason": "delta vide"}
+    if not auto_backtest_enabled(session):
+        return {"submitted": False, "reason": "désactivé (réglage review.auto_backtest_enabled)"}
+    panel_id = _resolve_auto_backtest_panel(session)
+    if panel_id is None:
+        return {"submitted": False,
+                "reason": "aucun panel de test généré disponible (générez-en un dans l'homologation)"}
+    token = f"backtest:{report.snapshot_id}"  # meme dedupe que le lancement manuel
+    try:
+        jobs.submit("backtest", token=token,
+                    label=f"Cahier de tests — {report.source} (auto)",
+                    params={"snapshot_id": report.snapshot_id,
+                            "panel_snapshot_id": panel_id,
+                            "candidate_rule_id": None, "username": "système"},
+                    created_by="système", dedupe_key=token,
+                    snapshot_id=report.snapshot_id)
+    except jobs.JobConflict:
+        return {"submitted": False, "reason": "un cahier de tests est déjà en cours"}
+    return {"submitted": True, "panel_snapshot_id": panel_id, "job_token": token}
+
+
 @jobs.task("sync")
 def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
                      for_date: Optional[str] = None, username: str = "?") -> None:
@@ -136,6 +200,8 @@ def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
     Cycle complet de synchronisation d'une source officielle : telechargement,
     delta, application (ou attente d'homologation), re-criblage post-delta.
     Le rapport est publie sur la ligne du job ET archive en base (SyncReport).
+    Si le snapshot est retenu en homologation avec un delta, le cahier de
+    tests part automatiquement (reglage review.auto_backtest_enabled).
     """
     from fiskr.rescreen import rescreen_after_snapshot_change
     from fiskr.settings import auto_rescreen_enabled
@@ -165,6 +231,15 @@ def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
                         phase="RESCREEN", processed=done, total=total,
                         snapshot_id=report.snapshot_id),
                 )
+        # Snapshot retenu en homologation : cahier de tests automatique pour
+        # que l'examen s'ouvre avec le rapport A/B deja pret (ou en cours)
+        try:
+            auto_bt = _maybe_auto_backtest(session, report)
+        except Exception as e:  # l'automatisme ne casse jamais la sync
+            logger.error(f"Auto-backtest impossible apres la sync {run_key} : {e}")
+            auto_bt = {"submitted": False, "reason": f"erreur : {e}"}
+        if auto_bt is not None:
+            result["auto_backtest"] = auto_bt
         ctx.set_result(result)
     finally:
         session.close()

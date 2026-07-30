@@ -96,6 +96,7 @@ from fiskr.settings import (
     SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
+    SETTING_AUTO_BACKTEST_ENABLED, SETTING_AUTO_BACKTEST_PANEL,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events,
@@ -1855,6 +1856,9 @@ _PORTABLE_SETTINGS = {
     SETTING_EXCLUSION_FILE_REQUIRED, SETTING_ALERT_FOUR_EYES,
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED,
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
+    # Auto-backtest : le booleen est portable, PAS le panel (snapshot_id
+    # propre a chaque installation — il ne survivrait pas a un import ailleurs)
+    SETTING_AUTO_BACKTEST_ENABLED,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
@@ -5544,6 +5548,10 @@ class IngestionSettingsUpdate(BaseModel):
     auto_rescreen: Optional[bool] = None
     backtest_required: Optional[bool] = None
     backtest_max_gap_pct: Optional[float] = None
+    # Cahier de tests automatique apres une sync retenue en homologation ;
+    # panel force (snapshot_id, "" = retour au dernier panel genere)
+    auto_backtest_enabled: Optional[bool] = None
+    auto_backtest_panel: Optional[str] = None
     # Score minimal de qualite du referentiel clients (0 = pas de seuil)
     quality_min_score_pct: Optional[float] = None
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
@@ -5578,6 +5586,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         bt_gap_value = float(bt_gap["value"])
     except (TypeError, ValueError):
         bt_gap_value = 20.0
+    auto_bt = get_setting_with_source(db, SETTING_AUTO_BACKTEST_ENABLED, True)
+    auto_bt_panel = get_setting_with_source(db, SETTING_AUTO_BACKTEST_PANEL, None)
     quality_min = get_setting_with_source(db, SETTING_QUALITY_MIN_SCORE, 0.0)
     return {
         "require_approval": bool(approval["value"]),
@@ -5589,6 +5599,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_rescreen": bool(rescreen["value"]),
         "backtest_required": bool(bt_required["value"]),
         "backtest_max_gap_pct": bt_gap_value,
+        "auto_backtest_enabled": bool(auto_bt["value"]),
+        "auto_backtest_panel": str(auto_bt_panel["value"]) if auto_bt_panel["value"] else None,
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
         "notification_events": notification_events(db),
@@ -5605,6 +5617,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
             "auto_rescreen": rescreen["source"],
             "backtest_required": bt_required["source"],
             "backtest_max_gap_pct": bt_gap["source"],
+            "auto_backtest_enabled": auto_bt["source"],
+            "auto_backtest_panel": auto_bt_panel["source"],
             "quality_min_score_pct": quality_min["source"],
         },
     }
@@ -5633,9 +5647,11 @@ async def update_ingestion_settings(
         SETTING_WHITELIST_FILE_REQUIRED: payload.whitelist_file_required,
         SETTING_AUTO_RESCREEN: payload.auto_rescreen,
         SETTING_BACKTEST_REQUIRED: payload.backtest_required,
+        SETTING_AUTO_BACKTEST_ENABLED: payload.auto_backtest_enabled,
     }
     changed = {k: v for k, v in updates.items() if v is not None}
     if (not changed and payload.backtest_max_gap_pct is None
+            and payload.auto_backtest_panel is None
             and payload.quality_min_score_pct is None
             and payload.alert_sla_hours is None and payload.notification_events is None
             and payload.digest is None and payload.resource_fields is None
@@ -5649,6 +5665,20 @@ async def update_ingestion_settings(
         if not (0 <= payload.backtest_max_gap_pct <= 1000):
             raise HTTPException(status_code=400, detail="backtest_max_gap_pct doit être entre 0 et 1000.")
         set_setting(db, SETTING_BACKTEST_MAX_GAP_PCT, float(payload.backtest_max_gap_pct),
+                    updated_by=admin_user["username"])
+    if payload.auto_backtest_panel is not None:
+        panel_id = payload.auto_backtest_panel.strip()
+        if panel_id:
+            panel = db.query(Snapshot).filter(
+                Snapshot.snapshot_id == panel_id,
+                Snapshot.file_type.in_(PANEL_FILE_TYPES),
+                Snapshot.status == "READY",
+            ).first()
+            if panel is None:
+                raise HTTPException(status_code=400,
+                                    detail="auto_backtest_panel : panel introuvable ou non prêt.")
+        # "" = retour au comportement par defaut (dernier panel genere)
+        set_setting(db, SETTING_AUTO_BACKTEST_PANEL, panel_id or None,
                     updated_by=admin_user["username"])
     if payload.quality_min_score_pct is not None:
         if not (0 <= payload.quality_min_score_pct <= 100):
@@ -6993,6 +7023,11 @@ def _snapshot_summary(db: Session, snap: Snapshot) -> Dict[str, Any]:
         "reviewed_by": snap.reviewed_by,
         "reviewed_at": snap.reviewed_at.isoformat() if snap.reviewed_at else None,
         "review_comment": snap.review_comment,
+        # Verdict du cahier de tests (auto ou manuel) : la file d'attente
+        # montre d'un coup d'oeil ce qui est pret a decider
+        "backtest_verdict": (snap.backtest_report or {}).get("verdict"),
+        "backtest_gap_pct": (snap.backtest_report or {}).get("gap_pct"),
+        "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
     }
 
 @app.get("/api/review/pending")
@@ -7007,6 +7042,27 @@ async def list_pending_reviews(
     ).order_by(Snapshot.uploaded_at.desc()).all()
     return {"pending": [_snapshot_summary(db, s) for s in snaps]}
 
+def _stored_sync_delta(db: Session, snapshot_id: str, production_id: Optional[str]):
+    """
+    Delta memorise par la synchronisation qui a produit ce snapshot, s'il est
+    encore valable : le SyncReport porte le delta (tronque, meme forme que le
+    recalcul) ET la base de comparaison (previous_snapshot_id). Il n'est servi
+    que si cette base est TOUJOURS la production courante — sinon le delta
+    affiche mentirait sur ce que l'approbation va reellement changer.
+    Retourne None pour un import manuel (pas de SyncReport) ou une base perimee.
+    """
+    report = db.query(SyncReport).filter(
+        SyncReport.snapshot_id == snapshot_id,
+        SyncReport.delta_report.isnot(None),
+    ).order_by(SyncReport.id.desc()).first()
+    if report is None or report.previous_snapshot_id != production_id:
+        return None
+    stored = report.delta_report or {}
+    if "summary" not in stored:
+        return None
+    return stored
+
+
 @app.get("/api/review/snapshots/{snapshot_id}")
 async def get_review_detail(
     snapshot_id: str,
@@ -7014,19 +7070,32 @@ async def get_review_detail(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Detail d'un snapshot en attente : metadonnees + delta calcule a la volee
-    par rapport a la liste actuellement en production (toujours a jour).
+    Detail d'un snapshot en attente : metadonnees + delta par rapport a la
+    liste actuellement en production. Le delta memorise a la synchronisation
+    est servi tel quel quand sa base de comparaison est toujours la production
+    courante (affichage instantane, aucune fiche chargee) ; sinon — import
+    manuel ou production changee depuis la synchronisation — il est recalcule
+    a la volee pour rester exact.
     """
     snap = _get_pending_snapshot(db, snapshot_id)
     production = _latest_ready_snapshot(db, snap.file_type)
-    old_entities = _snapshot_entity_dicts(db, production.snapshot_id) if production else []
-    new_entities = _snapshot_entity_dicts(db, snapshot_id)
-    delta = calculate_delta(old_entities, new_entities, "entity_id")
+    production_id = production.snapshot_id if production else None
+
+    stored = _stored_sync_delta(db, snapshot_id, production_id)
+    if stored is not None:
+        delta_summary, delta_details, delta_source = stored["summary"], stored, "stored"
+    else:
+        old_entities = _snapshot_entity_dicts(db, production_id) if production_id else []
+        new_entities = _snapshot_entity_dicts(db, snapshot_id)
+        delta = calculate_delta(old_entities, new_entities, "entity_id")
+        delta_summary, delta_details, delta_source = \
+            delta["summary"], _truncate_delta_details(delta), "computed"
     return {
         **_snapshot_summary(db, snap),
-        "production_snapshot_id": production.snapshot_id if production else None,
-        "delta_summary": delta["summary"],
-        "delta_details": _truncate_delta_details(delta),
+        "production_snapshot_id": production_id,
+        "delta_summary": delta_summary,
+        "delta_details": delta_details,
+        "delta_source": delta_source,
         "backtest_report": snap.backtest_report,
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
         "backtest_by": snap.backtest_by,

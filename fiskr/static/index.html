@@ -724,6 +724,7 @@
                                             <th>Type</th>
                                             <th>Fiches</th>
                                             <th>Exclusions</th>
+                                            <th>Cahier de tests</th>
                                             <th>Action</th>
                                         </tr>
                                     </thead>
@@ -1866,6 +1867,18 @@
                         <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
                             <label for="setting-backtest-gap">Seuil d'écart toléré du taux d'interception (%)</label>
                             <input type="number" id="setting-backtest-gap" min="0" max="1000" step="1" value="20">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0.75rem;">
+                            <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                                <input type="checkbox" id="setting-auto-backtest" style="width: 18px; height: 18px;">
+                                Cahier de tests automatique après une synchronisation retenue en homologation (delta non nul)
+                            </label>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
+                            <label for="setting-auto-backtest-panel">Panel du cahier de tests automatique</label>
+                            <select id="setting-auto-backtest-panel">
+                                <option value="">Dernier panel de pseudo-clients généré</option>
+                            </select>
                         </div>
                         <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
                             <label for="setting-quality-min">Score minimal de qualité du référentiel clients (%, 0 = pas de seuil)</label>

@@ -3542,6 +3542,10 @@ async function fetchIngestionSettings() {
         if (rescreenEl) rescreenEl.checked = ingestionSettings.auto_rescreen;
         if (btRequiredEl) btRequiredEl.checked = ingestionSettings.backtest_required;
         if (btGapEl) btGapEl.value = ingestionSettings.backtest_max_gap_pct ?? 20;
+        // Cahier de tests automatique : toggle + panel forcé (options depuis /api/testpanels)
+        const autoBtEl = document.getElementById("setting-auto-backtest");
+        if (autoBtEl) autoBtEl.checked = ingestionSettings.auto_backtest_enabled !== false;
+        populateAutoBacktestPanelSelect(ingestionSettings.auto_backtest_panel || "");
         const qualityMinEl = document.getElementById("setting-quality-min");
         if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
         // SLA par priorité + notifications métier
@@ -3572,6 +3576,20 @@ async function fetchIngestionSettings() {
     }
 }
 
+// Options du panel d'auto-backtest : les panels utilisables du cahier de tests
+async function populateAutoBacktestPanelSelect(selected) {
+    const sel = document.getElementById("setting-auto-backtest-panel");
+    if (!sel) return;
+    try {
+        const response = await apiFetch("/api/testpanels", { silent: true });
+        if (!response.ok) return;
+        const panels = (await response.json()).panels || [];
+        sel.innerHTML = `<option value="">Dernier panel de pseudo-clients généré</option>`
+            + panels.map(p => `<option value="${escapeHtml(p.snapshot_id)}">${escapeHtml(p.file_name)} — ${p.record_count} fiches${p.generated ? " (généré)" : ""}</option>`).join("");
+        if (selected && sel.querySelector(`option[value="${CSS.escape(selected)}"]`)) sel.value = selected;
+    } catch (e) { /* silencieux : le select garde l'option par défaut */ }
+}
+
 async function saveIngestionSettings() {
     const payload = {
         require_approval: document.getElementById("setting-require-approval").checked,
@@ -3583,6 +3601,9 @@ async function saveIngestionSettings() {
         auto_rescreen: document.getElementById("setting-auto-rescreen").checked,
         backtest_required: document.getElementById("setting-backtest-required").checked,
         backtest_max_gap_pct: parseFloat(document.getElementById("setting-backtest-gap").value) || 20,
+        auto_backtest_enabled: !!document.getElementById("setting-auto-backtest")?.checked,
+        // "" = dernier panel généré (le serveur efface la surcharge)
+        auto_backtest_panel: document.getElementById("setting-auto-backtest-panel")?.value ?? "",
         // 0 = pas de seuil : `|| 0` conserve bien la desactivation
         quality_min_score_pct: parseFloat(document.getElementById("setting-quality-min")?.value) || 0,
         alert_sla_hours: {
@@ -3796,11 +3817,26 @@ async function fetchPendingReviews() {
     }
 }
 
+// Verdict du cahier de tests pour la file d'attente : fait / en cours / à faire
+function pendingBacktestCell(snap) {
+    if (runningOperationFor("backtest", snap.snapshot_id)) {
+        return `<span title="Cahier de tests en cours d'exécution">⏳ en cours</span>`;
+    }
+    if (!snap.backtest_verdict) {
+        return `<span style="color: var(--text-muted);">—</span>`;
+    }
+    const ok = snap.backtest_verdict === "OK";
+    const gap = (snap.backtest_gap_pct !== null && snap.backtest_gap_pct !== undefined)
+        ? ` (écart ${snap.backtest_gap_pct} %)` : "";
+    return `<span style="color: ${ok ? "var(--success-soft-text)" : "var(--color-warning)"}; font-weight: 600;"
+                  title="Verdict du cahier de tests${gap}">${ok ? "✔ OK" : "⚠ " + escapeHtml(snap.backtest_verdict)}</span>`;
+}
+
 function renderPendingTable(pending) {
     const tbody = document.querySelector("#review-pending-table tbody");
     if (!tbody) return;
     if (!pending || pending.length === 0) {
-        tableEmpty(tbody, 6, "Aucun snapshot en attente d'homologation.", "✅");
+        tableEmpty(tbody, 7, "Aucun snapshot en attente d'homologation.", "✅");
         return;
     }
     tbody.innerHTML = pending.map(snap => {
@@ -3812,6 +3848,7 @@ function renderPendingTable(pending) {
                 <td>${listTypeBadge(snap.file_type)}</td>
                 <td>${snap.record_count}</td>
                 <td>${snap.excluded_count || 0}</td>
+                <td>${pendingBacktestCell(snap)}</td>
                 <td><button class="btn btn-sm btn-secondary" onclick="openReviewDetail('${escapeHtml(snap.snapshot_id)}')">🔍 Examiner</button></td>
             </tr>
         `;
@@ -3855,8 +3892,11 @@ async function openReviewDetail(snapshotId) {
         document.getElementById("review-detail-card").classList.remove("hidden");
         document.getElementById("review-detail-title").textContent = `Examen du Snapshot — ${data.file_name}`;
         const uploadedStr = data.uploaded_at ? new Date(data.uploaded_at).toLocaleString(uiLocale()) : "-";
+        const deltaOrigin = data.delta_source === "stored"
+            ? "delta mémorisé à la synchronisation (base de comparaison inchangée)"
+            : "delta recalculé par rapport à la production actuelle";
         document.getElementById("review-detail-meta").textContent =
-            `Liste ${listTypeLabel(data.file_type)} · ${data.record_count} fiches · importé le ${uploadedStr} · delta calculé par rapport à la production actuelle` +
+            `Liste ${listTypeLabel(data.file_type)} · ${data.record_count} fiches · importé le ${uploadedStr} · ${deltaOrigin}` +
             (data.production_snapshot_id ? "" : " (aucune liste du même type en production : tout est en ajout)");
         const summary = data.delta_summary || {};
         document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
