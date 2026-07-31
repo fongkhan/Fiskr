@@ -60,7 +60,7 @@ def _universe_snapshot_ids(db, pending_snap: Snapshot) -> Tuple[List[str], List[
     remplaces par le candidat, le snapshot manuel et les autres types restent.
     """
     from fiskr.api import WATCHLIST_FILE_TYPES
-    from fiskr.sync import MANUAL_SNAPSHOT_ID
+    from fiskr.sync import MANUAL_SNAPSHOT_ID  # prefixe commun aux snapshots manuels
     prod = db.query(Snapshot).filter(
         Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
         Snapshot.status == "READY"
@@ -68,7 +68,7 @@ def _universe_snapshot_ids(db, pending_snap: Snapshot) -> Tuple[List[str], List[
     current_ids = [s.snapshot_id for s in prod]
     candidate_ids = [
         s.snapshot_id for s in prod
-        if s.file_type != pending_snap.file_type or s.snapshot_id == MANUAL_SNAPSHOT_ID
+        if s.file_type != pending_snap.file_type or s.snapshot_id.startswith(MANUAL_SNAPSHOT_ID)
     ]
     candidate_ids.append(pending_snap.snapshot_id)
     return current_ids, candidate_ids

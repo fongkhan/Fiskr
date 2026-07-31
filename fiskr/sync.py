@@ -137,6 +137,10 @@ EURLEX_ARCHIVE_DIR = PROJECT_ROOT / "eurlex_archives"
 # Le snapshot des ajouts manuels reste toujours actif : il n'est ni fusionne
 # ni remplace par les synchronisations automatiques.
 MANUAL_SNAPSHOT_ID = "manual-watchlist"
+# Les ajouts manuels par liste vivent dans des snapshots dedies
+# (manual-watchlist-ofac, ...) : tout ce qui epargnait le snapshot manuel
+# generique doit epargner la famille entiere.
+MANUAL_SNAPSHOT_LIKE = "manual-watchlist%"
 
 # Taille maximale des listes de details conservees dans le rapport stocke
 MAX_REPORT_DETAILS = 100
@@ -866,7 +870,7 @@ def _latest_ready_snapshot(db, file_type: str) -> Optional[Snapshot]:
     return db.query(Snapshot).filter(
         Snapshot.file_type == file_type,
         Snapshot.status == "READY",
-        Snapshot.snapshot_id != MANUAL_SNAPSHOT_ID
+        Snapshot.snapshot_id.notlike(MANUAL_SNAPSHOT_LIKE)
     ).order_by(Snapshot.uploaded_at.desc()).first()
 
 
@@ -880,7 +884,7 @@ def _latest_reviewable_snapshot(db, file_type: str) -> Optional[Snapshot]:
     return db.query(Snapshot).filter(
         Snapshot.file_type == file_type,
         Snapshot.status.in_(["READY", "PENDING_REVIEW"]),
-        Snapshot.snapshot_id != MANUAL_SNAPSHOT_ID
+        Snapshot.snapshot_id.notlike(MANUAL_SNAPSHOT_LIKE)
     ).order_by(Snapshot.uploaded_at.desc()).first()
 
 
@@ -915,7 +919,7 @@ def _supersede_previous_snapshots(db, file_type: str, keep_snapshot_id: str) -> 
         Snapshot.file_type == file_type,
         Snapshot.status == "READY",
         Snapshot.snapshot_id != keep_snapshot_id,
-        Snapshot.snapshot_id != MANUAL_SNAPSHOT_ID
+        Snapshot.snapshot_id.notlike(MANUAL_SNAPSHOT_LIKE)
     ).update({"status": "SUPERSEDED"}, synchronize_session=False)
 
 

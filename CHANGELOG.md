@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the whole interface dropped emojis for a unified line-icon set
+Every emoji in the application (about 450 occurrences across navigation, titles, buttons, tiles, toasts, the login page) was replaced by a **single monochrome SVG icon set** (stroke-based, inheriting the text colour, one inline sprite referenced by `<use>`) or removed where the wording alone is clearer. Language flags became plain codes, the anchor logo is an SVG, the theme toggle uses sun/moon icons. The i18n engine now generates **emoji-stripped aliases** of its historical dictionary keys at load time, so all six languages keep working without rewriting the ~800 emoji-bearing entries.
+
+### Changed — the home grid packs densely and gained six more panels
+- The dashboard grid now uses `grid-auto-flow: dense`: a small panel that follows a large one backfills the hole instead of leaving a gap in the row; cards stretch to equal row height.
+- Six new panels in the catalogue: **Whitelist** and **Active rules** KPI tiles (asynchronous counters), **Latest screenings** and **Batch campaigns** tables, on top of the previous fifteen.
+
+### Added — manual additions can target an existing list, one by one or in batch
+Manual entry used to feed a single generic snapshot typed `WATCHLIST_EU`. Now:
+
+- The form has a **target list** selector: with a list chosen, the entity lives in a dedicated `manual-watchlist-<type>` snapshot bearing that list's type — it counts in that list's filters, per-list cut-off thresholds and alert labels. Without a choice, the historical generic snapshot is used unchanged.
+- **Batch add** (`POST /api/watchlist/entities/batch`, max 500): one line per entity in the UI (`Type;Primary name;Aliases;Country`); each line passes the quality gate individually — rejections are returned line by line and never block the others; one commit and one cache reload for the whole batch.
+- Manual snapshots (generic and per-list) are **never superseded by synchronisations** — the sparing rule was generalised from the single historical id to the whole `manual-watchlist*` family (delta bases and backtest comparisons skip them too).
+
+### Fixed — two synchronisation-screen bugs
+- **Checkboxes no longer untick themselves** in the Automatic Synchronisation card: the background operations poll was rebuilding the whole table from server state every few seconds, wiping unsaved edits. The poll now patches only the per-source "State" cells; inputs survive until Save.
+- **Sync reports no longer stay PENDING_REVIEW forever**: approving or rejecting the snapshot now settles the linked report (SUCCESS on approval, REJECTED on rejection) via its stored `snapshot_id`.
+- Bonus root fix: the live-state cell matching compared `sync:OFACNONSDN`/`sync:ofac_nonsdn` against the server token `sync:ofacnonsdn` and silently never matched for multi-word sources; the comparison is now normalised (lowercase alphanumeric), so the State column works for every source in both tables.
+
+### Changed — the Sources screen got a one-click global run and a compact layout
+- **“Synchronize enabled sources”** launches every enabled source in one click (a source already running answers 409 and is simply counted as busy; the summary toast reports launched / busy / failed).
+- The sources table is **dense**: one text-height per row, the long per-source descriptions moved to hover tooltips; the Automatic Synchronisation card and its intro texts were tightened for the same reason.
+
 ### Added — the home page became a dashboard each user composes
 The overview tab was a fixed layout: six tiles, three charts, two lists, identical for everyone. It is now a **grid of panels each user arranges for themselves**.
 
