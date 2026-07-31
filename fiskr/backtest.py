@@ -74,6 +74,38 @@ def _universe_snapshot_ids(db, pending_snap: Snapshot) -> Tuple[List[str], List[
     return current_ids, candidate_ids
 
 
+def _delta_entity_ids(db, pending_snap: Snapshot,
+                      old_type_ids: List[str]) -> Optional[Dict[str, Set[str]]]:
+    """
+    Delta candidat vs production du meme type, par (entity_id -> checksum) :
+    - added    : entity_id absents de la production ;
+    - modified : presents des deux cotes, checksum different ;
+    - removed  : entity_id absents du candidat ;
+    - unchanged: presents des deux cotes, checksum identique.
+    Deux requetes de deux colonnes — negligeable devant un criblage.
+    Les fiches exclues sont ignorees des deux cotes (memes regles que le
+    cache de production et que l'approbation).
+    """
+    from fiskr.database import WatchlistEntity
+
+    def _checksum_map(snapshot_ids: List[str]) -> Dict[str, str]:
+        if not snapshot_ids:
+            return {}
+        rows = db.query(WatchlistEntity.entity_id, WatchlistEntity.entity_checksum).filter(
+            WatchlistEntity.snapshot_id.in_(snapshot_ids),
+            WatchlistEntity.excluded.isnot(True)
+        ).yield_per(5000)
+        return {r[0]: (r[1] or "") for r in rows}
+
+    old_map = _checksum_map(old_type_ids)
+    new_map = _checksum_map([pending_snap.snapshot_id])
+    added = {e for e in new_map if e not in old_map}
+    removed = {e for e in old_map if e not in new_map}
+    modified = {e for e in new_map if e in old_map and new_map[e] != old_map[e]}
+    unchanged = {e for e in new_map if e in old_map and new_map[e] == old_map[e]}
+    return {"added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
+
+
 def _panel_clients(db, panel_snapshot_id: str) -> List[Dict[str, Any]]:
     # Ordre deterministe par id : le chemin parallele decoupe le panel par
     # bornes d'id, l'ordre sequentiel doit etre le meme pour que les deux
@@ -306,22 +338,88 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     # ce qui fait passer un univers de 750 000 fiches de 6,3 Go a ~2,8 Go.
     projection = screenpool.projection_for(list(current_rules) + list(candidate_rules))
 
-    # PASSES SEQUENTIELLES : jamais deux univers en memoire en meme temps.
-    # A 750 000 fiches, tenir production ET candidat simultanement (~12,6 Go)
-    # etait la cause premiere du cahier de tests qui ne se terminait pas.
-    current_entities = _entity_dicts(db, current_ids, projection=projection) if current_ids else []
-    current = _dry_run_screen(db, None, current_entities, rule_set=current_rules,
-                              progress=_phase_progress("SCREEN_CURRENT"),
-                              panel_snapshot_id=panel_snapshot_id)
-    del current_entities
-    _gc.collect()
+    # MODE DELTA (defaut sans regle candidate) : les deux univers sont
+    # identiques HORS les fiches modifiees de la liste testee. Une seule
+    # passe complete sur l'univers partage (autres listes + fiches
+    # inchangees de la liste), puis deux passes minuscules : les fiches
+    # retirees/anciennes versions (hits perdus, cote production) et les
+    # fiches ajoutees/nouvelles versions (hits gagnes, cote candidat).
+    # « alerts » compte des paires (client, entity_id) : les ensembles etant
+    # disjoints, l'union est EXACTE — memes chiffres que deux passes
+    # completes, en environ deux fois moins de temps de criblage.
+    # Une regle candidate, elle, peut supprimer des paires sur des fiches
+    # inchangees : son evaluation garde les deux passes completes.
+    old_type_ids = [
+        sid for sid in current_ids
+        if sid not in candidate_ids
+    ]
+    delta = _delta_entity_ids(db, pending_snap, old_type_ids) if candidate_rule is None else None
 
-    candidate_entities = _entity_dicts(db, candidate_ids, projection=projection) if candidate_ids else []
-    candidate = _dry_run_screen(db, None, candidate_entities, rule_set=candidate_rules,
-                                progress=_phase_progress("SCREEN_CANDIDATE"),
-                                panel_snapshot_id=panel_snapshot_id)
-    del candidate_entities
-    _gc.collect()
+    def _combine(shared_part, delta_part):
+        merged = {
+            "pairs": dict(shared_part["pairs"]),
+            "whitelisted_suppressed": shared_part["whitelisted_suppressed"] + delta_part["whitelisted_suppressed"],
+            "alerts_before_rules": shared_part["alerts_before_rules"] + delta_part["alerts_before_rules"],
+            "rule_suppressed": shared_part["rule_suppressed"] + delta_part["rule_suppressed"],
+            "rule_suppressed_pairs": (shared_part["rule_suppressed_pairs"]
+                                      + delta_part["rule_suppressed_pairs"])[:MAX_PAIR_DETAILS],
+        }
+        merged["pairs"].update(delta_part["pairs"])
+        merged["alerts"] = len(merged["pairs"])
+        return merged
+
+    if delta is not None:
+        changed_old = delta["removed"] | delta["modified"]
+        changed_new = delta["added"] | delta["modified"]
+        # Univers partage : toutes les autres listes + les fiches INCHANGEES
+        # de la liste testee (chargees depuis le candidat : meme checksum,
+        # meme contenu). C'est la seule passe de la taille d'un univers.
+        shared_ids = [sid for sid in candidate_ids if sid != pending_snap.snapshot_id]
+        shared_entities = _entity_dicts(db, shared_ids, projection=projection) if shared_ids else []
+        shared_entities.extend(_entity_dicts(
+            db, [pending_snap.snapshot_id], projection=projection,
+            entity_ids=delta["unchanged"]))
+        shared = _dry_run_screen(db, None, shared_entities, rule_set=current_rules,
+                                 progress=_phase_progress("SCREEN_CURRENT"),
+                                 panel_snapshot_id=panel_snapshot_id)
+        del shared_entities
+        _gc.collect()
+
+        removed_entities = _entity_dicts(db, old_type_ids, projection=projection,
+                                         entity_ids=changed_old) if old_type_ids else []
+        removed_hits = _dry_run_screen(db, None, removed_entities, rule_set=current_rules,
+                                       progress=_phase_progress("SCREEN_CANDIDATE"),
+                                       panel_snapshot_id=panel_snapshot_id)
+        del removed_entities
+
+        added_entities = _entity_dicts(db, [pending_snap.snapshot_id], projection=projection,
+                                       entity_ids=changed_new)
+        added_hits = _dry_run_screen(db, None, added_entities, rule_set=candidate_rules,
+                                     progress=_phase_progress("SCREEN_CANDIDATE"),
+                                     panel_snapshot_id=panel_snapshot_id)
+        del added_entities
+        _gc.collect()
+
+        current = _combine(shared, removed_hits)
+        candidate = _combine(shared, added_hits)
+    else:
+        # PASSES SEQUENTIELLES : jamais deux univers en memoire en meme temps.
+        # A 750 000 fiches, tenir production ET candidat simultanement
+        # (~12,6 Go) etait la cause premiere du cahier de tests qui ne se
+        # terminait pas.
+        current_entities = _entity_dicts(db, current_ids, projection=projection) if current_ids else []
+        current = _dry_run_screen(db, None, current_entities, rule_set=current_rules,
+                                  progress=_phase_progress("SCREEN_CURRENT"),
+                                  panel_snapshot_id=panel_snapshot_id)
+        del current_entities
+        _gc.collect()
+
+        candidate_entities = _entity_dicts(db, candidate_ids, projection=projection) if candidate_ids else []
+        candidate = _dry_run_screen(db, None, candidate_entities, rule_set=candidate_rules,
+                                    progress=_phase_progress("SCREEN_CANDIDATE"),
+                                    panel_snapshot_id=panel_snapshot_id)
+        del candidate_entities
+        _gc.collect()
 
     def _rate(alerts: int) -> float:
         return round(alerts * 100.0 / panel_size, 2) if panel_size else 0.0
@@ -358,6 +456,10 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         },
         "panel_snapshot_id": panel_snapshot_id,
         "panel_size": panel_size,
+        "mode": "delta" if delta is not None else "full",
+        "delta_sizes": ({"added": len(delta["added"]), "modified": len(delta["modified"]),
+                         "removed": len(delta["removed"]), "unchanged": len(delta["unchanged"])}
+                        if delta is not None else None),
         "current": {
             "alerts": current["alerts"],
             "interception_rate_pct": _rate(current["alerts"]),

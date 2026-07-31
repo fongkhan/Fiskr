@@ -1880,7 +1880,7 @@ async function startSourceSync(alias) {
  <button class="btn btn-primary" onclick="handleSourceSync('EURLEX')">Lancer EUR-Lex</button>
  <button class="btn-secondary" onclick="document.getElementById('sync-source-options').classList.add('hidden')">Annuler</button>
  </div>
- <p class="section-desc" style="margin-top: 0.4rem;">Vide = Journal Officiel du jour. EUR-Lex fonctionne en signal d'alerte précoce ; les désignations viennent du FSF.</p>`;
+ <p class="section-desc" style="margin-top: 0.4rem;">Vide = Journal Officiel du jour. Les fiches sont extraites des annexes des actes (HTML, repli sur le PDF officiel archivé — la pièce justificative) ; la liste consolidée FSF fait autorité quand elle est rafraîchie.</p>`;
  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
  }
  return;

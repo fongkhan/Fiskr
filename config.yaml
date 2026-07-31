@@ -119,17 +119,19 @@ sync:
     url: "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONS_ADVANCED.XML"
   eurlex:
     enabled: true
-    # alert   : signal d'alerte precoce — « un acte de mesures restrictives est
-    #           paru aujourd'hui ». Le PDF officiel est archive (valeur probante)
-    #           et les homologateurs sont prevenus, mais AUCUNE fiche n'est
-    #           deduite du texte : les designations viennent de eu_fsf, qui fait
-    #           autorite et porte les radiations. Une seule requete par jour.
-    # extract : comportement historique — extraction heuristique des noms dans
-    #           les annexes HTML. Ce qui en sort sont des SUPPOSITIONS (une
-    #           expression reguliere decide si une chaine est un nom) et les
-    #           radiations ne sont jamais appliquees. A n'utiliser que tant que
-    #           eu_fsf n'est pas configure.
-    mode: "alert"
+    # extract : extraction des fiches depuis les annexes HTML de chaque acte,
+    #           avec repli sur le texte du PDF officiel archive (la piece
+    #           justificative opposable aux regulateurs) quand le HTML est
+    #           inaccessible. Chaque fiche porte l'acte en official_reference.
+    #           Raison d'etre : la liste consolidee eu_fsf n'est rafraichie
+    #           que tous les ~2 mois — entre deux rafraichissements, les
+    #           designations du JO doivent etre criblees sans attendre. Quand
+    #           eu_fsf retombe, il fait autorite et remplace ces fiches
+    #           (radiations comprises).
+    # alert   : signal d'alerte precoce seul — « un acte de mesures
+    #           restrictives est paru ». PDF archive et homologateurs
+    #           prevenus, aucune fiche deduite du texte.
+    mode: "extract"
     # Version anglaise du Journal Officiel : reference reglementaire retenue.
     # {date} est remplace par la date du jour au format DDMMYYYY
     daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"

@@ -11,6 +11,7 @@ python-dotenv>=1.0.0
 pyjwt>=2.8.0
 python-multipart>=0.0.9
 anyascii>=0.3.2
+# pypdf>=4.0.0 # Optional, uncomment for the EUR-Lex PDF fallback (extracting listings from the archived official PDF when the act's HTML is unreachable)
 # openpyxl>=3.1.0 # Optional, uncomment to read the XLSX form of the Australian DFAT list
 # pyspark>=3.5.0 # Optional, uncomment for running distributed Spark batch jobs
 

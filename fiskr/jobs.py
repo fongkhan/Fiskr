@@ -229,6 +229,23 @@ def submit(kind: str, *, params: Optional[Dict[str, Any]] = None, token: Optiona
         session.close()
 
 
+# Genres de jobs SERIALISES : jamais deux en meme temps, quel que soit le
+# processus. Un cahier de tests (ou une simulation moteur) charge un univers
+# de listes complet en memoire : deux passes simultanees ont deja epuise la
+# RAM d'une machine de production. La file les enchaine au lieu de les cumuler.
+SERIAL_KINDS = ("backtest", "engine_simulation")
+
+
+def _serial_kind_busy(session, kind: str, exclude_job_id: Optional[int] = None) -> bool:
+    """Un job du meme genre serialise tourne-t-il deja (ailleurs) ?"""
+    if kind not in SERIAL_KINDS:
+        return False
+    q = session.query(Job.id).filter(Job.kind == kind, Job.status == "RUNNING")
+    if exclude_job_id is not None:
+        q = q.filter(Job.id != exclude_job_id)
+    return q.first() is not None
+
+
 def claim_next(session, claimer: str) -> Optional[int]:
     """
     Prend le prochain job QUEUED (priorite puis anciennete) et le passe
@@ -238,12 +255,21 @@ def claim_next(session, claimer: str) -> Optional[int]:
     pas prendre la meme ligne, par construction. Repli (SQLite de dev) :
     meme selection sans verrou, la garde `WHERE status='QUEUED'` de l'UPDATE
     et son rowcount arbitrent la course.
+
+    Les genres SERIAL_KINDS ne sont pris que si aucun homologue ne tourne :
+    les autres genres continuent de defiler pendant qu'un cahier de tests
+    attend son tour.
     """
     now = datetime.utcnow()
+    running_serial = [k for (k,) in session.query(Job.kind).distinct().filter(
+        Job.status == "RUNNING", Job.kind.in_(SERIAL_KINDS)).all()]
     q = session.query(Job).filter(
         Job.status == "QUEUED",
         (Job.not_before.is_(None)) | (Job.not_before <= now),
-    ).order_by(Job.priority.asc(), Job.id.asc()).limit(1)
+    )
+    if running_serial:
+        q = q.filter(~Job.kind.in_(running_serial))
+    q = q.order_by(Job.priority.asc(), Job.id.asc()).limit(1)
     if session.bind.dialect.name == "postgresql":
         q = q.with_for_update(skip_locked=True)
     row = q.first()
@@ -271,6 +297,20 @@ def run_job(job_id: int) -> None:
     session = _fresh_session()
     try:
         job = session.get(Job, job_id)
+        if job is None:
+            return
+        # Modes eager/thread : submit() execute immediatement, sans passer par
+        # claim_next — la serialisation doit donc aussi vivre ici. Le thread
+        # patiente tant qu'un homologue tourne (sommeil court, base rendue
+        # entre deux sondages) ; en mode worker le job arrive deja RUNNING et
+        # cette boucle est sans objet.
+        if job.status == "QUEUED" and job.kind in SERIAL_KINDS:
+            while _serial_kind_busy(session, job.kind, exclude_job_id=job_id):
+                session.rollback()
+                time.sleep(5)
+                job = session.get(Job, job_id)
+                if job is None or job.status != "QUEUED":
+                    break
         if job is None:
             return
         if job.status == "QUEUED":

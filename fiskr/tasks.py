@@ -155,7 +155,28 @@ def _resolve_auto_backtest_panel(session):
         Snapshot.status == "READY",
         Snapshot.record_count > 0,
     ).order_by(Snapshot.uploaded_at.desc()).first()
-    return panel.snapshot_id if panel is not None else None
+    if panel is not None:
+        return panel.snapshot_id
+
+    # Aucun panel : l'automatisme s'en genere un (500 pseudo-clients derives
+    # de la production) plutot que de s'abstenir en silence — c'etait la
+    # cause la plus frequente d'un cahier de tests qui « ne demarre pas ».
+    try:
+        from fiskr.backtest import generate_test_panel
+        from fiskr.database import WATCHLIST_FILE_TYPES
+
+        prod_ids = [s.snapshot_id for s in session.query(Snapshot).filter(
+            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+            Snapshot.status == "READY").all()]
+        if not prod_ids:
+            return None
+        generated = generate_test_panel(session, prod_ids, size=500,
+                                        created_by="système (auto-backtest)")
+        logger.info(f"Panel d'auto-backtest généré automatiquement : {generated.snapshot_id}")
+        return generated.snapshot_id
+    except Exception as e:
+        logger.warning(f"Génération automatique du panel d'auto-backtest impossible : {e}")
+        return None
 
 
 def _maybe_auto_backtest(session, report) -> Optional[Dict[str, Any]]:

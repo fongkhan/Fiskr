@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — EUR-Lex extracts listings from the acts themselves (HTML, PDF fallback)
+The consolidated EU FSF list only refreshes every ~2 months, while designations appear in the Official Journal immediately — screening only the FSF between refreshes is a regulatory exposure. The EUR-Lex source therefore switched its default from *alert* (early-warning signal, no records) to **extract**:
+
+- Records are extracted from the **annex tables of each restrictive-measures act** (name / identifying information / grounds columns), merged incrementally onto the EU list (pending approval as usual). Each record carries the act in **`official_reference`** — and the **official PDF of the act keeps being archived with its SHA-256**: that PDF is precisely the supporting evidence a regulator asks for.
+- **PDF fallback**: when an act's HTML is unreachable, the listing is extracted from the archived official PDF itself (`pypdf`, optional dependency — without it the act stays visibly reported as failed, never silently skipped).
+- When the FSF does refresh, it remains authoritative and supersedes these records, delistings included. The *alert* mode is still available (`sync.eurlex.mode`).
+
+### Fixed — the automatic backtest after a sync actually starts
+The post-sync automatic backtest silently abstained when no test panel existed — the most common reason it "never started". The automatism now **generates its own panel** (500 pseudo-clients derived from production) when none is available; every other abstention reason keeps being reported in the sync job result.
+
+### Changed — backtests are serialized and run in delta mode
+Two concurrent backtests each load a full watchlist universe and have exhausted a production machine's RAM:
+
+- **Heavy job kinds are serialized** (`backtest`, `engine_simulation`): never two running at once, whatever the process — the queue chains them while lighter jobs keep flowing (enforced both at worker claim time and in the API-thread execution path).
+- **Delta mode** (default when no candidate rule is evaluated): the two universes are identical except for the changed entities of the list under test, so the engine now runs **one full pass on the shared universe plus two tiny passes** — the removed/old versions (lost hits, production side) and the added/new versions (gained hits, candidate side). Alerts are counted as (client, entity) pairs over disjoint sets, so the numbers are **exactly** those of two full passes, in roughly half the screening time. Evaluating a candidate anti-FP rule (which can suppress pairs on unchanged entities) keeps the full two-pass mode. The report states `mode` and the delta sizes.
+
 ### Changed — the whole interface dropped emojis for a unified line-icon set
 Every emoji in the application (about 450 occurrences across navigation, titles, buttons, tiles, toasts, the login page) was replaced by a **single monochrome SVG icon set** (stroke-based, inheriting the text colour, one inline sprite referenced by `<use>`) or removed where the wording alone is clearer. Language flags became plain codes, the anchor logo is an SVG, the theme toggle uses sun/moon icons. The i18n engine now generates **emoji-stripped aliases** of its historical dictionary keys at load time, so all six languages keep working without rewriting the ~800 emoji-bearing entries.
 

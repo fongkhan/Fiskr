@@ -8,7 +8,7 @@ journal d'audit). Fournit aussi le lookback manuel (guidance Wolfsberg).
 """
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from fiskr.config import config
 from fiskr.database import (
@@ -31,7 +31,8 @@ _YIELD_EVERY = 25
 
 
 def _entity_dicts(db, snapshot_ids: List[str],
-                  projection: Optional[tuple] = None) -> List[Dict[str, Any]]:
+                  projection: Optional[tuple] = None,
+                  entity_ids: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
     """
     Fiches listees des snapshots demandes, en dicts.
 
@@ -40,35 +41,52 @@ def _entity_dicts(db, snapshot_ids: List[str],
     la projection reduit a ~3,8 Ko/fiche en ne chargeant que ce que le moteur
     lit — ET evite la materialisation d'objets ORM (tuples directs).
     None = comportement historique, toutes colonnes.
+
+    `entity_ids` : restreint aux entity_id demandes (passes DELTA du cahier de
+    tests : seules les fiches ajoutees/modifiees/retirees sont chargees). Le
+    IN est decoupe en tranches — SQLite plafonne les parametres d'une requete.
     """
     snapshot_types = {
         s.snapshot_id: s.file_type
         for s in db.query(Snapshot).filter(Snapshot.snapshot_id.in_(snapshot_ids)).all()
     }
+    id_chunks: List[Optional[List[str]]] = [None]
+    if entity_ids is not None:
+        if not entity_ids:
+            return []
+        ordered = sorted(entity_ids)
+        id_chunks = [ordered[i:i + 800] for i in range(0, len(ordered), 800)]
+
     out = []
     if projection:
         fields = [f for f in projection if f != "_list_type"]
         if "snapshot_id" not in fields:
             fields.append("snapshot_id")
         columns = [getattr(WatchlistEntity, f) for f in fields]
-        rows = db.query(*columns).filter(
+        for chunk in id_chunks:
+            query = db.query(*columns).filter(
+                WatchlistEntity.snapshot_id.in_(snapshot_ids),
+                WatchlistEntity.excluded.isnot(True)
+            )
+            if chunk is not None:
+                query = query.filter(WatchlistEntity.entity_id.in_(chunk))
+            for row in query.yield_per(5000):
+                d = dict(zip(fields, row))
+                d["_list_type"] = snapshot_types.get(d.get("snapshot_id"))
+                out.append(d)
+        return out
+    for chunk in id_chunks:
+        query = db.query(WatchlistEntity).filter(
             WatchlistEntity.snapshot_id.in_(snapshot_ids),
             WatchlistEntity.excluded.isnot(True)
-        ).yield_per(5000)
-        for row in rows:
-            d = dict(zip(fields, row))
-            d["_list_type"] = snapshot_types.get(d.get("snapshot_id"))
+        )
+        if chunk is not None:
+            query = query.filter(WatchlistEntity.entity_id.in_(chunk))
+        for r in query.all():
+            d = {c.name: getattr(r, c.name) for c in r.__table__.columns}
+            # Type de liste d'origine : seuils de cut-off par liste
+            d["_list_type"] = snapshot_types.get(r.snapshot_id)
             out.append(d)
-        return out
-    rows = db.query(WatchlistEntity).filter(
-        WatchlistEntity.snapshot_id.in_(snapshot_ids),
-        WatchlistEntity.excluded.isnot(True)
-    ).all()
-    for r in rows:
-        d = {c.name: getattr(r, c.name) for c in r.__table__.columns}
-        # Type de liste d'origine : seuils de cut-off par liste
-        d["_list_type"] = snapshot_types.get(r.snapshot_id)
-        out.append(d)
     return out
 
 
