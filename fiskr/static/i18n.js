@@ -71,6 +71,29 @@
         "Qualité indisponible.": { en: "Quality unavailable.", de: "Qualität nicht verfügbar.", es: "Calidad no disponible.", zh: "质量不可用。", ar: "الجودة غير متاحة." },
         "Aucune base clients en production.": { en: "No client base in production.", de: "Keine Kundenbasis produktiv.", es: "Sin base de clientes en producción.", zh: "无在产客户库。", ar: "لا قاعدة عملاء قيد الإنتاج." },
         "(non assignées)": { en: "(unassigned)", de: "(nicht zugewiesen)", es: "(sin asignar)", zh: "（未指派）", ar: "(غير مسندة)" },
+        // Nouveaux panneaux du dashboard
+        "🕘 Derniers criblages": { en: "🕘 Latest screenings", de: "🕘 Letzte Screenings", es: "🕘 Últimos cribados", zh: "🕘 最近筛查", ar: "🕘 أحدث عمليات الفحص" },
+        "Derniers criblages": { en: "Latest screenings", de: "Letzte Screenings", es: "Últimos cribados", zh: "最近筛查", ar: "أحدث عمليات الفحص" },
+        "📦 Campagnes batch": { en: "📦 Batch campaigns", de: "📦 Batch-Kampagnen", es: "📦 Campañas por lotes", zh: "📦 批量筛查活动", ar: "📦 حملات الدُفعات" },
+        "Campagnes batch": { en: "Batch campaigns", de: "Batch-Kampagnen", es: "Campañas por lotes", zh: "批量筛查活动", ar: "حملات الدُفعات" },
+        "🤍 Liste blanche": { en: "🤍 Whitelist", de: "🤍 Whitelist", es: "🤍 Lista blanca", zh: "🤍 白名单", ar: "🤍 القائمة البيضاء" },
+        "🧩 Règles actives": { en: "🧩 Active rules", de: "🧩 Aktive Regeln", es: "🧩 Reglas activas", zh: "🧩 生效规则", ar: "🧩 القواعد النشطة" },
+        "Règles actives": { en: "Active rules", de: "Aktive Regeln", es: "Reglas activas", zh: "生效规则", ar: "القواعد النشطة" },
+        "paires posées": { en: "pairs in place", de: "gesetzte Paare", es: "pares definidos", zh: "已设配对", ar: "أزواج مسجلة" },
+        "anti-faux positifs": { en: "false-positive rules", de: "Fehlalarm-Regeln", es: "antifalsos positivos", zh: "防误报", ar: "مكافحة الإنذارات الكاذبة" },
+        "Aucun criblage exécuté.": { en: "No screening run yet.", de: "Noch kein Screening ausgeführt.", es: "Ningún cribado ejecutado.", zh: "尚未执行筛查。", ar: "لم يُنفذ أي فحص." },
+        "Aucune campagne lancée.": { en: "No campaign launched yet.", de: "Noch keine Kampagne gestartet.", es: "Ninguna campaña lanzada.", zh: "尚未启动活动。", ar: "لم تُطلق أي حملة." },
+        "Campagnes indisponibles.": { en: "Campaigns unavailable.", de: "Kampagnen nicht verfügbar.", es: "Campañas no disponibles.", zh: "活动不可用。", ar: "الحملات غير متاحة." },
+        // Ajout manuel : liste cible + lot
+        "Liste de rattachement": { en: "Target list", de: "Zielliste", es: "Lista de destino", zh: "归属名单", ar: "قائمة الإلحاق" },
+        "Générique (par défaut)": { en: "Generic (default)", de: "Generisch (Standard)", es: "Genérica (por defecto)", zh: "通用（默认）", ar: "عام (افتراضي)" },
+        "Ajout par Lot": { en: "Batch Add", de: "Stapel-Erfassung", es: "Alta por lotes", zh: "批量添加", ar: "إضافة دفعة" },
+        "Entités (une par ligne)": { en: "Entities (one per line)", de: "Entitäten (eine je Zeile)", es: "Entidades (una por línea)", zh: "实体（每行一个）", ar: "كيانات (واحد لكل سطر)" },
+        "Ajouter le lot": { en: "Add the batch", de: "Stapel hinzufügen", es: "Añadir el lote", zh: "添加批次", ar: "أضف الدفعة" },
+        "Ajout en cours…": { en: "Adding…", de: "Wird hinzugefügt…", es: "Añadiendo…", zh: "正在添加…", ar: "جارٍ الإضافة…" },
+        // Sources : synchronisation globale
+        "Synchroniser les sources activées": { en: "Synchronize enabled sources", de: "Aktivierte Quellen synchronisieren", es: "Sincronizar las fuentes activadas", zh: "同步已启用的数据源", ar: "مزامنة المصادر المفعّلة" },
+        "Lancement…": { en: "Launching…", de: "Wird gestartet…", es: "Lanzando…", zh: "启动中…", ar: "جارٍ الإطلاق…" },
         // Centre de notifications : travaux récents
         "Annulé": { en: "Cancelled", de: "Abgebrochen", es: "Anulado", zh: "已取消", ar: "أُلغي" },
         "↻ Relancer": { en: "↻ Retry", de: "↻ Neu starten", es: "↻ Relanzar", zh: "↻ 重试", ar: "↻ إعادة التشغيل" },
@@ -588,6 +611,9 @@
 
     // ---- Paragraphes descriptifs (section-desc), cles = texte francais normalise ----
     const P = {
+        "Ajoutez plusieurs listés d'un coup dans la même liste de rattachement : une ligne par entité, champs séparés par des points-virgules — Type;Nom principal;Alias1,Alias2;Pays. Type : I (individu), E (personne morale), V (navire), O (autre) ; alias et pays optionnels. Chaque ligne passe le Quality Gate individuellement : les refus sont restitués ligne par ligne sans bloquer les autres.": {"en": "Add several listed parties at once into the same target list: one line per entity, fields separated by semicolons — Type;Primary name;Alias1,Alias2;Country. Type: I (individual), E (legal entity), V (vessel), O (other); aliases and country optional. Each line goes through the Quality Gate individually: rejections are reported line by line without blocking the others.", "de": "Fügen Sie mehrere Gelistete auf einmal in dieselbe Zielliste ein: eine Zeile je Entität, Felder durch Semikolons getrennt — Typ;Hauptname;Alias1,Alias2;Land. Typ: I (Person), E (juristische Person), V (Schiff), O (Sonstiges); Aliasse und Land optional. Jede Zeile durchläuft das Quality Gate einzeln: Ablehnungen werden zeilenweise gemeldet, ohne die anderen zu blockieren.", "es": "Añada varios listados de una vez en la misma lista de destino: una línea por entidad, campos separados por punto y coma — Tipo;Nombre principal;Alias1,Alias2;País. Tipo: I (persona física), E (persona jurídica), V (buque), O (otro); alias y país opcionales. Cada línea pasa el Quality Gate individualmente: los rechazos se devuelven línea a línea sin bloquear las demás.", "zh": "一次向同一归属名单添加多个列名对象：每行一个实体，字段以分号分隔 — 类型;主名称;别名1,别名2;国家。类型：I（个人）、E（法人）、V（船舶）、O（其他）；别名与国家可选。每行单独通过质量门控：拒绝逐行返回，不影响其他行。", "ar": "أضف عدة مدرجين دفعة واحدة إلى قائمة الإلحاق نفسها: سطر لكل كيان، والحقول مفصولة بفواصل منقوطة — النوع;الاسم الرئيسي;اللقب1,اللقب2;البلد. النوع: I (فرد)، E (كيان اعتباري)، V (سفينة)، O (آخر)؛ الألقاب والبلد اختياريان. كل سطر يمر عبر بوابة الجودة على حدة: تُعاد حالات الرفض سطراً بسطر دون عرقلة البقية."},
+        "Récupérations planifiées, modifiables à chaud. Interrupteur général, puis participation et cron 5 champs par source (minute heure jour mois jour-de-semaine ; vide = défaut ; ex. 0 6 * * * = 6h chaque jour). Couper l'automatique n'empêche jamais un lancement manuel.": {"en": "Scheduled fetches, hot-editable. Master switch, then per-source participation and 5-field cron (minute hour day month weekday; empty = default; e.g. 0 6 * * * = 6am daily). Turning automation off never prevents a manual run.", "de": "Geplante Abrufe, im laufenden Betrieb änderbar. Hauptschalter, dann je Quelle Teilnahme und 5-Feld-Cron (Minute Stunde Tag Monat Wochentag; leer = Standard; z. B. 0 6 * * * = täglich 6 Uhr). Das Abschalten der Automatik verhindert nie einen manuellen Lauf.", "es": "Recuperaciones planificadas, modificables en caliente. Interruptor general y, por fuente, participación y cron de 5 campos (minuto hora día mes día-semana; vacío = por defecto; ej. 0 6 * * * = 6h cada día). Cortar lo automático nunca impide un lanzamiento manual.", "zh": "计划抓取，可热修改。总开关，然后按数据源设置参与与 5 字段 cron（分 时 日 月 周；留空 = 默认；如 0 6 * * * = 每天 6 点）。关闭自动化不妨碍手动运行。", "ar": "عمليات جلب مجدولة قابلة للتعديل الفوري. مفتاح عام، ثم لكل مصدر المشاركة وتعبير cron من 5 حقول (دقيقة ساعة يوم شهر يوم-الأسبوع؛ فارغ = الافتراضي؛ مثال 0 6 * * * = السادسة صباحاً يومياً). إيقاف التلقائي لا يمنع أبداً تشغيلاً يدوياً."},
+        "Sources groupées par nature, description au survol du nom. « Automatique » = participe aux récupérations planifiées (réglable dans la carte Synchronisation Automatique) ; « Synchroniser » lance une récupération immédiate, même pour une source exclue de l'automatique.": {"en": "Sources grouped by nature, description on hover over the name. “Automatic” = takes part in scheduled fetches (set in the Automatic Synchronisation card); “Synchronize” starts an immediate fetch, even for a source excluded from automation.", "de": "Quellen nach Art gruppiert, Beschreibung beim Überfahren des Namens. „Automatisch“ = nimmt an geplanten Abrufen teil (einstellbar in der Karte Automatische Synchronisation); „Synchronisieren“ startet einen sofortigen Abruf, auch für eine von der Automatik ausgeschlossene Quelle.", "es": "Fuentes agrupadas por naturaleza, descripción al pasar sobre el nombre. «Automática» = participa en las recuperaciones planificadas (ajustable en la tarjeta Sincronización Automática); «Sincronizar» lanza una recuperación inmediata, incluso para una fuente excluida de lo automático.", "zh": "数据源按性质分组，悬停名称可见描述。“自动” = 参与计划抓取（在自动同步卡片中设置）；“同步”立即抓取，即使该数据源被排除在自动化之外。", "ar": "المصادر مجمعة حسب طبيعتها، والوصف يظهر عند المرور على الاسم. «تلقائي» = يشارك في الجلب المجدول (يُضبط في بطاقة المزامنة التلقائية)؛ «مزامنة» تطلق جلباً فورياً حتى لمصدر مستبعد من التلقائي."},
         "Délais de traitement par priorité, courriels et webhooks émis à chaque étape, et récapitulatif périodique. Ces réglages appartiennent à la même famille que la gouvernance : le bouton ci-dessous enregistre l'ensemble en un seul appel, où qu'on le clique.": { en: "Processing deadlines by priority, e-mails and webhooks emitted at each step, and the periodic summary. These settings belong to the same family as governance: the button below saves them all in a single call, wherever you click it.", de: "Bearbeitungsfristen nach Priorität, E-Mails und Webhooks bei jedem Schritt sowie die periodische Zusammenfassung. Diese Einstellungen gehören zur selben Familie wie die Governance: Die Schaltfläche unten speichert alles in einem einzigen Aufruf, egal wo man sie anklickt.", es: "Plazos de tratamiento por prioridad, correos y webhooks emitidos en cada etapa, y el resumen periódico. Estos ajustes pertenecen a la misma familia que la gobernanza: el botón de abajo lo guarda todo en una sola llamada, se pulse donde se pulse.", zh: "按优先级划分的处理时限、各环节发出的邮件与 webhook，以及周期性汇总。这些设置与治理属于同一族：无论从何处点击，下方按钮都会一次性保存全部内容。", ar: "مهل المعالجة حسب الأولوية، ورسائل البريد وخطافات الويب المرسلة عند كل مرحلة، والملخص الدوري. تنتمي هذه الإعدادات إلى العائلة نفسها التي تنتمي إليها الحوكمة: الزر أدناه يحفظها كلها في نداء واحد، أينما ضُغط." },
         "Consultation en direct de la base relationnelle : chaque affichage interroge la base (recherche, filtres et pagination côté serveur). Le périmètre « En production » reflète les instantanés homologués criblés par le moteur ; les autres statuts (en attente, remplacées, rejetées, exclues) sont consultables via le filtre Statut.": {"en": "Live view of the relational database: every display queries the database (server-side search, filters and pagination). The “In production” scope reflects the approved snapshots screened by the engine; the other statuses (pending, superseded, rejected, excluded) are available through the Status filter.", "de": "Live-Ansicht der relationalen Datenbank: Jede Anzeige fragt die Datenbank ab (serverseitige Suche, Filter und Paginierung). Der Bereich „Produktiv“ zeigt die freigegebenen, vom Engine gescreenten Snapshots; die anderen Status (ausstehend, ersetzt, abgelehnt, ausgeschlossen) sind über den Statusfilter abrufbar.", "es": "Consulta en vivo de la base relacional: cada pantalla interroga la base (búsqueda, filtros y paginación en el servidor). El perímetro «En producción» refleja las instantáneas homologadas cribadas por el motor; los demás estados (pendientes, sustituidas, rechazadas, excluidas) se consultan con el filtro Estado.", "zh": "实时查询关系型数据库：每次显示都直接查库（服务器端搜索、筛选与分页）。“在产”范围对应引擎实际筛查的已审批快照；其他状态（待审、已替换、已拒绝、已排除）可通过状态筛选器查看。", "ar": "عرض مباشر لقاعدة البيانات العلائقية: كل عرض يستعلم من القاعدة (بحث وتصفية وترقيم من جهة الخادم). نطاق «قيد الإنتاج» يعكس اللقطات المعتمدة التي يفحصها المحرك؛ الحالات الأخرى (معلقة، مستبدلة، مرفوضة، مستبعدة) متاحة عبر مرشح الحالة."},
         "Téléversez un fichier de watchlist ou de clients dans la base de données relationnelle. Le fichier importé apparaît ensuite dans l'onglet « Snapshots & Comparateur » (ou en Homologation si le pointage humain est actif).": {"en": "Upload a watchlist or client file into the relational database. The imported file then appears in the “Snapshots & Comparator” tab (or in Approval when human sign-off is enabled).", "de": "Laden Sie eine Watchlist- oder Kundendatei in die relationale Datenbank hoch. Die importierte Datei erscheint anschließend im Tab „Snapshots & Vergleich“ (oder in der Freigabe, wenn die menschliche Abnahme aktiv ist).", "es": "Suba un archivo de lista o de clientes a la base de datos relacional. El archivo importado aparece luego en la pestaña «Instantáneas y comparador» (o en Homologación si la validación humana está activa).", "zh": "将监控名单或客户文件上传到关系型数据库。导入的文件随后出现在“快照与比对”页签（若启用人工复核则进入审批）。", "ar": "حمّل ملف قائمة مراقبة أو عملاء إلى قاعدة البيانات. يظهر الملف المستورد بعدها في تبويب «اللقطات والمقارنة» (أو في الاعتماد إذا كان التحقق البشري مفعلاً)."},
@@ -696,15 +722,33 @@
             en: "Overall completeness score · $1 records", de: "Gesamt-Vollständigkeit · $1 Datensätze",
             es: "Puntuación global de completitud · $1 fichas", zh: "总体完整度评分 · $1 条记录",
             ar: "الدرجة الإجمالية للاكتمال · $1 سجل" }],
-        [/^⚠️ Sous le seuil d'alerte · (.+) fiches$/, {
-            en: "⚠️ Below the alert threshold · $1 records", de: "⚠️ Unter der Alarmschwelle · $1 Datensätze",
-            es: "⚠️ Bajo el umbral de alerta · $1 fichas", zh: "⚠️ 低于警戒阈值 · $1 条记录",
-            ar: "⚠️ دون عتبة التنبيه · $1 سجل" }],
+        [/^Sous le seuil d'alerte · (.+) fiches$/, {
+            en: "Below the alert threshold · $1 records", de: "Unter der Alarmschwelle · $1 Datensätze",
+            es: "Bajo el umbral de alerta · $1 fichas", zh: "低于警戒阈值 · $1 条记录",
+            ar: "دون عتبة التنبيه · $1 سجل" }],
     ];
 
     // Locale d'affichage des dates/nombres par langue (chiffres latins en arabe)
     const LOCALES = { fr: "fr-FR", en: "en-GB", de: "de-DE", es: "es-ES",
                       zh: "zh-CN", ar: "ar-SA-u-nu-latn" };
+
+    // ---- Alias sans pictogrammes ----
+    // L'interface n'affiche plus d'emoji : chaque clé historique du
+    // dictionnaire qui en portait reste valide via un alias dépouillé
+    // (clé ET traductions), généré une fois au chargement.
+    function stripPictos(s) {
+        return String(s).replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{26FF}\u{2300}-\u{23FF}\u{2139}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, "")
+            .replace(/[\u2700-\u27BF]/gu, ch => (ch === "\u2713" || ch === "\u2715") ? ch : "")
+            .replace(/  +/g, " ").trim();
+    }
+    for (const [key, entry] of Object.entries(T)) {
+        const plain = stripPictos(key);
+        if (plain && plain !== key && !T[plain]) {
+            const stripped = {};
+            for (const [lang, value] of Object.entries(entry)) stripped[lang] = stripPictos(value);
+            T[plain] = stripped;
+        }
+    }
 
     // ---- Moteur ----
     const ATTRS = ["placeholder", "title", "aria-label"];

@@ -3192,6 +3192,8 @@ async def compare_snapshots(
     return report
 
 class WatchlistEntityCreate(BaseModel):
+    # Liste de rattachement (WATCHLIST_*) : absente = snapshot manuel generique
+    list_type: Optional[str] = None
     entity_type: str
     primary_name: str
     first_name: Optional[str] = None
@@ -3229,21 +3231,32 @@ class WatchlistEntityCreate(BaseModel):
     listed_on: Optional[str] = None
     name_original_script: Optional[str] = None
 
-@app.post("/api/watchlist/entity")
-async def create_watchlist_entity(
-    payload: WatchlistEntityCreate, 
-    db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Manually adds a new entity to the active watchlist and updates the engine cache."""
-    # 1. Ensure the manual snapshot exists
-    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == "manual-watchlist").first()
+def _manual_snapshot_for(db: Session, list_type: Optional[str]) -> Snapshot:
+    """
+    Snapshot cible d'un ajout manuel : le generique historique (defaut,
+    type WATCHLIST_EU) ou un snapshot dedie a la liste demandee
+    (manual-watchlist-<type>). Ces snapshots sont READY d'emblee (l'acte
+    manuel EST la decision humaine) et ne sont jamais remplaces par les
+    synchronisations (voir _supersede_previous_snapshots).
+    """
+    if not (list_type or "").strip():
+        sid, ftype, fname = "manual-watchlist", "WATCHLIST_EU", "Manuel / Entités à la volée"
+    else:
+        ftype = list_type.strip().upper()
+        if ftype not in WATCHLIST_FILE_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Type de liste inconnu : {ftype}."
+            )
+        sid = f"manual-watchlist-{ftype.replace('WATCHLIST_', '').lower()}"
+        fname = f"Ajouts manuels — {ftype}"
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == sid).first()
     if not snap:
         snap = Snapshot(
-            snapshot_id="manual-watchlist",
-            file_type="WATCHLIST_EU",
-            file_name="Manuel / Entités à la volée",
-            file_hash="manual-watchlist-hash",
+            snapshot_id=sid,
+            file_type=ftype,
+            file_name=fname,
+            file_hash=f"{sid}-hash",
             record_count=0,
             uploaded_at=datetime.utcnow(),
             status="READY"
@@ -3251,21 +3264,27 @@ async def create_watchlist_entity(
         db.add(snap)
         db.commit()
         db.refresh(snap)
-        
-    # 2. Parse fields
+    return snap
+
+def _insert_manual_entity(db: Session, snap: Snapshot, payload: "WatchlistEntityCreate") -> Dict[str, str]:
+    """
+    Construit, controle (quality gate) et insere UNE entite manuelle dans le
+    snapshot cible — sans commit ni rechargement du cache : l'appelant commit
+    et recharge une seule fois (essentiel pour l'ajout par lot).
+    """
     aliases_list = [a.strip() for a in payload.aliases.split(",") if a.strip()] if payload.aliases else []
     dob_list = [d.strip() for d in payload.dates_of_birth.split(",") if d.strip()] if payload.dates_of_birth else []
     nationality_list = [c.strip().upper() for c in payload.nationality.split(",") if c.strip()] if payload.nationality else []
     residence_list = [c.strip().upper() for c in payload.residence.split(",") if c.strip()] if payload.residence else []
     alt_addrs = [a.strip() for a in payload.alternative_addresses.split(";") if a.strip()] if payload.alternative_addresses else []
-    
+
     passport_list = [{"number": num.strip(), "issuing_country": "XX"} for num in payload.passport_documents.split(",") if num.strip()] if payload.passport_documents else []
     national_id_list = [{"number": num.strip(), "issuing_country": "XX"} for num in payload.national_id_documents.split(",") if num.strip()] if payload.national_id_documents else []
-    
+
     from fiskr.ingest import categorize_aliases
     raw_aliases = [{"name": name, "type": "Strong"} for name in aliases_list]
     parsed_aliases = categorize_aliases(raw_aliases)
-    
+
     ent_dict = {
         "entity_id": f"MANUAL-{str(uuid.uuid4())[:8].upper()}",
         "entity_type": payload.entity_type,
@@ -3289,7 +3308,6 @@ async def create_watchlist_entity(
         "aircraft_tail_number": payload.aircraft_tail_number or None,
         "passport_documents": passport_list,
         "national_id_documents": national_id_list,
-        # New fields
         "place_of_birth": payload.place_of_birth or None,
         "address": payload.address or None,
         "city": payload.city or None,
@@ -3301,7 +3319,6 @@ async def create_watchlist_entity(
         "additional_informations": payload.additional_informations or None,
         "official_reference": payload.official_reference or None,
         "alternative_addresses": alt_addrs,
-        # Champs etendus (scalaires principaux)
         "bic_swift": payload.bic_swift or None,
         "tax_id": payload.tax_id or None,
         "duns_number": payload.duns_number or None,
@@ -3313,15 +3330,13 @@ async def create_watchlist_entity(
     # Moteur de detection des noms : decoupe le nom principal si prenom/nom absents
     ent_dict = ensure_parsed_name(ent_dict)
 
-    # 3. Quality Gate check
     report = evaluate_and_clean(ent_dict)
     if not report["is_valid"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"message": "Quality Gate rejected the entity.", "errors": report["errors"]}
         )
-        
-    # 4. Save to Database
+
     ent_checksum = compute_checksum(ent_dict)
     db_ent = WatchlistEntity(
         snapshot_id=snap.snapshot_id,
@@ -3340,7 +3355,6 @@ async def create_watchlist_entity(
         aircraft_tail_number=ent_dict["aircraft_tail_number"],
         passport_documents=ent_dict["passport_documents"],
         national_id_documents=ent_dict["national_id_documents"],
-        # New fields
         place_of_birth=ent_dict["place_of_birth"],
         address=ent_dict["address"],
         city=ent_dict["city"],
@@ -3361,18 +3375,77 @@ async def create_watchlist_entity(
         entity_checksum=ent_checksum
     )
     db.add(db_ent)
-    
-    # Update Snapshot record count
     snap.record_count += 1
+    return {"entity_id": ent_dict["entity_id"], "primary_name": report["cleansed_name"]}
+
+@app.post("/api/watchlist/entity")
+async def create_watchlist_entity(
+    payload: WatchlistEntityCreate,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Ajout manuel d'UNE entite. Sans list_type : snapshot generique historique
+    (manual-watchlist). Avec list_type : snapshot d'ajouts manuels dedie a
+    cette liste — l'entite compte alors dans cette liste (filtres, seuils de
+    cut-off, libelles d'alertes). Indexee immediatement dans le moteur.
+    """
+    snap = _manual_snapshot_for(db, payload.list_type)
+    result = _insert_manual_entity(db, snap, payload)
     db.commit()
-    
-    # 5. Reload Cache
     load_watchlist_cache(db)
-    
     return {
         "message": "Entité ajoutée avec succès.",
-        "entity_id": ent_dict["entity_id"],
-        "primary_name": report["cleansed_name"]
+        "entity_id": result["entity_id"],
+        "primary_name": result["primary_name"],
+        "list_type": snap.file_type,
+        "snapshot_id": snap.snapshot_id,
+    }
+
+class WatchlistEntityBatchCreate(BaseModel):
+    list_type: Optional[str] = None
+    entities: List[WatchlistEntityCreate]
+
+MANUAL_BATCH_MAX = 500
+
+@app.post("/api/watchlist/entities/batch")
+async def create_watchlist_entities_batch(
+    payload: WatchlistEntityBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Ajout manuel PAR LOT vers la meme liste cible. Chaque ligne passe le
+    quality gate individuellement : les refus n'empechent pas les autres
+    d'entrer (ils sont restitues ligne par ligne). Un seul commit et un seul
+    rechargement du cache pour tout le lot.
+    """
+    if not payload.entities:
+        raise HTTPException(status_code=400, detail="Aucune entité fournie.")
+    if len(payload.entities) > MANUAL_BATCH_MAX:
+        raise HTTPException(status_code=400,
+                            detail=f"Au plus {MANUAL_BATCH_MAX} entités par lot.")
+    snap = _manual_snapshot_for(db, payload.list_type)
+    added, rejected = [], []
+    for index, entity in enumerate(payload.entities):
+        try:
+            added.append(_insert_manual_entity(db, snap, entity))
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            rejected.append({"index": index,
+                             "primary_name": entity.primary_name,
+                             "errors": detail.get("errors") or [detail.get("message", "refusée")]})
+    if added:
+        db.commit()
+        load_watchlist_cache(db)
+    else:
+        db.rollback()
+    return {
+        "message": f"{len(added)} entité(s) ajoutée(s), {len(rejected)} refusée(s).",
+        "added": added,
+        "rejected": rejected,
+        "list_type": snap.file_type,
+        "snapshot_id": snap.snapshot_id,
     }
 
 # ------------------ PATCH DE VALEURS D'UNE FICHE LISTEE ------------------
@@ -7677,6 +7750,18 @@ async def download_exclusion_evidence(
         raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
     return FileResponse(str(file_path), filename=row.exclusion_file_name or file_path.name)
 
+def _settle_sync_reports(db: Session, snapshot_id: str, new_status: str) -> None:
+    """
+    La decision d'homologation solde le rapport de synchronisation lie : un
+    rapport restait fige en PENDING_REVIEW meme une fois son snapshot approuve
+    ou rejete, alors qu'il porte le snapshot_id qui permet de refleter l'issue
+    (SUCCESS a l'approbation, REJECTED au rejet).
+    """
+    db.query(SyncReport).filter(
+        SyncReport.snapshot_id == snapshot_id,
+        SyncReport.status == "PENDING_REVIEW",
+    ).update({"status": new_status}, synchronize_session=False)
+
 @app.post("/api/review/snapshots/{snapshot_id}/approve", status_code=status.HTTP_202_ACCEPTED)
 async def approve_pending_snapshot(
     snapshot_id: str,
@@ -7736,6 +7821,7 @@ async def approve_pending_snapshot(
     snap.reviewed_at = datetime.utcnow()
     snap.review_comment = (payload.comment or "").strip() or None
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
+    _settle_sync_reports(db, snap.snapshot_id, "SUCCESS")
     db.commit()
 
     job_token = f"approve:{snap.snapshot_id}"
@@ -7774,6 +7860,7 @@ async def reject_pending_snapshot(
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
     snap.review_comment = comment
+    _settle_sync_reports(db, snap.snapshot_id, "REJECTED")
     db.commit()
     emit(db, "snapshot_rejected", {
         "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
