@@ -1409,6 +1409,69 @@ class UpdateSelfProfileRequest(BaseModel):
     username: Optional[str] = None
     full_name: Optional[str] = None
     email: Optional[str] = None
+    phone: Optional[str] = None
+    job_title: Optional[str] = None
+    bio: Optional[str] = None
+    notification_opt_out: Optional[List[str]] = None
+
+class AvatarRequest(BaseModel):
+    # data-URI image (png/jpeg/webp) compressee cote client, ou null pour retirer
+    avatar: Optional[str] = None
+
+def _profile_payload(user: User) -> Dict[str, Any]:
+    from fiskr.events import event_categories
+    return {
+        "id": user.id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "email": user.email,
+        "phone": user.phone,
+        "job_title": user.job_title,
+        "bio": user.bio,
+        "avatar": user.avatar,
+        "role": user.role,
+        "totp_enabled": bool(user.totp_enabled),
+        "absent_until": user.absent_until.isoformat() if user.absent_until else None,
+        "delegate_to": user.delegate_to,
+        "notification_opt_out": user.notification_opt_out or [],
+        "notification_categories": event_categories(),
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
+@app.get("/api/me/profile")
+async def get_own_profile(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Profil complet du compte courant (espace « Mon compte »)."""
+    user = db.query(User).filter(User.id == current_user["id"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    return _profile_payload(user)
+
+AVATAR_MAX_CHARS = 400_000   # ~300 Ko binaires : le client redimensionne a 256 px
+
+@app.put("/api/me/avatar")
+async def update_own_avatar(
+    payload: AvatarRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Photo de profil (data-URI) : posee ou retiree par le compte lui-meme."""
+    user = db.query(User).filter(User.id == current_user["id"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    avatar = (payload.avatar or "").strip() or None
+    if avatar is not None:
+        if not re.match(r"^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$", avatar):
+            raise HTTPException(status_code=400,
+                                detail="Photo invalide : image PNG/JPEG/WebP encodée en data-URI attendue.")
+        if len(avatar) > AVATAR_MAX_CHARS:
+            raise HTTPException(status_code=400,
+                                detail="Photo trop lourde : 300 Ko maximum après compression.")
+    user.avatar = avatar
+    db.commit()
+    return {"message": "Photo mise à jour." if avatar else "Photo retirée.", "avatar": avatar}
 
 class CreateUserRequest(BaseModel):
     username: str
@@ -1481,17 +1544,35 @@ async def update_own_profile(
     if payload.email is not None:
         user.email = _validated_email(payload.email)
 
+    if payload.phone is not None:
+        phone = payload.phone.strip()
+        if phone and not re.fullmatch(r"[0-9+()\s.\-]{5,30}", phone):
+            raise HTTPException(status_code=400, detail="Numéro de téléphone invalide.")
+        user.phone = phone or None
+
+    if payload.job_title is not None:
+        user.job_title = payload.job_title.strip()[:150] or None
+
+    if payload.bio is not None:
+        if len(payload.bio) > 2000:
+            raise HTTPException(status_code=400, detail="Description : 2000 caractères maximum.")
+        user.bio = payload.bio.strip() or None
+
+    if payload.notification_opt_out is not None:
+        from fiskr.events import event_categories
+        known = set(event_categories()) | {"ALL"}
+        cleaned = [c for c in payload.notification_opt_out if isinstance(c, str) and c in known]
+        unknown = [c for c in payload.notification_opt_out if c not in known]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"Catégorie(s) de notification inconnue(s) : {', '.join(map(str, unknown[:3]))}.")
+        user.notification_opt_out = cleaned
+
     db.commit()
     db.refresh(user)
     return {
         "message": "Profil mis à jour avec succès.",
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "email": user.email,
-            "role": user.role
-        }
+        "user": _profile_payload(user),
     }
 
 @app.get("/api/users")

@@ -78,6 +78,11 @@
  </button>
  </li>
  <li id="nav-item-users" class="hidden">
+ <button id="nav-btn-account" title="Mon compte" class="nav-item" onclick="switchTab('account')">
+ <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg></span> Mon compte
+ </button>
+ </li>
+ <li>
  <button id="nav-btn-users" title="Utilisateurs" class="nav-item" onclick="switchTab('users')">
  <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-users"></use></svg></span> Utilisateurs
  </button>
@@ -85,7 +90,7 @@
  </ul>
  </nav>
  <div class="sidebar-footer">
- <div class="user-badge-container" onclick="openProfileModal()" style="cursor: pointer;" title="Gérer mon profil et mot de passe">
+ <div class="user-badge-container" onclick="switchTab('account')" style="cursor: pointer;" title="Mon compte">
  <span class="user-avatar"><svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg></span>
  <div class="user-details">
  <span id="sidebar-username" class="user-name">Administrateur</span>
@@ -117,15 +122,21 @@
  <div style="position: relative;">
  <button id="bell-btn" class="icon-btn" onclick="toggleNotifCenter()" aria-label="Centre de notifications" title="Notifications"><svg class="ui-icon" aria-hidden="true"><use href="#i-bell"></use></svg><span id="bell-badge" class="status-badge warning hidden" style="position: absolute; top: -6px; right: -6px; padding: 0.05rem 0.35rem; font-size: 0.65rem;">0</span></button>
  <div id="notif-panel" class="hidden" style="position: absolute; right: 0; top: 48px; width: 400px; max-width: 92vw; max-height: 74vh; overflow-y: auto; background: var(--modal-bg); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: var(--shadow-modal); z-index: 1100; padding: 0.75rem;">
+ <div class="notif-panel-toolbar">
+ <strong style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary);">Notifications</strong>
+ <button class="notif-clear-btn" onclick="clearAllNotifications()">Tout effacer</button>
+ </div>
  <div id="notif-ops-section" class="hidden" style="margin-bottom: 0.75rem;">
  <h4 style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.5rem;">Opérations en cours</h4>
  <div id="notif-ops-list"></div>
  </div>
  <div id="notif-jobs-section" class="hidden" style="margin-bottom: 0.75rem;">
- <h4 style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.5rem;">Travaux récents</h4>
+ <h4 style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">Travaux récents
+ <button class="notif-clear-btn" onclick="clearJobsNotifications()">Effacer</button></h4>
  <div id="notif-jobs-list"></div>
  </div>
- <h4 style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.5rem;">À traiter</h4>
+ <h4 style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">À traiter
+ <button class="notif-clear-btn" onclick="clearTodoNotifications()">Masquer</button></h4>
  <ul id="notif-list" class="home-list"></ul>
  </div>
  </div>
@@ -1846,9 +1857,7 @@
  <button id="sub-btn-settings-integrations" class="sub-tab-btn" role="tab" aria-selected="false" onclick="switchSubTab('settings', 'settings-integrations')">
  Intégrations
  </button>
- <button id="sub-btn-settings-account" class="sub-tab-btn" role="tab" aria-selected="false" onclick="switchSubTab('settings', 'settings-account')">
- <svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg> Mon compte
- </button>
+ 
  </div>
 
  <div id="sub-sec-settings-governance" class="sub-tab-content active" role="tabpanel" aria-labelledby="sub-btn-settings-governance">
@@ -2199,8 +2208,45 @@
  </div>
  </div>
 
- <div id="sub-sec-settings-account" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-account">
+ </section>
+<section id="sec-account" class="tab-content">
  <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
+
+ <div class="card form-card" id="profile-card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg> Profil</h2>
+ <p class="section-desc">Votre identité au sein du poste de contrôle : photo, fonction et coordonnées apparaissent aux collègues (assignations, validations 4-yeux, journal des décisions).</p>
+ <div class="profile-avatar-row">
+ <div id="profile-avatar-preview" class="profile-avatar"><svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg></div>
+ <div class="profile-avatar-actions">
+ <input type="file" id="profile-avatar-input" accept="image/png,image/jpeg,image/webp" class="hidden" onchange="handleAvatarFile(this)">
+ <button class="btn btn-sm btn-secondary" onclick="document.getElementById('profile-avatar-input').click()">Changer la photo</button>
+ <button id="profile-avatar-remove" class="btn btn-sm btn-secondary hidden" onclick="removeAvatar()">Retirer</button>
+ <small style="color: var(--text-muted); display: block; margin-top: 0.35rem;">PNG/JPEG/WebP — recadrée en 256 px, 300 Ko max.</small>
+ </div>
+ </div>
+ <div class="form-row">
+ <div class="form-group"><label for="profile-full-name">Nom complet</label><input type="text" id="profile-full-name" maxlength="255"></div>
+ <div class="form-group"><label for="profile-job-title">Fonction</label><input type="text" id="profile-job-title" maxlength="150" placeholder="Ex : Analyste conformité"></div>
+ </div>
+ <div class="form-row">
+ <div class="form-group"><label for="profile-email">Email</label><input type="email" id="profile-email" maxlength="255"></div>
+ <div class="form-group"><label for="profile-phone">Téléphone</label><input type="text" id="profile-phone" maxlength="30" placeholder="+33 …"></div>
+ </div>
+ <div class="form-group">
+ <label for="profile-bio">Description</label>
+ <textarea id="profile-bio" rows="3" maxlength="2000" placeholder="Périmètre, spécialités, horaires…"></textarea>
+ </div>
+ <button class="btn btn-primary" onclick="saveMyProfile()">Enregistrer le profil</button>
+ </div>
+
+ <div class="card form-card" id="account-security-card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Mot de passe</h2>
+ <p class="section-desc">Changement de votre mot de passe (la politique de complexité configurée s'applique).</p>
+ <div class="form-group" style="max-width: 380px;"><label for="account-old-password">Mot de passe actuel</label><input type="password" id="account-old-password" autocomplete="current-password"></div>
+ <div class="form-group" style="max-width: 380px;"><label for="account-new-password">Nouveau mot de passe</label><input type="password" id="account-new-password" autocomplete="new-password"></div>
+ <button class="btn btn-primary" onclick="saveAccountPassword()">Changer le mot de passe</button>
+ </div>
+
  <div class="card form-card" id="mfa-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-shield"></use></svg> Double Authentification (MFA)</h2>
  <p class="section-desc">Code à usage unique (TOTP, RFC 6238) demandé à chaque connexion, généré par une application d'authentification (Google Authenticator, Aegis, FreeOTP…). En cas de téléphone perdu, un administrateur peut réinitialiser la MFA du compte.</p>
@@ -2218,7 +2264,6 @@
  <div id="mfa-actions"></div>
  </div>
 
- <!-- Rétention des données (admin) -->
  <div class="card form-card" id="absence-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-calendar"></use></svg> Absence & Délégation</h2>
  <p class="section-desc">Pendant votre absence, toute alerte qui vous serait assignée ira à votre délégué, et vos alertes ouvertes peuvent lui être réassignées immédiatement (chaque réassignation est tracée dans l'historique de l'alerte).</p>
@@ -2245,11 +2290,42 @@
  </div>
  </div>
 
- <!-- Seuils de score (admin) -->
+ <div class="card form-card" id="account-notifications-card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-bell"></use></svg> Notifications du compte</h2>
+ <p class="section-desc">Les emails d'étape que reçoit CE compte, par catégorie. Couper une catégorie ne modifie le routage de personne d'autre — c'est un filtre personnel appliqué après le routage par rôle.</p>
+ <div class="form-group" style="margin-bottom: 0.75rem;">
+ <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+ <input type="checkbox" id="account-notif-all" style="width: 18px; height: 18px;" onchange="toggleAllAccountNotifs(this.checked)">
+ <strong>Recevoir les notifications par email</strong>
+ </label>
  </div>
+ <div id="account-notif-categories" style="display: flex; flex-direction: column; gap: 0.4rem;"></div>
+ <button class="btn btn-primary" style="margin-top: 1rem;" onclick="saveAccountNotifications()">Enregistrer les notifications</button>
+ </div>
+
+ <div class="card form-card" id="account-prefs-card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-sliders"></use></svg> Préférences d'affichage</h2>
+ <p class="section-desc">Propres à ce navigateur : langue de l'interface, thème et disposition de l'accueil.</p>
+ <div class="form-row" style="max-width: 480px;">
+ <div class="form-group">
+ <label for="account-lang">Langue</label>
+ <select id="account-lang" onchange="fiskrI18n.setLang(this.value)">
+ <option value="fr">Français</option><option value="en">English</option><option value="de">Deutsch</option>
+ <option value="es">Español</option><option value="zh">中文</option><option value="ar">العربية</option>
+ </select>
+ </div>
+ <div class="form-group">
+ <label>Thème</label>
+ <button class="btn btn-secondary" onclick="toggleTheme()">Basculer clair / sombre</button>
+ </div>
+ </div>
+ <button class="btn btn-secondary" onclick="switchTab('home'); enterDashboardEdit();">Personnaliser mon accueil</button>
+ </div>
+
  </div>
  </section>
-<section id="sec-users" class="tab-content">
+
+ <section id="sec-users" class="tab-content">
 
  <div class="card result-card">
  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">

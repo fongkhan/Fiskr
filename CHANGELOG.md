@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — a full "My account" space
+The account fragments scattered under Settings became a dedicated top-level tab. A person is now more than a username:
+
+- **Profile**: photo (client-side square-cropped to 256 px and compressed, stored as a data URI ≤ 300 KB, shown in the sidebar badge), full name, job title, phone, email and free-text description — visible to colleagues through assignments, 4-eyes validations and the decision log. New columns on `users` with additive migrations, `GET /api/me/profile` and `PUT /api/me/avatar`.
+- **Password change**, and the existing **two-factor (TOTP)** and **absence & delegation** cards moved in.
+- **Account notifications**: a per-account master switch plus per-category checkboxes. Muting is a personal filter applied *after* the role-based routing (`notification_opt_out` on the user, honoured by the notifier's recipient resolution) — it never changes anybody else's routing.
+- **Display preferences**: interface language, theme toggle and a shortcut to the home-page customizer.
+
+### Added — bell notifications can be purged one by one, per section, or entirely
+Every entry in the bell panel now carries a dismiss cross; "Recent jobs" has a *Clear* action, "To handle" a *Hide* action, and a *Clear all* sits at the top. Dismissals persist per browser; a hidden "to handle" item **reappears on its own if its counter grows** past the value it was dismissed at — purging can never hide new work. The badge counts only what is visible.
+
+### Changed — tabs and filters became finger-friendly on tablet and phone
+Sub-tab rows turn into a single-line horizontal swipe band with larger touch targets under 1024 px; filter bars wrap with stretching fields, then stack full-width under 640 px; the header compacts (engine status collapses to its dot), the bell panel docks full-width, and modals go near-fullscreen.
+
+
 ### Fixed — regulator alert-list extraction no longer produces kilometre-long "names" (HK SFC)
 The HTML table extractor behind the regulator alert lists (HK SFC, AMF) swallowed the content of `<script>`/`<style>` tags inside cells and lost its state on nested layout tables — embedded JavaScript could become a multi-kilobyte "name" on imported records. The extractor now suppresses script/style/noscript/template content and handles nested tables with a stack; downstream, a plausibility guard discards any row whose "name" exceeds 200 characters or 24 words (extraction residue, never an identity).
 

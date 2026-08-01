@@ -749,6 +749,16 @@ class User(Base):
     # destinees a ce compte sont redirigees vers delegate_to
     absent_until = Column(DateTime, nullable=True)
     delegate_to = Column(String(100), nullable=True)
+    # Profil enrichi (espace « Mon compte ») : photo (data-URI compressee cote
+    # client), description libre, telephone, fonction. L'identite d'un acteur
+    # de conformite ne se resume pas a un pseudo.
+    avatar = Column(Text, nullable=True)
+    bio = Column(Text, nullable=True)
+    phone = Column(String(50), nullable=True)
+    job_title = Column(String(150), nullable=True)
+    # Categories de notifications coupees par CE compte (["ALL"] = tout couper).
+    # Filtre personnel applique par-dessus le routage par role du notifier.
+    notification_opt_out = Column(JSON, nullable=True)
 
 class ApiKey(Base):
     """
@@ -1017,6 +1027,11 @@ def init_db():
                 ("absent_until", "TIMESTAMP"),
                 ("delegate_to", "VARCHAR(100)"),
                 ("email", "VARCHAR(255)"),
+                ("avatar", "TEXT"),
+                ("bio", "TEXT"),
+                ("phone", "VARCHAR(50)"),
+                ("job_title", "VARCHAR(150)"),
+                ("notification_opt_out", "TEXT"),
             ],
         }
         inspector = inspect(engine)

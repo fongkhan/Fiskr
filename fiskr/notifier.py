@@ -74,6 +74,21 @@ def _resolve_assignee(db, payload: Dict[str, Any]) -> List[str]:
     return emails
 
 
+def _opted_out_emails(db, category: str) -> set:
+    """Adresses des comptes ayant coupe cette categorie (ou tout) dans leur
+    espace « Mon compte ». Filtre personnel applique APRES le routage par
+    role : couper ses notifications ne modifie le routage de personne d'autre."""
+    out = set()
+    for user in db.query(User).all():
+        email = (user.email or "").strip()
+        if not email:
+            continue
+        muted = user.notification_opt_out or []
+        if "ALL" in muted or category in muted:
+            out.add(email)
+    return out
+
+
 def resolve_recipients(db, event_key: str, payload: Dict[str, Any]) -> List[str]:
     """
     Destinataires effectifs d'un evenement : union des adresses des comptes
@@ -101,6 +116,12 @@ def resolve_recipients(db, event_key: str, payload: Dict[str, Any]) -> List[str]
 
     if not emails:
         emails = notify.default_recipients()
+    # Filtre personnel : les comptes qui ont coupe cette categorie (ou tout)
+    # dans leur espace « Mon compte » sortent de la liste — apres le routage
+    # par role, avant le repli global (une adresse de repli n'est pas un compte).
+    muted = _opted_out_emails(db, event.category)
+    if muted:
+        emails = [a for a in emails if a.lower() not in {m.lower() for m in muted}]
     # Deduplication en conservant l'ordre
     seen, unique = set(), []
     for address in emails:
