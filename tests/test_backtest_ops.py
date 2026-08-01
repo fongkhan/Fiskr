@@ -157,3 +157,35 @@ def test_pdf_fallback_graceful_without_pypdf(tmp_path, monkeypatch):
 
 def test_eurlex_default_mode_is_extract():
     assert get_sync_config()["eurlex"]["mode"] == "extract"
+
+
+# ------------------ EXTRACTEUR HTML DES LISTES D'ALERTE (HK SFC) ------------------
+
+def test_html_table_extractor_ignores_scripts_and_nested_tables(tmp_path):
+    """La page SFC embarque du JavaScript et des tableaux de mise en page :
+    ni l'un ni l'autre ne doivent devenir des « noms » de fiches."""
+    from fiskr.ingest import parse_hk_sfc_alert_list
+
+    html = """
+    <html><body>
+    <table><tr><td>layout</td><td>
+        <table>
+            <tr><th>Name</th><th>Website</th><th>Date</th></tr>
+            <tr><td>Alpha Fake Broker Limited<script>var config = {%s};</script></td>
+                <td>www.alpha-fake.example</td><td>2026-05-01</td></tr>
+            <tr><td>Beta Clone Securities</td><td>www.beta-clone.example</td><td>2026-05-02</td></tr>
+            <tr><td>%s</td><td>www.junk.example</td><td>2026-05-03</td></tr>
+        </table>
+    </td></tr></table>
+    </body></html>
+    """ % ('"x": "' + "A" * 3000 + '"', "Texte éditorial " * 40)
+    path = tmp_path / "sfc.html"
+    path.write_text(html, encoding="utf-8")
+
+    entities = list(parse_hk_sfc_alert_list(str(path)))
+    names = [e["primary_name"] for e in entities]
+    assert "Alpha Fake Broker Limited" in names, names
+    assert "Beta Clone Securities" in names
+    # Aucun nom démesuré : ni script avalé, ni ligne éditoriale
+    assert all(len(n) <= 200 for n in names), [len(n) for n in names]
+    assert len(entities) == 2

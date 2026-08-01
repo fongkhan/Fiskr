@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — regulator alert-list extraction no longer produces kilometre-long "names" (HK SFC)
+The HTML table extractor behind the regulator alert lists (HK SFC, AMF) swallowed the content of `<script>`/`<style>` tags inside cells and lost its state on nested layout tables — embedded JavaScript could become a multi-kilobyte "name" on imported records. The extractor now suppresses script/style/noscript/template content and handles nested tables with a stack; downstream, a plausibility guard discards any row whose "name" exceeds 200 characters or 24 words (extraction residue, never an identity).
+
+### Fixed — the engine hash badge displays again
+The sidebar "Active hash" badge called `GET /api/watchlist`, which serializes the ENTIRE in-memory referential — on a production of hundreds of thousands of records the response never arrived and the badge stayed on "Loading...". A new light `GET /api/watchlist/summary` (hash, version, record count) feeds the badge; the tooltip now also shows the loaded record count.
+
+### Added — collapsible sidebar (icon mode)
+A chevron button collapses the left menu to a 68 px icon rail: navigation icons stay clickable with their label as tooltip, the logo, user block and hash badge fold away, and the state is persisted per browser. Independent from the existing mobile off-canvas behaviour.
+
+### Changed — pypdf became a required dependency
+The EUR-Lex PDF fallback (extracting listings from the archived official PDF when an act's HTML is unreachable) shipped as an optional dependency; it is now installed by default so the fallback works everywhere. The code remains tolerant of its absence.
+
+
 ### Changed — EUR-Lex extracts listings from the acts themselves (HTML, PDF fallback)
 The consolidated EU FSF list only refreshes every ~2 months, while designations appear in the Official Journal immediately — screening only the FSF between refreshes is a regulatory exposure. The EUR-Lex source therefore switched its default from *alert* (early-warning signal, no records) to **extract**:
 

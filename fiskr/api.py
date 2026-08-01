@@ -3924,6 +3924,21 @@ async def delete_relationship(
     db.commit()
     return {"message": "Relation supprimée."}
 
+@app.get("/api/watchlist/summary")
+async def get_watchlist_summary(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Etat du moteur en trois champs (hash actif, version, nombre de fiches).
+    Le badge « Hash Actif » de la barre laterale appelait GET /api/watchlist,
+    qui serialise TOUT le referentiel en memoire : sur une production de
+    centaines de milliers de fiches, la reponse ne revenait jamais et le
+    badge restait sur « Loading... ». Trois champs suffisent.
+    """
+    return {
+        "version": watchlist_version,
+        "hash": watchlist_hash,
+        "count": len(watchlist_store or []),
+    }
+
 @app.get("/api/watchlist")
 async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Returns the active loaded in-memory watchlist."""

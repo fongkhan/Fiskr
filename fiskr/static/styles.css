@@ -1994,3 +1994,27 @@ th.sortable.sort-desc::after {
 .tile-label .ui-icon, .dash-widget h3 .ui-icon { opacity: 0.85; }
 .toast-icon .ui-icon { width: 1.15em; height: 1.15em; }
 .btn .ui-icon { margin-right: 0.35em; }
+
+/* ------------------ Sidebar rétractable (mode icônes) ------------------ */
+.sidebar-collapse-btn { margin-left: auto; }
+
+@media (min-width: 1025px) {
+    body.sidebar-collapsed { --sidebar-width: 68px; }
+    body.sidebar-collapsed .sidebar { padding: 2rem 0.75rem; }
+    body.sidebar-collapsed .logo-container { justify-content: center; margin-bottom: 2rem; flex-direction: column; gap: 0.75rem; }
+    body.sidebar-collapsed .logo-text { display: none; }
+    body.sidebar-collapsed .sidebar-collapse-btn { margin-left: 0; }
+    /* Les libellés sont des nœuds texte : font-size 0 les efface, l'icône
+       retrouve sa taille en em restaurés */
+    body.sidebar-collapsed .nav-item {
+        font-size: 0; gap: 0; justify-content: center; padding: 0.85rem 0.5rem;
+    }
+    body.sidebar-collapsed .nav-item.active { padding-left: calc(0.5rem - 3px); }
+    body.sidebar-collapsed .nav-icon { font-size: 1.05rem; }
+    body.sidebar-collapsed .nav-item .status-badge { display: none; }
+    body.sidebar-collapsed .user-details,
+    body.sidebar-collapsed .watchlist-info { display: none; }
+    body.sidebar-collapsed .user-badge-container { justify-content: center; padding: 0.5rem; }
+    body.sidebar-collapsed .logout-btn { font-size: 0; padding: 0.5rem; }
+    body.sidebar-collapsed .logout-btn .ui-icon { font-size: 0.9rem; }
+}

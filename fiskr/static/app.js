@@ -298,6 +298,28 @@ function toggleTheme() {
  applyTheme(currentTheme() === "light" ? "dark" : "light");
 }
 
+// Sidebar rétractable (bureau) : mode icônes seules, état persisté.
+// Indépendant du mode mobile (off-canvas) qui garde son propre mécanisme.
+function applySidebarCollapsed(collapsed) {
+ document.body.classList.toggle("sidebar-collapsed", collapsed);
+ const btn = document.getElementById("sidebar-collapse-btn");
+ if (btn) {
+ btn.innerHTML = collapsed ? uiIcon("chevrons-right") : uiIcon("chevrons-left");
+ btn.title = collapsed ? "Déplier le menu" : "Replier le menu";
+ }
+ try { localStorage.setItem("fiskr_sidebar_collapsed", collapsed ? "1" : "0"); } catch (e) { /* stockage indisponible */ }
+}
+
+function toggleSidebarCollapse() {
+ applySidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+}
+
+function initSidebarCollapse() {
+ try {
+ if (localStorage.getItem("fiskr_sidebar_collapsed") === "1") applySidebarCollapsed(true);
+ } catch (e) { /* stockage indisponible */ }
+}
+
 // Sidebar rétractable (mobile / tablette) : classe sur <body>, overlay cliquable
 function toggleSidebar(force) {
  const open = force !== undefined ? force : !document.body.classList.contains("sidebar-open");
@@ -726,6 +748,7 @@ document.addEventListener("DOMContentLoaded", () => {
  checkAuthUser();
  initListTypeControls();
  populateManualListSelects();
+ initSidebarCollapse();
  // Filtres du tableau des sources (recherche + famille + état)
  ["sources-search", "sources-family-filter", "sources-state-filter"].forEach(id => {
  const el = document.getElementById(id);
@@ -2158,12 +2181,16 @@ async function handleCompareSnapshots(event) {
 // Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
 async function fetchWatchlistHash() {
  try {
- const response = await apiFetch("/api/watchlist");
+ // Résumé léger (hash + version + compte) : l'ancien appel à /api/watchlist
+ // sérialisait tout le référentiel en mémoire et le badge restait sur
+ // « Loading... » dès que la production dépassait quelques dizaines de
+ // milliers de fiches.
+ const response = await apiFetch("/api/watchlist/summary", { silent: true });
  const data = await response.json();
  const hashEl = document.getElementById("sidebar-wl-hash");
  if (hashEl) {
  hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "NONE";
- hashEl.title = data.hash;
+ hashEl.title = (data.hash || "") + (data.count ? ` · ${data.count.toLocaleString(uiLocale())} fiches` : "");
  }
  } catch (e) {
  console.error("Error loading watchlist hash:", e);

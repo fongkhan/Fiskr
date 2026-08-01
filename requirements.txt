@@ -11,7 +11,11 @@ python-dotenv>=1.0.0
 pyjwt>=2.8.0
 python-multipart>=0.0.9
 anyascii>=0.3.2
-# pypdf>=4.0.0 # Optional, uncomment for the EUR-Lex PDF fallback (extracting listings from the archived official PDF when the act's HTML is unreachable)
+# EUR-Lex : extraction depuis le PDF officiel archive quand le HTML d'un acte
+# est inaccessible — la piece justificative opposable aux regulateurs. Le code
+# reste tolerant a son absence (l'acte est alors signale en echec), mais la
+# dependance est installee d'office pour que le repli fonctionne partout.
+pypdf>=4.0.0
 # openpyxl>=3.1.0 # Optional, uncomment to read the XLSX form of the Australian DFAT list
 # pyspark>=3.5.0 # Optional, uncomment for running distributed Spark batch jobs
 
