@@ -912,6 +912,9 @@ async function fetchConfig() {
 
 // Tab navigation
 function switchTab(tabId) {
+ // Compatibilité : l'ancien onglet « Alertes » a été scindé — tout appel
+ // résiduel atterrit sur l'espace Criblage (le filtrage a son propre onglet).
+ if (tabId === "alerts") tabId = "screening";
  document.querySelectorAll(".nav-item").forEach(item => {
  item.classList.remove("active");
  });
@@ -932,14 +935,6 @@ function switchTab(tabId) {
  // Refresh tab-specific data
  if (tabId === "home") {
  fetchHomeDashboard();
- }
- if (tabId === "alerts") {
- populateAssigneeFilters();
- fetchAlerts("SCREENING");
- fetchAlerts("FILTERING");
- fetchWhitelist();
- fetchSavedViews("SCREENING");
- fetchSavedViews("FILTERING");
  }
  if (tabId === "kpi") {
  // Sous-onglets KPI : seule la « Vue d'ensemble » charge à l'arrivée ;
@@ -985,6 +980,12 @@ function switchTab(tabId) {
 
 // Sub-tab navigation
 function switchSubTab(sectionId, subTabId) {
+ // Compatibilité : les sous-onglets de l'ancien onglet « Alertes » vivent
+ // désormais dans Criblage ou Filtrage — le sous-onglet décide de l'espace.
+ if (sectionId === "alerts") {
+ sectionId = (subTabId === "alerts-filtering") ? "filtering" : "screening";
+ switchTab(sectionId);
+ }
  const section = document.getElementById(`sec-${sectionId}`);
  if (!section) return;
  
@@ -1026,8 +1027,12 @@ function switchSubTab(sectionId, subTabId) {
  fetchPendingReviews();
  } else if (subTabId === "alerts-screening") {
  fetchAlerts("SCREENING");
+ populateAssigneeFilters();
+ fetchSavedViews("SCREENING");
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
+ populateAssigneeFilters();
+ fetchSavedViews("FILTERING");
  } else if (subTabId === "alerts-whitelist") {
  fetchWhitelist();
  } else if (subTabId === "alerts-blocking") {
@@ -2763,7 +2768,7 @@ async function runBatchScreening() {
  <td><code>${escapeHtml(best.watchlist_entity.entity_id)}</code></td>
  <td><strong>${escapeHtml(best.best_watchlist_name)}</strong></td>
  <td style="color:var(--color-alert); font-weight:700">${best.final_score.toFixed(1)}%</td>
- <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;"> #${data.alert_id}</a>` : ""}</td>
+ <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;"> #${data.alert_id}</a>` : ""}</td>
  `;
  } else {
  tr.innerHTML = `
@@ -6055,7 +6060,7 @@ function renderTransactionResult(data) {
  <td>${p.best_watchlist_name ? p.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${p.best_watchlist_name ? escapeHtml(p.best_watchlist_name) + (p.list_type ? ` <small style="color:var(--text-muted)">${escapeHtml(p.list_type)}</small>` : "") : "—"}</td>
  <td>${badge}${p.hard_match ? ' <small style="color:var(--color-alert)">hard match</small>' : ""}</td>
- <td>${p.alert_id ? `<a href="#" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
+ <td>${p.alert_id ? `<a href="#" onclick="switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
  </tr>`;
  }).join("");
 }
@@ -7656,13 +7661,14 @@ const PALETTE_NAV_ITEMS = [
  { label: " Vue d'ensemble", action: () => switchTab("home") },
  { label: " Gestion des Watchlists", action: () => switchTab("watchlist-mgmt") },
  { label: " Criblage temps réel", action: () => switchTab("screening") },
- { label: " Filtrage transactionnel (ISO 20022)", action: () => { switchTab("screening"); switchSubTab("screening", "screening-transactions"); } },
- { label: " Alertes de criblage", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-screening"); } },
- { label: " Alertes de filtrage", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-filtering"); } },
- { label: " Liste blanche (Good Guys)", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-whitelist"); } },
+ { label: " Filtrage transactionnel (ISO 20022)", action: () => { switchTab("filtering"); switchSubTab("filtering", "screening-transactions"); } },
+ { label: " Alertes de criblage", action: () => { switchTab("screening"); switchSubTab("screening", "alerts-screening"); } },
+ { label: " Alertes de filtrage", action: () => { switchTab("filtering"); switchSubTab("filtering", "alerts-filtering"); } },
+ { label: " Liste blanche (Good Guys)", action: () => { switchTab("screening"); switchSubTab("screening", "alerts-whitelist"); } },
  { label: " Homologation des listes", action: () => { switchTab("watchlist-mgmt"); switchSubTab("watchlist-mgmt", "watchlist-review"); } },
  { label: " Pilotage (KPI)", action: () => switchTab("kpi") },
  { label: " Audit réglementaire", action: () => switchTab("audit") },
+ { label: " Guide : flux CFT et processus", action: () => { switchTab("guide"); switchSubTab("guide", "guide-flow"); } },
 ];
 
 function openCommandPalette() {
@@ -7747,7 +7753,7 @@ async function runPaletteSearch(term) {
  if ((al.items || []).length) {
  groups.push({ title: `Alertes (${al.total})`, items: al.items.map(a => ({
  html: `<strong>#${a.id} ${escapeHtml(a.client_name)}</strong> × ${escapeHtml(a.watchlist_name)} <small style="color: var(--text-muted);">${escapeHtml(statusLabel(a.status))}</small>`,
- action: () => { switchTab("alerts"); switchSubTab("alerts", a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
+ action: () => { const sp = a.channel === "FILTERING" ? "filtering" : "screening"; switchTab(sp); switchSubTab(sp, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
  })) });
  }
  }

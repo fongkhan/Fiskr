@@ -1076,14 +1076,17 @@ th.sortable.sort-desc::after {
     max-height: 250px;
 }
 
-/* Sub-tabs Component */
+/* Sub-tabs Component — une seule ligne, toujours : libellés courts d'abord,
+   défilement horizontal discret en dernier recours (jamais de retour à la ligne) */
 .sub-tabs {
     display: flex;
-    gap: 1.5rem;
+    gap: 1.1rem;
     margin-bottom: 2rem;
     border-bottom: 1px solid var(--border-color);
-    padding-bottom: 0.25rem;
-    flex-wrap: wrap;
+    padding-bottom: 0.55rem;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
 }
 
 .sub-tab-btn {
@@ -1097,6 +1100,8 @@ th.sortable.sort-desc::after {
     cursor: pointer;
     position: relative;
     transition: var(--transition-fast);
+    white-space: nowrap;
+    flex: none;
 }
 
 .sub-tab-btn:hover {
@@ -2049,6 +2054,12 @@ th.sortable.sort-desc::after {
 #notif-list li { display: flex; align-items: center; gap: 0.4rem; }
 #notif-list li .item-main { flex: 1; min-width: 0; }
 
+/* Petit desktop : on resserre la barre avant de céder au défilement */
+@media (min-width: 1025px) and (max-width: 1280px) {
+    .sub-tabs { gap: 0.6rem; }
+    .sub-tab-btn { font-size: 0.92rem; padding: 0.65rem 0.35rem; }
+}
+
 /* ------------------ Ergonomie tablette / mobile des onglets ------------------ */
 @media (max-width: 1024px) {
     /* Sous-onglets : bandeau défilant d'une seule ligne, cibles tactiles larges */
@@ -2091,4 +2102,38 @@ th.sortable.sort-desc::after {
     /* Modales quasi plein écran */
     .modal-content { width: 100%; max-height: 96vh; overflow-y: auto; border-radius: 10px; }
     .profile-avatar-row { flex-direction: column; align-items: flex-start; }
+}
+
+/* ------------------ Guide intégré (documentation de référence) ------------------ */
+.guide-wrap { max-width: 1000px; }
+.guide-wrap h2 { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+.guide-wrap h3 { margin: 1.6rem 0 0.6rem; font-size: 1.02rem; color: var(--text-primary); }
+.guide-p { color: var(--text-secondary); line-height: 1.65; margin: 0.55rem 0; }
+.guide-list { margin: 0.4rem 0 0.4rem 1.2rem; color: var(--text-secondary); line-height: 1.6; }
+.guide-list li { margin: 0.35rem 0; }
+.guide-steps { margin: 0.4rem 0 0.4rem 1.35rem; color: var(--text-secondary); line-height: 1.65; }
+.guide-steps li { margin: 0.55rem 0; padding-left: 0.2rem; }
+.guide-table { width: 100%; border-collapse: collapse; margin: 0.6rem 0 0.8rem; font-size: 0.92rem; }
+.guide-table th, .guide-table td { border: 1px solid var(--border-color); padding: 0.55rem 0.7rem; text-align: left; vertical-align: top; color: var(--text-secondary); }
+.guide-table th { color: var(--text-primary); background: rgba(99, 102, 241, 0.08); }
+.g-kbd { display: inline-block; border: 1px solid var(--border-color); border-bottom-width: 2px; border-radius: 5px; padding: 0.05rem 0.45rem; font-family: var(--font-mono, monospace); font-size: 0.82rem; color: var(--text-primary); background: var(--bg-card); }
+.g-pill { display: inline-block; border: 1px solid var(--border-color); border-radius: 999px; padding: 0.12rem 0.6rem; font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+.g-pill-ok { color: var(--color-safe); border-color: var(--color-safe); }
+.g-pill-warn { color: var(--color-warning); border-color: var(--color-warning); }
+.g-pill-bad { color: var(--color-alert); border-color: var(--color-alert); }
+
+/* Diagramme de flux CFT : boîtes empilées, fourches en grille, flèches sobres */
+.gflow { display: flex; flex-direction: column; gap: 0.15rem; margin: 1rem 0 1.4rem; }
+.gflow-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+.g-node { display: flex; align-items: flex-start; gap: 0.65rem; border: 1px solid var(--border-color); border-left: 3px solid var(--color-primary); border-radius: 8px; padding: 0.65rem 0.85rem; background: var(--bg-card); }
+.g-node small { color: var(--text-muted); line-height: 1.45; display: inline-block; margin-top: 0.15rem; }
+.g-node strong { color: var(--text-primary); }
+.g-node-accent { border-left-color: var(--color-accent); box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.25); }
+.g-node-alert { border-left-color: var(--color-alert); }
+.g-node-ok { border-left-color: var(--color-safe); }
+.g-k { flex: none; min-width: 1.7rem; height: 1.7rem; border-radius: 50%; background: rgba(99, 102, 241, 0.14); color: var(--color-primary); font-weight: 700; font-size: 0.82rem; display: flex; align-items: center; justify-content: center; margin-top: 0.1rem; }
+.g-arrow { text-align: center; color: var(--text-muted); font-size: 1rem; line-height: 1.4; }
+@media (max-width: 700px) {
+    .gflow-row { grid-template-columns: 1fr; }
+    .guide-table { display: block; overflow-x: auto; }
 }
