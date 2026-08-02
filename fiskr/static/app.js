@@ -298,6 +298,28 @@ function toggleTheme() {
  applyTheme(currentTheme() === "light" ? "dark" : "light");
 }
 
+// Sidebar rétractable (bureau) : mode icônes seules, état persisté.
+// Indépendant du mode mobile (off-canvas) qui garde son propre mécanisme.
+function applySidebarCollapsed(collapsed) {
+ document.body.classList.toggle("sidebar-collapsed", collapsed);
+ const btn = document.getElementById("sidebar-collapse-btn");
+ if (btn) {
+ btn.innerHTML = collapsed ? uiIcon("chevrons-right") : uiIcon("chevrons-left");
+ btn.title = collapsed ? "Déplier le menu" : "Replier le menu";
+ }
+ try { localStorage.setItem("fiskr_sidebar_collapsed", collapsed ? "1" : "0"); } catch (e) { /* stockage indisponible */ }
+}
+
+function toggleSidebarCollapse() {
+ applySidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+}
+
+function initSidebarCollapse() {
+ try {
+ if (localStorage.getItem("fiskr_sidebar_collapsed") === "1") applySidebarCollapsed(true);
+ } catch (e) { /* stockage indisponible */ }
+}
+
 // Sidebar rétractable (mobile / tablette) : classe sur <body>, overlay cliquable
 function toggleSidebar(force) {
  const open = force !== undefined ? force : !document.body.classList.contains("sidebar-open");
@@ -726,6 +748,7 @@ document.addEventListener("DOMContentLoaded", () => {
  checkAuthUser();
  initListTypeControls();
  populateManualListSelects();
+ initSidebarCollapse();
  // Filtres du tableau des sources (recherche + famille + état)
  ["sources-search", "sources-family-filter", "sources-state-filter"].forEach(id => {
  const el = document.getElementById(id);
@@ -921,11 +944,16 @@ function switchTab(tabId) {
  fetchIngestionSettings();
  fetchApiKeys();
  fetchHookStats();
- refreshMfaCard();
  fetchRetentionSettings();
- fetchAbsenceCard();
  fetchScoringSettings();
  fetchChecklistSettings();
+ }
+ if (tabId === "account") {
+ loadMyProfile();
+ refreshMfaCard();
+ fetchAbsenceCard();
+ const langSel = document.getElementById("account-lang");
+ if (langSel && window.fiskrI18n) langSel.value = fiskrI18n.currentLang();
  }
  if (tabId === "watchlist-mgmt") {
  const activeSubBtn = activeSec.querySelector(".sub-tab-btn.active");
@@ -1880,7 +1908,7 @@ async function startSourceSync(alias) {
  <button class="btn btn-primary" onclick="handleSourceSync('EURLEX')">Lancer EUR-Lex</button>
  <button class="btn-secondary" onclick="document.getElementById('sync-source-options').classList.add('hidden')">Annuler</button>
  </div>
- <p class="section-desc" style="margin-top: 0.4rem;">Vide = Journal Officiel du jour. EUR-Lex fonctionne en signal d'alerte précoce ; les désignations viennent du FSF.</p>`;
+ <p class="section-desc" style="margin-top: 0.4rem;">Vide = Journal Officiel du jour. Les fiches sont extraites des annexes des actes (HTML, repli sur le PDF officiel archivé — la pièce justificative) ; la liste consolidée FSF fait autorité quand elle est rafraîchie.</p>`;
  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
  }
  return;
@@ -2158,12 +2186,16 @@ async function handleCompareSnapshots(event) {
 // Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
 async function fetchWatchlistHash() {
  try {
- const response = await apiFetch("/api/watchlist");
+ // Résumé léger (hash + version + compte) : l'ancien appel à /api/watchlist
+ // sérialisait tout le référentiel en mémoire et le badge restait sur
+ // « Loading... » dès que la production dépassait quelques dizaines de
+ // milliers de fiches.
+ const response = await apiFetch("/api/watchlist/summary", { silent: true });
  const data = await response.json();
  const hashEl = document.getElementById("sidebar-wl-hash");
  if (hashEl) {
  hashEl.textContent = data.hash ? data.hash.substring(0, 12) + "..." : "NONE";
- hashEl.title = data.hash;
+ hashEl.title = (data.hash || "") + (data.count ? ` · ${data.count.toLocaleString(uiLocale())} fiches` : "");
  }
  } catch (e) {
  console.error("Error loading watchlist hash:", e);
@@ -8311,6 +8343,56 @@ async function waitForJobEnd(token, { onTick = null, intervalMs = 1500 } = {}) {
  }
 }
 
+// ------------------ PURGE DES NOTIFICATIONS (cloche) ------------------
+// Masquage personnel, persisté par navigateur : par entrée (croix), par
+// section (« Effacer » / « Masquer ») ou total. Les éléments « À traiter »
+// réapparaissent d'eux-mêmes si leur compteur AUGMENTE après le masquage —
+// une purge ne doit jamais cacher du travail nouveau.
+
+let _notifDismissed = { jobs: {}, todo: {} };
+try {
+ const stored = JSON.parse(localStorage.getItem("fiskr_notif_dismissed") || "null");
+ if (stored && typeof stored === "object") {
+ _notifDismissed = { jobs: stored.jobs || {}, todo: stored.todo || {} };
+ }
+} catch (e) { /* premier passage ou stockage indisponible */ }
+
+function _saveNotifDismissed() {
+ try { localStorage.setItem("fiskr_notif_dismissed", JSON.stringify(_notifDismissed)); } catch (e) { /* plein ou indisponible */ }
+}
+
+function dismissJobNotification(jobId) {
+ _notifDismissed.jobs[jobId] = true;
+ _saveNotifDismissed();
+ renderJobsSection();
+}
+
+function dismissTodoNotification(key, count) {
+ _notifDismissed.todo[key] = count;   // réapparaît si le compteur dépasse
+ _saveNotifDismissed();
+ renderNotifCenter();
+}
+
+function clearJobsNotifications() {
+ for (const id of _lastJobIds) _notifDismissed.jobs[id] = true;
+ _saveNotifDismissed();
+ renderJobsSection();
+}
+
+function clearTodoNotifications() {
+ for (const entry of _lastTodoEntries) _notifDismissed.todo[entry.key] = entry.count;
+ _saveNotifDismissed();
+ renderNotifCenter();
+}
+
+function clearAllNotifications() {
+ clearJobsNotifications();
+ clearTodoNotifications();
+}
+
+let _lastJobIds = [];
+let _lastTodoEntries = [];
+
 // ------------------ TRAVAUX (file de travaux persistée : historique + relance) ------------------
 
 // Une ligne de travail compacte : pastille de statut + libellé sur une ligne
@@ -8334,10 +8416,13 @@ function _jobRowHtml(j, { inGroup = false } = {}) {
  const err = j.status === "ERROR"
  ? `<div class="job-row-error">${escapeHtml(String(j.error || "échec").slice(0, 160))} ${retryBtn}</div>`
  : "";
+ const dismiss = `<button class="notif-dismiss-btn" title="Masquer cette notification"
+ onclick="event.stopPropagation(); dismissJobNotification(${j.id});">✕</button>`;
  return `<div class="job-row ${cls}${inGroup ? " in-group" : ""}" title="${escapeHtml(tooltip)}">
  <span class="job-dot" aria-hidden="true"></span>
  <span class="job-label">${inGroup ? "" : icon + " "}${escapeHtml(j.label || j.token)}${cancelled}</span>
  <span class="job-meta">${meta}</span>
+ ${dismiss}
  ${err}
  </div>`;
 }
@@ -8354,7 +8439,9 @@ async function renderJobsSection() {
  // cette section montre le devenir des travaux — surtout les échecs,
  // qui se relancent d'un clic (la reprise automatique plafonnée les a
  // laissés en ERROR exprès : un humain décide de la suite).
- const finished = items.filter(j => j.status !== "RUNNING" && j.status !== "QUEUED");
+ const finished = items.filter(j => j.status !== "RUNNING" && j.status !== "QUEUED"
+ && !_notifDismissed.jobs[j.id]);
+ _lastJobIds = finished.map(j => j.id);
  if (!finished.length) { section.classList.add("hidden"); list.innerHTML = ""; return; }
  section.classList.remove("hidden");
 
@@ -8428,21 +8515,26 @@ function renderNotifCenter() {
  const badge = document.getElementById("bell-badge");
  const list = document.getElementById("notif-list");
  const c = _lastCounters;
- const totalTodo = (c.open_alerts || 0) + (c.pending_reviews || 0);
+ const all = [];
+ if (c.open_alerts_screening) all.push({ key: "screening", count: c.open_alerts_screening, icon: uiIcon("alert"), label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#alerts/alerts-screening" });
+ if (c.open_alerts_filtering) all.push({ key: "filtering", count: c.open_alerts_filtering, icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#alerts/alerts-filtering" });
+ if (c.pending_validation) all.push({ key: "validation", count: c.pending_validation, icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#alerts/alerts-screening" });
+ if (c.overdue_alerts) all.push({ key: "overdue", count: c.overdue_alerts, icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#alerts/alerts-screening" });
+ if (c.pending_reviews) all.push({ key: "reviews", count: c.pending_reviews, icon: uiIcon("inbox"), label: `${c.pending_reviews} snapshot(s) en attente d'homologation`, hash: "#watchlist-mgmt/watchlist-review" });
+ _lastTodoEntries = all;
+ // Masqué tant que le compteur n'a pas DÉPASSÉ sa valeur au masquage
+ const entries = all.filter(e => !(e.key in _notifDismissed.todo) || e.count > _notifDismissed.todo[e.key]);
+ const totalTodo = entries.reduce((sum, e) => sum + e.count, 0);
  if (badge) {
  badge.textContent = totalTodo > 99 ? "99+" : String(totalTodo);
  badge.classList.toggle("hidden", !totalTodo);
  }
  if (!list) return;
- const entries = [];
- if (c.open_alerts_screening) entries.push({ icon: uiIcon("alert"), label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#alerts/alerts-screening" });
- if (c.open_alerts_filtering) entries.push({ icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#alerts/alerts-filtering" });
- if (c.pending_validation) entries.push({ icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#alerts/alerts-screening" });
- if (c.overdue_alerts) entries.push({ icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#alerts/alerts-screening" });
- if (c.pending_reviews) entries.push({ icon: uiIcon("inbox"), label: `${c.pending_reviews} snapshot(s) en attente d'homologation`, hash: "#watchlist-mgmt/watchlist-review" });
  list.innerHTML = entries.length
  ? entries.map(e => `<li onclick="location.hash='${e.hash}'; toggleNotifCenter(false);">
- <span class="item-main">${e.icon} ${escapeHtml(e.label)}</span><span class="item-meta">→</span>
+ <span class="item-main">${e.icon} ${escapeHtml(e.label)}</span>
+ <button class="notif-dismiss-btn" title="Masquer (réapparaît si le compteur augmente)"
+ onclick="event.stopPropagation(); dismissTodoNotification('${e.key}', ${e.count});">✕</button>
  </li>`).join("")
  : '<li style="cursor: default;"><span class="item-main" style="color: var(--text-muted);"> Rien à traiter.</span></li>';
 }
@@ -8650,6 +8742,162 @@ function bulkPrioritySelected(channel) {
 }
 
 // --- MFA TOTP (carte Paramètres + réinitialisation admin) ---
+// ------------------ MON COMPTE (profil enrichi) ------------------
+
+let _myProfile = null;
+
+function _avatarHtml(avatar) {
+ return avatar
+ ? `<img src="${avatar}" alt="" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">`
+ : uiIcon("user");
+}
+
+function updateSidebarAvatar(avatar) {
+ const el = document.querySelector(".user-avatar");
+ if (el) el.innerHTML = _avatarHtml(avatar);
+}
+
+async function loadMyProfile() {
+ try {
+ const response = await apiFetch("/api/me/profile", { silent: true });
+ if (!response.ok) return;
+ _myProfile = await response.json();
+ const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ""; };
+ set("profile-full-name", _myProfile.full_name);
+ set("profile-job-title", _myProfile.job_title);
+ set("profile-email", _myProfile.email);
+ set("profile-phone", _myProfile.phone);
+ set("profile-bio", _myProfile.bio);
+ const preview = document.getElementById("profile-avatar-preview");
+ if (preview) preview.innerHTML = _avatarHtml(_myProfile.avatar);
+ document.getElementById("profile-avatar-remove")?.classList.toggle("hidden", !_myProfile.avatar);
+ updateSidebarAvatar(_myProfile.avatar);
+ renderAccountNotifCategories();
+ } catch (e) { console.error("Profil :", e); }
+}
+
+function renderAccountNotifCategories() {
+ const box = document.getElementById("account-notif-categories");
+ if (!box || !_myProfile) return;
+ const muted = new Set(_myProfile.notification_opt_out || []);
+ const allMuted = muted.has("ALL");
+ const master = document.getElementById("account-notif-all");
+ if (master) master.checked = !allMuted;
+ box.innerHTML = Object.entries(_myProfile.notification_categories || {}).map(([key, label]) => `
+ <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; ${allMuted ? "opacity: 0.5;" : ""}">
+ <input type="checkbox" class="account-notif-cat" data-cat="${escapeHtml(key)}"
+ ${(!allMuted && !muted.has(key)) ? "checked" : ""} ${allMuted ? "disabled" : ""}
+ style="width: 16px; height: 16px;">
+ ${escapeHtml(label)}
+ </label>`).join("");
+}
+
+function toggleAllAccountNotifs(enabled) {
+ if (!_myProfile) return;
+ _myProfile.notification_opt_out = enabled
+ ? (_myProfile.notification_opt_out || []).filter(c => c !== "ALL")
+ : ["ALL"];
+ renderAccountNotifCategories();
+}
+
+async function saveAccountNotifications() {
+ const master = document.getElementById("account-notif-all");
+ let optOut;
+ if (master && !master.checked) {
+ optOut = ["ALL"];
+ } else {
+ optOut = [...document.querySelectorAll(".account-notif-cat")]
+ .filter(cb => !cb.checked).map(cb => cb.dataset.cat);
+ }
+ try {
+ const response = await apiFetch("/api/users/me/profile", {
+ method: "PUT", headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ notification_opt_out: optOut }),
+ });
+ const data = await response.json();
+ if (!response.ok) { showToast("Erreur : " + (data.detail || "enregistrement impossible."), "error"); return; }
+ _myProfile = data.user;
+ renderAccountNotifCategories();
+ showToast("Notifications du compte enregistrées.", "success");
+ } catch (e) { showToast("Erreur réseau.", "error"); }
+}
+
+async function saveMyProfile() {
+ const val = id => document.getElementById(id)?.value ?? null;
+ try {
+ const response = await apiFetch("/api/users/me/profile", {
+ method: "PUT", headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({
+ full_name: val("profile-full-name"),
+ email: val("profile-email"),
+ phone: val("profile-phone"),
+ job_title: val("profile-job-title"),
+ bio: val("profile-bio"),
+ }),
+ });
+ const data = await response.json();
+ if (!response.ok) { showToast("Erreur : " + (data.detail || "profil refusé."), "error"); return; }
+ _myProfile = data.user;
+ showToast("Profil enregistré.", "success");
+ checkAuthUser();   // met à jour nom/rôle affichés dans la sidebar
+ } catch (e) { showToast("Erreur réseau.", "error"); }
+}
+
+// Photo : recadrage carré + redimensionnement 256 px côté client (canvas),
+// export JPEG compressé — la limite serveur de 300 Ko est toujours tenue.
+function handleAvatarFile(input) {
+ const file = input.files && input.files[0];
+ if (!file) return;
+ const img = new Image();
+ img.onload = () => {
+ const side = Math.min(img.width, img.height);
+ const canvas = document.createElement("canvas");
+ canvas.width = canvas.height = 256;
+ const ctx = canvas.getContext("2d");
+ ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, 256, 256);
+ uploadAvatar(canvas.toDataURL("image/jpeg", 0.85));
+ };
+ img.onerror = () => showToast("Image illisible.", "error");
+ img.src = URL.createObjectURL(file);
+ input.value = "";
+}
+
+async function uploadAvatar(dataUri) {
+ try {
+ const response = await apiFetch("/api/me/avatar", {
+ method: "PUT", headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ avatar: dataUri }),
+ });
+ const data = await response.json();
+ if (!response.ok) { showToast("Erreur : " + (data.detail || "photo refusée."), "error"); return; }
+ if (_myProfile) _myProfile.avatar = data.avatar;
+ const preview = document.getElementById("profile-avatar-preview");
+ if (preview) preview.innerHTML = _avatarHtml(data.avatar);
+ document.getElementById("profile-avatar-remove")?.classList.toggle("hidden", !data.avatar);
+ updateSidebarAvatar(data.avatar);
+ showToast(data.message, "success");
+ } catch (e) { showToast("Erreur réseau.", "error"); }
+}
+
+function removeAvatar() { uploadAvatar(null); }
+
+async function saveAccountPassword() {
+ const oldPwd = document.getElementById("account-old-password")?.value || "";
+ const newPwd = document.getElementById("account-new-password")?.value || "";
+ if (!oldPwd || !newPwd) { showToast("Saisissez l'ancien et le nouveau mot de passe.", "error"); return; }
+ try {
+ const response = await apiFetch("/api/users/me/password", {
+ method: "PUT", headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ old_password: oldPwd, new_password: newPwd }),
+ });
+ const data = await response.json();
+ if (!response.ok) { showToast("Erreur : " + (data.detail || "changement refusé."), "error"); return; }
+ document.getElementById("account-old-password").value = "";
+ document.getElementById("account-new-password").value = "";
+ showToast(data.message, "success");
+ } catch (e) { showToast("Erreur réseau.", "error"); }
+}
+
 async function refreshMfaCard() {
  const statusEl = document.getElementById("mfa-status");
  const actionsEl = document.getElementById("mfa-actions");

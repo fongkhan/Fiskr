@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — a full "My account" space
+The account fragments scattered under Settings became a dedicated top-level tab. A person is now more than a username:
+
+- **Profile**: photo (client-side square-cropped to 256 px and compressed, stored as a data URI ≤ 300 KB, shown in the sidebar badge), full name, job title, phone, email and free-text description — visible to colleagues through assignments, 4-eyes validations and the decision log. New columns on `users` with additive migrations, `GET /api/me/profile` and `PUT /api/me/avatar`.
+- **Password change**, and the existing **two-factor (TOTP)** and **absence & delegation** cards moved in.
+- **Account notifications**: a per-account master switch plus per-category checkboxes. Muting is a personal filter applied *after* the role-based routing (`notification_opt_out` on the user, honoured by the notifier's recipient resolution) — it never changes anybody else's routing.
+- **Display preferences**: interface language, theme toggle and a shortcut to the home-page customizer.
+
+### Added — bell notifications can be purged one by one, per section, or entirely
+Every entry in the bell panel now carries a dismiss cross; "Recent jobs" has a *Clear* action, "To handle" a *Hide* action, and a *Clear all* sits at the top. Dismissals persist per browser; a hidden "to handle" item **reappears on its own if its counter grows** past the value it was dismissed at — purging can never hide new work. The badge counts only what is visible.
+
+### Changed — tabs and filters became finger-friendly on tablet and phone
+Sub-tab rows turn into a single-line horizontal swipe band with larger touch targets under 1024 px; filter bars wrap with stretching fields, then stack full-width under 640 px; the header compacts (engine status collapses to its dot), the bell panel docks full-width, and modals go near-fullscreen.
+
+
+### Fixed — regulator alert-list extraction no longer produces kilometre-long "names" (HK SFC)
+The HTML table extractor behind the regulator alert lists (HK SFC, AMF) swallowed the content of `<script>`/`<style>` tags inside cells and lost its state on nested layout tables — embedded JavaScript could become a multi-kilobyte "name" on imported records. The extractor now suppresses script/style/noscript/template content and handles nested tables with a stack; downstream, a plausibility guard discards any row whose "name" exceeds 200 characters or 24 words (extraction residue, never an identity).
+
+### Fixed — the engine hash badge displays again
+The sidebar "Active hash" badge called `GET /api/watchlist`, which serializes the ENTIRE in-memory referential — on a production of hundreds of thousands of records the response never arrived and the badge stayed on "Loading...". A new light `GET /api/watchlist/summary` (hash, version, record count) feeds the badge; the tooltip now also shows the loaded record count.
+
+### Added — collapsible sidebar (icon mode)
+A chevron button collapses the left menu to a 68 px icon rail: navigation icons stay clickable with their label as tooltip, the logo, user block and hash badge fold away, and the state is persisted per browser. Independent from the existing mobile off-canvas behaviour.
+
+### Changed — pypdf became a required dependency
+The EUR-Lex PDF fallback (extracting listings from the archived official PDF when an act's HTML is unreachable) shipped as an optional dependency; it is now installed by default so the fallback works everywhere. The code remains tolerant of its absence.
+
+
+### Changed — EUR-Lex extracts listings from the acts themselves (HTML, PDF fallback)
+The consolidated EU FSF list only refreshes every ~2 months, while designations appear in the Official Journal immediately — screening only the FSF between refreshes is a regulatory exposure. The EUR-Lex source therefore switched its default from *alert* (early-warning signal, no records) to **extract**:
+
+- Records are extracted from the **annex tables of each restrictive-measures act** (name / identifying information / grounds columns), merged incrementally onto the EU list (pending approval as usual). Each record carries the act in **`official_reference`** — and the **official PDF of the act keeps being archived with its SHA-256**: that PDF is precisely the supporting evidence a regulator asks for.
+- **PDF fallback**: when an act's HTML is unreachable, the listing is extracted from the archived official PDF itself (`pypdf`, optional dependency — without it the act stays visibly reported as failed, never silently skipped).
+- When the FSF does refresh, it remains authoritative and supersedes these records, delistings included. The *alert* mode is still available (`sync.eurlex.mode`).
+
+### Fixed — the automatic backtest after a sync actually starts
+The post-sync automatic backtest silently abstained when no test panel existed — the most common reason it "never started". The automatism now **generates its own panel** (500 pseudo-clients derived from production) when none is available; every other abstention reason keeps being reported in the sync job result.
+
+### Changed — backtests are serialized and run in delta mode
+Two concurrent backtests each load a full watchlist universe and have exhausted a production machine's RAM:
+
+- **Heavy job kinds are serialized** (`backtest`, `engine_simulation`): never two running at once, whatever the process — the queue chains them while lighter jobs keep flowing (enforced both at worker claim time and in the API-thread execution path).
+- **Delta mode** (default when no candidate rule is evaluated): the two universes are identical except for the changed entities of the list under test, so the engine now runs **one full pass on the shared universe plus two tiny passes** — the removed/old versions (lost hits, production side) and the added/new versions (gained hits, candidate side). Alerts are counted as (client, entity) pairs over disjoint sets, so the numbers are **exactly** those of two full passes, in roughly half the screening time. Evaluating a candidate anti-FP rule (which can suppress pairs on unchanged entities) keeps the full two-pass mode. The report states `mode` and the delta sizes.
+
 ### Changed — the whole interface dropped emojis for a unified line-icon set
 Every emoji in the application (about 450 occurrences across navigation, titles, buttons, tiles, toasts, the login page) was replaced by a **single monochrome SVG icon set** (stroke-based, inheriting the text colour, one inline sprite referenced by `<use>`) or removed where the wording alone is clearer. Language flags became plain codes, the anchor logo is an SVG, the theme toggle uses sun/moon icons. The i18n engine now generates **emoji-stripped aliases** of its historical dictionary keys at load time, so all six languages keep working without rewriting the ~800 emoji-bearing entries.
 

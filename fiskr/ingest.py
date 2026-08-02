@@ -3193,38 +3193,58 @@ class _HTMLTableExtractor(HTMLParser):
     tableau de donnees y voisine avec des tableaux de mise en page. On retient
     celui qui a le plus de lignes, ce qui est le critere le plus robuste sans
     connaitre la page.
+
+    Deux durcissements appris des pages reelles (SFC Hong Kong) :
+    - le contenu des <script>/<style>/<noscript>/<template> est IGNORE, meme
+      a l'interieur d'une cellule — sans cela, du JavaScript embarque devenait
+      un « nom » de plusieurs kilo-octets dans les fiches importees ;
+    - les tableaux IMBRIQUES (mise en page) sont geres par pile : un <table>
+      dans un <td> ne detruit plus l'etat du tableau englobant.
     """
+
+    _SUPPRESSED = ("script", "style", "noscript", "template")
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.tables: List[List[List[str]]] = []
-        self._table: Optional[List[List[str]]] = None
-        self._row: Optional[List[str]] = None
-        self._cell: Optional[List[str]] = None
+        # Pile de tableaux en cours : (lignes, ligne courante, cellule courante)
+        self._stack: List[List[Any]] = []
+        self._suppress = 0
 
     def handle_starttag(self, tag, attrs):
+        if tag in self._SUPPRESSED:
+            self._suppress += 1
+            return
         if tag == "table":
-            self._table = []
-        elif tag == "tr" and self._table is not None:
-            self._row = []
-        elif tag in ("td", "th") and self._row is not None:
-            self._cell = []
+            self._stack.append([[], None, None])
+        elif tag == "tr" and self._stack:
+            self._stack[-1][1] = []
+        elif tag in ("td", "th") and self._stack and self._stack[-1][1] is not None:
+            self._stack[-1][2] = []
 
     def handle_endtag(self, tag):
-        if tag in ("td", "th") and self._cell is not None:
-            self._row.append(re.sub(r"\s+", " ", "".join(self._cell)).strip())
-            self._cell = None
-        elif tag == "tr" and self._row is not None:
-            if any(self._row):
-                self._table.append(self._row)
-            self._row = None
-        elif tag == "table" and self._table is not None:
-            self.tables.append(self._table)
-            self._table = None
+        if tag in self._SUPPRESSED:
+            self._suppress = max(0, self._suppress - 1)
+            return
+        if not self._stack:
+            return
+        frame = self._stack[-1]
+        if tag in ("td", "th") and frame[2] is not None:
+            frame[1].append(re.sub(r"\s+", " ", "".join(frame[2])).strip())
+            frame[2] = None
+        elif tag == "tr" and frame[1] is not None:
+            if any(frame[1]):
+                frame[0].append(frame[1])
+            frame[1] = None
+        elif tag == "table":
+            finished = self._stack.pop()
+            self.tables.append(finished[0])
 
     def handle_data(self, data):
-        if self._cell is not None:
-            self._cell.append(data)
+        if self._suppress:
+            return
+        if self._stack and self._stack[-1][2] is not None:
+            self._stack[-1][2].append(data)
 
 
 def _read_html_table_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
@@ -3332,6 +3352,12 @@ def parse_regulatory_alert_list(
             # d'identite, faute de quoi la ligne serait perdue.
             name = websites[0] if websites else ""
         if not name:
+            continue
+        # Garde-fou : un « nom » demesure est un residu d'extraction (cellule
+        # de mise en page, texte editorial), jamais une identite. La ligne est
+        # ecartee plutot que de creer une fiche inutilisable au criblage.
+        if len(name) > 200 or len(name.split()) > 24:
+            logger.warning(f"{id_prefix} : ligne écartée, nom implausible ({len(name)} caractères).")
             continue
 
         aliases_raw = [

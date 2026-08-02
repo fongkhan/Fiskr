@@ -2028,6 +2028,10 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
             "imo_number": imo,
             "aircraft_tail_number": tail,
             "origin": f"EUR-Lex - {act_title}" if act_title else "EUR-Lex",
+            # Reference probante pour les regulateurs : l'acte (reglement/
+            # decision) dont la fiche est extraite — le PDF officiel archive
+            # de cet acte est la piece justificative.
+            "official_reference": act_title or None,
             "designation_reasons": reasons,
             "additional_informations": act_url or None,
         }
@@ -2076,6 +2080,36 @@ def scrape_act_entities(html: str, act_title: str = "", act_url: str = "") -> Li
             register(name, f"{name} {extra}")
 
     return list(entities.values())
+
+
+def _scrape_archived_pdf(act: Dict[str, str], archive_dir: Path) -> List[Dict[str, Any]]:
+    """
+    Repli PDF : extrait les listes du PDF officiel deja archive d'un acte
+    dont le HTML est inaccessible. Le texte du PDF passe par le meme
+    extracteur que le HTML (sans balises, il emprunte la voie « listes
+    numerotees en texte »). pypdf est optionnel : sans lui, le repli
+    s'abstient et l'acte reste signale en echec.
+    """
+    pdf_file = act.get("pdf_file")
+    if not pdf_file:
+        return []
+    try:
+        import pypdf
+    except ImportError:
+        logger.info("Repli PDF EUR-Lex indisponible : pypdf n'est pas installé.")
+        return []
+    try:
+        reader = pypdf.PdfReader(str(archive_dir / pdf_file))
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception as e:
+        logger.warning(f"Repli PDF EUR-Lex : lecture de {pdf_file} impossible : {e}")
+        return []
+    if not text.strip():
+        return []
+    entities = scrape_act_entities(text, act.get("title", ""), act.get("url", ""))
+    for ent in entities:
+        ent["origin"] = (ent.get("origin") or "EUR-Lex") + " (extrait du PDF)"
+    return entities
 
 
 def _act_pdf_url(act_url: str) -> str:
@@ -2270,12 +2304,16 @@ def run_eurlex_sync(
       (EUFSF), qui fait autorite et porte les radiations. Une seule requete
       HTTP pour la page du jour, plus une par PDF archive.
 
-    - **extract** : comportement historique. Scrape les annexes de chaque
-      acte et en deduit des listes par heuristique. Conserve pour ne pas
-      priver de source une installation sans token FSF — mais ce qui en sort
-      sont des SUPPOSITIONS : `_looks_like_name` decide par expression
-      reguliere si une chaine est un nom, et les radiations ne sont jamais
-      appliquees. A n'utiliser qu'en attendant le token FSF.
+    - **extract** (recommande, defaut) : extraction des fiches depuis les
+      annexes HTML de chaque acte (tables Nom / Informations / Motifs /
+      Date), avec repli sur le TEXTE DU PDF OFFICIEL archive quand le HTML
+      est inaccessible — le PDF etant precisement la piece justificative
+      opposable aux regulateurs. Chaque fiche porte l'acte en
+      `official_reference`. Raison d'etre : la liste consolidee FSF n'est
+      rafraichie que tous les ~2 mois ; entre deux rafraichissements, les
+      designations paraissent au JO et doivent etre criblees sans attendre.
+      Quand le FSF retombe, il fait autorite et remplace ces fiches
+      (radiations comprises).
     """
     cfg = get_sync_config()["eurlex"]
     for_date = for_date or date.today()
@@ -2305,6 +2343,24 @@ def run_eurlex_sync(
         for act in acts:
             if not _archive_act_pdf(act, pdf_getter, archive_dir):
                 pdf_failures.append(act["url"])
+
+        # Repli PDF : un acte dont le HTML est inaccessible mais dont le PDF
+        # probant est archive est extrait DU PDF — la piece justificative
+        # elle-meme. L'acte n'est plus compte en echec s'il a livre des fiches.
+        if failed_acts:
+            known_ids = {e["entity_id"] for e in scraped}
+            still_failed = []
+            for failure in failed_acts:
+                act = next((a for a in acts if a["url"] == failure["url"]), None)
+                recovered = _scrape_archived_pdf(act, archive_dir) if act else []
+                fresh = [e for e in recovered if e["entity_id"] not in known_ids]
+                if fresh:
+                    scraped.extend(fresh)
+                    known_ids.update(e["entity_id"] for e in fresh)
+                    failure["recovered_from_pdf"] = len(fresh)
+                else:
+                    still_failed.append(failure)
+            failed_acts = still_failed
 
         if not acts:
             return _finalize_report(

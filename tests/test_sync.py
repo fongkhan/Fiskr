@@ -767,7 +767,7 @@ def test_eurlex_alert_mode_signals_without_inventing_designations(db, tmp_path, 
                         lambda *a, **k: calls.append(a) or [])
 
     report = run_eurlex_sync(
-        db, for_date=date(2026, 7, 8),
+        db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
         pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
     )
@@ -788,7 +788,7 @@ def test_eurlex_alert_mode_archives_the_official_pdf(db, tmp_path):
     """La valeur probante est conservee : le PDF officiel reste archive avec
     son empreinte, c'est lui qui fait foi devant un auditeur."""
     report = run_eurlex_sync(
-        db, for_date=date(2026, 7, 8),
+        db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
         pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
     )
@@ -805,7 +805,7 @@ def test_eurlex_alert_mode_warns_when_consolidated_source_is_off(db, tmp_path):
     tacite est le pire des deux mondes.
     """
     report = run_eurlex_sync(
-        db, for_date=date(2026, 7, 8),
+        db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
         pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
     )
@@ -816,7 +816,7 @@ def test_eurlex_alert_mode_warns_when_consolidated_source_is_off(db, tmp_path):
 def test_eurlex_alert_mode_stays_quiet_without_acts(db, tmp_path):
     html_without_measures = '<html><body><a href="/x">Regulation on bananas</a></body></html>'
     report = run_eurlex_sync(
-        db, for_date=date(2026, 7, 8),
+        db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(html_without_measures, ""),
         pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
     )
@@ -833,7 +833,7 @@ def test_eurlex_alert_mode_makes_one_request_for_the_daily_page(db, tmp_path):
         seen.append(url)
         return MOCK_DAILY_OJ_HTML
 
-    run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=counting_getter,
+    run_eurlex_sync(db, mode="alert", for_date=date(2026, 7, 8), http_get=counting_getter,
                     pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path)
     assert len(seen) == 1, f"une seule requete attendue, obtenu {seen}"
 
