@@ -75,6 +75,9 @@
         "Replier le menu": { en: "Collapse the menu", de: "Menü einklappen", es: "Plegar el menú", zh: "收起菜单", ar: "طي القائمة" },
         "Déplier le menu": { en: "Expand the menu", de: "Menü ausklappen", es: "Desplegar el menú", zh: "展开菜单", ar: "فتح القائمة" },
         "Replier ou déplier le menu de navigation": { en: "Collapse or expand the navigation menu", de: "Navigationsmenü ein- oder ausklappen", es: "Plegar o desplegar el menú de navegación", zh: "收起或展开导航菜单", ar: "طي قائمة التنقل أو فتحها" },
+        // Espaces Criblage / Filtrage scindés
+        "Filtrage": { en: "Filtering", de: "Filterung", es: "Filtrado", zh: "过滤", ar: "الترشيح" },
+        "Filtrer un paiement": { en: "Filter a payment", de: "Eine Zahlung filtern", es: "Filtrar un pago", zh: "过滤一笔付款", ar: "ترشيح دفعة" },
         // Espace Mon compte
         "Mon compte": { en: "My account", de: "Mein Konto", es: "Mi cuenta", zh: "我的账户", ar: "حسابي" },
         "Profil": { en: "Profile", de: "Profil", es: "Perfil", zh: "个人资料", ar: "الملف الشخصي" },

@@ -54,14 +54,15 @@
  </li>
  <li>
  <button id="nav-btn-screening" title="Criblage" class="nav-item" onclick="switchTab('screening')">
- <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-search"></use></svg></span> Criblage
+ <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-search"></use></svg></span> Criblage <span id="screening-open-badge" class="status-badge warning hidden" style="margin-left: 0.35rem;">0</span>
  </button>
  </li>
  <li>
- <button id="nav-btn-alerts" title="Alertes" class="nav-item" onclick="switchTab('alerts')">
- <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-alert"></use></svg></span> Alertes <span id="alerts-open-badge" class="status-badge warning hidden" style="margin-left: 0.35rem;">0</span>
+ <button id="nav-btn-filtering" title="Filtrage" class="nav-item" onclick="switchTab('filtering')">
+ <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-credit-card"></use></svg></span> Filtrage <span id="filtering-open-badge" class="status-badge warning hidden" style="margin-left: 0.35rem;">0</span>
  </button>
  </li>
+ 
  <li>
  <button id="nav-btn-kpi" title="Pilotage" class="nav-item" onclick="switchTab('kpi')">
  <span class="nav-icon"><svg class="ui-icon" aria-hidden="true"><use href="#i-trend"></use></svg></span> Pilotage
@@ -914,8 +915,20 @@
  <button id="sub-btn-screening-batch" class="sub-tab-btn" onclick="switchSubTab('screening', 'screening-batch')">
  Screening de Masse (Batch)
  </button>
- <button id="sub-btn-screening-transactions" class="sub-tab-btn" onclick="switchSubTab('screening', 'screening-transactions')">
- Filtrage Transactionnel (ISO 20022)
+ <button id="sub-btn-alerts-screening" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-screening')">
+ Alertes <span id="alerts-screening-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
+ </button>
+ <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-whitelist')">
+ Liste Blanche
+ </button>
+ <button id="sub-btn-alerts-blocking" class="sub-tab-btn hidden" onclick="switchSubTab('screening', 'alerts-blocking')">
+ <svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Paramétrage moteur
+ </button>
+ <button id="sub-btn-alerts-resources" class="sub-tab-btn hidden" onclick="switchSubTab('screening', 'alerts-resources')">
+ <svg class="ui-icon" aria-hidden="true"><use href="#i-message"></use></svg> Ressources linguistiques
+ </button>
+ <button id="sub-btn-alerts-rules" class="sub-tab-btn hidden" onclick="switchSubTab('screening', 'alerts-rules')">
+ <svg class="ui-icon" aria-hidden="true"><use href="#i-scale"></use></svg> Règles Faux Positifs
  </button>
  </div>
 
@@ -1284,70 +1297,7 @@
  </div>
  </div>
 
- <div id="sub-sec-screening-transactions" class="sub-tab-content hidden">
- <div class="card">
- <h2>Filtrage Transactionnel ISO 20022</h2>
- <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques — sont criblées contre les listes en production. Verdict <strong>PASS</strong> ou <strong>HIT</strong> ; chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
- <div class="form-row" style="align-items: flex-end;">
- <div class="form-group" style="flex: 1;">
- <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
- <input type="file" id="txn-file-input" accept=".xml">
- </div>
- <div class="form-group">
- <button id="txn-screen-btn" class="btn btn-primary" onclick="runTransactionScreening()">Filtrer le paiement</button>
- </div>
- </div>
- <div id="txn-results-container" class="hidden">
- <hr>
- <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
- <p class="section-desc" id="txn-message-info"></p>
- <div class="table-container max-height-table">
- <table id="txn-results-table">
- <thead>
- <tr>
- <th>Partie</th>
- <th>Rôle(s)</th>
- <th>Pays</th>
- <th>BIC</th>
- <th>Score</th>
- <th>Meilleur match</th>
- <th>Statut</th>
- <th>Alerte</th>
- </tr>
- </thead>
- <tbody></tbody>
- </table>
- </div>
- </div>
- </div>
- </div>
- </section>
-
- <!-- SECTION : ALERTES (cycle de vie + 4-yeux, liste blanche) -->
- <section id="sec-alerts" class="tab-content">
- <div class="sub-tabs">
- <button id="sub-btn-alerts-screening" class="sub-tab-btn active" onclick="switchSubTab('alerts', 'alerts-screening')">
- <svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg> Criblage Clients <span id="alerts-screening-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
- </button>
- <button id="sub-btn-alerts-filtering" class="sub-tab-btn" onclick="switchSubTab('alerts', 'alerts-filtering')">
- <svg class="ui-icon" aria-hidden="true"><use href="#i-credit-card"></use></svg> Filtrage Transactionnel <span id="alerts-filtering-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
- </button>
- <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('alerts', 'alerts-whitelist')">
- Liste Blanche
- </button>
- <button id="sub-btn-alerts-blocking" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-blocking')">
- <svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Paramétrage moteur
- </button>
- <button id="sub-btn-alerts-resources" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-resources')">
- <svg class="ui-icon" aria-hidden="true"><use href="#i-message"></use></svg> Ressources linguistiques
- </button>
- <button id="sub-btn-alerts-rules" class="sub-tab-btn hidden" onclick="switchSubTab('alerts', 'alerts-rules')">
- <svg class="ui-icon" aria-hidden="true"><use href="#i-scale"></use></svg> Règles Faux Positifs
- </button>
- </div>
-
- <!-- FILE CRIBLAGE CLIENTS -->
- <div id="sub-sec-alerts-screening" class="sub-tab-content active">
+ <div id="sub-sec-alerts-screening" class="sub-tab-content hidden">
  <div class="grid-layout" style="grid-template-columns: 1fr;">
  <div class="card result-card">
  <h2>Alertes de Criblage — Données Clients</h2>
@@ -1402,62 +1352,41 @@
  </div>
 
  <!-- FILE FILTRAGE TRANSACTIONNEL -->
- <div id="sub-sec-alerts-filtering" class="sub-tab-content hidden">
+ 
+<div id="sub-sec-alerts-whitelist" class="sub-tab-content hidden">
  <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <!-- Liste blanche client x listé (« Good Guys », guidance Wolfsberg) -->
  <div class="card result-card">
- <h2>Alertes de Filtrage — Transactions (ISO 20022)</h2>
- <p class="section-desc">Alertes issues du filtrage des parties des messages de paiement (<code>pain.001</code> / <code>pacs.008</code>). Même cycle de vie 4-yeux que le criblage, avec des règles anti-faux positifs et un blocking key propres à ce canal.</p>
- <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
- <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('FILTERING','')">Toutes</button>
- <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('FILTERING','OPEN,IN_PROGRESS,ESCALATED')" style="background: var(--surface-3);">À traiter</button>
- <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
- <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
- <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
- <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
- <option value="">Toutes priorités</option>
- <option value="CRITICAL">Critique</option>
- <option value="HIGH">Haute</option>
- <option value="MEDIUM">Moyenne</option>
- <option value="LOW">Basse</option>
- </select>
- <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
- <select id="filtering-assignee-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
- <select id="filtering-views" onchange="applySavedView('FILTERING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
- <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
- <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
- </div>
- <div id="filtering-bulk-bar" class="bulk-bar hidden">
- <span id="filtering-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
- <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('FILTERING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
- <select id="filtering-bulk-priority" style="min-width: 140px;">
- <option value="">Priorité…</option>
- <option value="CRITICAL">Critique</option>
- <option value="HIGH">Haute</option>
- <option value="MEDIUM">Moyenne</option>
- <option value="LOW">Basse</option>
- </select>
- <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('FILTERING')">Appliquer la priorité</button>
- <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('FILTERING')">✕ Vider la sélection</button>
+ <h2>Liste Blanche (paires client × listé)</h2>
+ <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
+ <div class="form-group" style="max-width: 260px;">
+ <select id="whitelist-list-filter" onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
  </div>
  <div class="table-container max-height-table">
- <table id="filtering-alerts-table">
+ <table id="whitelist-table">
  <thead>
  <tr>
- <th style="width: 34px;"><input type="checkbox" id="filtering-select-all" onchange="toggleSelectAllAlerts('FILTERING', this.checked)" aria-label="Tout sélectionner"></th>
- <th>Priorité</th><th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
- <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
+ <th>Client</th>
+ <th>Listé</th>
+ <th>Liste</th>
+ <th>Justification</th>
+ <th>Créée par</th>
+ <th>Expiration</th>
+ <th>État</th>
+ <th>Action</th>
  </tr>
  </thead>
- <tbody><!-- Populated dynamically --></tbody>
+ <tbody>
+ <!-- Populated dynamically -->
+ </tbody>
  </table>
  </div>
- <div id="filtering-alerts-pagination" class="pagination-container hidden"></div>
+ <div id="whitelist-pagination" class="pagination-container hidden"></div>
  </div>
  </div>
  </div>
-
- <!-- PARAMÉTRAGE MOTEUR : clés de blocking + capacités (rôle blocking/admin) -->
- <div id="sub-sec-alerts-blocking" class="sub-tab-content hidden">
+ 
+<div id="sub-sec-alerts-blocking" class="sub-tab-content hidden">
  <div class="grid-layout" style="grid-template-columns: 1fr 1fr;">
  <div class="card form-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Blocking Key — Criblage Clients</h2>
@@ -1501,7 +1430,8 @@
  </div>
 
  <!-- RESSOURCES LINGUISTIQUES (rôle blocking/admin) -->
- <div id="sub-sec-alerts-resources" class="sub-tab-content hidden">
+ 
+<div id="sub-sec-alerts-resources" class="sub-tab-content hidden">
  <div class="grid-layout" style="grid-template-columns: 1fr;">
  <div class="card result-card">
  <h2> Ressources Linguistiques — Équivalences</h2>
@@ -1565,7 +1495,8 @@
  </div>
 
  <!-- RÈGLES FAUX POSITIFS (rôle rules/admin) -->
- <div id="sub-sec-alerts-rules" class="sub-tab-content hidden">
+ 
+<div id="sub-sec-alerts-rules" class="sub-tab-content hidden">
  <div class="grid-layout" style="grid-template-columns: 1fr;">
  <div class="card result-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-scale"></use></svg> Règles Anti-Faux Positifs (Python — mode DEV)</h2>
@@ -1594,39 +1525,116 @@
  </div>
  </div>
 
- <div id="sub-sec-alerts-whitelist" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
- <!-- Liste blanche client x listé (« Good Guys », guidance Wolfsberg) -->
- <div class="card result-card">
- <h2>Liste Blanche (paires client × listé)</h2>
- <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
- <div class="form-group" style="max-width: 260px;">
- <select id="whitelist-list-filter" onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
+ 
+</section>
+
+ <!-- SECTION : FILTRAGE DES PAIEMENTS (ISO 20022) — moteur et alertes propres à ce canal -->
+ <section id="sec-filtering" class="tab-content">
+ <div class="sub-tabs">
+ <button id="sub-btn-screening-transactions" class="sub-tab-btn active" onclick="switchSubTab('filtering', 'screening-transactions')">
+ Filtrer un paiement
+ </button>
+ <button id="sub-btn-alerts-filtering" class="sub-tab-btn" onclick="switchSubTab('filtering', 'alerts-filtering')">
+ Alertes <span id="alerts-filtering-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
+ </button>
  </div>
+<div id="sub-sec-screening-transactions" class="sub-tab-content active">
+ <div class="card">
+ <h2>Filtrage Transactionnel ISO 20022</h2>
+ <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques — sont criblées contre les listes en production. Verdict <strong>PASS</strong> ou <strong>HIT</strong> ; chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+ <div class="form-row" style="align-items: flex-end;">
+ <div class="form-group" style="flex: 1;">
+ <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
+ <input type="file" id="txn-file-input" accept=".xml">
+ </div>
+ <div class="form-group">
+ <button id="txn-screen-btn" class="btn btn-primary" onclick="runTransactionScreening()">Filtrer le paiement</button>
+ </div>
+ </div>
+ <div id="txn-results-container" class="hidden">
+ <hr>
+ <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
+ <p class="section-desc" id="txn-message-info"></p>
  <div class="table-container max-height-table">
- <table id="whitelist-table">
+ <table id="txn-results-table">
  <thead>
  <tr>
- <th>Client</th>
- <th>Listé</th>
- <th>Liste</th>
- <th>Justification</th>
- <th>Créée par</th>
- <th>Expiration</th>
- <th>État</th>
- <th>Action</th>
+ <th>Partie</th>
+ <th>Rôle(s)</th>
+ <th>Pays</th>
+ <th>BIC</th>
+ <th>Score</th>
+ <th>Meilleur match</th>
+ <th>Statut</th>
+ <th>Alerte</th>
  </tr>
  </thead>
- <tbody>
- <!-- Populated dynamically -->
- </tbody>
+ <tbody></tbody>
  </table>
  </div>
- <div id="whitelist-pagination" class="pagination-container hidden"></div>
  </div>
  </div>
  </div>
+ 
+<div id="sub-sec-alerts-filtering" class="sub-tab-content hidden">
+ <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="card result-card">
+ <h2>Alertes de Filtrage — Transactions (ISO 20022)</h2>
+ <p class="section-desc">Alertes issues du filtrage des parties des messages de paiement (<code>pain.001</code> / <code>pacs.008</code>). Même cycle de vie 4-yeux que le criblage, avec des règles anti-faux positifs et un blocking key propres à ce canal.</p>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('FILTERING','')">Toutes</button>
+ <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('FILTERING','OPEN,IN_PROGRESS,ESCALATED')" style="background: var(--surface-3);">À traiter</button>
+ <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
+ <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
+ <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
+ <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
+ <option value="">Toutes priorités</option>
+ <option value="CRITICAL">Critique</option>
+ <option value="HIGH">Haute</option>
+ <option value="MEDIUM">Moyenne</option>
+ <option value="LOW">Basse</option>
+ </select>
+ <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
+ <select id="filtering-assignee-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
+ <select id="filtering-views" onchange="applySavedView('FILTERING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
+ <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
+ <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
+ </div>
+ <div id="filtering-bulk-bar" class="bulk-bar hidden">
+ <span id="filtering-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
+ <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('FILTERING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
+ <select id="filtering-bulk-priority" style="min-width: 140px;">
+ <option value="">Priorité…</option>
+ <option value="CRITICAL">Critique</option>
+ <option value="HIGH">Haute</option>
+ <option value="MEDIUM">Moyenne</option>
+ <option value="LOW">Basse</option>
+ </select>
+ <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('FILTERING')">Appliquer la priorité</button>
+ <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('FILTERING')">✕ Vider la sélection</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="filtering-alerts-table">
+ <thead>
+ <tr>
+ <th style="width: 34px;"><input type="checkbox" id="filtering-select-all" onchange="toggleSelectAllAlerts('FILTERING', this.checked)" aria-label="Tout sélectionner"></th>
+ <th>Priorité</th><th>Date</th><th>Message / Partie</th><th>Listé</th><th>Liste</th>
+ <th>Score</th><th>Statut</th><th>Assignée à</th><th>Action</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <div id="filtering-alerts-pagination" class="pagination-container hidden"></div>
+ </div>
+ </div>
+ </div>
+
+ <!-- PARAMÉTRAGE MOTEUR : clés de blocking + capacités (rôle blocking/admin) -->
+ 
  </section>
+
+ 
 
  <!-- SECTION: PILOTAGE (KPI conformité) -->
  <section id="sec-kpi" class="tab-content">

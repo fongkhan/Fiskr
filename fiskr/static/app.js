@@ -616,10 +616,17 @@ async function refreshSidebarCounters() {
  const response = await apiFetch("/api/counters", { silent: true });
  if (!response.ok) return;
  const c = await response.json();
- const alertBadge = document.getElementById("alerts-open-badge");
- if (alertBadge) {
- alertBadge.textContent = c.open_alerts;
- alertBadge.classList.toggle("hidden", !c.open_alerts);
+ // Un badge par espace : le criblage et le filtrage portent chacun leurs
+ // alertes ouvertes dans la navigation (l'onglet Alertes unique a disparu)
+ const scrNavBadge = document.getElementById("screening-open-badge");
+ if (scrNavBadge) {
+ scrNavBadge.textContent = c.open_alerts_screening ?? 0;
+ scrNavBadge.classList.toggle("hidden", !c.open_alerts_screening);
+ }
+ const fltNavBadge = document.getElementById("filtering-open-badge");
+ if (fltNavBadge) {
+ fltNavBadge.textContent = c.open_alerts_filtering ?? 0;
+ fltNavBadge.classList.toggle("hidden", !c.open_alerts_filtering);
  }
  // Badges par canal sur les sous-onglets Criblage / Filtrage
  const scrBadge = document.getElementById("alerts-screening-badge");
@@ -2491,7 +2498,7 @@ async function handleScreening(event) {
  const alertLink = document.getElementById("screening-alert-link");
  if (alertLink) {
  if (data.alert_id) {
- alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('alerts'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button>`;
+ alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button>`;
  alertLink.classList.remove("hidden");
  } else {
  alertLink.classList.add("hidden");
@@ -2756,7 +2763,7 @@ async function runBatchScreening() {
  <td><code>${escapeHtml(best.watchlist_entity.entity_id)}</code></td>
  <td><strong>${escapeHtml(best.best_watchlist_name)}</strong></td>
  <td style="color:var(--color-alert); font-weight:700">${best.final_score.toFixed(1)}%</td>
- <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('alerts'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;"> #${data.alert_id}</a>` : ""}</td>
+ <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;"> #${data.alert_id}</a>` : ""}</td>
  `;
  } else {
  tr.innerHTML = `
@@ -5570,19 +5577,19 @@ const DASHBOARD_WIDGET_CATEGORIES = { kpi: "Indicateurs", charts: "Graphiques", 
 const DASHBOARD_WIDGETS = {
  "tile-screening": { cat: "kpi", icon: uiIcon("alert"), title: "Criblage", sub: "alertes ouvertes",
  value: d => d.counters.open_alerts_screening ?? 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
  "tile-filtering": { cat: "kpi", icon: uiIcon("credit-card"), title: "Filtrage", sub: "alertes ouvertes",
  value: d => d.counters.open_alerts_filtering ?? 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-filtering')" },
+ go: "switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering')" },
  "tile-4eyes": { cat: "kpi", icon: uiIcon("eye"), title: "4 yeux", sub: "décisions à valider",
  value: d => (d.alerts.by_status || {}).PENDING_VALIDATION || 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
  "tile-review": { cat: "kpi", icon: uiIcon("inbox"), title: "Homologation", sub: "snapshots en attente",
  value: d => d.counters.pending_reviews ?? 0,
  go: "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')" },
  "tile-overdue": { cat: "kpi", icon: uiIcon("clock"), title: "Retards SLA", sub: "alertes en dépassement",
  value: d => d.counters.overdue_alerts ?? 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
  "tile-fp-rate": { cat: "kpi", icon: uiIcon("trend"), title: "Faux positifs", sub: "taux sur alertes closes",
  value: d => (d.alerts.false_positive_rate_pct ?? null) === null ? "—" : d.alerts.false_positive_rate_pct + " %",
  go: "switchTab('kpi')" },
@@ -5613,14 +5620,14 @@ const DASHBOARD_WIDGETS = {
  const r = await apiFetch("/api/whitelist?page_size=1", { silent: true });
  return r.ok ? ((await r.json()).total ?? 0) : "—";
  },
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-whitelist')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-whitelist')" },
  "tile-rules": { cat: "kpi", icon: uiIcon("grid"), title: "Règles actives", sub: "anti-faux positifs",
  fetchValue: async () => {
  const r = await apiFetch("/api/fprules", { silent: true });
  if (!r.ok) return "—";
  return ((await r.json()).items || []).filter(x => x.status === "ACTIVE" && x.enabled).length;
  },
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-rules')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-rules')" },
 };
 
 // Disposition par défaut : l'accueil historique (tuiles + graphiques + listes)
@@ -5741,7 +5748,7 @@ function renderTodoWidget(body, d) {
  const oldest = d.alerts.oldest_open || [];
  body.innerHTML = '<ul class="home-list">' + (oldest.length
  ? oldest.map(al => `
- <li onclick="switchTab('alerts'); switchSubTab('alerts', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
+ <li onclick="switchTab('${al.channel === "FILTERING" ? "filtering" : "screening"}'); switchSubTab('${al.channel === "FILTERING" ? "filtering" : "screening"}', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
  <span class="item-main">#${al.id} — ${escapeHtml(al.client_name || "?")} × ${escapeHtml(al.watchlist_name || "?")}</span>
  <span class="item-meta">${escapeHtml(statusLabel(al.status))} · ${formatDate(al.created_at)}</span>
  </li>`).join("")
@@ -6048,7 +6055,7 @@ function renderTransactionResult(data) {
  <td>${p.best_watchlist_name ? p.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${p.best_watchlist_name ? escapeHtml(p.best_watchlist_name) + (p.list_type ? ` <small style="color:var(--text-muted)">${escapeHtml(p.list_type)}</small>` : "") : "—"}</td>
  <td>${badge}${p.hard_match ? ' <small style="color:var(--color-alert)">hard match</small>' : ""}</td>
- <td>${p.alert_id ? `<a href="#" onclick="switchTab('alerts'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
+ <td>${p.alert_id ? `<a href="#" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
  </tr>`;
  }).join("");
 }
@@ -7866,7 +7873,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  <td>${r.final_score !== null && r.final_score !== undefined ? r.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${r.watchlist_name ? `${escapeHtml(r.watchlist_name)}<br><small style="color: var(--text-muted);">${escapeHtml(r.watchlist_entity_id || "")}</small>` : (r.error ? `<small style="color: var(--color-alert);">${escapeHtml(r.error)}</small>` : "—")}</td>
  <td>${r.list_type ? listTypeBadge(r.list_type) : "—"}</td>
- <td>${r.alert_id ? `<button class="btn btn-sm btn-secondary" onclick="switchTab('alerts'); switchSubTab('alerts', 'alerts-screening'); openAlertModal(${r.alert_id})"> Alerte #${r.alert_id}</button>` : "—"}</td>
+ <td>${r.alert_id ? `<button class="btn btn-sm btn-secondary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${r.alert_id})"> Alerte #${r.alert_id}</button>` : "—"}</td>
  </tr>`).join("");
  container.innerHTML = `
  <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Campagne #${c.id} — ${escapeHtml(c.name)} ${campaignStatusBadge(c.status)}</h3>
@@ -8149,7 +8156,12 @@ function updateLocationHash(tabId, subTabId) {
 function applyHashRoute() {
  const raw = (location.hash || "").replace(/^#/, "");
  if (!raw) return false;
- const [tabId, subTabId] = raw.split("/");
+ let [tabId, subTabId] = raw.split("/");
+ // Vieux liens profonds #alerts/... : l'onglet a été scindé — le sous-onglet
+ // décide de l'espace (filtrage pour alerts-filtering, criblage sinon).
+ if (tabId === "alerts") {
+ tabId = (subTabId === "alerts-filtering") ? "filtering" : "screening";
+ }
  const section = document.getElementById(`sec-${tabId}`);
  if (!section) return false;
  _applyingHashRoute = true;
@@ -8516,10 +8528,10 @@ function renderNotifCenter() {
  const list = document.getElementById("notif-list");
  const c = _lastCounters;
  const all = [];
- if (c.open_alerts_screening) all.push({ key: "screening", count: c.open_alerts_screening, icon: uiIcon("alert"), label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#alerts/alerts-screening" });
- if (c.open_alerts_filtering) all.push({ key: "filtering", count: c.open_alerts_filtering, icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#alerts/alerts-filtering" });
- if (c.pending_validation) all.push({ key: "validation", count: c.pending_validation, icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#alerts/alerts-screening" });
- if (c.overdue_alerts) all.push({ key: "overdue", count: c.overdue_alerts, icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#alerts/alerts-screening" });
+ if (c.open_alerts_screening) all.push({ key: "screening", count: c.open_alerts_screening, icon: uiIcon("alert"), label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#screening/alerts-screening" });
+ if (c.open_alerts_filtering) all.push({ key: "filtering", count: c.open_alerts_filtering, icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#filtering/alerts-filtering" });
+ if (c.pending_validation) all.push({ key: "validation", count: c.pending_validation, icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#screening/alerts-screening" });
+ if (c.overdue_alerts) all.push({ key: "overdue", count: c.overdue_alerts, icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#screening/alerts-screening" });
  if (c.pending_reviews) all.push({ key: "reviews", count: c.pending_reviews, icon: uiIcon("inbox"), label: `${c.pending_reviews} snapshot(s) en attente d'homologation`, hash: "#watchlist-mgmt/watchlist-review" });
  _lastTodoEntries = all;
  // Masqué tant que le compteur n'a pas DÉPASSÉ sa valeur au masquage
@@ -8629,7 +8641,7 @@ async function openClient360(clientId) {
  <td>${escapeHtml(a.watchlist_name)}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${escapeHtml(statusLabel(a.status))}</td>
- <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('alerts'); openAlertModal(${a.id})"></button></td>
+ <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('${(a.channel || "SCREENING") === "FILTERING" ? "filtering" : "screening"}'); openAlertModal(${a.id})"></button></td>
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `

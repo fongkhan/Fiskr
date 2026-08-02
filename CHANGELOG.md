@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — screening and payment filtering became two separate top-level spaces
+Client screening (name screening against the referential) and ISO 20022 payment filtering generate alerts through different engines and methods, yet their queues, tools and screens were scattered across the "Alerts", "Screening" and other menus. The information architecture now reflects the business split:
+
+- **Criblage** groups everything about client screening: real-time screening, batch campaigns, the SCREENING alert queue, the whitelist, engine tuning (blocking keys), linguistic resources and false-positive rules.
+- **Filtrage** is a new top-level space for payments: the ISO 20022 message upload/filtering screen and the FILTERING alert queue.
+- The old "Alertes" menu entry disappears; each space carries its own open-alerts badge in the sidebar (fed by the per-channel counters).
+- **Old deep links keep working**: `#alerts/alerts-screening`, `#alerts/alerts-filtering` and every internal `switchTab('alerts')` call are transparently redirected to the right space — bookmarks, notification links and e-mails never break.
+
 ### Added — a full "My account" space
 The account fragments scattered under Settings became a dedicated top-level tab. A person is now more than a username:
 
