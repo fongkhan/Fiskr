@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — zombie RUNNING jobs no longer freeze the whole queue
+Production observation: two "Cahier de tests" entries RUNNING **simultaneously** (impossible within one daemon — backtests are serialized) with every other job stuck QUEUED. Those were **zombies**: jobs left RUNNING by a daemon incarnation killed mid-run (OOM). `requeue_stale` only ran **at daemon startup** — as long as the current daemon lived, zombies stayed RUNNING forever, occupied the daemon's slots in the display, and the serialization check counted them as "busy", blocking their whole kind. Two fixes:
+
+- **Periodic repair**: the daemon's heartbeat loop now runs `requeue_stale` every ~60 s — a zombie is re-queued (or marked ERROR past max attempts) within a minute, no restart needed.
+- **Serialization on fresh heartbeats only**: `claim_next` and `_serial_kind_busy` ignore RUNNING rows whose heartbeat is older than 90 s — a dead backtest can no longer block the next one.
+
+Reminder for deployments: the daemon keeps running the OLD code until killed — after `git pull` + `pip install -r requirements.txt`, kill it (`kill $(head -1 fiskr-worker.lock)`); the cron/autostart relaunches it on the new code and the startup repair re-queues everything wedged.
+
 ### Added — queued actions can be rolled back before they run
 A queued action has not executed nor modified anything yet — cancelling it is an exact return to the previous state. The bell panel's "Opérations en cours" now shows a **✕ Annuler** button (administrators) on every QUEUED entry, with a confirmation dialog; the job becomes CANCELLED, is logged in the admin journal, and the panel announces "Opération annulée". Two robustness fixes underneath: the cancellation is now **atomic** (`UPDATE … WHERE status='QUEUED'` — if the daemon claims the job in the same instant, the call answers 409 instead of clobbering a running job), and `run_job` gained a guard so a job cancelled while waiting for its serialization turn **never executes** (the thread path used to run it anyway). Running jobs remain non-cancellable — cooperative interruption of an executing task is a different, riskier feature.
 
