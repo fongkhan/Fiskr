@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — table filters audited at production scale; the typo-tolerant watchlist search now streams its results
+Every filtered endpoint was measured against a production-sized bench (300,000 listed parties, 300,000 audit rows, 80,000 alerts). Verdict: alert queues, audit history, sync reports and the client-side table filter bars all answer in 20–300 ms — no action needed (the filter bars did gain a small 120 ms debounce). One path was catastrophic: **typing a typo in the watchlist search blocked one request for 40.4 s**, because the fuzzy fallback scored the entire referential in Python inside the HTTP request.
+
+That fallback now **streams**: the browse endpoint answers immediately (`fuzzy_pending`, 0.4 s), and the screen drives a **chunk-by-chunk scan** (`GET /api/watchlist/db/fuzzy`, keyset cursor) that fills the table as matches arrive, with a live progress banner ("N % du périmètre parcouru, M résultats"). Each chunk is bounded (~0.4 s server-side: scoring runs on light column tuples, full records are hydrated only for the retained matches, Jaro-Winkler accelerated by the new required `rapidfuzz` dependency — bit-identical scores to the in-house implementation, pure-Python fallback kept). The scan always goes to the end of the perimeter so the best match can never be missed (display capped to the 200 best), is cancelled instantly by any new search, and no longer monopolises a worker: measured full-scan 6 s in 13 cancellable slices with first results after 0.4 s, versus one 40.4 s blocking request. Small perimeters (≤ 5,000 records) keep the historical inline fuzzy behaviour.
+
+### Changed — the Ctrl+K global search became instantaneous
+Each keystroke used to fire two heavy endpoints: `/api/watchlist/db` (SQL `LIKE` with a join, a `count`, and — whenever the exact match found nothing yet, i.e. most of the time while typing — a **fuzzy fallback that scanned the ENTIRE referential in Python** with Jaro-Winkler) and `/api/alerts` (three scans: total, open count, sorted fetch). On a production-sized referential that meant seconds per keystroke.
+
+The palette now uses a dedicated `GET /api/search/quick`: listed parties are searched in a **normalized in-memory index built together with the screening cache** (accent/case-insensitive, aliases and entity ids included, prefix matches ranked first — zero disk access, zero join), and alerts through one single bounded SQL query. Measured at 500,000 listed parties: **74 ms vs 5.3 s (×72)** for the watchlist part alone, in ONE round-trip instead of two. Front side: navigation results render instantly before the network call, stale responses from earlier keystrokes are discarded, a discreet "Recherche…" indicator shows while pending, and the debounce dropped to 150 ms. The watchlist screen's typo-tolerant search is unchanged — it deliberately keeps the deep fuzzy pass.
+
+### Added — a built-in guide: the whole site and every process explained, including the end-to-end CFT flow
+A new **Guide** tab (bottom of the sidebar, book icon, reachable via Ctrl+K and `#guide/...` deep links) documents the application from inside the application, in seven chapters: *Démarrer* (spaces, roles, gestures), *Flux CFT* (a step-by-step diagram from official sources to TRACFIN filing — synchronization, quality gates, 4-eyes approval, production hash, both alert channels, instruction, outcomes, evidence), *Listes*, *Criblage*, *Filtrage*, *Alertes & audit* and *Administration*. Every chapter links straight into the screens it describes ("Ouvrir" buttons). The guide's body is deliberately French (national AML/CFT frame of reference); its navigation labels are translated like the rest of the UI.
+
+### Changed — every sub-tab bar now fits on a single line
+Sub-tab labels were shortened to their essence ("Criblage Temps Réel" → "Temps réel", "Screening de Masse (Batch)" → "Batch", "Sources Automatiques" → "Sources", "Paramétrage moteur" → "Moteur"…), with the full historical wording kept as a translated tooltip. The bars no longer wrap: `nowrap` with a discreet horizontal-scroll last resort, a tightened intermediate breakpoint (1025–1280 px) so even the 7-tab Criblage bar fits without scrolling on small desktops, and the existing swipe band below 1024 px.
+
+### Fixed — leftovers of the Criblage/Filtrage split
+- Batch-screening hit links opened the *Filtrage* queue and payment-party hit links opened the *Criblage* queue (inverted targets); both now land on their own channel.
+- The Ctrl+K palette still navigated to the removed "Alertes" tab (blank screen) — entries now target the right spaces, and defensive aliases in `switchTab`/`switchSubTab` transparently reroute any residual `alerts` call.
+- The analyst filter and saved views of both alert queues were no longer loaded after the split — they now load when a queue sub-tab opens.
+- The "Mon compte" nav entry was accidentally admin-gated while "Utilisateurs" was visible to everyone; the gating is back on the right item.
+
+### Changed — screening and payment filtering became two separate top-level spaces
+Client screening (name screening against the referential) and ISO 20022 payment filtering generate alerts through different engines and methods, yet their queues, tools and screens were scattered across the "Alerts", "Screening" and other menus. The information architecture now reflects the business split:
+
+- **Criblage** groups everything about client screening: real-time screening, batch campaigns, the SCREENING alert queue, the whitelist, engine tuning (blocking keys), linguistic resources and false-positive rules.
+- **Filtrage** is a new top-level space for payments: the ISO 20022 message upload/filtering screen and the FILTERING alert queue.
+- The old "Alertes" menu entry disappears; each space carries its own open-alerts badge in the sidebar (fed by the per-channel counters).
+- **Old deep links keep working**: `#alerts/alerts-screening`, `#alerts/alerts-filtering` and every internal `switchTab('alerts')` call are transparently redirected to the right space — bookmarks, notification links and e-mails never break.
+
 ### Added — a full "My account" space
 The account fragments scattered under Settings became a dedicated top-level tab. A person is now more than a username:
 

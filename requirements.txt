@@ -16,6 +16,7 @@ anyascii>=0.3.2
 # reste tolerant a son absence (l'acte est alors signale en echec), mais la
 # dependance est installee d'office pour que le repli fonctionne partout.
 pypdf>=4.0.0
+rapidfuzz>=3.0.0
 # openpyxl>=3.1.0 # Optional, uncomment to read the XLSX form of the Australian DFAT list
 # pyspark>=3.5.0 # Optional, uncomment for running distributed Spark batch jobs
 

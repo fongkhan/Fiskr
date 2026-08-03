@@ -446,7 +446,12 @@ function attachTableFilters(tableId, spec) {
  const anchor = table.closest(".table-container") || table;
  anchor.parentNode.insertBefore(bar, anchor);
 
- bar.addEventListener("input", () => applyTableFilter(tableId));
+ // Débouncé : une frappe rapide ne déclenche qu'une passe sur les lignes
+ let filterTimer = null;
+ bar.addEventListener("input", () => {
+ clearTimeout(filterTimer);
+ filterTimer = setTimeout(() => applyTableFilter(tableId), 120);
+ });
 
  // Tout re-rendu du tableau rafraîchit les menus et réapplique le filtre.
  // On observe childList (ajout/retrait de lignes), jamais les attributs :
@@ -616,10 +621,17 @@ async function refreshSidebarCounters() {
  const response = await apiFetch("/api/counters", { silent: true });
  if (!response.ok) return;
  const c = await response.json();
- const alertBadge = document.getElementById("alerts-open-badge");
- if (alertBadge) {
- alertBadge.textContent = c.open_alerts;
- alertBadge.classList.toggle("hidden", !c.open_alerts);
+ // Un badge par espace : le criblage et le filtrage portent chacun leurs
+ // alertes ouvertes dans la navigation (l'onglet Alertes unique a disparu)
+ const scrNavBadge = document.getElementById("screening-open-badge");
+ if (scrNavBadge) {
+ scrNavBadge.textContent = c.open_alerts_screening ?? 0;
+ scrNavBadge.classList.toggle("hidden", !c.open_alerts_screening);
+ }
+ const fltNavBadge = document.getElementById("filtering-open-badge");
+ if (fltNavBadge) {
+ fltNavBadge.textContent = c.open_alerts_filtering ?? 0;
+ fltNavBadge.classList.toggle("hidden", !c.open_alerts_filtering);
  }
  // Badges par canal sur les sous-onglets Criblage / Filtrage
  const scrBadge = document.getElementById("alerts-screening-badge");
@@ -905,6 +917,9 @@ async function fetchConfig() {
 
 // Tab navigation
 function switchTab(tabId) {
+ // Compatibilité : l'ancien onglet « Alertes » a été scindé — tout appel
+ // résiduel atterrit sur l'espace Criblage (le filtrage a son propre onglet).
+ if (tabId === "alerts") tabId = "screening";
  document.querySelectorAll(".nav-item").forEach(item => {
  item.classList.remove("active");
  });
@@ -925,14 +940,6 @@ function switchTab(tabId) {
  // Refresh tab-specific data
  if (tabId === "home") {
  fetchHomeDashboard();
- }
- if (tabId === "alerts") {
- populateAssigneeFilters();
- fetchAlerts("SCREENING");
- fetchAlerts("FILTERING");
- fetchWhitelist();
- fetchSavedViews("SCREENING");
- fetchSavedViews("FILTERING");
  }
  if (tabId === "kpi") {
  // Sous-onglets KPI : seule la « Vue d'ensemble » charge à l'arrivée ;
@@ -978,6 +985,12 @@ function switchTab(tabId) {
 
 // Sub-tab navigation
 function switchSubTab(sectionId, subTabId) {
+ // Compatibilité : les sous-onglets de l'ancien onglet « Alertes » vivent
+ // désormais dans Criblage ou Filtrage — le sous-onglet décide de l'espace.
+ if (sectionId === "alerts") {
+ sectionId = (subTabId === "alerts-filtering") ? "filtering" : "screening";
+ switchTab(sectionId);
+ }
  const section = document.getElementById(`sec-${sectionId}`);
  if (!section) return;
  
@@ -1019,8 +1032,12 @@ function switchSubTab(sectionId, subTabId) {
  fetchPendingReviews();
  } else if (subTabId === "alerts-screening") {
  fetchAlerts("SCREENING");
+ populateAssigneeFilters();
+ fetchSavedViews("SCREENING");
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
+ populateAssigneeFilters();
+ fetchSavedViews("FILTERING");
  } else if (subTabId === "alerts-whitelist") {
  fetchWhitelist();
  } else if (subTabId === "alerts-blocking") {
@@ -2224,8 +2241,58 @@ function sortWatchlistBy(column) {
  fetchWatchlist(1);
 }
 
+// Balayage fuzzy progressif : jeton d'annulation — toute nouvelle recherche,
+// changement de filtre ou de page invalide le balayage en cours.
+let _wlFuzzySeq = 0;
+const WL_FUZZY_MAX_RESULTS = 200;
+
+async function runWatchlistFuzzyScan(seq, search, baseParams, scanTotal) {
+ const hint = document.getElementById("wl-match-hint");
+ let cursor = 0, scanned = 0;
+ const matches = [];
+ const progressHtml = (pct, n) =>
+ `≈ Aucun résultat exact pour « <strong>${escapeHtml(search)}</strong> » — recherche approchée en cours : ` +
+ `<strong>${pct}&nbsp;%</strong> du périmètre parcouru, <strong>${n}</strong> résultat(s) trouvé(s)…`;
+ if (hint) { hint.innerHTML = progressHtml(0, 0); hint.classList.remove("hidden"); }
+ try {
+ while (seq === _wlFuzzySeq) {
+ const params = new URLSearchParams(baseParams);
+ params.set("cursor", String(cursor));
+ const resp = await apiFetch(`/api/watchlist/db/fuzzy?${params.toString()}`, { silent: true });
+ if (seq !== _wlFuzzySeq) return;
+ if (!resp.ok) break;
+ const data = await resp.json();
+ if (seq !== _wlFuzzySeq) return;
+ matches.push(...(data.matches || []));
+ matches.sort((a, b) => (b._fuzzy_score || 0) - (a._fuzzy_score || 0));
+ if (matches.length > WL_FUZZY_MAX_RESULTS) matches.length = WL_FUZZY_MAX_RESULTS;
+ scanned += data.scanned || 0;
+ cursor = data.next_cursor;
+ // Affichage au fur et à mesure : la table se remplit tranche par tranche
+ renderWatchlistTable(matches, 1, matches.length);
+ const pct = scanTotal ? Math.min(100, Math.round((scanned / scanTotal) * 100)) : 100;
+ if (hint) hint.innerHTML = progressHtml(pct, matches.length);
+ // Le balayage va TOUJOURS au bout du périmètre (annulable à tout moment) :
+ // les 200 ne sont qu'un plafond d'affichage glissant qui conserve les
+ // meilleurs scores — la meilleure correspondance peut vivre dans la
+ // dernière tranche, s'arrêter avant la raterait.
+ if (data.done) {
+ if (hint) {
+ hint.innerHTML = matches.length
+ ? `≈ Aucun résultat exact pour « <strong>${escapeHtml(search)}</strong> » — ` +
+ `<strong>${matches.length}</strong> résultat(s) approché(s) (tolérance aux fautes de frappe), classés par similarité` +
+ (matches.length >= WL_FUZZY_MAX_RESULTS ? `, limité aux ${WL_FUZZY_MAX_RESULTS} meilleurs.` : ".")
+ : `Aucun résultat, même en recherche approchée, pour « <strong>${escapeHtml(search)}</strong> ».`;
+ }
+ return;
+ }
+ }
+ } catch (e) { /* balayage silencieux : la recherche suivante reprend la main */ }
+}
+
 async function fetchWatchlist(page = 1) {
  wlCurrentPage = page;
+ _wlFuzzySeq++; // stoppe tout balayage fuzzy en cours
  const searchEl = document.getElementById("wl-search-input");
  const listFilterEl = document.getElementById("wl-list-filter");
  const scopeFilterEl = document.getElementById("wl-scope-filter");
@@ -2250,6 +2317,18 @@ async function fetchWatchlist(page = 1) {
  const data = await response.json();
  if (!response.ok) {
  showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
+ return;
+ }
+ // Grand périmètre : le repli approché n'est pas calculé dans la requête —
+ // on le déroule par tranches et la table se remplit au fur et à mesure
+ if (data.match_mode === "fuzzy_pending") {
+ renderWatchlistTable([], 1, 0);
+ const baseParams = { search };
+ const fieldEl = document.getElementById("wl-field-filter");
+ if (fieldEl && fieldEl.value && fieldEl.value !== "default") baseParams.search_field = fieldEl.value;
+ if (listFilterEl && listFilterEl.value) baseParams.list_type = listFilterEl.value;
+ baseParams.scope = scopeFilterEl && scopeFilterEl.value ? scopeFilterEl.value : "production";
+ runWatchlistFuzzyScan(_wlFuzzySeq, search, baseParams, data.fuzzy_scan_total || 0);
  return;
  }
  // Bandeau fuzzy : la recherche exacte n'a rien donné, résultats approchés
@@ -2491,7 +2570,7 @@ async function handleScreening(event) {
  const alertLink = document.getElementById("screening-alert-link");
  if (alertLink) {
  if (data.alert_id) {
- alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('alerts'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button>`;
+ alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button>`;
  alertLink.classList.remove("hidden");
  } else {
  alertLink.classList.add("hidden");
@@ -2756,7 +2835,7 @@ async function runBatchScreening() {
  <td><code>${escapeHtml(best.watchlist_entity.entity_id)}</code></td>
  <td><strong>${escapeHtml(best.best_watchlist_name)}</strong></td>
  <td style="color:var(--color-alert); font-weight:700">${best.final_score.toFixed(1)}%</td>
- <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('alerts'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;"> #${data.alert_id}</a>` : ""}</td>
+ <td><span class="status-badge alert">ALERT</span>${data.alert_id ? ` <a href="#" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id}); return false;" style="font-size: 0.75rem;"> #${data.alert_id}</a>` : ""}</td>
  `;
  } else {
  tr.innerHTML = `
@@ -5570,19 +5649,19 @@ const DASHBOARD_WIDGET_CATEGORIES = { kpi: "Indicateurs", charts: "Graphiques", 
 const DASHBOARD_WIDGETS = {
  "tile-screening": { cat: "kpi", icon: uiIcon("alert"), title: "Criblage", sub: "alertes ouvertes",
  value: d => d.counters.open_alerts_screening ?? 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
  "tile-filtering": { cat: "kpi", icon: uiIcon("credit-card"), title: "Filtrage", sub: "alertes ouvertes",
  value: d => d.counters.open_alerts_filtering ?? 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-filtering')" },
+ go: "switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering')" },
  "tile-4eyes": { cat: "kpi", icon: uiIcon("eye"), title: "4 yeux", sub: "décisions à valider",
  value: d => (d.alerts.by_status || {}).PENDING_VALIDATION || 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
  "tile-review": { cat: "kpi", icon: uiIcon("inbox"), title: "Homologation", sub: "snapshots en attente",
  value: d => d.counters.pending_reviews ?? 0,
  go: "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')" },
  "tile-overdue": { cat: "kpi", icon: uiIcon("clock"), title: "Retards SLA", sub: "alertes en dépassement",
  value: d => d.counters.overdue_alerts ?? 0,
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-screening')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
  "tile-fp-rate": { cat: "kpi", icon: uiIcon("trend"), title: "Faux positifs", sub: "taux sur alertes closes",
  value: d => (d.alerts.false_positive_rate_pct ?? null) === null ? "—" : d.alerts.false_positive_rate_pct + " %",
  go: "switchTab('kpi')" },
@@ -5613,14 +5692,14 @@ const DASHBOARD_WIDGETS = {
  const r = await apiFetch("/api/whitelist?page_size=1", { silent: true });
  return r.ok ? ((await r.json()).total ?? 0) : "—";
  },
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-whitelist')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-whitelist')" },
  "tile-rules": { cat: "kpi", icon: uiIcon("grid"), title: "Règles actives", sub: "anti-faux positifs",
  fetchValue: async () => {
  const r = await apiFetch("/api/fprules", { silent: true });
  if (!r.ok) return "—";
  return ((await r.json()).items || []).filter(x => x.status === "ACTIVE" && x.enabled).length;
  },
- go: "switchTab('alerts'); switchSubTab('alerts', 'alerts-rules')" },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-rules')" },
 };
 
 // Disposition par défaut : l'accueil historique (tuiles + graphiques + listes)
@@ -5741,7 +5820,7 @@ function renderTodoWidget(body, d) {
  const oldest = d.alerts.oldest_open || [];
  body.innerHTML = '<ul class="home-list">' + (oldest.length
  ? oldest.map(al => `
- <li onclick="switchTab('alerts'); switchSubTab('alerts', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
+ <li onclick="switchTab('${al.channel === "FILTERING" ? "filtering" : "screening"}'); switchSubTab('${al.channel === "FILTERING" ? "filtering" : "screening"}', '${al.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"}'); openAlertModal(${al.id})">
  <span class="item-main">#${al.id} — ${escapeHtml(al.client_name || "?")} × ${escapeHtml(al.watchlist_name || "?")}</span>
  <span class="item-meta">${escapeHtml(statusLabel(al.status))} · ${formatDate(al.created_at)}</span>
  </li>`).join("")
@@ -6048,7 +6127,7 @@ function renderTransactionResult(data) {
  <td>${p.best_watchlist_name ? p.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${p.best_watchlist_name ? escapeHtml(p.best_watchlist_name) + (p.list_type ? ` <small style="color:var(--text-muted)">${escapeHtml(p.list_type)}</small>` : "") : "—"}</td>
  <td>${badge}${p.hard_match ? ' <small style="color:var(--color-alert)">hard match</small>' : ""}</td>
- <td>${p.alert_id ? `<a href="#" onclick="switchTab('alerts'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
+ <td>${p.alert_id ? `<a href="#" onclick="switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
  </tr>`;
  }).join("");
 }
@@ -7649,13 +7728,14 @@ const PALETTE_NAV_ITEMS = [
  { label: " Vue d'ensemble", action: () => switchTab("home") },
  { label: " Gestion des Watchlists", action: () => switchTab("watchlist-mgmt") },
  { label: " Criblage temps réel", action: () => switchTab("screening") },
- { label: " Filtrage transactionnel (ISO 20022)", action: () => { switchTab("screening"); switchSubTab("screening", "screening-transactions"); } },
- { label: " Alertes de criblage", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-screening"); } },
- { label: " Alertes de filtrage", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-filtering"); } },
- { label: " Liste blanche (Good Guys)", action: () => { switchTab("alerts"); switchSubTab("alerts", "alerts-whitelist"); } },
+ { label: " Filtrage transactionnel (ISO 20022)", action: () => { switchTab("filtering"); switchSubTab("filtering", "screening-transactions"); } },
+ { label: " Alertes de criblage", action: () => { switchTab("screening"); switchSubTab("screening", "alerts-screening"); } },
+ { label: " Alertes de filtrage", action: () => { switchTab("filtering"); switchSubTab("filtering", "alerts-filtering"); } },
+ { label: " Liste blanche (Good Guys)", action: () => { switchTab("screening"); switchSubTab("screening", "alerts-whitelist"); } },
  { label: " Homologation des listes", action: () => { switchTab("watchlist-mgmt"); switchSubTab("watchlist-mgmt", "watchlist-review"); } },
  { label: " Pilotage (KPI)", action: () => switchTab("kpi") },
  { label: " Audit réglementaire", action: () => switchTab("audit") },
+ { label: " Guide : flux CFT et processus", action: () => { switchTab("guide"); switchSubTab("guide", "guide-flow"); } },
 ];
 
 function openCommandPalette() {
@@ -7711,42 +7791,52 @@ function paletteActivate(idx) {
  }
 }
 
+let _paletteSeq = 0;
+
+function _paletteSetSearching(on) {
+ const el = document.getElementById("palette-status");
+ if (el) el.classList.toggle("hidden", !on);
+}
+
 async function runPaletteSearch(term) {
- const groups = [];
  const needle = term.trim().toLowerCase();
- // Navigation (filtrée localement)
+ const seq = ++_paletteSeq; // toute réponse d'une frappe antérieure sera ignorée
+ // Navigation (filtrée localement) : rendue IMMÉDIATEMENT, sans attendre le réseau
+ const groups = [];
  const navMatches = PALETTE_NAV_ITEMS.filter(n => !needle || n.label.toLowerCase().includes(needle)).slice(0, 5);
  if (navMatches.length) {
  groups.push({ title: "Navigation", items: navMatches.map(n => ({
  html: escapeHtml(n.label), action: n.action })) });
  }
- if (needle.length >= 2) {
+ renderPaletteResults(groups);
+ if (needle.length < 2) { _paletteSetSearching(false); return; }
+ _paletteSetSearching(true);
  try {
- const [wlResp, alResp] = await Promise.all([
- apiFetch(`/api/watchlist/db?search=${encodeURIComponent(term)}&page_size=5`, { silent: true }),
- apiFetch(`/api/alerts?search=${encodeURIComponent(term)}&page_size=5`, { silent: true }),
- ]);
- if (wlResp.ok) {
- const wl = await wlResp.json();
+ // Un seul aller-retour : listés servis par l'index mémoire du moteur,
+ // alertes par une requête SQL unique bornée (voir /api/search/quick)
+ const resp = await apiFetch(`/api/search/quick?q=${encodeURIComponent(term)}`, { silent: true });
+ if (seq !== _paletteSeq) return; // une frappe plus récente a pris la main
+ if (resp.ok) {
+ const data = await resp.json();
+ if (seq !== _paletteSeq) return;
+ const wl = data.watchlist || {};
  if ((wl.items || []).length) {
  groups.push({ title: `Listés (${wl.total})`, items: wl.items.map(item => ({
- html: `<strong>${escapeHtml(item.primary_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(item.entity_id)} · ${escapeHtml(listTypeLabel(item.list_type))}${wl.match_mode === "fuzzy" ? " · ≈" : ""}</small>`,
+ html: `<strong>${escapeHtml(item.primary_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(item.entity_id)} · ${escapeHtml(listTypeLabel(item.list_type))}</small>`,
  action: () => { switchTab("watchlist-mgmt"); switchSubTab("watchlist-mgmt", "watchlist-active"); showWatchlistDetails(item); },
  })) });
  }
- }
- if (alResp.ok) {
- const al = await alResp.json();
+ const al = data.alerts || {};
  if ((al.items || []).length) {
  groups.push({ title: `Alertes (${al.total})`, items: al.items.map(a => ({
  html: `<strong>#${a.id} ${escapeHtml(a.client_name)}</strong> × ${escapeHtml(a.watchlist_name)} <small style="color: var(--text-muted);">${escapeHtml(statusLabel(a.status))}</small>`,
- action: () => { switchTab("alerts"); switchSubTab("alerts", a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
+ action: () => { const sp = a.channel === "FILTERING" ? "filtering" : "screening"; switchTab(sp); switchSubTab(sp, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
  })) });
  }
+ renderPaletteResults(groups);
  }
  } catch (e) { /* recherche silencieuse */ }
- }
- renderPaletteResults(groups);
+ finally { if (seq === _paletteSeq) _paletteSetSearching(false); }
 }
 
 function initCommandPalette() {
@@ -7762,7 +7852,9 @@ function initCommandPalette() {
  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeCommandPalette(); });
  input.addEventListener("input", () => {
  clearTimeout(_paletteDebounce);
- _paletteDebounce = setTimeout(() => runPaletteSearch(input.value), 250);
+ // Le backend répond en millisecondes (index mémoire) : un débounce court
+ // suffit, la frappe reste fluide et les réponses périmées sont ignorées
+ _paletteDebounce = setTimeout(() => runPaletteSearch(input.value), 150);
  });
  input.addEventListener("keydown", (e) => {
  const items = document.querySelectorAll("#palette-results .palette-item");
@@ -7866,7 +7958,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  <td>${r.final_score !== null && r.final_score !== undefined ? r.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${r.watchlist_name ? `${escapeHtml(r.watchlist_name)}<br><small style="color: var(--text-muted);">${escapeHtml(r.watchlist_entity_id || "")}</small>` : (r.error ? `<small style="color: var(--color-alert);">${escapeHtml(r.error)}</small>` : "—")}</td>
  <td>${r.list_type ? listTypeBadge(r.list_type) : "—"}</td>
- <td>${r.alert_id ? `<button class="btn btn-sm btn-secondary" onclick="switchTab('alerts'); switchSubTab('alerts', 'alerts-screening'); openAlertModal(${r.alert_id})"> Alerte #${r.alert_id}</button>` : "—"}</td>
+ <td>${r.alert_id ? `<button class="btn btn-sm btn-secondary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${r.alert_id})"> Alerte #${r.alert_id}</button>` : "—"}</td>
  </tr>`).join("");
  container.innerHTML = `
  <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Campagne #${c.id} — ${escapeHtml(c.name)} ${campaignStatusBadge(c.status)}</h3>
@@ -8149,7 +8241,12 @@ function updateLocationHash(tabId, subTabId) {
 function applyHashRoute() {
  const raw = (location.hash || "").replace(/^#/, "");
  if (!raw) return false;
- const [tabId, subTabId] = raw.split("/");
+ let [tabId, subTabId] = raw.split("/");
+ // Vieux liens profonds #alerts/... : l'onglet a été scindé — le sous-onglet
+ // décide de l'espace (filtrage pour alerts-filtering, criblage sinon).
+ if (tabId === "alerts") {
+ tabId = (subTabId === "alerts-filtering") ? "filtering" : "screening";
+ }
  const section = document.getElementById(`sec-${tabId}`);
  if (!section) return false;
  _applyingHashRoute = true;
@@ -8516,10 +8613,10 @@ function renderNotifCenter() {
  const list = document.getElementById("notif-list");
  const c = _lastCounters;
  const all = [];
- if (c.open_alerts_screening) all.push({ key: "screening", count: c.open_alerts_screening, icon: uiIcon("alert"), label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#alerts/alerts-screening" });
- if (c.open_alerts_filtering) all.push({ key: "filtering", count: c.open_alerts_filtering, icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#alerts/alerts-filtering" });
- if (c.pending_validation) all.push({ key: "validation", count: c.pending_validation, icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#alerts/alerts-screening" });
- if (c.overdue_alerts) all.push({ key: "overdue", count: c.overdue_alerts, icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#alerts/alerts-screening" });
+ if (c.open_alerts_screening) all.push({ key: "screening", count: c.open_alerts_screening, icon: uiIcon("alert"), label: `${c.open_alerts_screening} alerte(s) de criblage ouverte(s)`, hash: "#screening/alerts-screening" });
+ if (c.open_alerts_filtering) all.push({ key: "filtering", count: c.open_alerts_filtering, icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#filtering/alerts-filtering" });
+ if (c.pending_validation) all.push({ key: "validation", count: c.pending_validation, icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#screening/alerts-screening" });
+ if (c.overdue_alerts) all.push({ key: "overdue", count: c.overdue_alerts, icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#screening/alerts-screening" });
  if (c.pending_reviews) all.push({ key: "reviews", count: c.pending_reviews, icon: uiIcon("inbox"), label: `${c.pending_reviews} snapshot(s) en attente d'homologation`, hash: "#watchlist-mgmt/watchlist-review" });
  _lastTodoEntries = all;
  // Masqué tant que le compteur n'a pas DÉPASSÉ sa valeur au masquage
@@ -8629,7 +8726,7 @@ async function openClient360(clientId) {
  <td>${escapeHtml(a.watchlist_name)}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${escapeHtml(statusLabel(a.status))}</td>
- <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('alerts'); openAlertModal(${a.id})"></button></td>
+ <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('${(a.channel || "SCREENING") === "FILTERING" ? "filtering" : "screening"}'); openAlertModal(${a.id})"></button></td>
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `

@@ -75,6 +75,9 @@
         "Replier le menu": { en: "Collapse the menu", de: "Menü einklappen", es: "Plegar el menú", zh: "收起菜单", ar: "طي القائمة" },
         "Déplier le menu": { en: "Expand the menu", de: "Menü ausklappen", es: "Desplegar el menú", zh: "展开菜单", ar: "فتح القائمة" },
         "Replier ou déplier le menu de navigation": { en: "Collapse or expand the navigation menu", de: "Navigationsmenü ein- oder ausklappen", es: "Plegar o desplegar el menú de navegación", zh: "收起或展开导航菜单", ar: "طي قائمة التنقل أو فتحها" },
+        // Espaces Criblage / Filtrage scindés
+        "Filtrage": { en: "Filtering", de: "Filterung", es: "Filtrado", zh: "过滤", ar: "الترشيح" },
+        "Filtrer un paiement": { en: "Filter a payment", de: "Eine Zahlung filtern", es: "Filtrar un pago", zh: "过滤一笔付款", ar: "ترشيح دفعة" },
         // Espace Mon compte
         "Mon compte": { en: "My account", de: "Mein Konto", es: "Mi cuenta", zh: "我的账户", ar: "حسابي" },
         "Profil": { en: "Profile", de: "Profil", es: "Perfil", zh: "个人资料", ar: "الملف الشخصي" },
@@ -157,6 +160,25 @@
         "⏳ À traiter en priorité": { en: "⏳ Handle first", de: "⏳ Zuerst bearbeiten", es: "⏳ Prioritarias", zh: "⏳ 优先处理", ar: "⏳ أولوية المعالجة" },
         "🔄 Dernière synchronisation": { en: "🔄 Last synchronization", de: "🔄 Letzte Synchronisation", es: "🔄 Última sincronización", zh: "🔄 最近同步", ar: "🔄 آخر مزامنة" },
         // Watchlists
+        // Sous-onglets compactés (une seule ligne) — les libellés longs restent
+        // au dictionnaire : ils servent d'infobulles (attribut title) traduites.
+        "Watchlist": { en: "Watchlist", de: "Watchlist", es: "Lista", zh: "名单", ar: "القائمة" },
+        "Imports": { en: "Imports", de: "Importe", es: "Importaciones", zh: "导入", ar: "الاستيراد" },
+        "Snapshots": { en: "Snapshots", de: "Snapshots", es: "Instantáneas", zh: "快照", ar: "اللقطات" },
+        "Sources": { en: "Sources", de: "Quellen", es: "Fuentes", zh: "数据源", ar: "المصادر" },
+        "Temps réel": { en: "Real-time", de: "Echtzeit", es: "Tiempo real", zh: "实时", ar: "فوري" },
+        "Batch": { en: "Batch", de: "Batch", es: "Lote", zh: "批量", ar: "دفعات" },
+        "Moteur": { en: "Engine", de: "Engine", es: "Motor", zh: "引擎", ar: "المحرك" },
+        "Linguistique": { en: "Linguistics", de: "Linguistik", es: "Lingüística", zh: "语言", ar: "اللغويات" },
+        "Règles FP": { en: "FP Rules", de: "FP-Regeln", es: "Reglas FP", zh: "误报规则", ar: "قواعد الإنذارات الكاذبة" },
+        // Guide intégré (le contenu du guide reste en français — documentation de référence)
+        "Guide": { en: "Guide", de: "Leitfaden", es: "Guía", zh: "指南", ar: "الدليل" },
+        "Démarrer": { en: "Get started", de: "Erste Schritte", es: "Empezar", zh: "入门", ar: "البدء" },
+        "Flux CFT": { en: "CFT flow", de: "CFT-Ablauf", es: "Flujo CFT", zh: "反恐融资流程", ar: "مسار مكافحة تمويل الإرهاب" },
+        "Listes": { en: "Lists", de: "Listen", es: "Listas", zh: "名单", ar: "القوائم" },
+        "Alertes & audit": { en: "Alerts & audit", de: "Alarme & Audit", es: "Alertas y auditoría", zh: "警报与审计", ar: "التنبيهات والتدقيق" },
+        "Administration": { en: "Administration", de: "Administration", es: "Administración", zh: "管理", ar: "الإدارة" },
+        "Recherche…": { en: "Searching…", de: "Suche…", es: "Buscando…", zh: "搜索中…", ar: "جارٍ البحث…" },
         "Watchlist Active": { en: "Active Watchlist", de: "Aktive Watchlist", es: "Lista activa", zh: "当前名单", ar: "القائمة النشطة" },
         "Import de Fichiers": { en: "File Import", de: "Datei-Import", es: "Importación de archivos", zh: "文件导入", ar: "استيراد الملفات" },
         "Snapshots & Comparateur": { en: "Snapshots & Comparator", de: "Snapshots & Vergleich", es: "Instantáneas y comparador", zh: "快照与比对", ar: "اللقطات والمقارنة" },
