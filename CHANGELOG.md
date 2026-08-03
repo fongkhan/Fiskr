@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — workers no longer get stuck forever on test-book (backtest) jobs
+Production symptom: the job queue fills with waiting operations because a backtest never finishes. Root cause: the backtest screens its panel through a `fork()` process pool, and when a pool child dies — typically **killed by the OOM killer**, the very memory risk backtests are known for — `multiprocessing.Pool` silently replaces the child but **never re-runs the lost chunk**. The parent then waited on `map_async` with no timeout and no child-death detection: the job span forever, its separate heartbeat thread kept it looking alive (so the stale-job recovery never fired), the backtest serialization kept every following test book QUEUED indefinitely, and one of the daemon's slots was consumed for good.
+
+Fixes:
+- **Watchdog on the screening pool** (`screenpool._wait_with_watchdog`): a child dead with a non-zero exit code (OOM: −9) or **no progress tick at all for `jobs.screen_stall_timeout_s`** (default 900 s) raises `PoolStalled` and terminates the pool — the infinite wait no longer exists.
+- **Self-healing backtest**: on `PoolStalled`, the test book automatically restarts **sequentially** (minimal memory, same screening body, no pool) instead of failing — it completes rather than blocking the queue.
+- Immediate production remedy (before deploying): restart the worker daemon — `requeue_stale` re-queues the wedged jobs on startup.
+
 ### Fixed/Changed — full application sweep: self-hosted fonts, favicon, redundant scans, audit indexes
 A three-pass sweep (static consistency audit of tab targets/ids/panels, a browser crawl of every screen collecting JS errors and failed requests, and a backend review) found and fixed:
 
