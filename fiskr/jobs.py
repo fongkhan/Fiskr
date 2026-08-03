@@ -229,27 +229,31 @@ def submit(kind: str, *, params: Optional[Dict[str, Any]] = None, token: Optiona
         session.close()
 
 
-# Genres de jobs SERIALISES : jamais deux en meme temps, quel que soit le
-# processus. Un cahier de tests (ou une simulation moteur) charge un univers
-# de listes complet en memoire : deux passes simultanees ont deja epuise la
-# RAM d'une machine de production. La file les enchaine au lieu de les cumuler.
+# Genres de jobs SERIALISES en GROUPE EXCLUSIF : jamais deux jobs de ce
+# groupe en meme temps — quel que soit le melange. Un cahier de tests comme
+# une simulation moteur charge un univers de listes complet en memoire :
+# deux univers simultanes (deux backtests, OU un backtest + une simulation)
+# ont deja epuise la RAM d'une machine de production. La file les enchaine.
 SERIAL_KINDS = ("backtest", "engine_simulation")
 
 
 def _serial_kind_busy(session, kind: str, exclude_job_id: Optional[int] = None) -> bool:
     """
-    Un job du meme genre serialise tourne-t-il deja (ailleurs) ?
+    Un job du GROUPE serialise tourne-t-il deja (ailleurs) ? Le groupe est
+    exclusif dans son ensemble : un cahier de tests attend aussi une
+    simulation moteur en cours (et inversement) — un seul univers de listes
+    en memoire a la fois.
 
     Seuls les RUNNING au battement de coeur FRAIS comptent : un job laisse
     RUNNING par un demon mort (OOM, kill) n'occupe plus personne — sans ce
-    filtre, un zombie bloquait son genre entier pour toujours (vu en
+    filtre, un zombie bloquait le groupe entier pour toujours (vu en
     production : deux cahiers de tests zombies, toute la file a l'arret).
     """
     if kind not in SERIAL_KINDS:
         return False
     cutoff = datetime.utcnow() - STALE_AFTER
     q = session.query(Job.id).filter(
-        Job.kind == kind, Job.status == "RUNNING",
+        Job.kind.in_(SERIAL_KINDS), Job.status == "RUNNING",
         Job.heartbeat_at.isnot(None), Job.heartbeat_at >= cutoff)
     if exclude_job_id is not None:
         q = q.filter(Job.id != exclude_job_id)
@@ -271,18 +275,20 @@ def claim_next(session, claimer: str) -> Optional[int]:
     attend son tour.
     """
     now = datetime.utcnow()
-    # Meme filtre de fraicheur que _serial_kind_busy : un job serialise
-    # laisse RUNNING par un demon mort ne doit pas bloquer son genre
+    # Groupe serialise EXCLUSIF : si un job du groupe tourne (au coeur
+    # frais — un zombie de demon mort ne compte pas), AUCUN autre job du
+    # groupe n'est pris, quel que soit son genre : un seul univers de
+    # listes en memoire a la fois.
     stale_cutoff = now - STALE_AFTER
-    running_serial = [k for (k,) in session.query(Job.kind).distinct().filter(
+    serial_group_busy = session.query(Job.id).filter(
         Job.status == "RUNNING", Job.kind.in_(SERIAL_KINDS),
-        Job.heartbeat_at.isnot(None), Job.heartbeat_at >= stale_cutoff).all()]
+        Job.heartbeat_at.isnot(None), Job.heartbeat_at >= stale_cutoff).first() is not None
     q = session.query(Job).filter(
         Job.status == "QUEUED",
         (Job.not_before.is_(None)) | (Job.not_before <= now),
     )
-    if running_serial:
-        q = q.filter(~Job.kind.in_(running_serial))
+    if serial_group_busy:
+        q = q.filter(~Job.kind.in_(SERIAL_KINDS))
     q = q.order_by(Job.priority.asc(), Job.id.asc()).limit(1)
     if session.bind.dialect.name == "postgresql":
         q = q.with_for_update(skip_locked=True)

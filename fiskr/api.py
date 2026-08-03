@@ -7755,6 +7755,25 @@ async def get_review_detail(
         delta = calculate_delta(old_entities, new_entities, "entity_id")
         delta_summary, delta_details, delta_source = \
             delta["summary"], _truncate_delta_details(delta), "computed"
+    # Etat du DERNIER job de cahier de tests de ce snapshot : un plantage ou
+    # une mise en file doit se voir DANS l'ecran d'homologation (avec relance
+    # ou annulation), pas seulement au fond du panneau des travaux.
+    from fiskr.database import Job
+    last_bt_job = db.query(Job).filter(
+        Job.kind == "backtest", Job.snapshot_id == snapshot_id
+    ).order_by(Job.id.desc()).first()
+    backtest_job = None
+    if last_bt_job is not None:
+        backtest_job = {
+            "id": last_bt_job.id,
+            "status": last_bt_job.status,
+            "error": last_bt_job.error,
+            "phase": last_bt_job.phase,
+            "attempts": last_bt_job.attempts,
+            "finished_at": last_bt_job.finished_at.isoformat() if last_bt_job.finished_at else None,
+            "cancellable": last_bt_job.status == "QUEUED",
+            "retryable": last_bt_job.status == "ERROR" and last_bt_job.kind in job_queue.TASKS,
+        }
     return {
         **_snapshot_summary(db, snap),
         "production_snapshot_id": production_id,
@@ -7764,6 +7783,7 @@ async def get_review_detail(
         "backtest_report": snap.backtest_report,
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
         "backtest_by": snap.backtest_by,
+        "backtest_job": backtest_job,
     }
 
 class BacktestRequest(BaseModel):

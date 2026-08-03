@@ -481,3 +481,32 @@ def test_approve_gate_accepts_legacy_report_without_rules_key(client, ab_setup):
         json={"comment": "test_bt approbation rapport legacy"},
     )
     assert response.status_code == 202, response.text
+
+
+def test_backtest_progress_is_continuous(client, ab_setup):
+    """La progression publiée est CONTINUE sur tout le cahier de tests :
+    un seul total cumulant toutes les passes, jamais décroissante, chargements
+    d'univers annoncés, passes du mode delta nommées."""
+    from fiskr.backtest import run_backtest
+
+    db = next(get_db())
+    try:
+        snap = db.query(Snapshot).filter(
+            Snapshot.snapshot_id == ab_setup["pending_id"]).first()
+        ticks = []
+        run_backtest(db, snap, ab_setup["panel_id"], threshold_pct=10.0,
+                     executed_by="test",
+                     progress=lambda ph, d, t: ticks.append((ph, d, t)))
+    finally:
+        db.close()
+
+    assert ticks, "aucune progression publiée"
+    totals = {t for _, _, t in ticks}
+    assert len(totals) == 1, f"le total doit être unique sur tout le cahier : {totals}"
+    processed = [d for _, d, _ in ticks]
+    assert processed == sorted(processed), "la progression ne doit jamais reculer"
+    assert processed[-1] == next(iter(totals)), "la barre doit finir à 100 %"
+    phases = {ph for ph, _, _ in ticks}
+    assert "LOAD_UNIVERSE" in phases, "les chargements d'univers doivent être annoncés"
+    # ab_setup sans règle candidate -> mode delta : passes nommées
+    assert {"SCREEN_SHARED", "SCREEN_REMOVED", "SCREEN_ADDED"} <= phases, phases
