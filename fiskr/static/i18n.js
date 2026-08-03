@@ -179,6 +179,11 @@
         "Alertes & audit": { en: "Alerts & audit", de: "Alarme & Audit", es: "Alertas y auditoría", zh: "警报与审计", ar: "التنبيهات والتدقيق" },
         "Administration": { en: "Administration", de: "Administration", es: "Administración", zh: "管理", ar: "الإدارة" },
         "Recherche…": { en: "Searching…", de: "Suche…", es: "Buscando…", zh: "搜索中…", ar: "جارٍ البحث…" },
+        // Annulation d'une action en file d'attente
+        "✕ Annuler": { en: "✕ Cancel", de: "✕ Abbrechen", es: "✕ Cancelar", zh: "✕ 取消", ar: "✕ إلغاء" },
+        "Annuler l'action": { en: "Cancel the action", de: "Aktion abbrechen", es: "Cancelar la acción", zh: "取消该操作", ar: "إلغاء الإجراء" },
+        "Annuler cette action en file d'attente ? Elle n'a encore rien exécuté : l'annulation revient exactement à l'état précédent.": { en: "Cancel this queued action? Nothing has been executed yet: cancelling returns exactly to the previous state.", de: "Diese wartende Aktion abbrechen? Es wurde noch nichts ausgeführt: der Abbruch stellt exakt den vorherigen Zustand wieder her.", es: "¿Cancelar esta acción en cola? Aún no se ha ejecutado nada: cancelar devuelve exactamente al estado anterior.", zh: "取消这个排队中的操作？它尚未执行任何内容：取消将完全恢复到之前的状态。", ar: "إلغاء هذا الإجراء المنتظر؟ لم يُنفذ أي شيء بعد: الإلغاء يعيد الحالة السابقة تماماً." },
+        "Action annulée — elle n'a jamais été exécutée.": { en: "Action cancelled — it was never executed.", de: "Aktion abgebrochen — sie wurde nie ausgeführt.", es: "Acción cancelada — nunca se ejecutó.", zh: "操作已取消 — 从未执行。", ar: "أُلغي الإجراء — لم يُنفذ أبداً." },
         "Watchlist Active": { en: "Active Watchlist", de: "Aktive Watchlist", es: "Lista activa", zh: "当前名单", ar: "القائمة النشطة" },
         "Import de Fichiers": { en: "File Import", de: "Datei-Import", es: "Importación de archivos", zh: "文件导入", ar: "استيراد الملفات" },
         "Snapshots & Comparateur": { en: "Snapshots & Comparator", de: "Snapshots & Vergleich", es: "Instantáneas y comparador", zh: "快照与比对", ar: "اللقطات والمقارنة" },

@@ -324,6 +324,12 @@ def run_job(job_id: int) -> None:
             if res.rowcount != 1:
                 return
             session.refresh(job)
+        elif job.status != "RUNNING":
+            # Annule (ou deja termine) pendant l'attente de serialisation :
+            # un job CANCELLED ne doit JAMAIS s'executer — sans cette garde,
+            # le chemin thread sortait de la boucle d'attente et lancait
+            # quand meme la tache.
+            return
         token, kind, label, params = job.token, job.kind, job.label, dict(job.params or {})
         created_by = job.created_by
     finally:

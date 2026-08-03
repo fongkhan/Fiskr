@@ -1981,6 +1981,7 @@ th.sortable.sort-desc::after {
     padding-left: 1.1rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
 }
 .job-retry-btn { padding: 0.1rem 0.5rem; font-size: 0.72rem; }
+.job-cancel-btn { padding: 0.1rem 0.5rem; font-size: 0.72rem; margin-left: 0.5rem; color: var(--color-alert); }
 .job-group > summary { list-style: none; cursor: pointer; }
 .job-group > summary::-webkit-details-marker { display: none; }
 .job-group .job-group-count {
