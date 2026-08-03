@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — table filters audited at production scale; the typo-tolerant watchlist search now streams its results
+Every filtered endpoint was measured against a production-sized bench (300,000 listed parties, 300,000 audit rows, 80,000 alerts). Verdict: alert queues, audit history, sync reports and the client-side table filter bars all answer in 20–300 ms — no action needed (the filter bars did gain a small 120 ms debounce). One path was catastrophic: **typing a typo in the watchlist search blocked one request for 40.4 s**, because the fuzzy fallback scored the entire referential in Python inside the HTTP request.
+
+That fallback now **streams**: the browse endpoint answers immediately (`fuzzy_pending`, 0.4 s), and the screen drives a **chunk-by-chunk scan** (`GET /api/watchlist/db/fuzzy`, keyset cursor) that fills the table as matches arrive, with a live progress banner ("N % du périmètre parcouru, M résultats"). Each chunk is bounded (~0.4 s server-side: scoring runs on light column tuples, full records are hydrated only for the retained matches, Jaro-Winkler accelerated by the new required `rapidfuzz` dependency — bit-identical scores to the in-house implementation, pure-Python fallback kept). The scan always goes to the end of the perimeter so the best match can never be missed (display capped to the 200 best), is cancelled instantly by any new search, and no longer monopolises a worker: measured full-scan 6 s in 13 cancellable slices with first results after 0.4 s, versus one 40.4 s blocking request. Small perimeters (≤ 5,000 records) keep the historical inline fuzzy behaviour.
+
 ### Changed — the Ctrl+K global search became instantaneous
 Each keystroke used to fire two heavy endpoints: `/api/watchlist/db` (SQL `LIKE` with a join, a `count`, and — whenever the exact match found nothing yet, i.e. most of the time while typing — a **fuzzy fallback that scanned the ENTIRE referential in Python** with Jaro-Winkler) and `/api/alerts` (three scans: total, open count, sorted fetch). On a production-sized referential that meant seconds per keystroke.
 

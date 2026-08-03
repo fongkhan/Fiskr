@@ -446,7 +446,12 @@ function attachTableFilters(tableId, spec) {
  const anchor = table.closest(".table-container") || table;
  anchor.parentNode.insertBefore(bar, anchor);
 
- bar.addEventListener("input", () => applyTableFilter(tableId));
+ // Débouncé : une frappe rapide ne déclenche qu'une passe sur les lignes
+ let filterTimer = null;
+ bar.addEventListener("input", () => {
+ clearTimeout(filterTimer);
+ filterTimer = setTimeout(() => applyTableFilter(tableId), 120);
+ });
 
  // Tout re-rendu du tableau rafraîchit les menus et réapplique le filtre.
  // On observe childList (ajout/retrait de lignes), jamais les attributs :
@@ -2236,8 +2241,58 @@ function sortWatchlistBy(column) {
  fetchWatchlist(1);
 }
 
+// Balayage fuzzy progressif : jeton d'annulation — toute nouvelle recherche,
+// changement de filtre ou de page invalide le balayage en cours.
+let _wlFuzzySeq = 0;
+const WL_FUZZY_MAX_RESULTS = 200;
+
+async function runWatchlistFuzzyScan(seq, search, baseParams, scanTotal) {
+ const hint = document.getElementById("wl-match-hint");
+ let cursor = 0, scanned = 0;
+ const matches = [];
+ const progressHtml = (pct, n) =>
+ `≈ Aucun résultat exact pour « <strong>${escapeHtml(search)}</strong> » — recherche approchée en cours : ` +
+ `<strong>${pct}&nbsp;%</strong> du périmètre parcouru, <strong>${n}</strong> résultat(s) trouvé(s)…`;
+ if (hint) { hint.innerHTML = progressHtml(0, 0); hint.classList.remove("hidden"); }
+ try {
+ while (seq === _wlFuzzySeq) {
+ const params = new URLSearchParams(baseParams);
+ params.set("cursor", String(cursor));
+ const resp = await apiFetch(`/api/watchlist/db/fuzzy?${params.toString()}`, { silent: true });
+ if (seq !== _wlFuzzySeq) return;
+ if (!resp.ok) break;
+ const data = await resp.json();
+ if (seq !== _wlFuzzySeq) return;
+ matches.push(...(data.matches || []));
+ matches.sort((a, b) => (b._fuzzy_score || 0) - (a._fuzzy_score || 0));
+ if (matches.length > WL_FUZZY_MAX_RESULTS) matches.length = WL_FUZZY_MAX_RESULTS;
+ scanned += data.scanned || 0;
+ cursor = data.next_cursor;
+ // Affichage au fur et à mesure : la table se remplit tranche par tranche
+ renderWatchlistTable(matches, 1, matches.length);
+ const pct = scanTotal ? Math.min(100, Math.round((scanned / scanTotal) * 100)) : 100;
+ if (hint) hint.innerHTML = progressHtml(pct, matches.length);
+ // Le balayage va TOUJOURS au bout du périmètre (annulable à tout moment) :
+ // les 200 ne sont qu'un plafond d'affichage glissant qui conserve les
+ // meilleurs scores — la meilleure correspondance peut vivre dans la
+ // dernière tranche, s'arrêter avant la raterait.
+ if (data.done) {
+ if (hint) {
+ hint.innerHTML = matches.length
+ ? `≈ Aucun résultat exact pour « <strong>${escapeHtml(search)}</strong> » — ` +
+ `<strong>${matches.length}</strong> résultat(s) approché(s) (tolérance aux fautes de frappe), classés par similarité` +
+ (matches.length >= WL_FUZZY_MAX_RESULTS ? `, limité aux ${WL_FUZZY_MAX_RESULTS} meilleurs.` : ".")
+ : `Aucun résultat, même en recherche approchée, pour « <strong>${escapeHtml(search)}</strong> ».`;
+ }
+ return;
+ }
+ }
+ } catch (e) { /* balayage silencieux : la recherche suivante reprend la main */ }
+}
+
 async function fetchWatchlist(page = 1) {
  wlCurrentPage = page;
+ _wlFuzzySeq++; // stoppe tout balayage fuzzy en cours
  const searchEl = document.getElementById("wl-search-input");
  const listFilterEl = document.getElementById("wl-list-filter");
  const scopeFilterEl = document.getElementById("wl-scope-filter");
@@ -2262,6 +2317,18 @@ async function fetchWatchlist(page = 1) {
  const data = await response.json();
  if (!response.ok) {
  showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
+ return;
+ }
+ // Grand périmètre : le repli approché n'est pas calculé dans la requête —
+ // on le déroule par tranches et la table se remplit au fur et à mesure
+ if (data.match_mode === "fuzzy_pending") {
+ renderWatchlistTable([], 1, 0);
+ const baseParams = { search };
+ const fieldEl = document.getElementById("wl-field-filter");
+ if (fieldEl && fieldEl.value && fieldEl.value !== "default") baseParams.search_field = fieldEl.value;
+ if (listFilterEl && listFilterEl.value) baseParams.list_type = listFilterEl.value;
+ baseParams.scope = scopeFilterEl && scopeFilterEl.value ? scopeFilterEl.value : "production";
+ runWatchlistFuzzyScan(_wlFuzzySeq, search, baseParams, data.fuzzy_scan_total || 0);
  return;
  }
  // Bandeau fuzzy : la recherche exacte n'a rien donné, résultats approchés
