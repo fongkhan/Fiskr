@@ -339,3 +339,40 @@ def test_active_operations_expose_cancellable(client):
     items = client.get("/api/progress/active").json()["items"]
     row = next(i for i in items if i.get("token") == token)
     assert row["cancellable"] is True and row["job_id"]
+
+
+# ------------------ ZOMBIES : la serialisation ne bloque plus ------------------
+
+def test_stale_serial_running_does_not_block_kind(client):
+    """Un backtest laisse RUNNING par un demon mort (coeur perime) ne doit
+    plus bloquer la serialisation : le suivant se prend normalement.
+    C'etait l'arret complet vu en production — zombies RUNNING eternels
+    (requeue_stale ne tournait qu'au demarrage) + genre serialise bloque."""
+    db = next(get_db())
+    try:
+        # Zombie : RUNNING avec un battement perime, du genre serialise
+        zombie = _insert(db, kind="backtest", status="RUNNING",
+                         heartbeat_at=datetime.utcnow() - timedelta(minutes=10))
+        zombie.token = f"test_jq_zmb-{uuid.uuid4().hex[:6]}"
+        queued = _insert(db, kind="backtest", status="QUEUED",
+                         token=f"test_jq_zmb-{uuid.uuid4().hex[:6]}")
+        queued.priority = 1  # pris avant tout job residuel d'un autre test
+        db.commit()
+        zombie_id, queued_id = zombie.id, queued.id
+
+        # _serial_kind_busy : le zombie ne compte pas comme occupe
+        assert job_queue._serial_kind_busy(db, "backtest") is False
+
+        # claim_next : le QUEUED du meme genre est pris malgre le zombie
+        claimed = job_queue.claim_next(db, "test-claimer")
+        assert claimed == queued_id
+
+        # Un backtest au coeur FRAIS, lui, bloque toujours (garde-fou RAM)
+        db.execute(__import__("sqlalchemy").update(Job).where(Job.id == queued_id)
+                   .values(heartbeat_at=datetime.utcnow()))
+        db.commit()
+        assert job_queue._serial_kind_busy(db, "backtest") is True
+    finally:
+        db.query(Job).filter(Job.id.in_([zombie_id, queued_id])).delete(synchronize_session=False)
+        db.commit()
+        db.close()

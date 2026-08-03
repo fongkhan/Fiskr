@@ -71,14 +71,26 @@ def _write_heartbeat(session) -> None:
 
 
 def _heartbeat_loop():
-    """Deux battements : les lignes jobs RUNNING de ce demon (la reprise s'y
-    fie) et le reglage global (l'autostart de l'API s'y fie)."""
+    """Trois battements : les lignes jobs RUNNING de ce demon (la reprise s'y
+    fie), le reglage global (l'autostart de l'API s'y fie), et — toutes les
+    minutes — la REPARATION des zombies : un job laisse RUNNING par une
+    incarnation morte du demon (OOM, kill) n'etait repare qu'au demarrage
+    suivant ; tant que CE demon vivait, le zombie restait RUNNING pour
+    toujours et, serialise, bloquait son genre entier (vu en production :
+    deux cahiers de tests zombies, toute la file a l'arret)."""
     me = jobs.worker_id()
+    beats = 0
     while not _stop.wait(HEARTBEAT_EVERY_S):
+        beats += 1
         session = jobs._fresh_session()
         try:
             jobs.heartbeat(session, me)
             _write_heartbeat(session)
+            if beats % 4 == 0:  # ~ toutes les 60 s
+                repaired = jobs.requeue_stale(session, worker_present=True)
+                if repaired:
+                    logger.warning(f"Réparation périodique : {repaired} job(s) "
+                                   f"zombie(s) traités (battement de coeur périmé).")
         except Exception as e:
             logger.warning(f"Battement de coeur en echec : {e}")
             try:

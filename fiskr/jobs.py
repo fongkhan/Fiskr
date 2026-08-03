@@ -237,10 +237,20 @@ SERIAL_KINDS = ("backtest", "engine_simulation")
 
 
 def _serial_kind_busy(session, kind: str, exclude_job_id: Optional[int] = None) -> bool:
-    """Un job du meme genre serialise tourne-t-il deja (ailleurs) ?"""
+    """
+    Un job du meme genre serialise tourne-t-il deja (ailleurs) ?
+
+    Seuls les RUNNING au battement de coeur FRAIS comptent : un job laisse
+    RUNNING par un demon mort (OOM, kill) n'occupe plus personne — sans ce
+    filtre, un zombie bloquait son genre entier pour toujours (vu en
+    production : deux cahiers de tests zombies, toute la file a l'arret).
+    """
     if kind not in SERIAL_KINDS:
         return False
-    q = session.query(Job.id).filter(Job.kind == kind, Job.status == "RUNNING")
+    cutoff = datetime.utcnow() - STALE_AFTER
+    q = session.query(Job.id).filter(
+        Job.kind == kind, Job.status == "RUNNING",
+        Job.heartbeat_at.isnot(None), Job.heartbeat_at >= cutoff)
     if exclude_job_id is not None:
         q = q.filter(Job.id != exclude_job_id)
     return q.first() is not None
@@ -261,8 +271,12 @@ def claim_next(session, claimer: str) -> Optional[int]:
     attend son tour.
     """
     now = datetime.utcnow()
+    # Meme filtre de fraicheur que _serial_kind_busy : un job serialise
+    # laisse RUNNING par un demon mort ne doit pas bloquer son genre
+    stale_cutoff = now - STALE_AFTER
     running_serial = [k for (k,) in session.query(Job.kind).distinct().filter(
-        Job.status == "RUNNING", Job.kind.in_(SERIAL_KINDS)).all()]
+        Job.status == "RUNNING", Job.kind.in_(SERIAL_KINDS),
+        Job.heartbeat_at.isnot(None), Job.heartbeat_at >= stale_cutoff).all()]
     q = session.query(Job).filter(
         Job.status == "QUEUED",
         (Job.not_before.is_(None)) | (Job.not_before <= now),
