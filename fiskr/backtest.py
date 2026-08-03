@@ -301,9 +301,12 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     ajoutee cote candidat UNIQUEMENT : l'ecart chiffre montre l'effet de la
     regle avant de la soumettre a validation.
 
-    `progress(phase, traites, total)` est relaye par les deux passes, avec les
-    phases SCREEN_CURRENT puis SCREEN_CANDIDATE : la barre avance sur toute la
-    duree du cahier de tests, pas seulement sur sa seconde moitie.
+    `progress(phase, traites, total)` publie une progression CONTINUE sur tout
+    le cahier de tests : le total cumule toutes les passes (2 en mode complet,
+    3 en mode delta), chaque passe porte son nom (SCREEN_CURRENT/SCREEN_CANDIDATE
+    en complet ; SCREEN_SHARED/SCREEN_REMOVED/SCREEN_ADDED en delta) et les
+    chargements d'univers sont annonces (LOAD_UNIVERSE) au lieu de laisser la
+    barre muette pendant des minutes.
 
     Leve ValueError si la regle candidate est invalide (l'endpoint valide en
     amont pour repondre 400 avant de lancer le job).
@@ -335,10 +338,26 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     } if candidate_rule else None)
     active_rules_count = len(current_rules)
 
+    # ------- Progression CONTINUE sur tout le cahier de tests -------
+    # Chaque passe crible le panel entier : la barre CUMULE les passes au
+    # lieu de repartir de zero a chacune — l'utilisateur voit une seule
+    # progression 0 -> 100 %, avec le nom de la passe en cours, et le
+    # chargement d'univers (silencieux pendant des minutes sur une grosse
+    # base) est annonce comme une phase a part entiere.
+    overall = {"base": 0, "total": panel_size * 2}  # ajuste en mode delta
+
     def _phase_progress(phase: str):
         if not progress:
             return None
-        return lambda done, total: progress(phase, done, total)
+        base = overall["base"]
+        return lambda done, total: progress(phase, base + done, overall["total"])
+
+    def _pass_done():
+        overall["base"] += panel_size
+
+    def _loading():
+        if progress:
+            progress("LOAD_UNIVERSE", overall["base"], overall["total"])
 
     # Projection memoire derivee des regles reellement evaluees : les colonnes
     # que le moteur lit, plus celles que le code d'une regle mentionne. C'est
@@ -376,36 +395,43 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         return merged
 
     if delta is not None:
+        overall["total"] = panel_size * 3  # partage + retirees + ajoutees
         changed_old = delta["removed"] | delta["modified"]
         changed_new = delta["added"] | delta["modified"]
         # Univers partage : toutes les autres listes + les fiches INCHANGEES
         # de la liste testee (chargees depuis le candidat : meme checksum,
         # meme contenu). C'est la seule passe de la taille d'un univers.
+        _loading()
         shared_ids = [sid for sid in candidate_ids if sid != pending_snap.snapshot_id]
         shared_entities = _entity_dicts(db, shared_ids, projection=projection) if shared_ids else []
         shared_entities.extend(_entity_dicts(
             db, [pending_snap.snapshot_id], projection=projection,
             entity_ids=delta["unchanged"]))
         shared = _dry_run_screen(db, None, shared_entities, rule_set=current_rules,
-                                 progress=_phase_progress("SCREEN_CURRENT"),
+                                 progress=_phase_progress("SCREEN_SHARED"),
                                  panel_snapshot_id=panel_snapshot_id)
         del shared_entities
         _gc.collect()
+        _pass_done()
 
+        _loading()
         removed_entities = _entity_dicts(db, old_type_ids, projection=projection,
                                          entity_ids=changed_old) if old_type_ids else []
         removed_hits = _dry_run_screen(db, None, removed_entities, rule_set=current_rules,
-                                       progress=_phase_progress("SCREEN_CANDIDATE"),
+                                       progress=_phase_progress("SCREEN_REMOVED"),
                                        panel_snapshot_id=panel_snapshot_id)
         del removed_entities
+        _pass_done()
 
+        _loading()
         added_entities = _entity_dicts(db, [pending_snap.snapshot_id], projection=projection,
                                        entity_ids=changed_new)
         added_hits = _dry_run_screen(db, None, added_entities, rule_set=candidate_rules,
-                                     progress=_phase_progress("SCREEN_CANDIDATE"),
+                                     progress=_phase_progress("SCREEN_ADDED"),
                                      panel_snapshot_id=panel_snapshot_id)
         del added_entities
         _gc.collect()
+        _pass_done()
 
         current = _combine(shared, removed_hits)
         candidate = _combine(shared, added_hits)
@@ -414,19 +440,23 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         # A 750 000 fiches, tenir production ET candidat simultanement
         # (~12,6 Go) etait la cause premiere du cahier de tests qui ne se
         # terminait pas.
+        _loading()
         current_entities = _entity_dicts(db, current_ids, projection=projection) if current_ids else []
         current = _dry_run_screen(db, None, current_entities, rule_set=current_rules,
                                   progress=_phase_progress("SCREEN_CURRENT"),
                                   panel_snapshot_id=panel_snapshot_id)
         del current_entities
         _gc.collect()
+        _pass_done()
 
+        _loading()
         candidate_entities = _entity_dicts(db, candidate_ids, projection=projection) if candidate_ids else []
         candidate = _dry_run_screen(db, None, candidate_entities, rule_set=candidate_rules,
                                     progress=_phase_progress("SCREEN_CANDIDATE"),
                                     panel_snapshot_id=panel_snapshot_id)
         del candidate_entities
         _gc.collect()
+        _pass_done()
 
     def _rate(alerts: int) -> float:
         return round(alerts * 100.0 / panel_size, 2) if panel_size else 0.0

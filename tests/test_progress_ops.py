@@ -271,8 +271,12 @@ def test_backtest_publishes_progress_phases(client, ab_setup, monkeypatch):
     response = client.post(f"/api/review/snapshots/{ab_setup['pending_id']}/backtest",
                            json={"panel_snapshot_id": ab_setup["panel_id"]})
     wait_for_job(client, response.json()["job_token"])
-    assert "SCREEN_CURRENT" in seen
-    assert "SCREEN_CANDIDATE" in seen
+    # Mode delta (pas de règle candidate) : trois passes nommées + chargements
+    # annoncés — chaque phase de criblage publie son avancement.
+    assert "SCREEN_SHARED" in seen
+    assert "SCREEN_REMOVED" in seen
+    assert "SCREEN_ADDED" in seen
+    assert "LOAD_UNIVERSE" in seen
 
 
 def test_backtest_refusals_stay_synchronous(client, ab_setup):

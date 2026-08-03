@@ -889,6 +889,7 @@
  </div>
  </div>
  </div>
+ <div id="review-backtest-job-state" style="margin-top: 0.75rem;"></div>
  <div id="backtest-results" class="hidden" style="margin-top: 1.25rem;"></div>
  </div>
 
@@ -2012,7 +2013,8 @@
  <p class="guide-p">La liste consolidée UE (FSF) est pratique mais paresseuse : elle peut dater de deux mois. Or le gel s'applique dès la publication du règlement au Journal officiel. Fiskr surveille donc les <strong>actes restrictifs publiés sur EUR-Lex</strong> et en extrait les listés directement (HTML de l'acte, PDF officiel en repli) ; le PDF est archivé avec son empreinte SHA-256 comme pièce justificative. La consolidée FSF reste synchronisée en parallèle — les deux se recoupent dans le référentiel.</p>
 
  <h3>Le cahier de tests (backtest)</h3>
- <p class="guide-p">Avant d'approuver une liste, on mesure ce qu'elle change : le backtest crible un <strong>panel de clients de test</strong> contre l'ancienne et la nouvelle version et compare les volumes d'alertes. Au-delà d'un écart maximal paramétré, l'approbation est bloquée. Le moteur travaille en <strong>mode delta</strong> (une passe partagée + deux passes minuscules sur les entités ajoutées/retirées) : exact et économe, et les backtests sont sérialisés pour ne jamais saturer la mémoire. Un panel de 500 clients est généré automatiquement s'il n'en existe pas.</p>
+ <p class="guide-p">Avant d'approuver une liste, on mesure ce qu'elle change : le backtest crible un <strong>panel de clients de test</strong> contre l'ancienne et la nouvelle version et compare les volumes d'alertes. Au-delà d'un écart maximal paramétré, l'approbation est bloquée. Le moteur travaille en <strong>mode delta</strong> (une passe partagée + deux passes minuscules sur les entités ajoutées/retirées) : exact et économe. Un panel de 500 clients est généré automatiquement s'il n'en existe pas.</p>
+ <p class="guide-p">Robuste par construction : la mémoire est maîtrisée (univers chargés en projection, jamais deux univers en RAM — cahiers de tests et simulations moteur forment un <strong>groupe sérialisé exclusif</strong>), la progression est <strong>continue de 0 à 100 %</strong> avec des passes nommées et des chargements annoncés, et les pannes sont toujours visibles : un criblage parallèle figé repart seul en séquentiel, un job zombie est remis en file en ~60 s, et un échec définitif s'affiche dans l'étape 3 du stepper avec sa cause et un bouton <strong>↻ Relancer</strong>. Un cahier encore en file s'annule d'un clic (✕ Annuler) et le rapport archivé n'est écrit qu'en fin de succès — un échec n'écrase jamais le dernier rapport valide.</p>
  </div>
  </div>
 
@@ -2142,7 +2144,7 @@
  <p class="guide-p">Tout réglage à chaud est journalisé et prend effet sans redémarrage ; la configuration de départ vit dans <em>config.yaml</em>.</p>
 
  <h3>Travaux de fond</h3>
- <p class="guide-p">Synchronisations, imports volumineux, backtests, re-criblages et campagnes tournent dans une <strong>file de travaux</strong> supervisée (pastille en haut de l'écran, relance possible, travaux lourds sérialisés). Si le démon de traitement s'arrête, un bandeau l'annonce — rien ne se perd, la file reprend.</p>
+ <p class="guide-p">Synchronisations, imports volumineux, backtests, re-criblages et campagnes tournent dans une <strong>file de travaux</strong> supervisée (pastille en haut de l'écran, relance possible, travaux lourds en groupe sérialisé exclusif). Si le démon de traitement s'arrête, un bandeau l'annonce — rien ne se perd : les jobs interrompus sont réparés en continu (~60 s), un travail en file s'annule avant exécution, un échec se relance d'un clic.</p>
 
  <h3>Pilotage</h3>
  <ul class="guide-list">

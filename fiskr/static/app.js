@@ -1487,8 +1487,12 @@ const PROGRESS_PHASE_LABELS = {
  DELTA: "Calcul du delta…",
  RELOAD: "Rechargement du cache de production…",
  INDEX: "Construction de l'index de blocking…",
- SCREEN_CURRENT: "Criblage à blanc — listes en production…",
- SCREEN_CANDIDATE: "Criblage à blanc — listes candidates…",
+ LOAD_UNIVERSE: "Chargement de l'univers de listes…",
+ SCREEN_CURRENT: "Criblage à blanc (passe 1/2) — listes en production…",
+ SCREEN_CANDIDATE: "Criblage à blanc (passe 2/2) — listes candidates…",
+ SCREEN_SHARED: "Criblage à blanc (passe 1/3) — univers partagé…",
+ SCREEN_REMOVED: "Criblage à blanc (passe 2/3) — fiches retirées…",
+ SCREEN_ADDED: "Criblage à blanc (passe 3/3) — fiches ajoutées…",
  RESCREEN: "Re-criblage du référentiel clients…",
  QUALITY: "Contrôle de qualité du référentiel…",
  DONE: "Terminé",
@@ -4376,6 +4380,7 @@ async function openReviewDetail(snapshotId) {
  fetchTestPanels();
  fetchBacktestCandidateRules();
  renderBacktestReport(data.backtest_report);
+ renderBacktestJobState(data.backtest_job, snapshotId);
  // Reprise d'état : un cahier de tests lancé avant un rechargement de
  // page (ou depuis un autre poste) reverrouille le bouton et se
  // reconnecte à sa fin — la progression ne se perd jamais
@@ -4587,6 +4592,55 @@ function backtestVerdictBadge(report) {
  return report.verdict === "OK"
  ? '<span class="status-badge no_match">ÉCART OK</span>'
  : '<span class="status-badge warning">ÉCART ÉLEVÉ</span>';
+}
+
+// État du DERNIER job de cahier de tests du snapshot, rendu DANS l'étape 3
+// du stepper : un échec s'y voit en rouge avec sa cause et se relance d'un
+// clic ; un job encore en file s'annule (retour à l'état précédent). Le
+// rapport archivé, lui, reste affiché tel quel — un échec de re-exécution
+// n'efface jamais le dernier rapport valide.
+function renderBacktestJobState(job, snapshotId) {
+ const box = document.getElementById("review-backtest-job-state");
+ if (!box) return;
+ if (!job || job.status === "DONE" || job.status === "RUNNING") {
+ box.innerHTML = "";
+ return;
+ }
+ if (job.status === "ERROR") {
+ const retry = job.retryable
+ ? ` <button class="btn-secondary job-retry-btn" onclick="retryReviewBacktest(${job.id}, '${escapeHtml(snapshotId)}')">↻ Relancer</button>`
+ : "";
+ box.innerHTML = `
+ <div class="job-row err" style="display:block; padding: 0.6rem 0.8rem;">
+ <strong style="color: var(--color-alert);">Le dernier cahier de tests a échoué</strong>
+ (tentative ${job.attempts}) : ${escapeHtml(String(job.error || "erreur inconnue").slice(0, 200))}${retry}
+ <div style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.25rem;">
+ Le dernier rapport valide ci-dessous reste inchangé — rien n'a été écrasé.</div>
+ </div>`;
+ } else if (job.status === "QUEUED") {
+ box.innerHTML = `
+ <div class="job-row warn" style="display:block; padding: 0.6rem 0.8rem;">
+ <strong>Un cahier de tests est en file d'attente</strong> — il démarrera dès que le créneau sérialisé se libère.
+ <button class="btn-secondary job-cancel-btn" onclick="cancelReviewBacktest(${job.id}, '${escapeHtml(snapshotId)}')">✕ Annuler</button>
+ </div>`;
+ } else if (job.status === "CANCELLED") {
+ box.innerHTML = `
+ <div class="job-row warn" style="display:block; padding: 0.6rem 0.8rem;">
+ Le dernier cahier de tests a été <strong>annulé avant exécution</strong> — relancez-en un si nécessaire.
+ </div>`;
+ }
+}
+
+async function retryReviewBacktest(jobId, snapshotId) {
+ await retryJob(jobId);
+ setBacktestButtonRunning(true);
+ fetchActiveOperations();
+ setTimeout(() => openReviewDetail(snapshotId), 800);
+}
+
+async function cancelReviewBacktest(jobId, snapshotId) {
+ await cancelQueuedJob(jobId);
+ setTimeout(() => openReviewDetail(snapshotId), 800);
 }
 
 function renderBacktestReport(report) {
@@ -8362,18 +8416,9 @@ function renderOpsPill() {
  pill.classList.remove("hidden");
 }
 
-function renderOpsSection() {
- const section = document.getElementById("notif-ops-section");
- const list = document.getElementById("notif-ops-list");
- if (!section || !list) return;
- if (!_activeOps.length) {
- section.classList.add("hidden");
- list.innerHTML = "";
- return;
- }
- section.classList.remove("hidden");
- list.innerHTML = _activeOps.map(op => {
- const icon = OPERATION_KIND_ICONS[op.kind] || "";
+// État d'affichage d'une opération : pièces partagées entre la construction
+// d'une ligne neuve et sa mise à jour en place.
+function _opsRowState(op) {
  const done = op.status !== "RUNNING";
  const phase = done
  ? (op.status === "ERROR" ? `Échec : ${op.error || "erreur inconnue"}` : "Terminé")
@@ -8393,23 +8438,67 @@ function renderOpsSection() {
  : "");
  const fillClass = (!done && (op.pct === null || op.pct === undefined))
  ? "progress-tracker-fill indeterminate" : "progress-tracker-fill";
- const onClick = op.link
- ? ` class="ops-row clickable" onclick="location.hash='${op.link}'; toggleNotifCenter(false);"`
- : ' class="ops-row"';
  // Une action encore EN FILE n'a rien exécuté : elle s'annule d'un clic
  // (retour exact à l'état précédent). Réservé aux administrateurs, comme
  // l'endpoint. Dès qu'elle démarre, le bouton disparaît.
  const cancelBtn = (op.cancellable && op.job_id && userRoles(currentUser).includes("admin"))
- ? `<button class="btn-secondary job-cancel-btn" title="Annuler cette action avant son exécution — rien n'a encore été modifié"
+ ? ` <button class="btn-secondary job-cancel-btn" title="Annuler cette action avant son exécution — rien n'a encore été modifié"
  onclick="event.stopPropagation(); cancelQueuedJob(${op.job_id});">✕ Annuler</button>`
  : "";
- return `<div${onClick}>
+ const metaHtml = `${escapeHtml(phase)}${counts ? ` · ${escapeHtml(counts)}` : ""}`
+ + `${op.started_by ? ` · @${escapeHtml(op.started_by)}` : ""}${cancelBtn}`;
+ return { pctText, fillStyle, fillClass, metaHtml };
+}
+
+function renderOpsSection() {
+ const section = document.getElementById("notif-ops-section");
+ const list = document.getElementById("notif-ops-list");
+ if (!section || !list) return;
+ if (!_activeOps.length) {
+ section.classList.add("hidden");
+ list.innerHTML = "";
+ delete list.dataset.identity;
+ return;
+ }
+ section.classList.remove("hidden");
+
+ // Rendu FLUIDE : tant que la composition de la liste ne change pas (mêmes
+ // opérations, mêmes états), les lignes sont mises à jour EN PLACE — la
+ // barre s'anime par la transition CSS au lieu d'être recréée à chaque
+ // sondage (clignotement, survol perdu). La liste n'est reconstruite que
+ // quand une opération apparaît, disparaît ou change d'état.
+ const identity = _activeOps.map(op => `${op.token}·${op.status}·${op.cancellable ? 1 : 0}`).join("|");
+ if (list.dataset.identity === identity) {
+ for (const op of _activeOps) {
+ const row = list.querySelector(`[data-token="${CSS.escape(op.token)}"]`);
+ if (!row) continue;
+ const st = _opsRowState(op);
+ const pctEl = row.querySelector(".ops-pct");
+ if (pctEl && pctEl.textContent !== st.pctText) pctEl.textContent = st.pctText;
+ const fill = row.querySelector(".progress-tracker-bar > div");
+ if (fill) {
+ if (fill.className !== st.fillClass) fill.className = st.fillClass;
+ if (fill.style.cssText !== st.fillStyle) fill.style.cssText = st.fillStyle;
+ }
+ const meta = row.querySelector(".ops-row-meta");
+ if (meta && meta.innerHTML !== st.metaHtml) meta.innerHTML = st.metaHtml;
+ }
+ return;
+ }
+ list.dataset.identity = identity;
+ list.innerHTML = _activeOps.map(op => {
+ const icon = OPERATION_KIND_ICONS[op.kind] || "";
+ const st = _opsRowState(op);
+ const onClick = op.link
+ ? ` class="ops-row clickable" onclick="location.hash='${op.link}'; toggleNotifCenter(false);"`
+ : ' class="ops-row"';
+ return `<div${onClick} data-token="${escapeHtml(op.token)}">
  <div class="ops-row-head">
  <span>${icon} ${escapeHtml(op.label || op.token)}</span>
- <span style="color: var(--text-muted);">${escapeHtml(pctText)}</span>
+ <span class="ops-pct" style="color: var(--text-muted);">${escapeHtml(st.pctText)}</span>
  </div>
- <div class="progress-tracker-bar"><div class="${fillClass}" style="${fillStyle}"></div></div>
- <div class="ops-row-meta">${escapeHtml(phase)}${counts ? ` · ${escapeHtml(counts)}` : ""}${op.started_by ? ` · @${escapeHtml(op.started_by)}` : ""}${cancelBtn}</div>
+ <div class="progress-tracker-bar"><div class="${st.fillClass}" style="${st.fillStyle}"></div></div>
+ <div class="ops-row-meta">${st.metaHtml}</div>
  </div>`;
  }).join("");
 }

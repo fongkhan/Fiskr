@@ -440,7 +440,11 @@ Processus API (×N, Passenger/uvicorn)      Démon travailleur (×1, verrou floc
   interrompu par un arrêt brutal est détecté par son battement de cœur périmé
   et remis en file (relance de zéro, plafonnée par `attempts` ; au-delà, ERROR
   relançable d'un clic depuis la section **Travaux** du centre de
-  notifications).
+  notifications). Cette réparation tourne **au démarrage ET en continu**
+  (toutes les ~60 s dans la boucle de battement du démon) : un job zombie
+  laissé RUNNING par une incarnation morte est repris en une minute, sans
+  redémarrage. La sérialisation ne compte que les jobs au **cœur frais** :
+  un zombie ne bloque jamais son groupe.
 - **Le démon est unique par construction** : verrou `flock` sur
   `fiskr-worker.lock`, rendu par le noyau à la mort du processus — pas de
   fichier de PID fantôme. Il héberge aussi **tous les planificateurs

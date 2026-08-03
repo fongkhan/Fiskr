@@ -376,3 +376,33 @@ def test_stale_serial_running_does_not_block_kind(client):
         db.query(Job).filter(Job.id.in_([zombie_id, queued_id])).delete(synchronize_session=False)
         db.commit()
         db.close()
+
+
+def test_serial_group_is_exclusive_across_kinds(client):
+    """Le groupe serialise est exclusif dans son ENSEMBLE : une simulation
+    moteur en cours (coeur frais) bloque aussi la prise d'un cahier de tests
+    — jamais deux univers de listes en memoire, quel que soit le melange."""
+    noop_kind = _noop_task("test_jq_grp")
+    db = next(get_db())
+    created = []
+    try:
+        running_sim = _insert(db, kind="engine_simulation", status="RUNNING",
+                              heartbeat_at=datetime.utcnow(),
+                              token=f"test_jq_grp-{uuid.uuid4().hex[:6]}")
+        queued_bt = _insert(db, kind="backtest", status="QUEUED",
+                            token=f"test_jq_grp-{uuid.uuid4().hex[:6]}")
+        queued_bt.priority = 1  # premier candidat s'il n'etait pas bloque
+        other = _insert(db, kind=noop_kind, status="QUEUED")
+        other.priority = 2
+        db.commit()
+        created = [running_sim.id, queued_bt.id, other.id]
+
+        # Occupation croisee : le backtest attend la simulation en cours
+        assert job_queue._serial_kind_busy(db, "backtest") is True
+        # claim_next saute le groupe entier et sert le job ordinaire
+        claimed = job_queue.claim_next(db, "test-claimer")
+        assert claimed == other.id
+    finally:
+        db.query(Job).filter(Job.id.in_(created)).delete(synchronize_session=False)
+        db.commit()
+        db.close()

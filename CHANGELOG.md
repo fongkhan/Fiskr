@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — test-book (backtest) overhaul: bounded RAM, continuous progress, visible failures, one-click rollback
+Full review of the backtest path (`fiskr/backtest.py`, `fiskr/jobs.py`, homologation stepper) with four outcomes:
+
+- **RAM bounded by construction**: universes were already loaded in projection and passes already sequential; the remaining vector was two heavy jobs of *different* kinds running side by side. Backtests and engine simulations now form an **exclusive serialized group** (`SERIAL_KINDS`): while any member is RUNNING with a fresh heartbeat, no other member starts — at most one screening universe in RAM at any time, whatever the mix. The daemon keeps its second slot for light jobs (promotions, syncs), which now explicitly bypass the wait instead of queueing behind a backtest.
+- **Continuous, legible progress**: one single 0 → 100 % bar covers the whole test book. The total cumulates every pass (2 in full mode, 3 in delta mode), each pass is named ("passe 1/3 — univers partagé", "passe 2/3 — fiches retirées"…), and universe loads — previously silent minutes on large referentials — announce themselves (`LOAD_UNIVERSE`). The operations panel re-renders **in place** (patched rows, animated bar, no flicker) instead of rebuilding its DOM on every poll.
+- **Failures visible where the user works**: the homologation stepper's step 3 now shows the last backtest job's state — an ERROR banner with the cause, attempt count and a **↻ Relancer** button; a QUEUED notice with **✕ Annuler**; a CANCELLED notice. (`GET /api/review/snapshots/{id}` returns `backtest_job`.) Combined with the continuous zombie repair, a crash can no longer be invisible.
+- **Rollback guarantees stated and tested**: a queued test book cancels atomically (nothing ran, exact return to the previous state), and the archived report is written **only on success, in one commit** — a failed re-run never clobbers the last valid report.
+
+New tests: progress monotonicity/continuity across delta passes, and cross-kind exclusivity of the serial group. Documentation updated accordingly (README, in-app guide, `Documentation/PRODUCTION_DES_LISTES.md` — the business process itself is unchanged).
+
 ### Fixed — zombie RUNNING jobs no longer freeze the whole queue
 Production observation: two "Cahier de tests" entries RUNNING **simultaneously** (impossible within one daemon — backtests are serialized) with every other job stuck QUEUED. Those were **zombies**: jobs left RUNNING by a daemon incarnation killed mid-run (OOM). `requeue_stale` only ran **at daemon startup** — as long as the current daemon lived, zombies stayed RUNNING forever, occupied the daemon's slots in the display, and the serialization check counted them as "busy", blocking their whole kind. Two fixes:
 

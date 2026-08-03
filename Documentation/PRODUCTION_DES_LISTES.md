@@ -112,22 +112,49 @@ Le rapport est **archivé avec le snapshot** (auditable après promotion) via
 liste, liste blanche) que la production est appliqué : le taux mesuré prédit
 le comportement réel.
 
-### Exécution et reprise automatique
+### Exécution, mémoire et progression
 
 Le cahier de tests s'exécute dans le **démon travailleur** (processus séparé
 de l'API) : l'application reste pleinement réactive pendant tout le criblage,
 même sur un univers de 750 000 fiches, et le calcul est **parallélisé** sur
 plusieurs processus (tranches de pseudo-clients, résultats identiques au
-séquentiel). La progression est visible dans la pastille ⚙ et survit à un
+séquentiel).
+
+**Mémoire maîtrisée, par construction** : les univers sont chargés en
+*projection* (seuls les champs lus par le moteur, ~3,8 Ko/fiche au lieu de
+~8,4), jamais deux univers ne sont en mémoire simultanément (passes
+séquentielles, mémoire rendue entre les passes), et les jobs lourds —
+cahiers de tests **et** simulations moteur — forment un **groupe sérialisé
+exclusif** : un seul univers en RAM à la fois, quel que soit le mélange.
+
+**Progression continue** : une seule barre 0 → 100 % couvre tout le cahier
+(le total cumule toutes les passes — 2 en mode complet, 3 en mode delta),
+chaque passe est nommée (« passe 1/3 — univers partagé », « passe 2/3 —
+fiches retirées »…) et les chargements d'univers, longs sur une grosse
+base, sont annoncés au lieu de laisser la barre muette. L'affichage se met
+à jour en douceur (barre animée, sans clignotement) et survit à un
 rechargement de page.
 
-Si le serveur ou le démon est arrêté en plein criblage (recyclage de
-l'hébergeur, redémarrage), le job est **repris automatiquement de zéro** au
-redémarrage suivant — c'est la ligne de la file de travaux qui fait foi, pas
-un thread en mémoire. La reprise est plafonnée (2 tentatives) ; au-delà,
-l'opération apparaît **en échec dans la section « Travaux »** du centre de
-notifications (🔔), avec un bouton **↻ Relancer** (réservé aux
-administrateurs, tracé au journal d'administration).
+### Pannes visibles, reprise et retour arrière
+
+Trois garde-fous rendent tout incident **visible et réparable** — jamais
+silencieux, jamais bloquant :
+
+- **Chien de garde du criblage parallèle** : un processus enfant tué (OOM)
+  ou figé est détecté (aucune progression pendant
+  `jobs.screen_stall_timeout_s`, 15 min par défaut) ; le cahier de tests
+  **repart alors automatiquement en séquentiel** (mémoire minimale) et
+  aboutit au lieu de bloquer la file.
+- **Réparation continue des zombies** : un job laissé RUNNING par un démon
+  mort est remis en file en ~60 s (2 tentatives au plus) ; au-delà, il
+  apparaît **en échec** — dans la section « Travaux » du centre de
+  notifications ET directement dans l'**étape 3 du stepper
+  d'homologation**, avec sa cause et un bouton **↻ Relancer**.
+- **Retour à l'état précédent** : un cahier de tests encore **en file
+  d'attente** n'a rien exécuté — il s'annule d'un clic (✕ Annuler, depuis
+  le panneau des opérations ou le stepper). Et le rapport archivé n'est
+  écrit **qu'en fin de succès, en un seul commit** : un échec de
+  ré-exécution n'écrase jamais le dernier rapport valide.
 
 ## Étape 5 — Good Guys (liste blanche) si écart élevé
 
