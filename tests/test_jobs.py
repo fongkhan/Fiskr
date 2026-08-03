@@ -266,3 +266,76 @@ def test_purge_removes_only_old_finished_jobs(client):
         assert db.get(Job, ids[2]) is not None  # jamais purger une file vivante
     finally:
         db.close()
+
+
+# ------------------ ANNULATION (retour a l'etat precedent) ------------------
+
+def test_cancel_queued_job_never_runs(client):
+    """Un job QUEUED s'annule : CANCELLED, trace au journal admin, et la
+    tache ne s'execute JAMAIS (retour exact a l'etat d'avant soumission)."""
+    from fiskr.database import AdminAuditLog
+    kind = _noop_task("test_jq_cancel")
+    db = next(get_db())
+    try:
+        job = _insert(db, kind=kind, status="QUEUED")
+        job_id, token = job.id, job.token
+    finally:
+        db.close()
+
+    response = client.post(f"/api/jobs/{job_id}/cancel")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "CANCELLED"
+
+    db = next(get_db())
+    try:
+        refreshed = db.get(Job, job_id)
+        assert refreshed.status == "CANCELLED"
+        assert refreshed.finished_at is not None
+        assert refreshed.result is None  # rien n'a ete execute
+        logged = db.query(AdminAuditLog).filter(
+            AdminAuditLog.action == "JOB_CANCELLED",
+            AdminAuditLog.target == f"{kind}:{token}").first()
+        assert logged is not None
+        db.query(AdminAuditLog).filter(AdminAuditLog.id == (logged.id if logged else -1)).delete()
+        db.commit()
+    finally:
+        db.close()
+
+    # run_job sur un job annule : la garde refuse de l'executer
+    job_queue.run_job(job_id)
+    db = next(get_db())
+    try:
+        refreshed = db.get(Job, job_id)
+        assert refreshed.status == "CANCELLED"
+        assert refreshed.result is None
+    finally:
+        db.close()
+
+
+def test_cancel_refuses_running_and_unknown(client):
+    kind = _noop_task("test_jq_cancel_run")
+    db = next(get_db())
+    try:
+        running = _insert(db, kind=kind, status="RUNNING",
+                          heartbeat_at=datetime.utcnow())
+        running_id = running.id
+    finally:
+        db.close()
+    assert client.post(f"/api/jobs/{running_id}/cancel").status_code == 400
+    assert client.post("/api/jobs/99999999/cancel").status_code == 404
+
+
+def test_active_operations_expose_cancellable(client):
+    """La liste des operations actives porte job_id + cancellable sur les
+    QUEUED : le panneau peut afficher le bouton d'annulation."""
+    kind = _noop_task("test_jq_cancel_view")
+    db = next(get_db())
+    try:
+        queued = _insert(db, kind=kind, status="QUEUED")
+        token = queued.token
+    finally:
+        db.close()
+    items = client.get("/api/progress/active").json()["items"]
+    row = next(i for i in items if i.get("token") == token)
+    assert row["cancellable"] is True and row["job_id"]

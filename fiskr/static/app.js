@@ -8396,15 +8396,46 @@ function renderOpsSection() {
  const onClick = op.link
  ? ` class="ops-row clickable" onclick="location.hash='${op.link}'; toggleNotifCenter(false);"`
  : ' class="ops-row"';
+ // Une action encore EN FILE n'a rien exécuté : elle s'annule d'un clic
+ // (retour exact à l'état précédent). Réservé aux administrateurs, comme
+ // l'endpoint. Dès qu'elle démarre, le bouton disparaît.
+ const cancelBtn = (op.cancellable && op.job_id && userRoles(currentUser).includes("admin"))
+ ? `<button class="btn-secondary job-cancel-btn" title="Annuler cette action avant son exécution — rien n'a encore été modifié"
+ onclick="event.stopPropagation(); cancelQueuedJob(${op.job_id});">✕ Annuler</button>`
+ : "";
  return `<div${onClick}>
  <div class="ops-row-head">
  <span>${icon} ${escapeHtml(op.label || op.token)}</span>
  <span style="color: var(--text-muted);">${escapeHtml(pctText)}</span>
  </div>
  <div class="progress-tracker-bar"><div class="${fillClass}" style="${fillStyle}"></div></div>
- <div class="ops-row-meta">${escapeHtml(phase)}${counts ? ` · ${escapeHtml(counts)}` : ""}${op.started_by ? ` · @${escapeHtml(op.started_by)}` : ""}</div>
+ <div class="ops-row-meta">${escapeHtml(phase)}${counts ? ` · ${escapeHtml(counts)}` : ""}${op.started_by ? ` · @${escapeHtml(op.started_by)}` : ""}${cancelBtn}</div>
  </div>`;
  }).join("");
+}
+
+// Annulation d'une action en file : rien n'a encore été exécuté ni modifié —
+// l'annuler restaure exactement l'état d'avant sa soumission. Si le job a
+// démarré entre-temps, le serveur répond 409 et l'état est rafraîchi tel quel.
+async function cancelQueuedJob(jobId) {
+ const ok = await confirmDialog(
+ "Annuler cette action en file d'attente ? Elle n'a encore rien exécuté : " +
+ "l'annulation revient exactement à l'état précédent.",
+ { confirmLabel: "Annuler l'action", danger: true });
+ if (!ok) return;
+ try {
+ const response = await apiFetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast(data.detail || "Annulation impossible.", "error");
+ } else {
+ showToast("Action annulée — elle n'a jamais été exécutée.", "success");
+ }
+ } catch (e) {
+ showToast("Annulation impossible (réseau).", "error");
+ }
+ fetchActiveOperations();
+ renderJobsSection();
 }
 
 // Opération en cours portant ce snapshot (reprise d'état après rechargement)

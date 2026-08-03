@@ -5722,6 +5722,10 @@ async def list_active_operations(
             **view,
             "label": job.label or job.token,
             "link": _OPERATION_LINKS.get(job.kind, ""),
+            # Une action encore en file n'a rien execute : elle s'annule
+            # (bouton du panneau, admin) — retour exact a l'etat precedent
+            "job_id": job.id,
+            "cancellable": job.status == "QUEUED",
         })
 
     # Campagnes batch : deja persistees avec leur progression, on les fusionne
@@ -5836,22 +5840,38 @@ async def cancel_job(
     db: Session = Depends(get_db),
     admin_user: Dict[str, Any] = Depends(require_admin)
 ):
-    """Annule un job encore en file (QUEUED uniquement : l'annulation
-    cooperative d'un job en cours n'est pas supportee)."""
+    """
+    Annule un job encore en file — le « retour a l'etat precedent » d'une
+    action en attente : rien n'a encore ete execute ni modifie, l'annuler
+    restaure exactement l'etat d'avant sa soumission. QUEUED uniquement
+    (l'annulation cooperative d'un job en cours n'est pas supportee).
+
+    ATOMIQUE : l'UPDATE est garde par `status = QUEUED` — si le demon prend
+    le job entre la lecture et l'annulation, le rowcount arbitre et l'appel
+    repond 409 au lieu d'ecraser un job devenu RUNNING.
+    """
+    from sqlalchemy import update as sa_update
     from fiskr.database import Job
     job = db.query(Job).filter(Job.id == job_id).first()
     if job is None:
         raise HTTPException(status_code=404, detail="Job introuvable.")
     if job.status != "QUEUED":
         raise HTTPException(status_code=400, detail="Seul un job en attente s'annule.")
-    job.status = "CANCELLED"
-    job.finished_at = datetime.utcnow()
+    res = db.execute(
+        sa_update(Job).where(Job.id == job_id, Job.status == "QUEUED")
+        .values(status="CANCELLED", finished_at=datetime.utcnow(), phase="CANCELLED")
+    )
+    if res.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409,
+                            detail="Le job vient de démarrer : il ne peut plus être annulé.")
     log_admin_action(db, admin_user["username"], "JOB_CANCELLED",
                      target=f"{job.kind}:{job.token}", before={"status": "QUEUED"},
                      after={"status": "CANCELLED"})
     db.commit()
+    db.refresh(job)
     progress_registry.finish(job.token, status="ERROR", error="Opération annulée.")
-    return {"message": "Job annulé.", **_job_row_view(job)}
+    return {"message": "Job annulé — l'action n'a jamais été exécutée.", **_job_row_view(job)}
 
 
 def _worker_status_view(db) -> Dict[str, Any]:

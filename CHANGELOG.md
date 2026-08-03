@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — queued actions can be rolled back before they run
+A queued action has not executed nor modified anything yet — cancelling it is an exact return to the previous state. The bell panel's "Opérations en cours" now shows a **✕ Annuler** button (administrators) on every QUEUED entry, with a confirmation dialog; the job becomes CANCELLED, is logged in the admin journal, and the panel announces "Opération annulée". Two robustness fixes underneath: the cancellation is now **atomic** (`UPDATE … WHERE status='QUEUED'` — if the daemon claims the job in the same instant, the call answers 409 instead of clobbering a running job), and `run_job` gained a guard so a job cancelled while waiting for its serialization turn **never executes** (the thread path used to run it anyway). Running jobs remain non-cancellable — cooperative interruption of an executing task is a different, riskier feature.
+
 ### Fixed — workers no longer get stuck forever on test-book (backtest) jobs
 Production symptom: the job queue fills with waiting operations because a backtest never finishes. Root cause: the backtest screens its panel through a `fork()` process pool, and when a pool child dies — typically **killed by the OOM killer**, the very memory risk backtests are known for — `multiprocessing.Pool` silently replaces the child but **never re-runs the lost chunk**. The parent then waited on `map_async` with no timeout and no child-death detection: the job span forever, its separate heartbeat thread kept it looking alive (so the stale-job recovery never fired), the backtest serialization kept every following test book QUEUED indefinitely, and one of the daemon's slots was consumed for good.
 
