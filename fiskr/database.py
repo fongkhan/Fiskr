@@ -455,6 +455,9 @@ _PERFORMANCE_INDEXES = (
     Index("ix_alerts_client_entity", Alert.client_id, Alert.watchlist_entity_id),
     Index("ix_audit_trail_timestamp", AuditTrail.timestamp),
     Index("ix_audit_trail_client_id", AuditTrail.client_id),
+    # Filtres du journal d'audit (/api/history) : statut de decision et liste
+    Index("ix_audit_trail_status", AuditTrail.status),
+    Index("ix_audit_trail_list_type", AuditTrail.list_type),
     Index("ix_wl_entities_snapshot_id", WatchlistEntity.snapshot_id),
     Index("ix_wl_entities_entity_id", WatchlistEntity.entity_id),
     Index("ix_client_entities_snapshot_id", ClientEntity.snapshot_id),

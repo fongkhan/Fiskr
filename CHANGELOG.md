@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed/Changed — full application sweep: self-hosted fonts, favicon, redundant scans, audit indexes
+A three-pass sweep (static consistency audit of tab targets/ids/panels, a browser crawl of every screen collecting JS errors and failed requests, and a backend review) found and fixed:
+
+- **Fonts are now self-hosted** (Inter + Outfit, latin/latin-ext woff2 under `/static/fonts/`, SIL OFL). The UI no longer makes ANY request to Google Fonts: faster first paint, works fully offline/behind restrictive egress, and a compliance workstation no longer calls a third-party CDN on every page.
+- **Favicon**: the anchor logo now exists as `/static/favicon.svg` (tab icon at last) and a `/favicon.ico` route ends the 404 previously logged on every page load.
+- `/api/watchlist/db`: an exact search counted its perimeter **twice** (the same LIKE count re-executed) — now reused; one full scan saved per search.
+- `/api/alerts`: total and open counts were two separate table scans per queue load — merged into one aggregate.
+- New indexes on the audit trail (`status`, `list_type`) covering the `/api/history` filters, created idempotently on existing databases.
+- Static audit came back clean: no duplicate ids, no orphan tab targets, every `switchSubTab` destination exists in its section; the browser crawl over all 10 tabs and 32 sub-tabs reports zero JS errors and zero failing requests.
+
 ### Changed — table filters audited at production scale; the typo-tolerant watchlist search now streams its results
 Every filtered endpoint was measured against a production-sized bench (300,000 listed parties, 300,000 audit rows, 80,000 alerts). Verdict: alert queues, audit history, sync reports and the client-side table filter bars all answer in 20–300 ms — no action needed (the filter bars did gain a small 120 ms debounce). One path was catastrophic: **typing a typo in the watchlist search blocked one request for 40.4 s**, because the fuzzy fallback scored the entire referential in Python inside the HTTP request.
 

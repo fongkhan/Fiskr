@@ -4764,7 +4764,9 @@ async def browse_watchlist_db(
             return {"total": total, "page": page, "page_size": page_size, "scope": scope,
                     "match_mode": match_mode, "items": items}
 
-    total = query.count()
+    # Une recherche exacte a deja compte son perimetre : ne pas relancer le
+    # meme COUNT (deux parcours LIKE complets au lieu d'un sur une grosse base)
+    total = exact_total if match_mode == "exact" else query.count()
     if sort_by:
         col = getattr(WatchlistEntity, sort_by)
         order_clause = col.desc() if sort_dir == "desc" else col.asc()
@@ -9631,8 +9633,14 @@ async def list_alerts(
             Alert.watchlist_name.ilike(needle), Alert.watchlist_entity_id.ilike(needle),
         ))
     query = _apply_list_type_filter(query, Alert.list_type, list_type)
-    total = query.count()
-    open_count = query.filter(Alert.status.in_(ALERT_OPEN_STATUSES)).count()
+    # Un seul agregat pour le total ET les ouvertes : la file etait comptee
+    # deux fois (deux parcours de table) a chaque chargement
+    from sqlalchemy import func
+    total, open_count = query.with_entities(
+        func.count(Alert.id),
+        func.coalesce(func.sum(case((Alert.status.in_(ALERT_OPEN_STATUSES), 1), else_=0)), 0),
+    ).one()
+    open_count = int(open_count)
     # CRITICAL d'abord, puis echeance la plus proche, puis score : la file
     # se lit de haut en bas dans l'ordre de traitement attendu
     priority_rank = case(
@@ -10768,6 +10776,14 @@ async def get_compliance_kpis(
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def serve_favicon():
+    # Les navigateurs demandent /favicon.ico d'office : sans cette route,
+    # chaque chargement de page journalisait un 404.
+    from fastapi.responses import FileResponse
+    return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
 
 @app.get("/login", response_class=HTMLResponse)
 @app.get("/login.html", response_class=HTMLResponse)
