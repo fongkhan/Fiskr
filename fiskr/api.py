@@ -150,15 +150,32 @@ from fiskr.database import WATCHLIST_FILE_TYPES
 # In-memory index cache
 watchlist_store: List[Dict[str, Any]] = []
 watchlist_index: Dict[str, List[Dict[str, Any]]] = {}
+# Index de recherche plein texte de la palette Ctrl+K : (blob normalise, entite).
+# Construit avec le cache — la recherche globale ne touche jamais la base.
+watchlist_search_index: List[Tuple[str, Dict[str, Any]]] = []
 watchlist_version: str = "Database Active Snapshot"
 watchlist_hash: str = "N/A"
 # Layout de blocking utilise pour CONSTRUIRE l'index en memoire : les sondes
 # du criblage doivent utiliser le meme (coherence index/sonde garantie)
 watchlist_index_layout: List[str] = ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
 
+def _entity_search_blob(ent: Dict[str, Any]) -> str:
+    """Texte normalise (accents/casse) sur lequel la palette Ctrl+K cherche :
+    nom principal, identifiant et alias — tout ce qu'un humain tape."""
+    from fiskr.quality import strip_accents
+    parts = [str(ent.get("primary_name") or ""), str(ent.get("entity_id") or "")]
+    aliases = ent.get("aliases")
+    if isinstance(aliases, dict):
+        parts.extend(str(a) for a in (aliases.get("high_priority") or []))
+        parts.extend(str(a) for a in (aliases.get("low_priority") or []))
+    elif isinstance(aliases, list):
+        parts.extend(str(a) for a in aliases)
+    return strip_accents(" | ".join(p for p in parts if p)).upper()
+
+
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
-    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout
+    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index
     
     # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
     snapshots = db.query(Snapshot).filter(
@@ -194,6 +211,7 @@ def load_watchlist_cache(db: Session):
 
     temp_store = []
     temp_index = {}
+    temp_search = []
 
     # Layout de blocking du canal criblage (parametrable a chaud) : l'index
     # est construit avec, et les sondes reutilisent le layout memorise
@@ -206,6 +224,7 @@ def load_watchlist_cache(db: Session):
         # Type de liste d'origine : permet les seuils de cut-off par liste
         ent_dict["_list_type"] = snapshot_types.get(ent.snapshot_id)
         temp_store.append(ent_dict)
+        temp_search.append((_entity_search_blob(ent_dict), ent_dict))
 
         # Index by blocking key
         keys = generate_blocking_keys(ent_dict, screening_cfg)
@@ -217,6 +236,7 @@ def load_watchlist_cache(db: Session):
     watchlist_store = temp_store
     watchlist_index = temp_index
     watchlist_index_layout = screening_layout
+    watchlist_search_index = temp_search
     logger.info(f"Loaded {len(watchlist_store)} active database entities into memory across {len(watchlist_index)} blocking blocks.")
 
 def seed_watchlist_json(db: Session):
@@ -4549,6 +4569,67 @@ def _wl_search_clauses(field: str, needle: str):
         WatchlistEntity.lei_number.ilike(needle),
         WatchlistEntity.imo_number.ilike(needle),
     ]
+
+
+@app.get("/api/search/quick")
+async def quick_search(
+    q: str = Query(..., min_length=2, max_length=120),
+    limit: int = Query(5, ge=1, le=20),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Recherche globale instantanee (palette Ctrl+K). Les listes sont cherches
+    dans l'index memoire du moteur (blobs normalises construits avec le cache
+    de criblage : zero acces disque, zero jointure), les alertes par UNE
+    requete SQL bornee. Un seul aller-retour la ou l'ancienne palette payait
+    deux endpoints lourds — dont le repli fuzzy plein referentiel de
+    /api/watchlist/db des que la frappe ne matchait pas encore.
+    """
+    import heapq
+    from sqlalchemy import or_
+    from fiskr.quality import strip_accents
+
+    _ensure_watchlist_cache(db)
+    term = q.strip()
+    needle = strip_accents(term).upper()
+
+    # --- Listes : balayage lineaire de l'index memoire, classement par
+    # position du match (prefixe d'abord) puis longueur du texte ---
+    wl_total = 0
+    scored: List[Tuple[int, int, int]] = []  # (position, longueur, n° d'ordre)
+    snapshot_index = watchlist_search_index
+    for i, (blob, _ent) in enumerate(snapshot_index):
+        pos = blob.find(needle)
+        if pos < 0:
+            continue
+        wl_total += 1
+        scored.append((pos, len(blob), i))
+    best = heapq.nsmallest(limit, scored)
+    wl_items = []
+    for _pos, _blen, i in best:
+        ent = snapshot_index[i][1]
+        d = dict(ent)  # copie superficielle : memes cles que le cache moteur
+        d["list_type"] = ent.get("_list_type")
+        wl_items.append(d)
+
+    # --- Alertes : une seule requete, tri par identifiant (index PK) ---
+    like = f"%{term}%"
+    al_query = db.query(Alert).filter(or_(
+        Alert.client_name.ilike(like), Alert.client_id.ilike(like),
+        Alert.watchlist_name.ilike(like), Alert.watchlist_entity_id.ilike(like),
+    ))
+    al_total = al_query.count()
+    al_rows = al_query.order_by(Alert.id.desc()).limit(limit).all()
+    al_items = [{
+        "id": a.id, "client_name": a.client_name, "watchlist_name": a.watchlist_name,
+        "status": a.status, "channel": a.channel,
+    } for a in al_rows]
+
+    return {
+        "watchlist": {"total": wl_total, "items": wl_items},
+        "alerts": {"total": al_total, "items": al_items},
+    }
 
 
 @app.get("/api/watchlist/db")

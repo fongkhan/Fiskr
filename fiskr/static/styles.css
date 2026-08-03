@@ -1509,6 +1509,12 @@ th.sortable.sort-desc::after {
     background: transparent;
 }
 
+#palette-status {
+    padding: 0.35rem 1rem 0;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
 #palette-results {
     max-height: 50vh;
     overflow-y: auto;

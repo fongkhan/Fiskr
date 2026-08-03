@@ -178,6 +178,7 @@
         "Listes": { en: "Lists", de: "Listen", es: "Listas", zh: "名单", ar: "القوائم" },
         "Alertes & audit": { en: "Alerts & audit", de: "Alarme & Audit", es: "Alertas y auditoría", zh: "警报与审计", ar: "التنبيهات والتدقيق" },
         "Administration": { en: "Administration", de: "Administration", es: "Administración", zh: "管理", ar: "الإدارة" },
+        "Recherche…": { en: "Searching…", de: "Suche…", es: "Buscando…", zh: "搜索中…", ar: "جارٍ البحث…" },
         "Watchlist Active": { en: "Active Watchlist", de: "Aktive Watchlist", es: "Lista activa", zh: "当前名单", ar: "القائمة النشطة" },
         "Import de Fichiers": { en: "File Import", de: "Datei-Import", es: "Importación de archivos", zh: "文件导入", ar: "استيراد الملفات" },
         "Snapshots & Comparateur": { en: "Snapshots & Comparator", de: "Snapshots & Vergleich", es: "Instantáneas y comparador", zh: "快照与比对", ar: "اللقطات والمقارنة" },

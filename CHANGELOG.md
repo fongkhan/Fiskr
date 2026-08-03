@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the Ctrl+K global search became instantaneous
+Each keystroke used to fire two heavy endpoints: `/api/watchlist/db` (SQL `LIKE` with a join, a `count`, and — whenever the exact match found nothing yet, i.e. most of the time while typing — a **fuzzy fallback that scanned the ENTIRE referential in Python** with Jaro-Winkler) and `/api/alerts` (three scans: total, open count, sorted fetch). On a production-sized referential that meant seconds per keystroke.
+
+The palette now uses a dedicated `GET /api/search/quick`: listed parties are searched in a **normalized in-memory index built together with the screening cache** (accent/case-insensitive, aliases and entity ids included, prefix matches ranked first — zero disk access, zero join), and alerts through one single bounded SQL query. Measured at 500,000 listed parties: **74 ms vs 5.3 s (×72)** for the watchlist part alone, in ONE round-trip instead of two. Front side: navigation results render instantly before the network call, stale responses from earlier keystrokes are discarded, a discreet "Recherche…" indicator shows while pending, and the debounce dropped to 150 ms. The watchlist screen's typo-tolerant search is unchanged — it deliberately keeps the deep fuzzy pass.
+
 ### Added — a built-in guide: the whole site and every process explained, including the end-to-end CFT flow
 A new **Guide** tab (bottom of the sidebar, book icon, reachable via Ctrl+K and `#guide/...` deep links) documents the application from inside the application, in seven chapters: *Démarrer* (spaces, roles, gestures), *Flux CFT* (a step-by-step diagram from official sources to TRACFIN filing — synchronization, quality gates, 4-eyes approval, production hash, both alert channels, instruction, outcomes, evidence), *Listes*, *Criblage*, *Filtrage*, *Alertes & audit* and *Administration*. Every chapter links straight into the screens it describes ("Ouvrir" buttons). The guide's body is deliberately French (national AML/CFT frame of reference); its navigation labels are translated like the rest of the UI.
 

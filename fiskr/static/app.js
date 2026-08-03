@@ -7724,42 +7724,52 @@ function paletteActivate(idx) {
  }
 }
 
+let _paletteSeq = 0;
+
+function _paletteSetSearching(on) {
+ const el = document.getElementById("palette-status");
+ if (el) el.classList.toggle("hidden", !on);
+}
+
 async function runPaletteSearch(term) {
- const groups = [];
  const needle = term.trim().toLowerCase();
- // Navigation (filtrée localement)
+ const seq = ++_paletteSeq; // toute réponse d'une frappe antérieure sera ignorée
+ // Navigation (filtrée localement) : rendue IMMÉDIATEMENT, sans attendre le réseau
+ const groups = [];
  const navMatches = PALETTE_NAV_ITEMS.filter(n => !needle || n.label.toLowerCase().includes(needle)).slice(0, 5);
  if (navMatches.length) {
  groups.push({ title: "Navigation", items: navMatches.map(n => ({
  html: escapeHtml(n.label), action: n.action })) });
  }
- if (needle.length >= 2) {
+ renderPaletteResults(groups);
+ if (needle.length < 2) { _paletteSetSearching(false); return; }
+ _paletteSetSearching(true);
  try {
- const [wlResp, alResp] = await Promise.all([
- apiFetch(`/api/watchlist/db?search=${encodeURIComponent(term)}&page_size=5`, { silent: true }),
- apiFetch(`/api/alerts?search=${encodeURIComponent(term)}&page_size=5`, { silent: true }),
- ]);
- if (wlResp.ok) {
- const wl = await wlResp.json();
+ // Un seul aller-retour : listés servis par l'index mémoire du moteur,
+ // alertes par une requête SQL unique bornée (voir /api/search/quick)
+ const resp = await apiFetch(`/api/search/quick?q=${encodeURIComponent(term)}`, { silent: true });
+ if (seq !== _paletteSeq) return; // une frappe plus récente a pris la main
+ if (resp.ok) {
+ const data = await resp.json();
+ if (seq !== _paletteSeq) return;
+ const wl = data.watchlist || {};
  if ((wl.items || []).length) {
  groups.push({ title: `Listés (${wl.total})`, items: wl.items.map(item => ({
- html: `<strong>${escapeHtml(item.primary_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(item.entity_id)} · ${escapeHtml(listTypeLabel(item.list_type))}${wl.match_mode === "fuzzy" ? " · ≈" : ""}</small>`,
+ html: `<strong>${escapeHtml(item.primary_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(item.entity_id)} · ${escapeHtml(listTypeLabel(item.list_type))}</small>`,
  action: () => { switchTab("watchlist-mgmt"); switchSubTab("watchlist-mgmt", "watchlist-active"); showWatchlistDetails(item); },
  })) });
  }
- }
- if (alResp.ok) {
- const al = await alResp.json();
+ const al = data.alerts || {};
  if ((al.items || []).length) {
  groups.push({ title: `Alertes (${al.total})`, items: al.items.map(a => ({
  html: `<strong>#${a.id} ${escapeHtml(a.client_name)}</strong> × ${escapeHtml(a.watchlist_name)} <small style="color: var(--text-muted);">${escapeHtml(statusLabel(a.status))}</small>`,
  action: () => { const sp = a.channel === "FILTERING" ? "filtering" : "screening"; switchTab(sp); switchSubTab(sp, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
  })) });
  }
+ renderPaletteResults(groups);
  }
  } catch (e) { /* recherche silencieuse */ }
- }
- renderPaletteResults(groups);
+ finally { if (seq === _paletteSeq) _paletteSetSearching(false); }
 }
 
 function initCommandPalette() {
@@ -7775,7 +7785,9 @@ function initCommandPalette() {
  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeCommandPalette(); });
  input.addEventListener("input", () => {
  clearTimeout(_paletteDebounce);
- _paletteDebounce = setTimeout(() => runPaletteSearch(input.value), 250);
+ // Le backend répond en millisecondes (index mémoire) : un débounce court
+ // suffit, la frappe reste fluide et les réponses périmées sont ignorées
+ _paletteDebounce = setTimeout(() => runPaletteSearch(input.value), 150);
  });
  input.addEventListener("keydown", (e) => {
  const items = document.querySelectorAll("#palette-results .palette-item");
