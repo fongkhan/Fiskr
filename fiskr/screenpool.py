@@ -225,6 +225,67 @@ def resolve_processes(universe_count: int, requested: Optional[int] = None) -> i
 
 # ------------------ POOL FORK ------------------
 
+class PoolStalled(RuntimeError):
+    """
+    Le pool de criblage n'avance plus : un enfant a ete tue (OOM killer,
+    typiquement) et sa tranche est PERDUE — multiprocessing.Pool remplace
+    l'enfant mais ne relance jamais la tranche, donc map_async ne se termine
+    jamais — ou un enfant est fige (interblocage fork+threads).
+
+    Sans ce signal, l'attente du parent etait INFINIE : le job gardait son
+    battement de coeur (thread separe), la reprise sur battement perime ne le
+    voyait jamais, et la serialisation des cahiers de tests bloquait tous les
+    suivants — un slot du demon consomme a vie, la file en attente.
+    """
+
+
+def _pool_stall_timeout_s() -> float:
+    raw = (config.get("jobs") or {}).get("screen_stall_timeout_s", 900)
+    try:
+        return max(60.0, float(raw))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def _wait_with_watchdog(async_result, queue, pool, total_clients: int,
+                        progress: Optional[Callable[[int, int], None]],
+                        stall_timeout_s: Optional[float] = None) -> None:
+    """
+    Attend la fin du pool en surveillant DEUX signaux de blocage :
+    - un enfant mort avec un code de sortie non nul (tue par l'OOM killer :
+      exitcode -9) — detection opportuniste, le pool peut le remplacer avant
+      qu'on le voie ;
+    - AUCUN tick de progression pendant `stall_timeout_s` (la garantie) :
+      les tranches saines tickent tous les 500 clients, un silence total
+      prolonge signifie que seules des tranches perdues/figees restent.
+    Leve PoolStalled — le `with` du pool le termine, l'appelant decide du
+    repli. L'attente infinie n'existe plus.
+    """
+    stall = stall_timeout_s if stall_timeout_s is not None else _pool_stall_timeout_s()
+    done = 0
+    last_activity = time.monotonic()
+    while not async_result.ready():
+        drained = _drain_count(queue)
+        if drained:
+            done += drained
+            last_activity = time.monotonic()
+            if progress:
+                try:
+                    progress(min(done, total_clients), total_clients)
+                except Exception:
+                    pass
+        dead = [p.exitcode for p in getattr(pool, "_pool", ())
+                if p.exitcode not in (None, 0)]
+        if dead:
+            raise PoolStalled(
+                f"un processus de criblage est mort (code {dead[0]} — tué par "
+                f"l'OOM killer ?) et sa tranche est perdue.")
+        if time.monotonic() - last_activity > stall:
+            raise PoolStalled(
+                f"aucune progression depuis {int(stall)} s : tranche(s) "
+                f"perdue(s) ou processus figé(s).")
+        time.sleep(0.2)
+
 # Etat partage avec les enfants par HERITAGE de fork (jamais picklé) : pose
 # avant la creation du pool, lu par les tranches.
 _G = types.SimpleNamespace(index=None, cfg=None, wl=None, rules=None,
@@ -321,17 +382,7 @@ def parallel_dry_run(db, panel_snapshot_id: str, index, screening_cfg,
     try:
         with ctx.Pool(processes=processes, initializer=_child_init) as pool:
             async_result = pool.map_async(_screen_chunk, bounds)
-            done = 0
-            while not async_result.ready():
-                drained = _drain_count(_G.queue)
-                if drained:
-                    done += drained
-                    if progress:
-                        try:
-                            progress(min(done, total_clients), total_clients)
-                        except Exception:
-                            pass
-                time.sleep(0.2)
+            _wait_with_watchdog(async_result, _G.queue, pool, total_clients, progress)
             partials = async_result.get()  # propage l'exception d'une tranche
         if progress:
             try:

@@ -63,6 +63,11 @@ jobs:
   # Processus de calcul par criblage parallele : 0 = auto (borne par les
   # coeurs ET par la RAM disponible), 1 = sequentiel force
   screen_processes: 0
+  # Chien de garde du pool de criblage : sans AUCUNE progression pendant ce
+  # delai (enfant tue par l'OOM killer dont la tranche est perdue, processus
+  # fige), le pool est arrete et le cahier de tests repart en sequentiel au
+  # lieu de bloquer la file pour toujours. Minimum 60 s.
+  screen_stall_timeout_s: 900
   # L'API demarre le demon elle-meme s'il est absent (indispensable en
   # hebergement mutualise Passenger, sans systemd)
   autostart: true

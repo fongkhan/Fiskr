@@ -218,11 +218,18 @@ def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
     if resolved > 1 and panel_snapshot_id:
         # Tout ce dont les tranches ont besoin est en memoire ou recharge par
         # elles ; parallel_dry_run fait son propre rollback avant le fork.
-        result = screenpool.parallel_dry_run(
-            db, panel_snapshot_id, index, screening_cfg, whitelist_keys, rules,
-            total_clients=(len(clients) if clients is not None else _panel_count(db, panel_snapshot_id)),
-            processes=resolved, progress=progress)
-        return result
+        try:
+            result = screenpool.parallel_dry_run(
+                db, panel_snapshot_id, index, screening_cfg, whitelist_keys, rules,
+                total_clients=(len(clients) if clients is not None else _panel_count(db, panel_snapshot_id)),
+                processes=resolved, progress=progress)
+            return result
+        except screenpool.PoolStalled as e:
+            # Auto-guerison : le pool est mort (OOM) ou fige — on repart en
+            # SEQUENTIEL, memoire minimale, dans CE processus. Le cahier de
+            # tests aboutit au lieu de bloquer la file pour toujours.
+            logger.warning(f"Criblage parallèle du cahier de tests interrompu : {e} "
+                           f"Repli séquentiel — le calcul repart de zéro, sans pool.")
 
     if clients is None:
         clients = _panel_clients(db, panel_snapshot_id)
