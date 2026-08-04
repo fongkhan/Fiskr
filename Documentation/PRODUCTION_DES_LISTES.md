@@ -50,6 +50,15 @@ Deux voies, toutes deux aboutissant au même parcours :
 > cours de synchronisation (**409** — deux ingestions concurrentes de la même
 > liste se marcheraient dessus).
 
+> **Une republication au contenu identique n'entre pas en homologation.**
+> Certains fournisseurs (OpenSanctions notamment) republient chaque jour des
+> fichiers aux métadonnées nouvelles (horodatages, ordre des lignes) : le hash
+> change, aucune fiche ne diffère. Après calcul du delta, un snapshot
+> strictement identique à la liste en production est archivé (`SUPERSEDED`) et
+> le rapport conclut `NO_CHANGE` — pas de pointage humain ni de cahier de
+> tests pour un non-événement. Un **premier import** (aucune base de
+> comparaison) passe, lui, toujours par l'homologation.
+
 En mode homologation, le snapshot arrive en `PENDING_REVIEW` : il est archivé,
 comparé, testable — mais **invisible du moteur de criblage** tant qu'il n'est
 pas approuvé. Après un import ou une synchro, l'application propose d'ouvrir

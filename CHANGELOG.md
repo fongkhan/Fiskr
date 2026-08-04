@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — identical-content republishes no longer enter homologation (nor trigger backtests)
+Observed in production via the remote diagnostic: the homologation queue filled with snapshots showing a **0/0/0 delta** — OpenSanctions (and others) republish their files daily with fresh metadata (timestamps, row order), so the byte-hash dedup sees a "new" file whose **parsed content is identical** to the production list. Each of those non-events cost a full homologation entry plus an automatic test book — the very jobs that were clogging the queue.
+
+The three sync paths (OFAC, DGT, generic list-replacement runner) now share `_discard_content_identical`: after the delta is computed, a snapshot whose delta vs the current production list is empty is **archived as SUPERSEDED** (never shown to homologation), production stays untouched, and the report says `NO_CHANGE` ("contenu identique à la liste active — seules les métadonnées du fichier ont changé"). First imports (no comparison base) still go through homologation. Tested in both modes (direct promotion and staged homologation).
+
 ### Added — one-shot production refresh script: `tools/refresh_prod.sh`
 Everything the deployment procedure requires, in the right order and with guard rails: venv activation, `git pull` (**fast-forward only** — refuses uncommitted local changes and diverged history), `pip install -r requirements.txt`, then stop-and-relaunch of the worker daemon — the step everyone forgets, and the daemon keeps running the OLD code until it happens. The kill targets only the current account's `python -m fiskr.worker` processes (SIGTERM first, SIGKILL only after 10 s), the immediate relaunch is race-free thanks to the flock singleton, and the script ends by pointing at `GET /api/diagnostic/jobs` to verify `versions.worker.outdated: false`. Default paths match the cPanel layout, overridable via `FISKR_VENV`/`FISKR_DIR`/`FISKR_BRANCH`.
 

@@ -172,3 +172,53 @@ def test_error_message_of_unknown_source_lists_registry_aliases():
                 assert src.source in response.json()["detail"]
     finally:
         app.dependency_overrides.clear()
+
+
+# ------------------ REPUBLICATION AU CONTENU IDENTIQUE ------------------
+
+def _reordered_csv():
+    # Même contenu, octets différents : lignes de données inversées (le hash
+    # change, aucune fiche ne diffère — la republication quotidienne type)
+    lines = TARGETS_CSV.strip().split("\n")
+    return "\n".join([lines[0], lines[2], lines[1]]) + "\n"
+
+
+def test_metadata_only_republish_skips_homologation(db):
+    """Republication au contenu identique (hash différent par les seules
+    métadonnées) : NO_CHANGE, snapshot archivé, production intacte — plus
+    d'homologation ni de cahier de tests pour un non-événement (vu en
+    production sur les sources OpenSanctions)."""
+    run_key = sorted(OPENSANCTIONS_BY_KEY)[0]
+    src = OPENSANCTIONS_BY_KEY[run_key]
+    run = OPENSANCTIONS_RUNNERS[run_key]
+
+    first = run(db, fetcher=_fetcher(TARGETS_CSV))
+    assert first.status == "SUCCESS"
+
+    second = run(db, fetcher=_fetcher(_reordered_csv()))
+    assert second.status == "NO_CHANGE"
+    assert "identique" in (second.message or "")
+
+    discarded = db.query(Snapshot).filter(
+        Snapshot.snapshot_id == second.snapshot_id).first()
+    assert discarded is not None and discarded.status == "SUPERSEDED"
+    ready = db.query(Snapshot).filter(Snapshot.file_type == src.file_type,
+                                      Snapshot.status == "READY").all()
+    assert [s.snapshot_id for s in ready] == [first.snapshot_id]
+
+
+def test_metadata_only_republish_skips_homologation_in_staging_mode(db):
+    """Même garantie en mode homologation : le non-événement n'entre pas en
+    file d'attente de pointage humain (premier import, lui, y entre)."""
+    from fiskr.settings import set_setting, SETTING_REQUIRE_APPROVAL
+    run_key = sorted(OPENSANCTIONS_BY_KEY)[0]
+    run = OPENSANCTIONS_RUNNERS[run_key]
+
+    assert run(db, fetcher=_fetcher(TARGETS_CSV)).status == "SUCCESS"
+    set_setting(db, SETTING_REQUIRE_APPROVAL, True)
+    db.commit()
+
+    second = run(db, fetcher=_fetcher(_reordered_csv()))
+    assert second.status == "NO_CHANGE"
+    assert db.query(Snapshot).filter(
+        Snapshot.status == "PENDING_REVIEW").count() == 0

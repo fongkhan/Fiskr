@@ -995,6 +995,46 @@ def send_report_email(report: SyncReport) -> bool:
         return False
 
 
+def _discard_content_identical(db, *, source: str, trigger: str, snap_id: str,
+                               previous_id: Optional[str], record_count: int,
+                               delta: Dict[str, Any]) -> Optional[SyncReport]:
+    """
+    Le hash du fichier a change mais AUCUNE fiche ne differe de la liste
+    active : OpenSanctions et d'autres fournisseurs republient chaque jour
+    des fichiers aux metadonnees nouvelles (horodatages, ordre des lignes),
+    invisibles de la deduplication par hash. Promouvoir ou homologuer un tel
+    snapshot serait un non-evenement — et chaque non-evenement coutait un
+    passage d'homologation complet plus un cahier de tests automatique (vu
+    en production : file de backtests remplie par des listes inchangees).
+
+    Le snapshot est archive en SUPERSEDED (jamais montre a l'homologation),
+    la production reste intacte, le rapport dit NO_CHANGE. Retourne le
+    rapport, ou None si le delta n'est pas vide — ou s'il n'y a pas de base
+    de comparaison (premier import : l'homologation doit avoir lieu).
+    """
+    summary = delta["summary"]
+    if not previous_id or summary["added_count"] or summary["removed_count"] \
+            or summary["modified_count"]:
+        return None
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+    if snap is not None:
+        snap.status = "SUPERSEDED"
+        snap.phase = "DONE"
+        db.commit()
+    logger.info(f"Sync {source}: contenu identique a la liste active "
+                f"({record_count} fiches, hash seul different) — snapshot archive, "
+                "aucune homologation.")
+    return _finalize_report(
+        db, source=source, trigger=trigger, status="NO_CHANGE",
+        message=(f"{record_count} fiches lues : contenu identique à la liste active "
+                 "(seules les métadonnées du fichier ont changé). "
+                 "Aucune homologation nécessaire."),
+        snapshot_id=snap_id,
+        previous_snapshot_id=previous_id,
+        delta_report=_truncate_delta_details(delta),
+    )
+
+
 def _finalize_report(db, **kwargs) -> SyncReport:
     """Persiste le rapport, tente l'envoi email et memorise le resultat."""
     report = _save_report(db, **kwargs)
@@ -1117,6 +1157,12 @@ def run_ofac_sync(
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
 
+        no_change = _discard_content_identical(
+            db, source="OFAC", trigger=trigger, snap_id=snap_id,
+            previous_id=previous_id, record_count=record_count, delta=delta)
+        if no_change is not None:
+            return no_change
+
         if not staging:
             # Application immediate (remplacement de la liste OFAC active)
             _supersede_previous_snapshots(db, "WATCHLIST_OFAC", snap_id)
@@ -1237,6 +1283,12 @@ def run_dgt_sync(
         old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
+
+        no_change = _discard_content_identical(
+            db, source="DGT", trigger=trigger, snap_id=snap_id,
+            previous_id=previous_id, record_count=record_count, delta=delta)
+        if no_change is not None:
+            return no_change
 
         if not staging:
             _supersede_previous_snapshots(db, "WATCHLIST_DGT", snap_id)
@@ -1381,6 +1433,12 @@ def _run_list_replacement_sync(
         old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
         new_entities = _snapshot_entity_dicts(db, snap_id)
         delta = calculate_delta(old_entities, new_entities, "entity_id")
+
+        no_change = _discard_content_identical(
+            db, source=source, trigger=trigger, snap_id=snap_id,
+            previous_id=previous_id, record_count=record_count, delta=delta)
+        if no_change is not None:
+            return no_change
 
         if not staging:
             _supersede_previous_snapshots(db, file_type, snap_id)
