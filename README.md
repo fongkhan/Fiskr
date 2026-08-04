@@ -520,6 +520,25 @@ garde-fous rendent cette panne visible et réparable :
 > par *Setup Python App*). Cette ligne décorrèle la vie du démon du trafic web :
 > même sans visiteur, les synchronisations planifiées partent à l'heure.
 
+### Déploiement en un geste : `tools/refresh_prod.sh`
+
+Le script fait tout le rafraîchissement dans le bon ordre — venv, `git pull`
+(**fast-forward uniquement**), `pip install`, arrêt du démon (qui garde
+l'ancien code tant qu'il vit), relance immédiate sur le nouveau code :
+
+```bash
+bash tools/refresh_prod.sh
+# chemins par défaut surchargables :
+FISKR_VENV=/chemin/activate FISKR_DIR=/chemin/repo bash tools/refresh_prod.sh
+```
+
+Garde-fous intégrés : arrêt à la première erreur, refus si des modifications
+locales ne sont pas commitées, refus d'un historique divergent (jamais de
+merge silencieux en prod), et le `pkill` ne cible que les processus
+`python -m fiskr.worker` **de votre compte** (SIGTERM d'abord, SIGKILL après
+10 s seulement). La relance immédiate est sans risque : le verrou `flock`
+n'en laisse vivre qu'un, même si le cron tente en même temps.
+
 ### Diagnostic à distance : `GET /api/diagnostic/jobs`
 
 Quand la production bloque, un **seul appel lecture seule** rend toute la

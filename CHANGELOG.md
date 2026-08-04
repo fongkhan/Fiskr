@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — one-shot production refresh script: `tools/refresh_prod.sh`
+Everything the deployment procedure requires, in the right order and with guard rails: venv activation, `git pull` (**fast-forward only** — refuses uncommitted local changes and diverged history), `pip install -r requirements.txt`, then stop-and-relaunch of the worker daemon — the step everyone forgets, and the daemon keeps running the OLD code until it happens. The kill targets only the current account's `python -m fiskr.worker` processes (SIGTERM first, SIGKILL only after 10 s), the immediate relaunch is race-free thanks to the flock singleton, and the script ends by pointing at `GET /api/diagnostic/jobs` to verify `versions.worker.outdated: false`. Default paths match the cPanel layout, overridable via `FISKR_VENV`/`FISKR_DIR`/`FISKR_BRANCH`.
+
 ### Added — remote production diagnosis: `GET /api/diagnostic/jobs` + code-version stamps
 Production kept blocking on test-book jobs while every fix looked deployed. The missing piece was **eyes on the box**: one read-only endpoint now returns the whole job-queue radiography in a single call, designed to be queried **from outside** (support/ops/assistant) over HTTPS without shell access:
 
