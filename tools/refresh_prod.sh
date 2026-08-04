@@ -40,13 +40,27 @@ source "$FISKR_VENV"
 cd "$FISKR_DIR"
 log "Rafraîchissement de $FISKR_DIR (branche $FISKR_BRANCH, utilisateur $ME)"
 
-# --- Garde-fou : jamais écraser un travail local non commité --------------
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    fail "modifications locales non commitées — réglez-les d'abord (git status)."
-fi
-
 # --- Code : avance rapide uniquement --------------------------------------
 git fetch origin "$FISKR_BRANCH"
+
+# Garde-fou : la production porte des modifications locales LÉGITIMES
+# (config.yaml adapté à l'hébergement, passenger_wsgi.py). Elles ne bloquent
+# que si la mise à jour distante touche les MÊMES fichiers (risque
+# d'écrasement) — sinon l'avance rapide les conserve telles quelles.
+# Les fichiers non suivis (logs, sauvegardes .sqlite3) ne bloquent jamais.
+DIRTY="$( { git diff --name-only; git diff --cached --name-only; } | sort -u)"
+if [ -n "$DIRTY" ]; then
+    INCOMING="$(git diff --name-only HEAD "origin/$FISKR_BRANCH" | sort -u)"
+    OVERLAP="$(comm -12 <(printf '%s\n' "$DIRTY") <(printf '%s\n' "$INCOMING"))"
+    if [ -n "$OVERLAP" ]; then
+        log "Fichiers modifiés localement ET par la mise à jour :"
+        printf '    - %s\n' $OVERLAP
+        fail "mettez ces fichiers de côté d'abord (git stash) puis relancez."
+    fi
+    log "Modifications locales conservées (aucun chevauchement avec la mise à jour) :"
+    printf '    - %s\n' $DIRTY
+fi
+
 BEFORE="$(git rev-parse --short HEAD)"
 if [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$FISKR_BRANCH")" ]; then
     log "Code déjà à jour ($BEFORE) — le démon sera tout de même relancé."
