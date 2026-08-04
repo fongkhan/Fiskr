@@ -411,6 +411,17 @@ class AdminAuditLog(Base):
     after = Column(JSON, nullable=True)
     detail = Column(Text, nullable=True)
 
+
+def log_admin_action(db, username, action, target=None,
+                     before=None, after=None, detail=None):
+    """Trace append-only d'une action d'administration (commit par l'appelant).
+    Vit ici, a cote du modele, pour etre appelable des deux processus : l'API
+    ET le demon travailleur (la fouille d'homonymes plantait chaque nuit sur
+    cet import quand la fonction n'existait que dans fiskr.api)."""
+    db.add(AdminAuditLog(username=username, action=action, target=target,
+                         before=before, after=after, detail=detail))
+
+
 ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
 ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE", "CLOSED_BY_RULE")
 

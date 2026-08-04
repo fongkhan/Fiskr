@@ -406,3 +406,21 @@ def test_serial_group_is_exclusive_across_kinds(client):
         db.query(Job).filter(Job.id.in_(created)).delete(synchronize_session=False)
         db.commit()
         db.close()
+
+
+def test_log_admin_action_importable_from_database():
+    """La fouille d'homonymes (tasks.mining_task) importe log_admin_action
+    depuis fiskr.database : quand la fonction ne vivait que dans fiskr.api,
+    la tâche plantait chaque nuit en production sur l'ImportError."""
+    from fiskr.database import log_admin_action, AdminAuditLog, get_db
+    db = next(get_db())
+    try:
+        log_admin_action(db, "test_jobs", "TEST_IMPORT_MINING", target="resources")
+        db.commit()
+        row = db.query(AdminAuditLog) \
+                .filter(AdminAuditLog.action == "TEST_IMPORT_MINING").first()
+        assert row is not None and row.username == "test_jobs"
+        db.delete(row)  # append-only en prod ; on nettoie le bac à sable
+        db.commit()
+    finally:
+        db.close()

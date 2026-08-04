@@ -1625,13 +1625,9 @@ async def list_users(
     ]
 
 # ------------------ JOURNAL DES ACTIONS D'ADMINISTRATION ------------------
-
-def log_admin_action(db: Session, username: str, action: str, target: Optional[str] = None,
-                     before: Optional[Dict[str, Any]] = None, after: Optional[Dict[str, Any]] = None,
-                     detail: Optional[str] = None) -> None:
-    """Trace append-only d'une action d'administration (commit par l'appelant)."""
-    db.add(AdminAuditLog(username=username, action=action, target=target,
-                         before=before, after=after, detail=detail))
+# log_admin_action vit dans fiskr.database (a cote du modele) pour etre
+# importable du demon travailleur comme de l'API — voir tasks.mining_task.
+from fiskr.database import log_admin_action  # noqa: E402
 
 @app.get("/api/admin-log")
 async def get_admin_log(
