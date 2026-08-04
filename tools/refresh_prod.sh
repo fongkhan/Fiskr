@@ -51,7 +51,13 @@ git fetch origin "$FISKR_BRANCH"
 DIRTY="$( { git diff --name-only; git diff --cached --name-only; } | sort -u)"
 if [ -n "$DIRTY" ]; then
     INCOMING="$(git diff --name-only HEAD "origin/$FISKR_BRANCH" | sort -u)"
-    OVERLAP="$(comm -12 <(printf '%s\n' "$DIRTY") <(printf '%s\n' "$INCOMING"))"
+    # Intersection sans substitution de processus : CageFS (cPanel) n'a pas /dev/fd
+    OVERLAP=""
+    for f in $DIRTY; do
+        if printf '%s\n' "$INCOMING" | grep -qxF "$f"; then
+            OVERLAP="${OVERLAP}${f} "
+        fi
+    done
     if [ -n "$OVERLAP" ]; then
         log "Fichiers modifiés localement ET par la mise à jour :"
         printf '    - %s\n' $OVERLAP

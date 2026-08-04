@@ -41,3 +41,7 @@ retention_archive/
 fiskr-worker.lock
 worker.log
 uv_ux.log
+passenger_stdout.log
+passenger_stderr.log
+passenger_wsgi.py.cpanel
+fiskr.sqlite3.*
