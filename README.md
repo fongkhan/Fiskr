@@ -520,6 +520,35 @@ garde-fous rendent cette panne visible et réparable :
 > par *Setup Python App*). Cette ligne décorrèle la vie du démon du trafic web :
 > même sans visiteur, les synchronisations planifiées partent à l'heure.
 
+### Diagnostic à distance : `GET /api/diagnostic/jobs`
+
+Quand la production bloque, un **seul appel lecture seule** rend toute la
+radiographie de la file de travaux — conçu pour être interrogé **de
+l'extérieur** (support, exploitation, assistant) sans accès shell au serveur :
+
+- **`versions`** : empreinte du code chargé par l'API et par le démon,
+  comparées au code présent sur le disque. C'est le piège n°1 des
+  déploiements : le démon **garde l'ancien code tant qu'on ne le tue pas**
+  (`kill $(head -1 fiskr-worker.lock)`) — `worker.outdated: true` le dit sans
+  ambiguïté (et un démon vivant **sans** empreinte est lui aussi un ancien
+  code) ;
+- **`jobs`** : compteurs par statut, jobs RUNNING avec fraîcheur du battement
+  de cœur, file d'attente dans l'ordre où le démon la servirait, dernières
+  erreurs avec leur cause, et l'état du **groupe sérialisé** (quel job tient
+  la place) ;
+- **`worker`** : supervision + verrou flock (le PID inscrit vit-il ?) ;
+- **`system`** : mémoire machine/processus, charge, moteur de base ;
+- **`worker_log_tail`** : la queue de `worker.log` — les dernières volontés
+  du démon quand il est mort.
+
+Accès : session **admin**, ou **clé d'API de rôle `auditor`** (⚙️ Paramètres →
+Clés d'API) passée en `X-API-Key` — lecture seule par construction (toute
+écriture est refusée à ce rôle), révocable d'un clic :
+
+```bash
+curl -sS -H "X-API-Key: fsk_..." https://votre-instance/api/diagnostic/jobs | python -m json.tool
+```
+
 ## 🚀 Installation & Lancement
 
 ### Prérequis

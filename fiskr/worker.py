@@ -63,10 +63,17 @@ def acquire_worker_lock():
 
 
 def _write_heartbeat(session) -> None:
+    from fiskr import buildinfo
     from fiskr.settings import set_setting
+    # L'empreinte de code figee a l'import dit quelle version CE demon
+    # execute : le diagnostic la compare au disque pour detecter un demon
+    # reste sur l'ancien code apres un deploiement.
     set_setting(session, HEARTBEAT_SETTING, {
         "pid": os.getpid(), "host": socket.gethostname(),
         "at": datetime.utcnow().isoformat() + "Z",
+        "version": buildinfo.LOADED_FINGERPRINT,
+        "started_at": buildinfo.PROCESS_STARTED_AT,
+        "python": buildinfo.PYTHON_VERSION,
     })
 
 

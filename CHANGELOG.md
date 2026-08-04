@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — remote production diagnosis: `GET /api/diagnostic/jobs` + code-version stamps
+Production kept blocking on test-book jobs while every fix looked deployed. The missing piece was **eyes on the box**: one read-only endpoint now returns the whole job-queue radiography in a single call, designed to be queried **from outside** (support/ops/assistant) over HTTPS without shell access:
+
+- **Version stamps** (`fiskr/buildinfo.py`): every process freezes a fingerprint of the `fiskr/*.py` sources it loaded at startup; the daemon publishes its own in its heartbeat. The endpoint compares API-loaded, daemon-loaded and on-disk fingerprints — `worker.outdated: true` (or a live daemon with **no** fingerprint) proves the #1 deployment trap: a daemon still running the OLD code because it was never killed after `git pull`.
+- **Queue radiography**: counts by status, RUNNING jobs with heartbeat freshness, the waiting queue in daemon claim order, last errors with their cause, and the serialized group's holder.
+- **Daemon forensics**: supervision view + flock lock (is the written PID alive?), machine/process memory, load, DB engine, and the tail of `worker.log` — the daemon's last words when it died.
+- **Access**: admin session, or an **`auditor`-role API key** via `X-API-Key` — read-only by construction (all writes are refused to that role), revocable at any time. Admin-role keys remain forbidden (least privilege).
+
 ### Changed — test-book (backtest) overhaul: bounded RAM, continuous progress, visible failures, one-click rollback
 Full review of the backtest path (`fiskr/backtest.py`, `fiskr/jobs.py`, homologation stepper) with four outcomes:
 

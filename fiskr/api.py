@@ -83,7 +83,7 @@ from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
-    create_access_token, decode_access_token, parse_roles, normalize_roles,
+    require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
     validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN,
     generate_totp_secret, verify_totp, totp_provisioning_uri
 )
@@ -868,7 +868,11 @@ def _worker_heartbeat(db) -> Dict[str, Any]:
             pass
     alive = age_s is not None and age_s < WORKER_STALE_AFTER_S
     return {"alive": alive, "age_s": age_s, "at": at,
-            "pid": hb.get("pid"), "host": hb.get("host")}
+            "pid": hb.get("pid"), "host": hb.get("host"),
+            # Empreinte du code que le demon execute (None : demon anterieur
+            # a cette version — donc ancien code, a relancer)
+            "version": hb.get("version"), "started_at": hb.get("started_at"),
+            "python": hb.get("python")}
 
 
 def ensure_worker(db=None, force: bool = False) -> bool:
@@ -5941,6 +5945,184 @@ async def worker_restart(
     # l'etat, pour que le front reflete le resultat immediatement.
     time.sleep(2.0)
     return {"message": "Relance du démon demandée.", **_worker_status_view(db)}
+
+
+def _tail_file(path, max_bytes: int = 16384, max_lines: int = 80) -> List[str]:
+    """Dernieres lignes d'un journal, borne en octets ET en lignes — jamais
+    le fichier entier en memoire, jamais bloquant."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - max_bytes))
+            data = fh.read(max_bytes)
+        return data.decode("utf-8", errors="replace").splitlines()[-max_lines:]
+    except OSError:
+        return []
+
+
+@app.get("/api/diagnostic/jobs")
+async def diagnostic_jobs(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(require_roles("auditor")),
+):
+    """
+    Radiographie de la file de travaux pour le diagnostic A DISTANCE d'une
+    production bloquee, en un seul appel lecture seule. Accessible a l'admin
+    et au role `auditor` — donc a une cle d'API de role auditor (X-API-Key),
+    lecture seule par construction : c'est la voie prevue pour un diagnostic
+    exterieur sans toucher au serveur.
+
+    - **versions** : empreinte du code charge par l'API et par le demon vs le
+      code present sur le disque — detecte le cas le plus frequent, un demon
+      reste sur l'ANCIEN code apres un deploiement (il vit tant qu'on ne le
+      tue pas) ; un demon vivant sans empreinte est lui aussi un ancien code ;
+    - **jobs** : compteurs par statut, RUNNING avec fraicheur du battement de
+      coeur, file d'attente ordonnee comme le ferait le demon, dernieres
+      erreurs, et l'etat du groupe serialise (qui tient le verrou implicite) ;
+    - **worker** : supervision existante + verrou flock (PID vivant ?) ;
+    - **system** : memoire de la machine et du processus, charge, moteur BDD ;
+    - **worker_log_tail** : la queue du journal du demon — ses dernieres
+      volontes quand il est mort.
+    """
+    from fiskr import buildinfo
+    from fiskr.database import Job, JOB_STATUSES
+    from fiskr.database import engine as db_engine
+    from fiskr.worker import LOCK_FILE
+    from sqlalchemy import func
+    now = datetime.utcnow()
+
+    def _age(dt):
+        return round((now - dt).total_seconds(), 1) if dt else None
+
+    # --- Versions : qui execute quel code ? ---
+    disk = buildinfo.source_fingerprint()
+    hb = _worker_heartbeat(db)
+    versions = {
+        "disk": disk,
+        "git_head": buildinfo.git_head(),
+        "api": {
+            "loaded": buildinfo.LOADED_FINGERPRINT,
+            "started_at": buildinfo.PROCESS_STARTED_AT,
+            "python": buildinfo.PYTHON_VERSION,
+            "outdated": buildinfo.LOADED_FINGERPRINT != disk,
+        },
+        "worker": {
+            "loaded": hb.get("version"),
+            "started_at": hb.get("started_at"),
+            "python": hb.get("python"),
+            # None = demon anterieur au diagnostic : forcement un ancien code
+            "outdated": (hb.get("version") != disk) if hb.get("version") else None,
+        },
+    }
+
+    # --- Verrou flock du demon : le PID inscrit vit-il encore ? ---
+    lock = {"present": LOCK_FILE.exists(), "pid": None, "pid_alive": None}
+    if lock["present"]:
+        try:
+            first = LOCK_FILE.read_text(encoding="utf-8").splitlines()
+            lock["pid"] = int(first[0].strip()) if first and first[0].strip() else None
+        except (OSError, ValueError):
+            pass
+        if lock["pid"]:
+            try:
+                os.kill(lock["pid"], 0)
+                lock["pid_alive"] = True
+            except ProcessLookupError:
+                lock["pid_alive"] = False
+            except PermissionError:
+                lock["pid_alive"] = True
+            except OSError:
+                pass
+
+    # --- Jobs : compteurs, en cours, en attente, erreurs, groupe serialise ---
+    counts = {s: 0 for s in JOB_STATUSES}
+    counts.update(dict(db.query(Job.status, func.count(Job.id))
+                       .group_by(Job.status).all()))
+    queued_by_kind = dict(db.query(Job.kind, func.count(Job.id))
+                          .filter(Job.status == "QUEUED").group_by(Job.kind).all())
+    running = []
+    for j in db.query(Job).filter(Job.status == "RUNNING") \
+               .order_by(Job.started_at.asc()).all():
+        row = _job_row_view(j)
+        row.update({
+            "claimed_by": j.claimed_by,
+            "heartbeat_age_s": _age(j.heartbeat_at),
+            "heartbeat_stale": j.heartbeat_at is None
+                or (now - j.heartbeat_at) > job_queue.STALE_AFTER,
+            "running_for_s": _age(j.started_at),
+        })
+        running.append(row)
+    queued = []
+    for j in db.query(Job).filter(Job.status == "QUEUED") \
+               .order_by(Job.priority.asc(), Job.id.asc()).limit(20).all():
+        row = _job_row_view(j)
+        row.update({"priority": j.priority, "queued_for_s": _age(j.created_at),
+                    "not_before": j.not_before.isoformat() if j.not_before else None})
+        queued.append(row)
+    recent_errors = [dict(_job_row_view(j), claimed_by=j.claimed_by)
+                     for j in db.query(Job).filter(Job.status == "ERROR")
+                                .order_by(Job.id.desc()).limit(10).all()]
+    stale_cutoff = now - job_queue.STALE_AFTER
+    holder = db.query(Job).filter(
+        Job.status == "RUNNING", Job.kind.in_(job_queue.SERIAL_KINDS),
+        Job.heartbeat_at.isnot(None), Job.heartbeat_at >= stale_cutoff).first()
+    serial = {
+        "kinds": list(job_queue.SERIAL_KINDS),
+        "stale_after_s": job_queue.STALE_AFTER.total_seconds(),
+        "busy": holder is not None,
+        "holder": _job_row_view(holder) if holder is not None else None,
+    }
+
+    # --- Machine : memoire, charge, moteur BDD (jamais bloquant) ---
+    system = {"db_engine": None, "load_avg": None, "mem_total_mb": None,
+              "mem_available_mb": None, "api_process_rss_mb": None}
+    try:
+        system["db_engine"] = db_engine.url.get_backend_name()
+    except Exception:
+        pass
+    try:
+        system["load_avg"] = [round(x, 2) for x in os.getloadavg()]
+    except OSError:
+        pass
+    try:
+        import resource as _resource
+        system["api_process_rss_mb"] = round(
+            _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except Exception:
+        pass
+    try:
+        meminfo = {}
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                key, _, val = line.partition(":")
+                meminfo[key.strip()] = val.strip()
+        system["mem_total_mb"] = round(int(meminfo["MemTotal"].split()[0]) / 1024)
+        system["mem_available_mb"] = round(int(meminfo["MemAvailable"].split()[0]) / 1024)
+    except Exception:
+        pass
+
+    # --- Reglages qui gouvernent la file (aucun secret) ---
+    jobs_cfg = (config.get("jobs") or {})
+    cfg = {
+        "jobs_mode": job_queue.jobs_mode(),
+        "slots": int(jobs_cfg.get("slots", 2) or 2),
+        "screen_stall_timeout_s": jobs_cfg.get("screen_stall_timeout_s", 900),
+        "worker_stale_after_s": WORKER_STALE_AFTER_S,
+    }
+
+    return {
+        "now": now.isoformat() + "Z",
+        "versions": versions,
+        "worker": {**_worker_status_view(db), "lock": lock},
+        "jobs": {"counts": counts, "queued_by_kind": queued_by_kind,
+                 "running": running, "queued": queued,
+                 "recent_errors": recent_errors, "serial": serial},
+        "progress_active": progress_registry.list_active(),
+        "system": system,
+        "config": cfg,
+        "worker_log_tail": _tail_file(PROJECT_ROOT / "worker.log"),
+    }
 
 
 class SyncSchedulesUpdate(BaseModel):
