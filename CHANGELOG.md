@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — one-shot SQLite → PostgreSQL migration tool: `tools/migrate_sqlite_to_postgres.py`
+When PostgreSQL is unreachable, Fiskr silently falls back to SQLite — all production data then lives in `fiskr.sqlite3`. The day the PostgreSQL connection is repaired, **nothing migrates by itself**: Pg starts empty (freshly seeded admin), and the API and the daemon can even end up on *different* databases. The new tool copies the entire SQLite content to PostgreSQL faithfully (every table in FK dependency order, ids preserved, JSON/date types converted, auto-increment sequences reset, per-table count verification, batches of 5000). Guard rails: the SQLite file is never modified; the run aborts if the target is not empty unless `--wipe-target`; `--pg-url`/`--sqlite` overrides for non-standard layouts. Validated end-to-end against a real PostgreSQL 16 (6,560 rows, all counts equal, sequence continuity checked). The printed epilogue walks through the cut-over: `database.fallback_to_sqlite: false`, rename the SQLite file, restart app + daemon, verify `system.db_engine == "postgresql"` in `GET /api/diagnostic/jobs`.
+
 ### Fixed — identical-content republishes no longer enter homologation (nor trigger backtests)
 Observed in production via the remote diagnostic: the homologation queue filled with snapshots showing a **0/0/0 delta** — OpenSanctions (and others) republish their files daily with fresh metadata (timestamps, row order), so the byte-hash dedup sees a "new" file whose **parsed content is identical** to the production list. Each of those non-events cost a full homologation entry plus an automatic test book — the very jobs that were clogging the queue.
 
