@@ -144,6 +144,18 @@ base, sont annoncés au lieu de laisser la barre muette. L'affichage se met
 à jour en douceur (barre animée, sans clignotement) et survit à un
 rechargement de page.
 
+**Une vague de cahiers ne recrible qu'une fois l'univers.** En mode delta,
+une seule des trois passes a la taille d'un univers : l'**univers partagé**
+(toutes les autres listes + les fiches inchangées de la liste testée). Elle
+est **réemployée d'un cahier au suivant** tant que rien de ce qui la
+détermine n'a bougé — même panel, même ensemble de lots partagés, mêmes
+réglages à chaud, mêmes règles anti-FP, même liste blanche, mêmes ressources
+linguistiques, aucune fiche corrigée à la main entre-temps. Une matinée où
+huit listes se sont synchronisées coûte donc **une** passe complète, pas
+huit. Au moindre changement, le calcul repart de zéro : un recalcul inutile
+ne coûte que du temps, un réemploi abusif donnerait un **verdict faux**. Le
+rapport indique s'il y a eu réemploi (`shared_pass_reused`).
+
 ### Pannes visibles, reprise et retour arrière
 
 Trois garde-fous rendent tout incident **visible et réparable** — jamais

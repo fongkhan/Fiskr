@@ -95,11 +95,17 @@ def _cleanup_db(known_panels=frozenset()):
 
 @pytest.fixture
 def client():
+    from fiskr.backtest import reset_shared_pass_memo
+
     _override_user("admin")
     known_panels = _known_panels()
+    # La passe partagee est memorisee au niveau du processus : on repart d'une
+    # memoire vide pour que chaque test observe le comportement qu'il teste.
+    reset_shared_pass_memo()
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+    reset_shared_pass_memo()
     _cleanup_db(known_panels)
 
 
@@ -510,3 +516,82 @@ def test_backtest_progress_is_continuous(client, ab_setup):
     assert "LOAD_UNIVERSE" in phases, "les chargements d'univers doivent être annoncés"
     # ab_setup sans règle candidate -> mode delta : passes nommées
     assert {"SCREEN_SHARED", "SCREEN_REMOVED", "SCREEN_ADDED"} <= phases, phases
+
+
+# ------------------ MUTUALISATION DE LA PASSE PARTAGEE ------------------
+# En mode delta, la passe « univers partagé » est la seule de la taille d'un
+# univers : c'est elle qui coûte les minutes. Constaté en production : 19
+# cahiers en file recriblaient chacun les mêmes 770 000 fiches. Elle est donc
+# réemployée d'un cahier à l'autre — mais UNIQUEMENT si rien de ce qui la
+# détermine n'a bougé, un faux réemploi donnant un verdict faux.
+
+def _report_of(client, snapshot_id):
+    return client.get(f"/api/review/snapshots/{snapshot_id}").json()["backtest_report"]
+
+
+def test_shared_pass_is_reused_when_nothing_changed(client, ab_setup):
+    """Deux cahiers de suite sur le même univers, le même panel et le même
+    paramétrage : le second réemploie la passe partagée et rend EXACTEMENT
+    les mêmes chiffres."""
+    premier = _run_backtest(client, ab_setup["pending_id"],
+                            panel_snapshot_id=ab_setup["panel_id"])
+    assert premier["mode"] == "delta"
+    assert premier["shared_pass_reused"] is False, "rien à réemployer au premier passage"
+
+    second = _run_backtest(client, ab_setup["pending_id"],
+                           panel_snapshot_id=ab_setup["panel_id"])
+    assert second["shared_pass_reused"] is True, second
+    for cle in ("gap_pct", "verdict", "new_pairs_count", "resolved_pairs_count"):
+        assert second[cle] == premier[cle], cle
+    assert second["current"] == premier["current"]
+    assert second["candidate"] == premier["candidate"]
+
+
+def test_shared_pass_is_recomputed_when_a_setting_changes(client, ab_setup):
+    """Garde-fou de justesse : tout changement de réglage à chaud (seuils,
+    blocking, bascules du moteur) invalide la mémoire. Le coût d'un recalcul
+    inutile est du temps ; celui d'un réemploi abusif serait un verdict faux."""
+    _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
+    assert client.put("/api/settings/ingestion",
+                      json={"backtest_max_gap_pct": 42}).status_code == 200
+
+    apres = _run_backtest(client, ab_setup["pending_id"],
+                          panel_snapshot_id=ab_setup["panel_id"])
+    assert apres["shared_pass_reused"] is False, apres
+
+
+def test_shared_pass_is_recomputed_for_another_list(client, ab_setup):
+    """Une autre liste en attente n'a pas le même univers partagé : sa passe
+    ne peut pas être celle du cahier précédent."""
+    _run_backtest(client, ab_setup["pending_id"], panel_snapshot_id=ab_setup["panel_id"])
+
+    autre = _upload_watchlist(
+        client, [(f"BT-{ab_setup['tag']}-3", f"Sergei Autrov{ab_setup['tag']}", "1955-03-03")],
+        require_approval=True)
+    assert autre["status"] == "PENDING_REVIEW"
+    rapport = _run_backtest(client, autre["snapshot_id"],
+                            panel_snapshot_id=ab_setup["panel_id"])
+    assert rapport["shared_pass_reused"] is False, rapport
+
+
+def test_shared_pass_is_recomputed_after_a_manual_entity_edit(client, ab_setup):
+    """Une fiche corrigée à la main ne change pas d'identifiant de lot : sans
+    le journal des éditions dans l'empreinte, le cahier suivant réemploierait
+    un criblage périmé."""
+    from fiskr.backtest import _engine_fingerprint
+    from fiskr.database import WatchlistEntityChange
+
+    db = next(get_db())
+    try:
+        avant = _engine_fingerprint(db, [])
+        db.add(WatchlistEntityChange(
+            entity_pk=1, entity_id=ab_setup["igor_entity_id"],
+            snapshot_id=ab_setup["pending_id"], field="primary_name",
+            old_value="a", new_value="b", changed_by="testeur"))
+        db.commit()
+        assert _engine_fingerprint(db, []) != avant
+    finally:
+        db.query(WatchlistEntityChange).filter(
+            WatchlistEntityChange.changed_by == "testeur").delete(synchronize_session=False)
+        db.commit()
+        db.close()

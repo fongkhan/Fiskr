@@ -841,6 +841,9 @@ document.addEventListener("DOMContentLoaded", () => {
  // Supervision du démon travailleur : bandeau si arrêté (prod « worker »)
  refreshWorkerStatus();
  setInterval(refreshWorkerStatus, 30_000);
+ // Nouvelle version livrée pendant que l'onglet est ouvert : bandeau discret
+ // proposant de recharger, au lieu d'un écran qui semble figé.
+ setInterval(checkForNewVersion, VERSION_CHECK_MS);
  // Opérations de fond : cadence adaptative (2 s en activité, 8 s au repos).
  // Repeuple aussi la pastille au chargement — une opération lancée avant le
  // rechargement de la page reste suivie.
@@ -8472,6 +8475,62 @@ let _opsPollDelay = 0;
 
 const OPS_POLL_BUSY_MS = 2000; // quelque chose tourne : suivi fluide
 const OPS_POLL_IDLE_MS = 8000; // au repos : inutile de marteler le serveur
+
+// ------------------ NOUVELLE VERSION DISPONIBLE ------------------
+// Un onglet déjà ouvert continue d'exécuter le code chargé à son ouverture :
+// après une livraison, il tourne sur l'ANCIENNE version sans que rien ne le
+// signale. Vu en production : l'écran paraissait figé (« ça a planté »)
+// alors que tout fonctionnait — un simple rechargement suffisait.
+const VERSION_CHECK_MS = 5 * 60 * 1000;
+
+// Version chargée par CET onglet, lue sur sa propre balise script.
+const BOOT_STATIC_VERSION = (() => {
+ const tag = document.querySelector('script[src*="app.js"]');
+ const src = tag ? tag.getAttribute("src") || "" : "";
+ const found = src.match(/[?&]v=([^&]+)/);
+ return found ? found[1] : null;
+})();
+
+function _tr(texte) {
+ return fiskrI18n ? fiskrI18n.t(texte) : texte;
+}
+
+function showNewVersionBanner() {
+ if (document.getElementById("new-version-banner")) return; // déjà affiché
+ const banner = document.createElement("div");
+ banner.id = "new-version-banner";
+ banner.className = "new-version-banner";
+ banner.setAttribute("role", "status");
+ const texte = document.createElement("span");
+ texte.textContent = _tr("Une nouvelle version de Fiskr est disponible. Cet onglet utilise encore l'ancienne.");
+ const recharger = document.createElement("button");
+ recharger.className = "btn btn-sm btn-primary";
+ recharger.textContent = _tr("Recharger");
+ recharger.onclick = () => location.reload();
+ const plusTard = document.createElement("button");
+ plusTard.className = "btn btn-sm btn-secondary";
+ plusTard.textContent = _tr("Plus tard");
+ plusTard.title = _tr("Masquer jusqu'au prochain rechargement");
+ plusTard.onclick = () => { banner.remove(); _versionBannerDismissed = true; };
+ banner.append(texte, recharger, plusTard);
+ document.body.appendChild(banner);
+}
+
+// « Plus tard » vaut jusqu'au prochain rechargement : on ne réaffiche pas le
+// bandeau toutes les cinq minutes à quelqu'un qui l'a déjà écarté.
+let _versionBannerDismissed = false;
+
+async function checkForNewVersion() {
+ if (!BOOT_STATIC_VERSION || _versionBannerDismissed) return; // rien à comparer / écarté
+ try {
+ const response = await apiFetch("/api/version", { silent: true });
+ if (!response.ok) return;
+ const data = await response.json();
+ if (data.static_version && data.static_version !== BOOT_STATIC_VERSION) {
+ showNewVersionBanner();
+ }
+ } catch (e) { /* une vérification manquée n'a aucune conséquence */ }
+}
 
 // Enregistre un rappel déclenché quand l'opération se termine (succès ou échec)
 function onOperationDone(token, callback) {
