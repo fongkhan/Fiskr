@@ -412,7 +412,12 @@ body {
 
 .grid-layout {
     display: grid;
-    grid-template-columns: 1.1fr 0.9fr;
+    /* minmax(0, …) et non « 1.1fr 0.9fr » : une piste `1fr` ne descend JAMAIS
+       sous la largeur minimale de son contenu. Un tableau large (la table des
+       sources, qui grandit avec le catalogue) gonflait donc sa colonne et
+       poussait la carte voisine HORS de l'écran. Avec minmax(0, …) la piste
+       peut se réduire et c'est .table-container qui défile, comme prévu. */
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
     gap: 2rem;
     align-items: start;
 }
@@ -1180,7 +1185,7 @@ th.sortable.sort-desc::after {
 /* Details Grid inside Modals */
 .details-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 1.2rem;
     margin-top: 1rem;
 }
@@ -1389,7 +1394,7 @@ th.sortable.sort-desc::after {
 
 .home-grid {
     display: grid;
-    grid-template-columns: 1.4fr 1fr;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
     gap: 2rem;
     align-items: start;
 }

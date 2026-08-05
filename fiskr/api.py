@@ -11102,21 +11102,41 @@ async def serve_favicon():
     from fastapi.responses import FileResponse
     return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
 
+_STATIC_VERSION_RE = re.compile(r'(\.(?:js|css))\?v=[^"\']*')
+
+
+def _serve_page(path) -> str:
+    """
+    Page HTML avec la version de cache des ressources RECALCULEE.
+
+    Les pages portaient un numero fige a la main (`app.js?v=7.0`) : quand le
+    fichier changeait sans que le chiffre bouge — c'est-a-dire a presque
+    chaque livraison — les navigateurs continuaient de servir l'ANCIENNE
+    version depuis leur cache. Un deploiement pouvait donc rester invisible
+    des utilisateurs, sans le moindre signe (vu en production : de nouvelles
+    sources absentes de l'ecran alors que le serveur servait le bon fichier).
+    L'empreinte du contenu change des que le contenu change, et seulement
+    alors : le cache reste efficace, et un vidage manuel n'est plus requis.
+    """
+    from fiskr import buildinfo
+    with open(path, "r", encoding="utf-8") as f:
+        html = f.read()
+    return _STATIC_VERSION_RE.sub(rf"\1?v={buildinfo.STATIC_VERSION}", html)
+
+
 @app.get("/login", response_class=HTMLResponse)
 @app.get("/login.html", response_class=HTMLResponse)
 async def serve_login():
     login_path = static_dir / "login.html"
     if not login_path.exists():
         raise HTTPException(status_code=404, detail="Login page not found")
-    with open(login_path, "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read(), status_code=200)
+    return HTMLResponse(content=_serve_page(login_path), status_code=200)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
     token = request.cookies.get("fiskr_access_token")
     if token and decode_access_token(token):
-        index_path = static_dir / "index.html"
-        with open(index_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
+        return HTMLResponse(content=_serve_page(static_dir / "index.html"),
+                            status_code=200)
     return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
 

@@ -175,3 +175,43 @@ def test_worker_heartbeat_carries_version():
     finally:
         app.dependency_overrides.clear()
         _cleanup_db()
+
+
+# ------------------ VERSION DE CACHE DES RESSOURCES ------------------
+
+def test_pages_carry_a_content_derived_static_version(client):
+    """Les pages portaient un numéro de version figé à la main
+    (« app.js?v=7.0 ») : un fichier modifié sans que le chiffre bouge restait
+    servi depuis le cache du navigateur — un déploiement pouvait rester
+    invisible (constaté en production). La version doit valoir l'empreinte du
+    contenu des ressources."""
+    from fiskr import buildinfo
+    from fiskr.api import _serve_page, static_dir
+    # GET / redirige vers la connexion sans cookie : on rend la page du
+    # tableau de bord par le même chemin de service que l'application.
+    page = _serve_page(static_dir / "index.html")
+    attendu = f"?v={buildinfo.STATIC_VERSION}"
+    assert f"/static/app.js{attendu}" in page
+    assert f"/static/i18n.js{attendu}" in page
+    assert f"/static/styles.css{attendu}" in page
+    # Plus aucune version figée ne subsiste
+    import re
+    figees = [v for v in re.findall(r'\.(?:js|css)\?v=([^"\']*)', page)
+              if v != buildinfo.STATIC_VERSION]
+    assert not figees, f"Versions figées restantes : {figees}"
+
+
+def test_static_version_follows_the_content(tmp_path, monkeypatch):
+    """L'empreinte change quand une ressource change, et JAMAIS autrement —
+    sans quoi le cache navigateur ne servirait plus à rien."""
+    from fiskr import buildinfo
+    avant = buildinfo.static_fingerprint()
+    assert avant == buildinfo.static_fingerprint()  # stable à contenu égal
+
+    faux = tmp_path / "static"
+    faux.mkdir()
+    (faux / "a.js").write_text("un", encoding="utf-8")
+    monkeypatch.setattr(buildinfo, "_STATIC_DIR", faux)
+    empreinte_1 = buildinfo.static_fingerprint()
+    (faux / "a.js").write_text("deux", encoding="utf-8")
+    assert buildinfo.static_fingerprint() != empreinte_1

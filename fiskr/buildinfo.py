@@ -34,6 +34,30 @@ def source_fingerprint() -> str:
     return h.hexdigest()[:12]
 
 
+_STATIC_DIR = _SRC_DIR / "static"
+
+
+def static_fingerprint() -> str:
+    """
+    Empreinte du CONTENU des fichiers servis au navigateur (js, css).
+
+    Les pages referencent leurs ressources avec une version figee a la main
+    (`app.js?v=7.0`) : quand le fichier changeait sans que le chiffre bouge,
+    les navigateurs continuaient de servir l'ANCIENNE version depuis leur
+    cache — un deploiement pouvait donc rester invisible des utilisateurs.
+    Cette empreinte-ci change des que le contenu change, donc a chaque
+    deploiement utile, et jamais autrement (le cache reste efficace).
+    """
+    h = hashlib.sha256()
+    for path in sorted(_STATIC_DIR.glob("*.js")) + sorted(_STATIC_DIR.glob("*.css")):
+        h.update(path.name.encode("utf-8"))
+        try:
+            h.update(path.read_bytes())
+        except OSError:
+            h.update(b"<unreadable>")
+    return h.hexdigest()[:12]
+
+
 def git_head() -> Optional[str]:
     """SHA court du HEAD git si le deploiement est un clone — lecture directe
     des fichiers .git (pas de binaire git requis). None sinon, jamais
@@ -62,3 +86,6 @@ def git_head() -> Optional[str]:
 LOADED_FINGERPRINT = source_fingerprint()
 PROCESS_STARTED_AT = datetime.utcnow().isoformat() + "Z"
 PYTHON_VERSION = sys.version.split()[0]
+# Version de cache des ressources du navigateur, figee au demarrage : tous
+# les processus API d'un meme deploiement servent donc la meme.
+STATIC_VERSION = static_fingerprint()
