@@ -11,6 +11,7 @@ quasi-collisions (meme nom, date de naissance differente) et clients neutres.
 Les panels generes sont isoles du referentiel clients reel (file_type dedie,
 jamais repris par le re-criblage automatique).
 """
+import hashlib
 import logging
 import random
 import time
@@ -260,6 +261,86 @@ def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
     return screenpool.merge_partials([agg])
 
 
+# ------------------ MUTUALISATION DE LA PASSE PARTAGEE ------------------
+# En mode delta, la passe « univers partage » est la SEULE de la taille d'un
+# univers : c'est elle qui coute les minutes. Or elle est identique d'un
+# cahier de tests a l'autre tant que la production, le panel et le
+# parametrage du moteur n'ont pas bouge — le cas exact d'une vague de
+# cahiers automatiques apres l'activation de plusieurs sources (constate en
+# production : 19 cahiers a la file, chacun recriblant les memes 770 000
+# fiches pour evaluer une liste de quelques centaines).
+#
+# La memoire ne garde QU'UNE entree (la derniere) : elle sert une vague, ne
+# croit jamais, et disparait avec le processus. Rien n'est persiste : au
+# moindre doute, on recalcule.
+_SHARED_PASS_MEMO: Dict[str, Any] = {"key": None, "value": None}
+
+
+def _hash_parts(*parts: Any) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(repr(part).encode("utf-8", errors="replace"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _engine_fingerprint(db, current_rules) -> str:
+    """
+    Empreinte de TOUT ce qui peut changer le resultat d'un criblage en dehors
+    de l'univers et du panel : reglages a chaud (table app_settings, qui porte
+    seuils, blocking, bascules du moteur), regles anti-faux positifs, liste
+    blanche, ressources linguistiques (fichiers + equivalences apprises) et
+    corrections manuelles de fiches listees — une fiche editee a la main ne
+    change pas d'identifiant de lot, seul son journal en garde trace.
+
+    Volontairement GROSSIERE : un reglage sans effet sur le criblage invalide
+    quand meme la memoire. Un faux recalcul ne coute qu'un peu de temps ; un
+    faux REEMPLOI donnerait un verdict faux — ce serait inacceptable.
+    """
+    from fiskr.database import AppSetting, WatchlistEntityChange
+    from sqlalchemy import func
+    reglages = sorted(
+        (r.key, repr(r.value))
+        for r in db.query(AppSetting.key, AppSetting.value).all()
+    )
+    regles = sorted((r.id, getattr(r, "code", "") or "") for r in (current_rules or []))
+    liste_blanche = sorted(_active_whitelist_keys(db))
+    # Journal des editions manuelles : deux entiers suffisent a detecter toute
+    # correction survenue depuis le cahier precedent (table de petite taille).
+    editions = db.query(func.count(WatchlistEntityChange.id),
+                        func.max(WatchlistEntityChange.id)).one()
+    ressources = ""
+    try:
+        from fiskr import resources as resource_tables
+        index = resource_tables.get_index()
+        ressources = (f"{getattr(index, 'content_hash', '') or ''}"
+                      f":{getattr(index, 'learned_terms', 0)}")
+    except Exception:  # ressources indisponibles : l'empreinte reste valable
+        pass
+    return _hash_parts(reglages, regles, liste_blanche, tuple(editions), ressources)
+
+
+def _shared_pass_key(db, panel_snapshot_id: str, shared_ids: List[str],
+                     pending_snapshot_id: str, unchanged: Set[str],
+                     current_rules) -> str:
+    """Identite EXACTE de la passe partagee : panel, univers, parametrage."""
+    return _hash_parts(
+        panel_snapshot_id,
+        sorted(shared_ids),
+        # Les fiches inchangees de la liste testee font partie de l'univers
+        # partage : deux listes differentes n'ont pas le meme partage.
+        pending_snapshot_id if unchanged else None,
+        _hash_parts(sorted(unchanged)) if unchanged else "",
+        _engine_fingerprint(db, current_rules),
+    )
+
+
+def reset_shared_pass_memo() -> None:
+    """Vide la memoire de passe partagee (tests, et prudence a la demande)."""
+    _SHARED_PASS_MEMO["key"] = None
+    _SHARED_PASS_MEMO["value"] = None
+
+
 def _panel_count(db, panel_snapshot_id: str) -> int:
     return db.query(ClientEntity).filter(
         ClientEntity.snapshot_id == panel_snapshot_id).count()
@@ -394,6 +475,7 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         merged["alerts"] = len(merged["pairs"])
         return merged
 
+    shared_reused = False
     if delta is not None:
         overall["total"] = panel_size * 3  # partage + retirees + ajoutees
         changed_old = delta["removed"] | delta["modified"]
@@ -401,17 +483,37 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         # Univers partage : toutes les autres listes + les fiches INCHANGEES
         # de la liste testee (chargees depuis le candidat : meme checksum,
         # meme contenu). C'est la seule passe de la taille d'un univers.
-        _loading()
         shared_ids = [sid for sid in candidate_ids if sid != pending_snap.snapshot_id]
-        shared_entities = _entity_dicts(db, shared_ids, projection=projection) if shared_ids else []
-        shared_entities.extend(_entity_dicts(
-            db, [pending_snap.snapshot_id], projection=projection,
-            entity_ids=delta["unchanged"]))
-        shared = _dry_run_screen(db, None, shared_entities, rule_set=current_rules,
-                                 progress=_phase_progress("SCREEN_SHARED"),
-                                 panel_snapshot_id=panel_snapshot_id)
-        del shared_entities
-        _gc.collect()
+        # Passe partagee : reemployee telle quelle si RIEN de ce qui la
+        # determine n'a bouge depuis le cahier precedent (meme panel, meme
+        # univers partage, meme parametrage moteur). C'est ce qui fait passer
+        # une vague de cahiers de « N x plusieurs minutes » a « une fois ».
+        memo_key = _shared_pass_key(db, panel_snapshot_id, shared_ids,
+                                    pending_snap.snapshot_id, delta["unchanged"],
+                                    current_rules)
+        if _SHARED_PASS_MEMO["key"] == memo_key:
+            shared = _SHARED_PASS_MEMO["value"]
+            shared_reused = True
+            logger.info("Cahier de tests : passe partagée réemployée "
+                        "(univers, panel et paramétrage inchangés).")
+            if progress:  # la barre franchit la passe d'un coup
+                progress("SCREEN_SHARED", overall["base"] + panel_size, overall["total"])
+        else:
+            shared_reused = False
+            _loading()
+            shared_entities = _entity_dicts(db, shared_ids, projection=projection) if shared_ids else []
+            shared_entities.extend(_entity_dicts(
+                db, [pending_snap.snapshot_id], projection=projection,
+                entity_ids=delta["unchanged"]))
+            shared = _dry_run_screen(db, None, shared_entities, rule_set=current_rules,
+                                     progress=_phase_progress("SCREEN_SHARED"),
+                                     panel_snapshot_id=panel_snapshot_id)
+            del shared_entities
+            _gc.collect()
+            # `_combine` recopie systematiquement ce qu'il lit : la valeur
+            # memorisee n'est jamais modifiee par les cahiers qui la reutilisent.
+            _SHARED_PASS_MEMO["key"] = memo_key
+            _SHARED_PASS_MEMO["value"] = shared
         _pass_done()
 
         _loading()
@@ -494,6 +596,9 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         "panel_snapshot_id": panel_snapshot_id,
         "panel_size": panel_size,
         "mode": "delta" if delta is not None else "full",
+        # Tracabilite : ce cahier a-t-il reemploye la passe partagee d'un
+        # cahier precedent (meme univers, meme panel, meme parametrage) ?
+        "shared_pass_reused": shared_reused,
         "delta_sizes": ({"added": len(delta["added"]), "modified": len(delta["modified"]),
                          "removed": len(delta["removed"]), "unchanged": len(delta["unchanged"])}
                         if delta is not None else None),

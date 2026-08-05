@@ -201,6 +201,21 @@ def test_pages_carry_a_content_derived_static_version(client):
     assert not figees, f"Versions figées restantes : {figees}"
 
 
+def test_api_version_lets_an_open_tab_notice_a_delivery(client):
+    """Un onglet déjà ouvert continue d'exécuter le code chargé à son
+    ouverture : après une livraison il tourne sur l'ancienne version sans que
+    rien ne le signale (constaté en production, l'écran paraissait figé).
+    L'application compare périodiquement la version qu'elle a chargée à
+    celle-ci."""
+    from fiskr import buildinfo
+    response = client.get("/api/version")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"static_version": buildinfo.STATIC_VERSION}
+    # C'est bien la version que les pages inscrivent sur leurs ressources
+    from fiskr.api import _serve_page, static_dir
+    assert f"?v={response.json()['static_version']}" in _serve_page(static_dir / "index.html")
+
+
 def test_static_version_follows_the_content(tmp_path, monkeypatch):
     """L'empreinte change quand une ressource change, et JAMAIS autrement —
     sans quoi le cache navigateur ne servirait plus à rien."""

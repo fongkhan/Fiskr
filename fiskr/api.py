@@ -5909,6 +5909,21 @@ def _worker_status_view(db) -> Dict[str, Any]:
     }
 
 
+@app.get("/api/version")
+async def app_version(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Version des ressources servies au navigateur.
+
+    Un onglet deja ouvert continue d'executer le code charge a son ouverture :
+    apres une livraison, il tourne sur l'ANCIENNE version sans que rien ne le
+    signale — vu en production, ou l'ecran paraissait fige alors que tout
+    fonctionnait. L'application compare periodiquement cette valeur a celle
+    qu'elle a chargee et propose de recharger quand elles different.
+    """
+    from fiskr import buildinfo
+    return {"static_version": buildinfo.STATIC_VERSION}
+
+
 @app.get("/api/worker/status")
 async def worker_status(
     db: Session = Depends(get_db),

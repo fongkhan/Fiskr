@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — an open tab now says when a new version has been delivered
+Following on from the cache-busting fix below: assets are correctly refreshed on **reload**, but a tab left open keeps running the code it loaded when it was opened. After a deployment it therefore runs the **old** version with nothing to signal it — which is exactly what happened in production, where the screen looked frozen ("it seems to have crashed") while everything was in fact working; a reload was all it took.
+
+The application now compares the version it loaded against `GET /api/version` every five minutes, and, when they differ, shows a discreet floating banner offering **Recharger** / **Plus tard**. "Plus tard" holds until the next reload, so nobody gets nagged every five minutes. Translated into the six languages, RTL-aware.
+
+### Changed — a wave of test books no longer re-screens the same universe N times
+In delta mode a test book runs three passes, but only one of them is the size of a universe: the **shared universe** (all the other lists, plus the unchanged records of the list under test). Measured in production: 19 queued test books, each re-screening the same **770,000** records — around eight minutes apiece, roughly three hours of queue — to assess lists of a few hundred entries.
+
+That pass is now **reused from one test book to the next**, so a wave costs one full pass instead of N. Reuse is keyed on a fingerprint of everything that can change the outcome: panel, the exact set of shared snapshots, the unchanged records of the list under test, hot settings (`app_settings`, which carries thresholds, blocking and engine toggles), anti-false-positive rules, whitelist, linguistic resources (files **and** learned equivalences), and the manual-edit journal — a record corrected by hand does not change its snapshot id, only its journal records it. The fingerprint is **deliberately coarse**: a setting with no bearing on screening still invalidates the memo. A needless recompute only costs time; a wrongful reuse would produce a **false verdict**. Nothing is persisted, a single entry is kept, and it dies with the process. Reports carry `shared_pass_reused` for traceability. Pinned by tests on both sides: reuse when nothing moved, recompute when a setting changes, when the list differs, and when a record is edited by hand.
+
 ### Fixed — deployments were invisible to browsers, and a wide table pushed a card off-screen
 Reported from production right after a deployment: the newly added sources were nowhere to be seen, plus display glitches. Two distinct root causes, both now fixed at the root.
 
