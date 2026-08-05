@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — bulk homologation: approve several lists in one gesture, from a single overview
+A morning after the scheduled syncs leaves several lists waiting. Approving them meant opening each one, reading its delta, checking its verdict, deciding, coming back. The pending queue is now a **decision table**: each row carries the list's **delta (additions / modifications / removals)** next to its **test-book verdict and gap**, with checkboxes and a **"Homologuer la sélection"** button (`POST /api/review/snapshots/approve-bulk`).
+
+Guarantees, because a batch must not be a back door: every list in the batch goes through **exactly the same controls** as a single approval (exclusion justifications, mandatory test book with an `OK` verdict) — the single-approval body was extracted and is replayed as-is. A refused list **does not stop the batch**: it comes back with its reason while the others go through, so one blocked list no longer forces a one-by-one restart. The whole batch is traced in the admin journal, and lists of the same type still follow the usual rule — the most recently approved supersedes the other.
+
+The queue's delta uses the **delta stored at sync time** (instant); when it isn't applicable — manual import, production changed since — the row says so ("à l'examen", "premier import") rather than showing a misleading 0/0/0 or making the queue crawl through a recompute over hundreds of thousands of records. The detail view still recomputes exactly.
+
 ### Fixed — four broken sources repaired (Canada, US CSL, AMF) and one documented (World Bank)
 The remote diagnostic showed four sources failing every night. Root causes and fixes, each verified against the live upstream:
 

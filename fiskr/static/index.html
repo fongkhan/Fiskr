@@ -773,14 +773,22 @@
  <div id="review-mode-hint" class="hidden" style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.88rem;">
  Le <strong>mode homologation est inactif</strong> : les imports et synchronisations passent directement en production, sans delta ni cahier de tests. Pour un parcours de production contrôlé, activez « Homologation obligatoire » dans l'onglet <strong><svg class="ui-icon" aria-hidden="true"><use href="#i-gear"></use></svg> Paramètres</strong> (admin).
  </div>
+ <div id="review-bulk-bar" class="filter-bar hidden" style="margin-bottom: 1rem; align-items: center;">
+ <span id="review-bulk-count" style="font-weight: 600;">0 sélectionnée(s)</span>
+ <button class="btn btn-sm btn-secondary" onclick="selectAllPendingReviews(true)">Tout sélectionner</button>
+ <button class="btn btn-sm btn-secondary" onclick="selectAllPendingReviews(false)">Tout désélectionner</button>
+ <button id="review-bulk-approve-btn" class="btn btn-sm btn-primary" onclick="approveSelectedSnapshots()" disabled><svg class="ui-icon" aria-hidden="true"><use href="#i-check"></use></svg> Homologuer la sélection</button>
+ </div>
  <div class="table-container max-height-table">
  <table id="review-pending-table">
  <thead>
  <tr>
+ <th style="width: 2.5rem;"><input type="checkbox" id="review-select-all" onchange="selectAllPendingReviews(this.checked)" title="Tout sélectionner"></th>
  <th>Date</th>
  <th>Fichier</th>
  <th>Type</th>
  <th>Fiches</th>
+ <th>Delta (ajouts / modifs / suppr.)</th>
  <th>Exclusions</th>
  <th>Cahier de tests</th>
  <th>Action</th>

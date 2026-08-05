@@ -337,3 +337,126 @@ def test_stacked_roles_admin_and_user_crud(client):
     # Nettoyage du compte cree
     client.delete(f"/api/users/{created['id']}")
     _override_user("admin")
+
+
+# ------------------ HOMOLOGATION GROUPÉE ------------------
+
+def _pending_snapshot_of_type(file_type, name):
+    """Snapshot en attente d'un AUTRE type de liste : le lot porte sur des
+    listes différentes (le cas réel de la file du matin), et seul
+    WATCHLIST_EU accepte un CSV générique à l'import."""
+    snapshot_id = f"test-bulk-{uuid.uuid4().hex[:10]}"
+    db = next(get_db())
+    try:
+        db.add(Snapshot(snapshot_id=snapshot_id, file_type=file_type,
+                        file_name=f"{snapshot_id}.csv", file_hash=uuid.uuid4().hex,
+                        record_count=1, status="PENDING_REVIEW"))
+        db.add(WatchlistEntity(snapshot_id=snapshot_id, entity_id=f"{snapshot_id}-1",
+                               entity_type="I", primary_name=name,
+                               entity_checksum=uuid.uuid4().hex))
+        db.commit()
+    finally:
+        db.close()
+    return {"snapshot_id": snapshot_id}
+
+
+def test_bulk_approve_promotes_every_selected_list(client):
+    """Plusieurs listes mises en production en un geste : chacune promue,
+    chacune avec son job de rechargement."""
+    _set_approval(client, True)
+    a = _upload_watchlist(client, [("I", "Groupe Unov")], file_name="bulk_a.csv")
+    b = _pending_snapshot_of_type("WATCHLIST_UN", "GROUPE DEUXOV")
+
+    response = post_and_wait(client, "/api/review/snapshots/approve-bulk",
+                             json={"snapshot_ids": [a["snapshot_id"], b["snapshot_id"]],
+                                   "comment": "Pointage groupé"})
+    assert response.status_code == 202, response.text
+    data = response.json()
+    assert len(data["approved"]) == 2 and data["refused"] == []
+    assert len(data["job_tokens"]) == 2
+
+    db = next(get_db())
+    try:
+        for snapshot_id in (a["snapshot_id"], b["snapshot_id"]):
+            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
+            assert snap.status == "READY"
+            assert snap.review_comment == "Pointage groupé"
+    finally:
+        db.close()
+
+
+def test_bulk_approve_refuses_individually_without_stopping_the_batch(client):
+    """Une liste refusée (ici : cahier de tests obligatoire et absent) ne doit
+    PAS empêcher les autres de passer — sinon le lot serait inutilisable dès
+    qu'une seule liste coince."""
+    _set_approval(client, True)
+    conforme = _upload_watchlist(client, [("I", "Groupe Conformov")], file_name="bulk_ok.csv")
+    bloquee = _pending_snapshot_of_type("WATCHLIST_UN", "GROUPE BLOQUOV")
+
+    # Le cahier de tests devient obligatoire : aucune des deux n'en a...
+    assert client.put("/api/settings/ingestion", json={"backtest_required": True}).status_code == 200
+    # ...on en fabrique un, au verdict OK, pour la seule liste conforme
+    db = next(get_db())
+    try:
+        snap = db.query(Snapshot).filter(
+            Snapshot.snapshot_id == conforme["snapshot_id"]).first()
+        snap.backtest_report = {"verdict": "OK", "gap_pct": 0.0}
+        db.commit()
+    finally:
+        db.close()
+
+    response = post_and_wait(client, "/api/review/snapshots/approve-bulk",
+                             json={"snapshot_ids": [conforme["snapshot_id"],
+                                                    bloquee["snapshot_id"]]})
+    assert response.status_code == 202, response.text
+    data = response.json()
+    assert [a["snapshot_id"] for a in data["approved"]] == [conforme["snapshot_id"]]
+    assert len(data["refused"]) == 1
+    assert data["refused"][0]["snapshot_id"] == bloquee["snapshot_id"]
+    assert "cahier de tests" in data["refused"][0]["reason"].lower()
+
+    db = next(get_db())
+    try:
+        assert db.query(Snapshot).filter(
+            Snapshot.snapshot_id == bloquee["snapshot_id"]).first().status == "PENDING_REVIEW"
+    finally:
+        db.close()
+    client.put("/api/settings/ingestion", json={"backtest_required": False})
+
+
+def test_bulk_approve_rejects_an_empty_selection(client):
+    assert client.post("/api/review/snapshots/approve-bulk",
+                       json={"snapshot_ids": []}).status_code == 400
+
+
+def test_pending_queue_carries_the_delta_overview(client):
+    """La file d'attente porte le delta de chaque liste : c'est ce qui permet
+    de décider en lot sans ouvrir les listes une par une."""
+    _set_approval(client, True)
+    result = _upload_watchlist(client, [("I", "Vue Ensemblov")], file_name="apercu.csv")
+    ligne = next(p for p in client.get("/api/review/pending").json()["pending"]
+                 if p["snapshot_id"] == result["snapshot_id"])
+    assert "delta_available" in ligne and "is_first_import" in ligne
+    assert "backtest_verdict" in ligne
+
+
+def test_bulk_approve_of_the_same_list_keeps_only_the_latest(client):
+    """Deux versions de la MÊME liste dans un même lot : la plus récemment
+    approuvée l'emporte et supersede l'autre — la règle habituelle, qu'un lot
+    ne doit pas contourner."""
+    _set_approval(client, True)
+    ancien = _upload_watchlist(client, [("I", "Version Unov")], file_name="v1.csv")
+    recent = _upload_watchlist(client, [("I", "Version Deuxov")], file_name="v2.csv")
+
+    response = post_and_wait(client, "/api/review/snapshots/approve-bulk",
+                             json={"snapshot_ids": [ancien["snapshot_id"],
+                                                    recent["snapshot_id"]]})
+    assert response.status_code == 202, response.text
+    db = next(get_db())
+    try:
+        statuts = {s: db.query(Snapshot).filter(Snapshot.snapshot_id == s).first().status
+                   for s in (ancien["snapshot_id"], recent["snapshot_id"])}
+    finally:
+        db.close()
+    assert statuts[recent["snapshot_id"]] == "READY"
+    assert statuts[ancien["snapshot_id"]] == "SUPERSEDED"

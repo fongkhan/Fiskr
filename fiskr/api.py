@@ -7878,12 +7878,33 @@ async def list_pending_reviews(
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Snapshots watchlist en attente d'homologation (plus recents d'abord)."""
+    """
+    Snapshots watchlist en attente d'homologation (plus recents d'abord).
+
+    Chaque ligne porte le DELTA memorise a la synchronisation quand il est
+    encore valable : l'homologation groupee a besoin de la vue d'ensemble
+    (ajouts / modifications / suppressions + verdict du cahier de tests) sans
+    ouvrir les listes une par une. Le delta memorise est instantane ; quand il
+    manque (import manuel, production changee depuis), la ligne le dit
+    (`delta_available: false`) plutot que de faire ramer la file d'attente sur
+    un recalcul de centaines de milliers de fiches — le detail, lui, recalcule
+    toujours exactement.
+    """
     snaps = db.query(Snapshot).filter(
         Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
         Snapshot.status == "PENDING_REVIEW"
     ).order_by(Snapshot.uploaded_at.desc()).all()
-    return {"pending": [_snapshot_summary(db, s) for s in snaps]}
+    pending = []
+    for snap in snaps:
+        row = _snapshot_summary(db, snap)
+        production = _latest_ready_snapshot(db, snap.file_type)
+        stored = _stored_sync_delta(db, snap.snapshot_id,
+                                    production.snapshot_id if production else None)
+        row["delta_summary"] = stored["summary"] if stored else None
+        row["delta_available"] = stored is not None
+        row["is_first_import"] = production is None
+        pending.append(row)
+    return {"pending": pending}
 
 def _stored_sync_delta(db: Session, snapshot_id: str, production_id: Optional[str]):
     """
@@ -8277,23 +8298,16 @@ def _settle_sync_reports(db: Session, snapshot_id: str, new_status: str) -> None
         SyncReport.status == "PENDING_REVIEW",
     ).update({"status": new_status}, synchronize_session=False)
 
-@app.post("/api/review/snapshots/{snapshot_id}/approve", status_code=status.HTTP_202_ACCEPTED)
-async def approve_pending_snapshot(
-    snapshot_id: str,
-    payload: ReviewDecisionRequest,
-    db: Session = Depends(get_db),
-    reviewer: Dict[str, Any] = Depends(require_reviewer)
-):
+def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any],
+                          comment: Optional[str]) -> Dict[str, Any]:
     """
-    Approuve un snapshot en attente : promotion en production (READY), les
-    anciens snapshots du meme type passent en SUPERSEDED et le cache de
-    criblage est recharge sans les entites exclues.
+    Promotion d'UN snapshot : controles de gouvernance, bascule READY,
+    supersede des anciens, puis job de rechargement/re-criblage. Les refus
+    restent des HTTPException 400 (mesage exploitable tel quel).
 
-    La promotion (controles + bascule READY + SUPERSEDED des anciens) est
-    SYNCHRONE : c'est l'acte de gouvernance, il est rapide et ses refus restent
-    des 400 immediats. Le rechargement du cache et le re-criblage post-delta,
-    eux, partent en tache de fond et repondent **202** avec un jeton suivi par
-    GET /api/progress?id= (et par la pastille du dashboard).
+    Extrait de l'endpoint unitaire pour etre rejoue tel quel par l'homologation
+    groupee : une liste approuvee en lot doit franchir EXACTEMENT les memes
+    controles qu'approuvee seule — sans quoi le lot serait une porte derobee.
     """
     snap = _get_pending_snapshot(db, snapshot_id)
 
@@ -8334,7 +8348,7 @@ async def approve_pending_snapshot(
     snap.status = "READY"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
-    snap.review_comment = (payload.comment or "").strip() or None
+    snap.review_comment = (comment or "").strip() or None
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     _settle_sync_reports(db, snap.snapshot_id, "SUCCESS")
     db.commit()
@@ -8351,10 +8365,95 @@ async def approve_pending_snapshot(
     return {
         "message": "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours.",
         "snapshot_id": snapshot_id,
+        "file_type": snap.file_type,
         "status": snap.status,
         "excluded_count": len(excluded_rows),
         "job_token": job_token,
     }
+
+
+@app.post("/api/review/snapshots/{snapshot_id}/approve", status_code=status.HTTP_202_ACCEPTED)
+async def approve_pending_snapshot(
+    snapshot_id: str,
+    payload: ReviewDecisionRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Approuve un snapshot en attente : promotion en production (READY), les
+    anciens snapshots du meme type passent en SUPERSEDED et le cache de
+    criblage est recharge sans les entites exclues.
+
+    La promotion (controles + bascule READY + SUPERSEDED des anciens) est
+    SYNCHRONE : c'est l'acte de gouvernance, il est rapide et ses refus restent
+    des 400 immediats. Le rechargement du cache et le re-criblage post-delta,
+    eux, partent en tache de fond et repondent **202** avec un jeton suivi par
+    GET /api/progress?id= (et par la pastille du dashboard).
+    """
+    return _approve_one_snapshot(db, snapshot_id, reviewer, payload.comment)
+
+
+class BulkApproveRequest(BaseModel):
+    snapshot_ids: List[str]
+    comment: Optional[str] = None
+
+
+@app.post("/api/review/snapshots/approve-bulk", status_code=status.HTTP_202_ACCEPTED)
+async def approve_pending_snapshots_bulk(
+    payload: BulkApproveRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Homologation GROUPEE : plusieurs listes promues en un geste, apres lecture
+    de la vue d'ensemble (delta et verdict de cahier de tests de chacune).
+
+    Chaque snapshot franchit les MEMES controles qu'une approbation unitaire —
+    le lot n'assouplit rien. Une liste refusee (exclusions incompletes, cahier
+    de tests manquant ou en ecart) n'interrompt PAS le lot : elle est rendue
+    avec son motif, les autres passent. C'est ce qui evite qu'un refus isole
+    oblige a tout recommencer une liste a la fois.
+    """
+    ids = [s.strip() for s in (payload.snapshot_ids or []) if (s or "").strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Aucun snapshot sélectionné.")
+    if len(ids) > 50:
+        raise HTTPException(status_code=400,
+                            detail="Homologation groupée limitée à 50 listes à la fois.")
+
+    approved, refused = [], []
+    for snapshot_id in dict.fromkeys(ids):  # dedoublonne en gardant l'ordre
+        try:
+            approved.append(_approve_one_snapshot(db, snapshot_id, reviewer, payload.comment))
+        except HTTPException as refus:
+            db.rollback()
+            refused.append({"snapshot_id": snapshot_id, "reason": refus.detail})
+        except Exception as err:  # jamais un lot interrompu par un imprevu
+            db.rollback()
+            logger.error(f"Homologation groupée — échec sur {snapshot_id} : {err}")
+            refused.append({"snapshot_id": snapshot_id, "reason": f"Erreur inattendue : {err}"})
+
+    if approved:
+        log_admin_action(db, reviewer["username"], "SNAPSHOTS_BULK_APPROVED",
+                         target=", ".join(a["file_type"] for a in approved),
+                         after={"approved": [a["snapshot_id"] for a in approved],
+                                "refused": [r["snapshot_id"] for r in refused]})
+        db.commit()
+
+    if approved and refused:
+        message = (f"{len(approved)} liste(s) mise(s) en production, "
+                   f"{len(refused)} refusée(s) — voir le détail.")
+    elif approved:
+        message = f"{len(approved)} liste(s) mise(s) en production."
+    else:
+        message = "Aucune liste n'a pu être mise en production — voir les motifs."
+    return {
+        "message": message,
+        "approved": approved,
+        "refused": refused,
+        "job_tokens": [a["job_token"] for a in approved],
+    }
+
 
 @app.post("/api/review/snapshots/{snapshot_id}/reject")
 async def reject_pending_snapshot(

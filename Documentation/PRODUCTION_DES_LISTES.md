@@ -191,6 +191,27 @@ L'étape **4 · Décision** rappelle le dernier verdict du cahier de tests
 - **Rejeter** (commentaire obligatoire) : le snapshot n'entrera jamais en
   production, la liste actuelle continue de servir.
 
+## Homologation groupée (plusieurs listes en un geste)
+
+Au lendemain des synchronisations planifiées, plusieurs listes attendent
+souvent ensemble. La file d'attente est une **table de décision** : chaque
+ligne porte le **delta** (ajouts / modifications / suppressions) à côté du
+**verdict du cahier de tests** et de son écart. Cochez les listes à
+promouvoir, puis **« Homologuer la sélection »**.
+
+Le lot n'assouplit **rien** : chaque liste franchit exactement les mêmes
+contrôles qu'une approbation unitaire (justifications d'exclusion, cahier de
+tests obligatoire au verdict `OK` si le réglage est actif). Une liste refusée
+**n'interrompt pas le lot** — elle est rendue avec son motif, les autres
+passent. L'opération est tracée au journal d'administration, et deux versions
+d'une même liste suivent la règle habituelle : la dernière approuvée
+supersede l'autre.
+
+> Le delta affiché dans la file est celui **mémorisé à la synchronisation**
+> (instantané). Quand il ne s'applique pas — import manuel, production changée
+> depuis — la ligne l'indique (« à l'examen », « premier import ») plutôt que
+> d'afficher un 0/0/0 trompeur. Le détail, lui, recalcule toujours exactement.
+
 ## Réglages de gouvernance (⚙️ Paramètres, admin)
 
 | Réglage | Défaut | Effet |

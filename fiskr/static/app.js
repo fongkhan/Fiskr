@@ -4304,27 +4304,121 @@ function pendingBacktestCell(snap) {
  title="Verdict du cahier de tests${gap}">${ok ? "✓ OK" : " " + escapeHtml(snap.backtest_verdict)}</span>`;
 }
 
+// Delta d'une ligne de la file d'attente : le delta mémorisé à la
+// synchronisation est instantané ; quand il manque (import manuel, production
+// changée depuis), on le DIT au lieu d'afficher un faux 0/0/0.
+function pendingDeltaCell(snap) {
+ if (snap.is_first_import) {
+ return `<span style="color: var(--text-muted);" title="Aucune liste de ce type en production : tout le contenu est nouveau">premier import</span>`;
+ }
+ if (!snap.delta_available || !snap.delta_summary) {
+ return `<span style="color: var(--text-muted);" title="Delta calculé à l'ouverture du détail">à l'examen</span>`;
+ }
+ const d = snap.delta_summary;
+ const zero = !d.added_count && !d.modified_count && !d.removed_count;
+ if (zero) {
+ return `<span style="color: var(--text-muted);" title="Contenu identique à la liste en production">aucun changement</span>`;
+ }
+ return `<span style="white-space: nowrap;">`
+ + `<strong style="color: var(--success-soft-text);">+${d.added_count}</strong> / `
+ + `<strong style="color: var(--color-warning);">~${d.modified_count}</strong> / `
+ + `<strong style="color: var(--color-danger);">−${d.removed_count}</strong></span>`;
+}
+
 function renderPendingTable(pending) {
  const tbody = document.querySelector("#review-pending-table tbody");
  if (!tbody) return;
+ const bulkBar = document.getElementById("review-bulk-bar");
  if (!pending || pending.length === 0) {
- tableEmpty(tbody, 7, "Aucun snapshot en attente d'homologation.", "");
+ tableEmpty(tbody, 9, "Aucun snapshot en attente d'homologation.", "");
+ if (bulkBar) bulkBar.classList.add("hidden");
  return;
  }
+ if (bulkBar) bulkBar.classList.toggle("hidden", !canReview());
  tbody.innerHTML = pending.map(snap => {
  const dateStr = snap.uploaded_at ? new Date(snap.uploaded_at).toLocaleString(uiLocale()) : "-";
+ const id = escapeHtml(snap.snapshot_id);
  return `
  <tr>
+ <td><input type="checkbox" class="review-pick" value="${id}" onchange="refreshBulkSelection()"></td>
  <td>${escapeHtml(dateStr)}</td>
  <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}...</small></td>
  <td>${listTypeBadge(snap.file_type)}</td>
  <td>${snap.record_count}</td>
+ <td>${pendingDeltaCell(snap)}</td>
  <td>${snap.excluded_count || 0}</td>
  <td>${pendingBacktestCell(snap)}</td>
- <td><button class="btn btn-sm btn-secondary" onclick="openReviewDetail('${escapeHtml(snap.snapshot_id)}')"> Examiner</button></td>
+ <td><button class="btn btn-sm btn-secondary" onclick="openReviewDetail('${id}')"> Examiner</button></td>
  </tr>
  `;
  }).join("");
+ refreshBulkSelection();
+}
+
+// ------------------ HOMOLOGATION GROUPÉE ------------------
+
+function canReview() {
+ const roles = (currentUser && currentUser.roles) || [];
+ return roles.includes("admin") || roles.includes("reviewer");
+}
+
+function selectedPendingIds() {
+ return Array.from(document.querySelectorAll(".review-pick:checked")).map(c => c.value);
+}
+
+function selectAllPendingReviews(checked) {
+ document.querySelectorAll(".review-pick").forEach(c => { c.checked = checked; });
+ const master = document.getElementById("review-select-all");
+ if (master) master.checked = checked;
+ refreshBulkSelection();
+}
+
+function refreshBulkSelection() {
+ const n = selectedPendingIds().length;
+ const total = document.querySelectorAll(".review-pick").length;
+ const label = document.getElementById("review-bulk-count");
+ if (label) label.textContent = `${n} sélectionnée(s)`;
+ const btn = document.getElementById("review-bulk-approve-btn");
+ if (btn) btn.disabled = n === 0;
+ const master = document.getElementById("review-select-all");
+ if (master) {
+ master.checked = n > 0 && n === total;
+ master.indeterminate = n > 0 && n < total;
+ }
+}
+
+async function approveSelectedSnapshots() {
+ const ids = selectedPendingIds();
+ if (!ids.length) return;
+ const ok = await confirmDialog(
+ `Mettre en production ${ids.length} liste(s) ? Chaque liste franchit les mêmes `
+ + "contrôles qu'une homologation unitaire (exclusions justifiées, cahier de tests "
+ + "si obligatoire). Une liste refusée n'interrompt pas les autres : son motif sera affiché.",
+ { title: "Homologation groupée", confirmLabel: "Mettre en production" }
+ );
+ if (!ok) return;
+ const btn = document.getElementById("review-bulk-approve-btn");
+ if (btn) { btn.disabled = true; btn.textContent = "Mise en production…"; }
+ try {
+ const comment = (document.getElementById("review-comment") || {}).value || "";
+ const response = await apiFetch("/api/review/snapshots/approve-bulk", {
+ method: "POST",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ snapshot_ids: ids, comment })
+ });
+ const data = await response.json();
+ if (!response.ok) { showToast(data.detail || "Homologation groupée impossible.", "error"); return; }
+ showToast(data.message, (data.refused || []).length ? "warning" : "success");
+ (data.refused || []).forEach(r => {
+ showToast(`${r.snapshot_id} : ${r.reason}`, "error");
+ });
+ fetchActiveOperations();
+ await fetchPendingReviews();
+ } catch (err) {
+ showToast("Homologation groupée impossible : " + err.message, "error");
+ } finally {
+ if (btn) { btn.disabled = false; btn.innerHTML = `<svg class="ui-icon" aria-hidden="true"><use href="#i-check"></use></svg> Homologuer la sélection`; }
+ }
 }
 
 // ------------------ PARCOURS GUIDÉ DE PRODUCTION DE LISTE ------------------
