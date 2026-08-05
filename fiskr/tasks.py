@@ -464,8 +464,8 @@ def testpanel_generate_task(ctx: jobs.JobContext, *, source_ids: List[str],
 def mining_task(ctx: jobs.JobContext, *, username: str = "?") -> None:
     """Fouille d'homonymes : parcours des listes en production, propositions
     d'equivalences apprises."""
+    from fiskr.api import run_resource_mining
     from fiskr.database import log_admin_action
-    from fiskr.resource_mining import run_resource_mining
 
     session = ctx.session()
     try:

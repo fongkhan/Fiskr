@@ -424,3 +424,38 @@ def test_log_admin_action_importable_from_database():
         db.commit()
     finally:
         db.close()
+
+
+def test_deferred_imports_of_daemon_tasks_all_resolve():
+    """
+    Chaque tâche du démon (fiskr/tasks.py) importe ses dépendances À
+    L'INTÉRIEUR de sa fonction : ces imports ne sont vérifiés qu'à
+    l'exécution, donc une fonction déplacée d'un module à l'autre ne casse
+    RIEN au démarrage — la tâche plante seulement la nuit venue, en
+    production (vu deux fois : log_admin_action, puis run_resource_mining).
+
+    Ce test résout tous les imports différés du module, une bonne fois.
+    """
+    import ast
+    import importlib
+    from pathlib import Path
+
+    source = Path(job_queue.__file__).with_name("tasks.py")
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    manquants = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        if not node.module.startswith("fiskr"):
+            continue
+        module = importlib.import_module(node.module)
+        for alias in node.names:
+            if alias.name == "*" or hasattr(module, alias.name):
+                continue
+            # « from fiskr import engine_impact » : un sous-module est valide
+            # même s'il n'est pas encore un attribut du paquet
+            try:
+                importlib.import_module(f"{node.module}.{alias.name}")
+            except ImportError:
+                manquants.append(f"{node.module}.{alias.name} (ligne {node.lineno})")
+    assert not manquants, "Imports introuvables dans fiskr/tasks.py : " + ", ".join(manquants)
