@@ -100,13 +100,22 @@ DEFAULT_SECO_OPENSANCTIONS_URL = (
 # Administration). Agregat public et sans cle : son apport propre est le
 # CONTROLE DES EXPORTATIONS (BIS Entity List, Denied Persons, Unverified,
 # Military End User ; ITAR Debarred et Nonproliferation du Departement d'Etat).
-DEFAULT_CSL_URL = "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
+# Voie data.trade.gov : l'ancien point d'entree api.trade.gov sert un
+# certificat TLS EXPIRE (constate en production, echec apres 4 tentatives).
+# Meme JSON, meme structure — seul l'hote change.
+DEFAULT_CSL_URL = (
+    "https://data.trade.gov/downloadable_consolidated_screening_list/v1/consolidated.json"
+)
 
-# Liste consolidee des sanctions autonomes canadiennes (SEMA), publiee en CSV
-# par Affaires mondiales Canada. Le Canada designe de facon autonome, avec un
+# Liste consolidee des sanctions autonomes canadiennes (SEMA), publiee par
+# Affaires mondiales Canada. Le Canada designe de facon autonome, avec un
 # perimetre qui ne recoupe ni celui de l'UE ni celui de l'OFAC.
+# Le CSV a ete RETIRE (404 constate en production) : la voie servie est
+# desormais le XML, un tableau plat d'enregistrements que le meme lecteur
+# consomme. Il porte en outre les navires designes et leur numero OMI, que
+# le CSV n'avait jamais publies.
 DEFAULT_CANADA_URL = (
-    "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.csv"
+    "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.xml"
 )
 
 # Liste consolidee australienne (DFAT) : sanctions onusiennes transposees ET
@@ -120,8 +129,15 @@ DEFAULT_DFAT_URL = "https://www.dfat.gov.au/sites/default/files/regulation8_cons
 # Hong Kong n'ayant pas de regime de sanctions autonome, c'est cette liste-la
 # qui apporte quelque chose qu'aucune autre source branchee ne porte.
 DEFAULT_HK_SFC_URL = "https://www.sfc.hk/en/alert-list"
-# Listes noires de l'AMF : marche domestique de l'etablissement.
-DEFAULT_AMF_URL = "https://www.amf-france.org/fr/listes-noires-et-mises-en-garde"
+# Listes noires de l'AMF : marche domestique de l'etablissement. La page web
+# a ete refondue (404 sur l'ancienne adresse) et, surtout, elle ne publie plus
+# les entites en HTML mais en PDF par categorie — illisible en machine.
+# L'AMF publie en revanche un EXPORT OUVERT quotidien (data.gouv.fr, colonnes
+# nom;categorie;date_inscription) : c'est desormais la voie retenue, et l'URL
+# de ressource « latest » reste stable quand le fichier date change de nom.
+DEFAULT_AMF_URL = (
+    "https://www.data.gouv.fr/api/1/datasets/r/d2d9df6d-1cd2-41a8-96f5-684cb3057ecb"
+)
 
 # Exclusions de la Banque mondiale : ni gel, ni mise en garde — une exclusion
 # des marches finances, prononcee pour fraude ou corruption averee. Criblee

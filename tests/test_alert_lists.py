@@ -362,3 +362,40 @@ def test_a_record_without_a_country_is_reachable_through_the_wildcard(tmp_path):
     }
     assert not listed_keys & set(generate_blocking_keys(client, config))
     assert listed_keys & set(lookup_blocking_keys(client, config))
+
+
+# ------------------ AMF : L'EXPORT OUVERT (la page HTML ne liste plus rien) ------------------
+
+AMF_OPEN_DATA_CSV = (
+    '"nom";"categorie";"date_inscription"\n'
+    '"hsbc@service-gestions.com";"Usurpation";"2026-07-29"\n'
+    '"exemple-forex-test.com";"Forex";"2026-06-15"\n'
+)
+
+
+def test_amf_open_data_export_is_read(tmp_path):
+    """La page web de l'AMF a été refondue et ne publie plus les entités qu'en
+    PDF : la voie retenue est l'export ouvert quotidien (data.gouv.fr).
+    Il est en POINT-VIRGULE — supposer la virgule donnait une liste vide
+    sans la moindre erreur."""
+    chemin = tmp_path / "amf.csv"
+    chemin.write_text(AMF_OPEN_DATA_CSV, encoding="utf-8")
+    entities = list(parse_amf_blacklist(str(chemin)))
+
+    assert len(entities) == 2
+    premier = entities[0]
+    assert premier["primary_name"] == "hsbc@service-gestions.com"
+    # « Date d'inscription » se normalise en « datedinscription » : l'intitulé
+    # machine « date_inscription » doit être reconnu explicitement
+    assert premier["listed_on"] == "2026-07-29"
+    # La catégorie de mise en garde reste lisible dans le motif
+    assert "Usurpation" in premier["designation_reasons"]
+    assert "mise en garde" in premier["designation_reasons"].lower()
+
+
+def test_amf_export_survives_a_wrong_extension(tmp_path):
+    """L'URL de ressource data.gouv.fr ne porte pas d'extension : le fichier
+    est enregistré en .html. Le contenu, lui, doit trancher."""
+    chemin = tmp_path / "amf_sans_extension.html"
+    chemin.write_text(AMF_OPEN_DATA_CSV, encoding="utf-8")
+    assert len(list(parse_amf_blacklist(str(chemin)))) == 2

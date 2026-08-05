@@ -178,7 +178,8 @@ sync:
   # ajouter ici ses libelles (« Sectoral Sanctions », « Non-SDN »...).
   csl:
     enabled: false
-    url: "https://api.trade.gov/static/consolidated_screening_list/consolidated.json"
+    # api.trade.gov sert un certificat TLS expire : voie data.trade.gov (meme JSON).
+    url: "https://data.trade.gov/downloadable_consolidated_screening_list/v1/consolidated.json"
     exclude_sources:
       - "Specially Designated Nationals"
   # Sanctions autonomes canadiennes (SEMA, Affaires mondiales Canada) - opt-in.
@@ -187,7 +188,9 @@ sync:
   # jeux d'intitules de colonnes sont acceptes.
   canada:
     enabled: false
-    url: "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.csv"
+    # Le CSV a ete retire (404) : le XML fait foi, et porte en plus les
+    # navires designes avec leur numero OMI.
+    url: "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.xml"
   # Liste consolidee australienne (DFAT) - opt-in. Reunit les sanctions
   # onusiennes transposees et les designations autonomes australiennes.
   # L'extension de l'url choisit le lecteur : .csv (natif) ou .xlsx, cette
@@ -209,11 +212,22 @@ sync:
     url: "https://www.sfc.hk/en/alert-list"
   amf:
     enabled: false
-    url: "https://www.amf-france.org/fr/listes-noires-et-mises-en-garde"
+    # La page web ne publie plus que des PDF par categorie : la voie retenue
+    # est l export ouvert quotidien de l AMF (data.gouv.fr), URL de ressource
+    # "latest" stable malgre le nom de fichier horodate.
+    url: "https://www.data.gouv.fr/api/1/datasets/r/d2d9df6d-1cd2-41a8-96f5-684cb3057ecb"
   # Exclusions de la Banque mondiale : encore une autre nature — ni gel, ni mise
   # en garde, mais une exclusion des marches finances prononcee pour fraude ou
   # corruption averee. La date de fin d'exclusion alimente delisted_on.
   worldbank:
+    # ATTENTION : depuis 2026 cette API exige une CLE D ABONNEMENT (401
+    # "missing subscription key" sans elle). Demandez-la a la Banque mondiale,
+    # puis passez-la en en-tete via auth_headers (valeur interpolee depuis
+    # .env, jamais ecrite en clair ici) :
+    #   auth_headers:
+    #     Ocp-Apim-Subscription-Key: "${WORLDBANK_API_KEY}"
+    # Sans cle, laissez enabled: false — la synchronisation echouerait chaque
+    # jour en 401.
     enabled: false
     url: "https://apigwext.worldbank.org/dvsvc/v1.0/json/APPLICATION/ADOBE_EXPERIENCE_MANAGER/FIRM/SANCTIONED_FIRM"
   # Liste consolidee suisse (SECO) - opt-in selon l'exposition CH.

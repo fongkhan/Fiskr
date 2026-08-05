@@ -2910,13 +2910,53 @@ def _read_xlsx_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
         workbook.close()
 
 
+def _read_xml_record_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
+    """
+    Lignes d'un XML PLAT : chaque enfant de la racine est un enregistrement,
+    chaque balise fille une colonne (<record><LastName>…</LastName>…</record>).
+    C'est la forme publiee par Affaires mondiales Canada depuis le retrait de
+    son CSV. Lecture en flux (iterparse + clear) : la memoire ne croit pas
+    avec la taille du fichier.
+    """
+    for _event, element in ET.iterparse(file_path, events=("end",)):
+        children = list(element)
+        if not children or any(len(child) for child in children):
+            continue  # pas une feuille d'enregistrement (racine, ou imbrique)
+        row = {}
+        for child in children:
+            tag = child.tag.split("}")[-1]
+            row[tag] = (child.text or "").strip()
+        if row:
+            yield row
+        element.clear()
+
+
+def _sniff_csv_delimiter(sample: str) -> str:
+    """
+    Separateur d'un CSV : virgule, point-virgule ou tabulation. Les sources
+    europeennes publient couramment en point-virgule (AMF, plusieurs
+    regulateurs) — suppose virgule, tout le fichier se lisait comme UNE
+    colonne et la liste ressortait vide, sans erreur.
+    """
+    header = sample.splitlines()[0] if sample else ""
+    counts = {sep: header.count(sep) for sep in (",", ";", "\t")}
+    best = max(counts, key=lambda sep: counts[sep])
+    return best if counts[best] else ","
+
+
 def _read_table_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
-    """Lignes d'un CSV ou d'un XLSX, choisies sur l'extension du fichier."""
-    if file_path.lower().endswith((".xlsx", ".xlsm")):
+    """Lignes d'un CSV, d'un XLSX ou d'un XML plat, selon le fichier."""
+    lowered = file_path.lower()
+    if lowered.endswith((".xlsx", ".xlsm")):
         yield from _read_xlsx_rows(file_path)
         return
+    if lowered.endswith(".xml"):
+        yield from _read_xml_record_rows(file_path)
+        return
     with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
+        sample = f.readline()
+        f.seek(0)
+        for row in csv.DictReader(f, delimiter=_sniff_csv_delimiter(sample)):
             yield {k: ("" if v is None else v) for k, v in row.items() if k}
 
 
@@ -2956,7 +2996,10 @@ def parse_canada_sema_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
     """Parse la liste consolidee des sanctions autonomes canadiennes."""
     seen: Dict[str, int] = {}
     for row in _read_table_rows(file_path):
-        entity = _table_get(row, "Entity", "Entite", "Entité", "EntityName")
+        # « EntityOrShip » : intitule de l'export XML, ou une meme colonne porte
+        # les personnes morales ET les navires designes (avec leur numero OMI).
+        entity = _table_get(row, "Entity", "Entite", "Entité", "EntityName",
+                            "EntityOrShip", "EntiteOuNavire", "Entité ou navire")
         last_name = _table_get(row, "LastName", "Last Name", "Nom", "NomDeFamille")
         given_name = _table_get(row, "GivenName", "Given Name", "Prenom", "Prénom", "Prenoms")
         if entity:
@@ -2990,11 +3033,14 @@ def parse_canada_sema_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
             aliases_raw.append({"name": f"{last_name} {given_name}", "type": "Strong"})
 
         dob = _extract_iso_date(_table_get(row, "DateOfBirth", "Date of Birth",
-                                           "DateDeNaissance", "Date de naissance"))
+                                           "DateDeNaissance", "Date de naissance",
+                                           "DateOfBirthOrShipBuildDate",
+                                           "DateDeNaissanceOuDateDeConstruction"))
         country = _table_get(row, "Country", "Pays")
         listed_on = _extract_iso_date(_table_get(row, "DateOfListing", "Date of Listing",
                                                  "DateInscription", "Date d'inscription"))
-        title = _table_get(row, "Title", "Titre")
+        title = _table_get(row, "Title", "Titre", "TitleOrShip", "TitreOuNavire")
+        imo = _table_get(row, "ShipIMONumber", "IMO", "NumeroOMI") or None
         reference = " ".join(p for p in (schedule and f"Annexe {schedule}",
                                          item and f"article {item}") if p)
 
@@ -3032,7 +3078,7 @@ def parse_canada_sema_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
             "sanction_programs": [country] if country else [],
             "name_original_script": None,
             "origin": "Canada — Sanctions autonomes (SEMA)",
-            "imo_number": None,
+            "imo_number": imo,
             "aircraft_tail_number": None,
             "lei_number": None,
             "national_registry_ids": [],
@@ -3392,8 +3438,16 @@ def parse_regulatory_alert_list(
         published = _extract_iso_date(_table_get(
             row, "Date", "Date of publication", "Publication date", "Date added",
             "Date of listing", "Date de publication", "Date d'inscription",
+            # « Date d'inscription » se normalise en « datedinscription » (le d
+            # elide subsiste) : l'intitule machine du fichier ouvert AMF ne s'y
+            # ramene pas, il est donc cite tel quel.
+            "date_inscription", "Date inscription",
             "Date de mise en garde", "Last updated",
         ))
+        # Categorie de la mise en garde (crypto-actifs, forex, usurpation...) :
+        # portee comme « programme » pour rester filtrable a l'ecran.
+        category = _table_get(row, "Category", "Categorie", "Catégorie",
+                              "categorie", "Type", "Nature")
         country = _table_get(row, "Country", "Jurisdiction", "Pays", "Juridiction")
         # PAS de juridiction inventee quand la source n'en publie pas. Le
         # premier jet remplissait avec la juridiction du regulateur, pour
@@ -3444,7 +3498,8 @@ def parse_regulatory_alert_list(
             "designation": None,
             # Le libelle dit explicitement qu'il s'agit d'une mise en garde :
             # l'analyste ne doit jamais la confondre avec un gel des avoirs.
-            "designation_reasons": designation_reasons,
+            "designation_reasons": f"{designation_reasons} — {category}" if category
+                                   else designation_reasons,
             "additional_informations": "; ".join(extra) or None,
             "official_reference": build_official_reference(reference or reference_label, published),
             "title": None,

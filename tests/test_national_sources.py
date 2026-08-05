@@ -289,3 +289,71 @@ def test_end_to_end_canada_upload_then_screen(api):
     best = result.json()["best_match"]
     assert best is not None and best["status"] == "ALERT"
     assert best["watchlist_entity"]["_list_type"] == "WATCHLIST_CANADA"
+
+
+# ------------------ CANADA : L'EXPORT XML (le CSV a ete retire) ------------------
+
+CANADA_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<data-set>
+ <record>
+  <Country>Belarus / Bélarus</Country>
+  <LastName>Atabekov</LastName>
+  <GivenName>Khazalbek Bakhtibekovich</GivenName>
+  <DateOfBirthOrShipBuildDate>1965-04-29</DateOfBirthOrShipBuildDate>
+  <Schedule>1, Part 1</Schedule>
+  <Item>1</Item>
+  <DateOfListing>2020-09-28</DateOfListing>
+ </record>
+ <record>
+  <Country>Russia / Russie</Country>
+  <EntityOrShip>Testovaya Kompaniya OOO</EntityOrShip>
+  <Schedule>1, Part 2</Schedule>
+  <Item>7</Item>
+  <DateOfListing>2022-03-15</DateOfListing>
+ </record>
+ <record>
+  <Country>Russia / Russie</Country>
+  <EntityOrShip>MV Test Vessel</EntityOrShip>
+  <ShipIMONumber>9123456</ShipIMONumber>
+  <Schedule>1, Part 3</Schedule>
+  <Item>2</Item>
+  <DateOfListing>2023-06-01</DateOfListing>
+ </record>
+</data-set>
+"""
+
+
+def test_canada_xml_export_maps_persons_entities_and_ships(tmp_path):
+    """Affaires mondiales Canada a RETIRE son CSV (404 constaté en production).
+    L'export XML — un tableau plat d'enregistrements — doit produire les mêmes
+    fiches, y compris les personnes morales et les navires que le CSV
+    n'exposait pas (colonne EntityOrShip, numéro OMI)."""
+    entities = list(parse_canada_sema_csv(_file(tmp_path, "ca.xml", CANADA_XML)))
+    assert len(entities) == 3
+    by_type = {}
+    for e in entities:
+        by_type.setdefault(e["entity_type"], []).append(e)
+    assert len(by_type["I"]) == 1 and len(by_type["E"]) == 2
+
+    person = by_type["I"][0]
+    assert person["primary_name"] == "Khazalbek Bakhtibekovich Atabekov"
+    # L'intitulé XML de la date de naissance diffère de celui du CSV
+    assert person["dates_of_birth"] == ["1965-04-29"]
+    assert person["listed_on"] == "2020-09-28"
+
+    ship = next(e for e in by_type["E"] if e["primary_name"] == "MV Test Vessel")
+    assert ship["imo_number"] == "9123456"
+
+
+def test_canada_xml_and_csv_agree_on_the_same_content(tmp_path):
+    """Le passage du CSV au XML ne doit RIEN changer aux fiches produites :
+    sans quoi le delta de la première synchronisation annoncerait un
+    remplacement intégral de la liste."""
+    csv_text = ("Country,LastName,GivenName,DateOfBirth,Schedule,Item,DateOfListing\n"
+                "Belarus / Bélarus,Atabekov,Khazalbek Bakhtibekovich,1965-04-29,"
+                "\"1, Part 1\",1,2020-09-28\n")
+    xml_only = list(parse_canada_sema_csv(_file(tmp_path, "one.xml", CANADA_XML)))[0]
+    csv_only = list(parse_canada_sema_csv(_file(tmp_path, "one.csv", csv_text)))[0]
+    for champ in ("entity_id", "primary_name", "entity_type", "dates_of_birth",
+                  "listed_on", "countries", "official_reference"):
+        assert xml_only[champ] == csv_only[champ], champ
