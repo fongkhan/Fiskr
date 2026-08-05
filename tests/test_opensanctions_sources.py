@@ -222,3 +222,41 @@ def test_metadata_only_republish_skips_homologation_in_staging_mode(db):
     assert second.status == "NO_CHANGE"
     assert db.query(Snapshot).filter(
         Snapshot.status == "PENDING_REVIEW").count() == 0
+
+
+# ------------------ COHÉRENCE REGISTRE <-> FRONT ------------------
+
+def _app_js() -> str:
+    return (Path(__file__).resolve().parents[1] / "fiskr" / "static" / "app.js") \
+        .read_text(encoding="utf-8")
+
+
+def test_every_list_type_has_a_front_label():
+    """Un type de liste sans libellé s'affiche en brut (« WATCHLIST_AE_TERROR »)
+    dans les tableaux et les sélecteurs. Le registre étant la source de vérité,
+    tout type qu'il déclare doit avoir son libellé côté écran."""
+    from fiskr.database import WATCHLIST_FILE_TYPES
+    src = _app_js()
+    sans_libelle = [t for t in WATCHLIST_FILE_TYPES if f"{t}:" not in src]
+    assert not sans_libelle, "Types sans libellé dans LIST_TYPE_LABELS : " + ", ".join(sans_libelle)
+
+
+def test_every_registry_source_is_offered_on_the_sources_screen():
+    """Une source branchée mais absente du catalogue front est injoignable :
+    ni bouton de synchronisation, ni planification."""
+    src = _app_js()
+    absentes = [s.run_key for s in OPENSANCTIONS_SOURCES
+                if f'key: "{s.run_key}"' not in src]
+    assert not absentes, "Sources absentes du catalogue front : " + ", ".join(absentes)
+
+
+def test_registry_datasets_are_unique():
+    """Deux entrées sur le même jeu de données produiraient deux listes
+    jumelles — et deux fois le même criblage."""
+    datasets = [s.dataset for s in OPENSANCTIONS_SOURCES]
+    doublons = {d for d in datasets if datasets.count(d) > 1}
+    assert not doublons, f"Jeux OpenSanctions déclarés deux fois : {doublons}"
+    cles = [s.run_key for s in OPENSANCTIONS_SOURCES]
+    assert len(cles) == len(set(cles))
+    types = [s.file_type for s in OPENSANCTIONS_SOURCES]
+    assert len(types) == len(set(types))
