@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — deployments were invisible to browsers, and a wide table pushed a card off-screen
+Reported from production right after a deployment: the newly added sources were nowhere to be seen, plus display glitches. Two distinct root causes, both now fixed at the root.
+
+**Deployments were invisible.** The pages referenced their assets with a **hand-maintained version** (`app.js?v=7.0`). That number hadn't moved in months, so browsers kept serving the **cached** copy of a file the server had long since updated — a deployment could reach production and remain invisible to every user, with nothing to signal it. The version is now the **fingerprint of the assets' content** (`buildinfo.STATIC_VERSION`), injected when the page is served: it changes as soon as the content changes, and never otherwise — so the cache stays effective and no manual purge is needed. Pinned by a test.
+
+**A wide table pushed a card off-screen.** The `.grid-layout` columns were `1.1fr 0.9fr`, and a `1fr` track **never shrinks below its content's minimum width**. As the sources table grew with the catalogue, its column inflated and pushed the neighbouring card 114 px past the viewport edge, forcing the whole page to scroll sideways. Now `minmax(0, …)`: the track can shrink and `.table-container` scrolls internally, as designed. Same fix applied to `.home-grid` and `.details-grid`, which carried the same latent bug. Measured after the fix: **0 px of horizontal overflow** on every screen checked.
+
 ### Fixed/Added — every source verified against the live internet; 16 public sources added
 All 40 wired sources were queried **one by one from the internet**, not inferred from documentation (report: `Documentation/VERIFICATION_DES_SOURCES.md`).
 
