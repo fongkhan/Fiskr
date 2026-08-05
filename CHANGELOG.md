@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed/Added — every source verified against the live internet; 16 public sources added
+All 40 wired sources were queried **one by one from the internet**, not inferred from documentation (report: `Documentation/VERIFICATION_DES_SOURCES.md`).
+
+**The find**: the Israeli NBCTF source pointed at `il_nbctf_sanctions`, a slug that **has never existed** in the OpenSanctions catalogue — a 404 `NoSuchKey` on every run, meaning the source had been reporting nothing since it was wired. Corrected to `il_mod_terrorists` (2,056 records). Two more sources were dead ends: **DFAT Australia** (HTTP/2 stream error on the CSV, 404 on the XLSX) and the **World Bank** (401, subscription key now required) — both now have a working OpenSanctions route, with the native connectors kept for manual import / for whoever obtains a key. All 27 registry slugs are now validated against the live catalogue (462 datasets).
+
+**The probe tool no longer drifts**: `tools/diagnostic_sources.py` derived its list from a hand-copied block — six sources were missing from it (Canada, AMF, DFAT, HK-SFC, World Bank, OFAC Non-SDN) and three URLs had gone stale, so it could report "all good" about addresses the product no longer used. It now reads `get_sync_config()`: it probes exactly what the product downloads, 73 probes.
+
+**16 public sources added**, each chosen for what no already-wired list carries: national terrorism lists under UNSCR 1373 (**UAE, Saudi Arabia, Qatar, Egypt, Türkiye MASAK, Indonesia DTTOT, South Africa FIC, Tunisia**), European neighbourhood freezes (**Monaco**, 12,929 records; **Czechia**), what the Anglo-Saxon lists don't hold (**US FTO** — OFAC carries the freeze, not the State Department's terrorist-organisation designation; **UK FCDO** and **proscribed organisations** — OFSI carries the financial freeze, not those), and **designated crypto wallets** (Israel MoD, 4,284 — Fiskr already hard-matches crypto addresses). Every one is **off by default**, with its own list type and therefore its own score threshold. No paid source was wired: all require a contract (see `SOURCES_PREMIUM.md`).
+
+Two consistency gaps closed on the way, each now pinned by a test: **every list type has a front label** (the 11 registry sources had none — they displayed as raw `WATCHLIST_*` in tables and selectors) and **every registry source appears on the Sources screen** (without which it has no sync button and no scheduling).
+
 ### Added — bulk homologation: approve several lists in one gesture, from a single overview
 A morning after the scheduled syncs leaves several lists waiting. Approving them meant opening each one, reading its delta, checking its verdict, deciding, coming back. The pending queue is now a **decision table**: each row carries the list's **delta (additions / modifications / removals)** next to its **test-book verdict and gap**, with checkboxes and a **"Homologuer la sélection"** button (`POST /api/review/snapshots/approve-bulk`).
 

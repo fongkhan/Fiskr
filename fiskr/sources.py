@@ -96,9 +96,12 @@ OPENSANCTIONS_SOURCES: Tuple[OpenSanctionsSource, ...] = (
         "Belgique — liste nationale de gel", FAMILY_SANCTIONS,
         "Belgique (gels)", "Liste nationale belge de gel (terrorisme)",
         "https://finances.belgium.be/fr/tresorerie/sanctions-financieres"),
+    # Le slug `il_nbctf_sanctions` n'a JAMAIS existe au catalogue (404
+    # NoSuchKey a chaque passage, constate a la verification generale) : le
+    # jeu publie est `il_mod_terrorists`.
     OpenSanctionsSource(
-        "il_nbctf", "il_nbctf_sanctions", "ILNBCTF", "WATCHLIST_IL_NBCTF", "ILN",
-        "Israël — désignations NBCTF", FAMILY_SANCTIONS,
+        "il_nbctf", "il_mod_terrorists", "ILNBCTF", "WATCHLIST_IL_NBCTF", "ILN",
+        "Israël — organisations terroristes", FAMILY_SANCTIONS,
         "Israël NBCTF", "Désignation du bureau national israélien de lutte contre le financement du terrorisme",
         "https://nbctf.mod.gov.il/en/Pages/designation.aspx"),
 
@@ -110,6 +113,114 @@ OPENSANCTIONS_SOURCES: Tuple[OpenSanctionsSource, ...] = (
         "Ukraine — sanctions NSDC", FAMILY_SANCTIONS,
         "Ukraine NSDC", "Sanction du Conseil national de sécurité et de défense ukrainien",
         "https://sanctions.nsdc.gov.ua/"),
+
+    # --- Listes nationales de terrorisme (RCSNU 1373) -----------------------
+    # Le coeur du CFT : chaque Etat designe sur son propre sol, et AUCUNE de
+    # ces designations ne remonte dans les listes onusiennes ou europeennes.
+    # Juridictions retenues pour l'exposition d'un etablissement francais :
+    # Golfe et Levant (correspondants bancaires, transferts de fonds),
+    # Maghreb, Asie du Sud-Est, Afrique.
+    OpenSanctionsSource(
+        "ae_terror", "ae_local_terrorists", "AETERROR", "WATCHLIST_AE_TERROR", "AET",
+        "Émirats arabes unis — liste nationale de terrorisme", FAMILY_SANCTIONS,
+        "EAU (terrorisme)", "Désignation nationale émirienne (RCSNU 1373)",
+        "https://www.uaeiec.gov.ae/en-us/un-page"),
+    OpenSanctionsSource(
+        "sa_terror", "sa_pcct_terrorism_list", "SATERROR", "WATCHLIST_SA_TERROR", "SAT",
+        "Arabie saoudite — liste nationale de terrorisme", FAMILY_SANCTIONS,
+        "Arabie saoudite (terrorisme)", "Désignation nationale saoudienne (RCSNU 1373)",
+        "https://www.spa.gov.sa/"),
+    OpenSanctionsSource(
+        "qa_nctc", "qa_nctc_sanctions", "QANCTC", "WATCHLIST_QA_NCTC", "QAT",
+        "Qatar — registre national des sanctions", FAMILY_SANCTIONS,
+        "Qatar NCTC", "Désignation nationale qatarienne (comité national de lutte contre le terrorisme)",
+        "https://www.nctc.gov.qa/"),
+    OpenSanctionsSource(
+        "eg_terror", "eg_terrorists", "EGTERROR", "WATCHLIST_EG_TERROR", "EGT",
+        "Égypte — liste nationale de terrorisme", FAMILY_SANCTIONS,
+        "Égypte (terrorisme)", "Désignation nationale égyptienne (RCSNU 1373)",
+        "https://www.cc.gov.eg/"),
+    OpenSanctionsSource(
+        "tr_masak", "tr_fcib", "TRMASAK", "WATCHLIST_TR_MASAK", "TRM",
+        "Türkiye — gels d'avoirs MASAK", FAMILY_SANCTIONS,
+        "Türkiye MASAK", "Gel d'avoirs prononcé par la cellule de renseignement financier turque",
+        "https://en.hmb.gov.tr/financial-crimes-investigation-board"),
+    OpenSanctionsSource(
+        "id_dttot", "id_dttot", "IDDTTOT", "WATCHLIST_ID_DTTOT", "IDT",
+        "Indonésie — liste DTTOT", FAMILY_SANCTIONS,
+        "Indonésie DTTOT", "Désignation nationale indonésienne (terroristes et organisations terroristes)",
+        "https://www.ppatk.go.id/"),
+    OpenSanctionsSource(
+        "za_fic", "za_fic_sanctions", "ZAFIC", "WATCHLIST_ZA_FIC", "ZAF",
+        "Afrique du Sud — sanctions financières ciblées", FAMILY_SANCTIONS,
+        "Afrique du Sud FIC", "Sanction financière ciblée sud-africaine (Financial Intelligence Centre)",
+        "https://www.fic.gov.za/"),
+    OpenSanctionsSource(
+        "tn_cnlct", "tn_cnlct", "TNCNLCT", "WATCHLIST_TN_CNLCT", "TNC",
+        "Tunisie — liste nationale antiterroriste", FAMILY_SANCTIONS,
+        "Tunisie CNLCT", "Désignation nationale tunisienne (commission nationale de lutte contre le terrorisme)",
+        "https://www.cnlct.tn/"),
+
+    # --- Voisinage europeen : gels nationaux hors liste UE ------------------
+    OpenSanctionsSource(
+        "mc_freezes", "mc_fund_freezes", "MCFREEZE", "WATCHLIST_MC_FREEZE", "MCF",
+        "Monaco — gels de fonds", FAMILY_SANCTIONS,
+        "Monaco (gels)", "Gel de fonds prononcé par la Principauté de Monaco",
+        "https://geldesfonds.gouv.mc/"),
+    OpenSanctionsSource(
+        "cz_terror", "cz_terrorists", "CZTERROR", "WATCHLIST_CZ_TERROR", "CZT",
+        "Tchéquie — désignations antiterroristes", FAMILY_SANCTIONS,
+        "Tchéquie (terrorisme)", "Désignation nationale tchèque (règlement gouvernemental)",
+        "https://www.financnianalytickyurad.cz/"),
+
+    # --- Etats-Unis et Royaume-Uni : ce que nos listes ne portent pas -------
+    # L'OFAC porte le gel, PAS la designation d'organisation terroriste
+    # etrangere (FTO) du Departement d'Etat ; l'OFSI porte le gel financier,
+    # PAS la liste de sanctions du FCDO ni les organisations proscrites.
+    OpenSanctionsSource(
+        "us_fto", "us_state_terrorist_orgs", "USFTO", "WATCHLIST_US_FTO", "FTO",
+        "États-Unis — organisations terroristes étrangères (FTO)", FAMILY_SANCTIONS,
+        "US FTO", "Désignation d'organisation terroriste étrangère (Département d'État)",
+        "https://www.state.gov/foreign-terrorist-organizations/"),
+    OpenSanctionsSource(
+        "gb_fcdo", "gb_fcdo_sanctions", "GBFCDO", "WATCHLIST_GB_FCDO", "FCD",
+        "Royaume-Uni — liste de sanctions FCDO", FAMILY_SANCTIONS,
+        "UK FCDO", "Désignation du Foreign, Commonwealth & Development Office",
+        "https://www.gov.uk/government/publications/the-uk-sanctions-list"),
+    OpenSanctionsSource(
+        "gb_proscribed", "gb_proscribed_orgs", "GBPROSC", "WATCHLIST_GB_PROSCRIBED", "GBP",
+        "Royaume-Uni — organisations terroristes proscrites", FAMILY_SANCTIONS,
+        "UK organisations proscrites", "Organisation proscrite au titre du Terrorism Act 2000",
+        "https://www.gov.uk/government/publications/proscribed-terror-groups-or-organisations"),
+
+    # --- Australie : la voie officielle DFAT ne repond plus ------------------
+    # Le CSV et le XLSX de dfat.gov.au ont ete retires (erreur de flux HTTP/2
+    # puis 404, constate a la verification generale) : le connecteur natif
+    # WATCHLIST_DFAT reste en place pour l'import manuel du fichier, et cette
+    # voie-ci prend le relais de la synchronisation automatique.
+    OpenSanctionsSource(
+        "au_dfat", "au_dfat_sanctions", "AUDFAT", "WATCHLIST_AU_DFAT", "AUD",
+        "Australie — liste consolidée DFAT", FAMILY_SANCTIONS,
+        "Australie DFAT", "Sanction australienne (ONU transposée + désignations autonomes)",
+        "https://www.dfat.gov.au/international-relations/security/sanctions/consolidated-list"),
+
+    # --- Exclusions de bailleurs : la voie Banque mondiale sans cle ---------
+    # L'API native de la Banque mondiale exige desormais une cle d'abonnement
+    # (401). Cette voie-ci porte le meme contenu, sans cle.
+    OpenSanctionsSource(
+        "worldbank_os", "worldbank_debarred", "WBDEBAR", "WATCHLIST_WB_DEBARRED", "WBD",
+        "Banque mondiale — fournisseurs exclus (voie ouverte)", FAMILY_DEBARMENT,
+        "Banque mondiale (exclusions)", "Exclusion des marchés financés par le Groupe de la Banque mondiale",
+        "https://www.worldbank.org/en/projects-operations/procurement/debarred-firms"),
+
+    # --- Crypto : portefeuilles designes ------------------------------------
+    # Fiskr sait deja faire une correspondance exacte sur adresse crypto : ces
+    # portefeuilles designes lui donnent de la matiere.
+    OpenSanctionsSource(
+        "il_crypto", "il_mod_crypto", "ILCRYPTO", "WATCHLIST_IL_CRYPTO", "ILC",
+        "Israël — portefeuilles crypto désignés", FAMILY_SANCTIONS,
+        "Israël (crypto)", "Portefeuille crypto désigné par le ministère de la Défense israélien",
+        "https://nbctf.mod.gov.il/en/Pages/AdministrativeSeizure.aspx"),
 )
 
 OPENSANCTIONS_BY_KEY: Dict[str, OpenSanctionsSource] = {

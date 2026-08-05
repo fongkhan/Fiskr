@@ -93,23 +93,26 @@ PROBES = [
      None,  # construite depuis la config (token)
      {}, "<"),
 
-    # --- Autres sources deja branchees, pour un tableau de bord complet ---
-    ("ofac_sdn", "OFAC — SDN Advanced XML", "HEAD",
-     "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_ADVANCED.XML",
-     {}, None),
-    ("un", "ONU — liste consolidee XML", "HEAD",
-     "https://scsanctions.un.org/resources/xml/en/consolidated.xml", {}, None),
-    ("dgt", "DGT — registre national des gels (JSON)", "HEAD",
-     "https://gels-avoirs.dgtresor.gouv.fr/ApiPublic/api/v1/publication/derniere-publication-fichier-json",
-     {}, None),
-    ("ofsi", "UK OFSI — liste consolidee CSV", "HEAD",
-     "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv", {}, None),
-    ("seco", "Suisse SECO — export SESAM XML", "HEAD",
-     "https://www.sesam.search.admin.ch/sesam-search-web/pages/"
-     "downloadXmlGesamtliste.xhtml?lang=en&action=downloadXmlGesamtlisteAction", {}, None),
-    ("csl", "US CSL — liste consolidee JSON", "HEAD",
-     "https://api.trade.gov/static/consolidated_screening_list/consolidated.json", {}, None),
 ]
+
+# --- TOUTES les autres sources branchees, derivees de la CONFIGURATION ---
+# Elles etaient auparavant recopiees a la main ici : six manquaient (Canada,
+# AMF, Australie, HK-SFC, Banque mondiale, OFAC Non-SDN) et trois URL avaient
+# vieilli — la sonde declarait donc « tout va bien » sur des adresses que la
+# synchronisation n'utilisait plus. Lire get_sync_config() supprime la
+# derive : la sonde interroge exactement ce que le produit telecharge.
+try:
+    from fiskr.sync import get_sync_config as _sync_config
+    for _key, _cfg in sorted((_sync_config() or {}).items()):
+        if not isinstance(_cfg, dict):
+            continue
+        _url = (_cfg.get("url") or "").strip()
+        # EUR-Lex a ses sondes dediees ; le FSF exige un token (sonde plus haut)
+        if not _url or _key in ("eurlex", "eu_fsf") or "{token}" in _url:
+            continue
+        PROBES.append((_key, f"Source configurée — {_key}", "GET", _url, {}, None))
+except Exception:  # configuration illisible : la sonde reste utilisable
+    pass
 
 # Sources du registre OpenSanctions (fiskr/sources.py) : une sonde par
 # dataset, generee depuis le registre. Le verdict porte sur le CONTENU
