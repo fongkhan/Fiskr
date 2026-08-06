@@ -87,6 +87,38 @@ def load_config() -> dict:
 config = load_config()
 
 # Security & Authentication Settings
-SECRET_KEY = os.getenv("SECRET_KEY", "fiskr_super_secret_jwt_key_change_in_production_2026")
+_DEFAULT_SECRET_KEY = "fiskr_super_secret_jwt_key_change_in_production_2026"
+_DEFAULT_ADMIN_PASSWORD = "adminpassword"
+SECRET_KEY = os.getenv("SECRET_KEY", _DEFAULT_SECRET_KEY)
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "adminpassword")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", _DEFAULT_ADMIN_PASSWORD)
+
+# La cle par defaut signe les jetons de session : connue de tous (elle est dans
+# le code source), elle permettrait a un tiers de forger un cookie admin. Le mot
+# de passe admin par defaut est tout aussi public. On le signale FORT au
+# demarrage — silencieux en test/CI, ou ces valeurs sont normales et voulues.
+INSECURE_DEFAULT_SECRET_KEY = (SECRET_KEY == _DEFAULT_SECRET_KEY)
+INSECURE_DEFAULT_ADMIN_PASSWORD = (ADMIN_PASSWORD == _DEFAULT_ADMIN_PASSWORD)
+
+
+def warn_on_insecure_defaults() -> list:
+    """
+    Liste les secrets restes a leur valeur par defaut (non definis en
+    variable d'environnement). Chaque entree est journalisee en WARNING.
+    Appele au demarrage de l'API ; rend la liste pour le diagnostic.
+    """
+    import logging
+    problems = []
+    if INSECURE_DEFAULT_SECRET_KEY:
+        problems.append("SECRET_KEY")
+    if INSECURE_DEFAULT_ADMIN_PASSWORD:
+        problems.append("ADMIN_PASSWORD")
+    if problems and not os.getenv("PYTEST_CURRENT_TEST"):
+        log = logging.getLogger("fiskr.config")
+        log.warning(
+            "SÉCURITÉ : %s utilise(nt) encore la valeur par défaut du code source. "
+            "Définissez-la/les en variable d'environnement AVANT toute mise en "
+            "production — une clé de signature publique permet de forger un jeton "
+            "de session administrateur.", " et ".join(problems),
+        )
+    return problems

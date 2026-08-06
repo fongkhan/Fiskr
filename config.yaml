@@ -341,6 +341,24 @@ fprules:
   llm_enabled: false            # true = bouton "Générer par IA" dans l'éditeur de règles
   llm_model: "claude-sonnet-5"  # necessite ANTHROPIC_API_KEY et `pip install anthropic`
 
+# Risque geographique GAFI/FATF (juridictions a haut risque).
+# Lentille COMPLEMENTAIRE au criblage par nom : signale les clients/parties
+# rattaches a une juridiction sous « appel a l'action » (contre-mesures) ou
+# sous « surveillance renforcee ». N'altere ni score ni verdict.
+#
+# Le referentiel INTEGRE (fiskr/country_risk.py) sert de defaut et porte sa
+# date de plenniere. Le GAFI revise ses listes ~3 fois par an : apres chaque
+# plenniere, mettez a jour ICI (sans redeploiement) plutot que dans le code.
+# Un bloc fourni REMPLACE la liste correspondante ; laisser commente = defaut.
+# country_risk:
+#   as_of: "2026-06-19"
+#   # Codes ISO 3166-1 alpha-2. Appel a l'action (contre-mesures) :
+#   blacklist: ["IR", "KP", "MM"]
+#   # Surveillance renforcee (grey list) :
+#   greylist: ["AO", "BO", "BA", "BG", "CM", "CI", "CD", "HT", "IQ", "KE",
+#              "KW", "LA", "LB", "MC", "NP", "PG", "SS", "SY", "VE", "VN",
+#              "VG", "YE"]
+
 # Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
 # Les selecteurs de balises pivots sont surchargables lors de chaque import.
 ssie:

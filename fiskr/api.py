@@ -38,6 +38,7 @@ from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORM
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
+    safe_upload_filename,
     SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
@@ -126,6 +127,7 @@ from fiskr.settings import (
     watchlist_epoch, bump_watchlist_epoch
 )
 from fiskr import resources as resource_tables
+from fiskr import country_risk
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
@@ -1007,6 +1009,8 @@ def _ensure_watchlist_cache(db: Session) -> None:
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing Fiskr application...")
+    from fiskr.config import warn_on_insecure_defaults
+    warn_on_insecure_defaults()  # secrets restes a leur valeur par defaut : WARNING
     init_db()
     # Populate the cache from database
     db = next(get_db())
@@ -2338,6 +2342,109 @@ async def revoke_api_key(
 
 # ------------------ DATA ENDPOINTS ------------------
 
+def _screen_preview(db, name: str, entity_type: str, dob: Optional[str],
+                    countries: List[str], requested_lists: Optional[List[str]],
+                    limit: int) -> Dict[str, Any]:
+    """
+    Criblage flou d'un nom saisi à la volée — MÊME moteur que la production
+    (quality gate, blocking, translittération, phonétique, ajustements DOB/genre/
+    géographie, seuils par liste) mais **strictement en lecture** : aucune
+    ligne d'audit, aucune alerte, aucun compteur touché. C'est la vérification
+    d'appoint qui manquait pour un contrôle d'entrée en relation ou une levée
+    de doute, sans polluer le journal réglementaire ni ouvrir de dossier.
+    """
+    from fiskr import country_risk
+
+    name = (name or "").strip()
+    is_entity = (entity_type or "").upper().startswith("E")
+    client_dict: Dict[str, Any] = {
+        "client_type": "PM" if is_entity else "PP",
+        "client_dob": dob or None,
+        "client_countries": {"nationality": list(countries or [])},
+    }
+    if is_entity:
+        client_dict["client_company_name"] = name
+    else:
+        client_dict["client_first_name"] = ""
+        client_dict["client_last_name"] = name
+
+    report = evaluate_and_clean(client_dict, channel=caps.CHANNEL_SCREENING)
+    if not report["is_valid"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={"errors": report["errors"]})
+
+    cleansed_client = client_dict.copy()
+    if client_dict["client_type"] == "PP":
+        parts = report["cleansed_name"].split()
+        cleansed_client["client_first_name"] = parts[0] if parts else ""
+        cleansed_client["client_last_name"] = " ".join(parts[1:]) if len(parts) > 1 else report["cleansed_name"]
+        cleansed_client["client_maiden_name"] = report["cleansed_maiden_name"]
+    else:
+        cleansed_client["client_company_name"] = report["cleansed_name"]
+    cleansed_client["client_gender"] = report["resolved_gender"]
+
+    client_keys = lookup_blocking_keys(cleansed_client, blocking_config_for(watchlist_index_layout))
+    candidates: Dict[str, Any] = {}
+
+    def _keep(item) -> bool:
+        return not (requested_lists and item.get("_list_type") not in requested_lists)
+
+    if countries:
+        # Pays connu : partitionnement normal (comme la production), O(seau).
+        for key in client_keys:
+            for item in watchlist_index.get(key, []):
+                if _keep(item):
+                    candidates[item["entity_id"]] = item
+    else:
+        # AUCUN pays fourni : l'index est partitionné par pays
+        # (COUNTRY_TYPE_PHONÉTIQUE), donc les clés propres du client ne
+        # touchent que la partition « pays inconnu ». Une vérification de nom ne
+        # doit pas rater une fiche au motif qu'on ignore sa nationalité : on
+        # balaie donc TOUTES les partitions pays pour le même type + phonétique,
+        # via le suffixe « _{type}_{phonétique} » de la clé. Borné au nombre de
+        # seaux distincts (bien inférieur à la base) et réservé au cas sans pays.
+        suffixes = tuple(
+            "_" + k.split("_", 1)[1] for k in client_keys if "_" in k)
+        if suffixes:
+            for idx_key, bucket in watchlist_index.items():
+                if idx_key.endswith(suffixes):
+                    for item in bucket:
+                        if _keep(item):
+                            candidates[item["entity_id"]] = item
+
+    scoring_config = scoring_config_with_thresholds(db)
+    matches = []
+    for candidate in candidates.values():
+        res = match_entities(cleansed_client, candidate, scoring_config)  # pur, sans écriture
+        matches.append({
+            "entity_id": candidate.get("entity_id"),
+            "watchlist_name": res.get("best_watchlist_name") or candidate.get("primary_name"),
+            "list_type": candidate.get("_list_type"),
+            "status": res.get("status"),
+            "final_score": res.get("final_score"),
+            "hard_match": bool(res.get("hard_match_triggered")),
+            "hard_match_details": res.get("hard_match_details") if res.get("hard_match_triggered") else None,
+            "cut_off_applied": res.get("cut_off_applied"),
+        })
+    matches.sort(key=lambda m: (m["final_score"] or 0.0), reverse=True)
+    alert_count = sum(1 for m in matches if m["status"] == "ALERT")
+    return {
+        "query": {
+            "name": name, "entity_type": "E" if is_entity else "I",
+            "dob": dob or None, "countries": list(countries or []),
+            "screening_lists": requested_lists or "ALL",
+        },
+        "quality": {"status": report.get("status"), "warnings": report.get("warnings", [])},
+        "candidates_count": len(candidates),
+        "alert_count": alert_count,
+        "matches": matches[:limit],
+        # Réutilise la lentille GAFI : le nom est peut-être inconnu des listes
+        # mais rattaché à une juridiction à haut risque.
+        "country_risk": country_risk.assess(countries or []),
+        "preview": True,  # marqueur explicite : rien n'a été journalisé
+    }
+
+
 def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: str,
                           requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
     """
@@ -2493,7 +2600,11 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "alert_id": alert_id,
         "whitelisted": whitelist_pair_id is not None,
         "whitelist_pair_id": whitelist_pair_id,
-        "screening_lists": requested_lists or "ALL"
+        "screening_lists": requested_lists or "ALL",
+        # Lentille COMPLEMENTAIRE au criblage par nom : le client touche-t-il
+        # une juridiction à haut risque GAFI ? Calcul en lecture, à côté du
+        # moteur — n'altère ni score ni verdict (None si aucune).
+        "country_risk": country_risk.assess_client(client_dict),
     }
 
 def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
@@ -2528,6 +2639,31 @@ async def screen_client(
     client_dict.pop("screening_lists", None)
     requested_lists = _validate_screening_lists(request.screening_lists)
     return screen_client_profile(db, client_dict, current_user["username"], requested_lists)
+
+
+@app.get("/api/screen/preview")
+async def screen_preview(
+    name: str = Query(..., min_length=2, max_length=200),
+    type: str = Query("I", description="I (individu) ou E (entité/personne morale)"),
+    dob: Optional[str] = Query(None, description="Date de naissance AAAA-MM-JJ (facultatif)"),
+    country: Optional[str] = Query(None, description="Codes pays ISO2, séparés par des virgules"),
+    lists: Optional[str] = Query(None, description="Restriction WATCHLIST_*, séparés par des virgules"),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Vérification ad-hoc d'un nom (criblage à blanc) : renvoie les
+    correspondances floues classées par score, **sans rien journaliser** ni
+    ouvrir d'alerte. Une méthode GET, en lecture seule — utilisable y compris
+    par un auditeur. Le criblage réglementaire, lui, reste `POST /api/screen`
+    (audit + alerte).
+    """
+    _ensure_watchlist_cache(db)
+    countries = [c.strip().upper() for c in (country or "").split(",") if c.strip()]
+    requested_lists = _validate_screening_lists(
+        [v for v in (lists or "").split(",") if v.strip()])
+    return _screen_preview(db, name, type, dob, countries, requested_lists, limit)
 
 @app.post("/api/transactions/screen")
 async def screen_transaction_message(
@@ -2705,7 +2841,11 @@ def ingest_snapshot(
     # 1. Create a temporary path
     temp_dir = PROJECT_ROOT / "temp_ingestion"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file_path = temp_dir / file.filename
+    # Le nom du televersement est reduit a un basename sur (jamais « / », « .. »
+    # ni chemin absolu) et prefixe d'un jeton unique : un fichier nomme
+    # « ../../passenger_wsgi.py » ne peut plus faire ecrire hors de temp_dir ni
+    # ecraser un autre import concurrent. Le nom d'origine reste affiche.
+    temp_file_path = temp_dir / f"{uuid.uuid4().hex[:8]}_{safe_upload_filename(file.filename, 'import.dat')}"
     keep_temp_file = False
     original_filename = file.filename
     
@@ -4266,7 +4406,7 @@ async def create_batch_campaign(
     requested_lists = _validate_screening_lists(
         [v for v in (screening_lists or "").split(",") if v.strip()]
     )
-    safe_upload_name = re.sub(r"[^\w.\-]", "_", file.filename or "clients.csv")
+    safe_upload_name = safe_upload_filename(file.filename, "clients.csv")
     temp_path = PROJECT_ROOT / "temp_ingestion" / f"batch_{uuid.uuid4().hex[:8]}_{safe_upload_name}"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
     with open(temp_path, "wb") as out:
@@ -5924,6 +6064,32 @@ async def app_version(current_user: Dict[str, Any] = Depends(get_current_user)):
     return {"static_version": buildinfo.STATIC_VERSION}
 
 
+@app.get("/api/country-risk")
+async def country_risk_reference(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Référentiel GAFI des juridictions à haut risque (appel à l'action + surveillance
+    renforcée), avec sa date de plénière. Sert la lentille de risque géographique
+    du front et permet à l'analyste de consulter la liste en vigueur. Surchargeable
+    à chaud par le bloc `country_risk` de config.yaml (mis à jour après plénière
+    sans redéploiement).
+    """
+    return country_risk.reference()
+
+
+@app.get("/api/country-risk/assess")
+async def country_risk_assess(
+    countries: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Évalue une liste de codes pays ISO2 (séparés par des virgules) contre le
+    référentiel GAFI. Retourne le niveau le plus sévère et le détail, ou
+    `{"country_risk": null}` si aucun n'est listé.
+    """
+    codes = [c.strip() for c in (countries or "").split(",") if c.strip()]
+    return {"country_risk": country_risk.assess(codes)}
+
+
 @app.get("/api/worker/status")
 async def worker_status(
     db: Session = Depends(get_db),
@@ -5956,6 +6122,17 @@ async def worker_restart(
     # l'etat, pour que le front reflete le resultat immediatement.
     time.sleep(2.0)
     return {"message": "Relance du démon demandée.", **_worker_status_view(db)}
+
+
+def _insecure_default_secrets() -> List[str]:
+    """Noms des secrets restes a leur valeur par defaut (jamais la valeur)."""
+    from fiskr import config as _cfg
+    out = []
+    if getattr(_cfg, "INSECURE_DEFAULT_SECRET_KEY", False):
+        out.append("SECRET_KEY")
+    if getattr(_cfg, "INSECURE_DEFAULT_ADMIN_PASSWORD", False):
+        out.append("ADMIN_PASSWORD")
+    return out
 
 
 def _tail_file(path, max_bytes: int = 16384, max_lines: int = 80) -> List[str]:
@@ -6120,6 +6297,10 @@ async def diagnostic_jobs(
         "slots": int(jobs_cfg.get("slots", 2) or 2),
         "screen_stall_timeout_s": jobs_cfg.get("screen_stall_timeout_s", 900),
         "worker_stale_after_s": WORKER_STALE_AFTER_S,
+        # Secrets restes a leur valeur par defaut du code source (jamais la
+        # valeur elle-meme) : visible du diagnostic pour ne pas dependre d'un
+        # WARNING perdu dans les logs.
+        "insecure_defaults": _insecure_default_secrets(),
     }
 
     return {
@@ -8224,7 +8405,7 @@ async def set_review_exclusions(
     evidence_name = None
     evidence_path = None
     if file is not None and file.filename:
-        safe_name = os.path.basename(file.filename).replace("..", "_")
+        safe_name = safe_upload_filename(file.filename, "piece_jointe.bin")
         target_dir = EXCLUSION_EVIDENCE_DIR / snap.snapshot_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
