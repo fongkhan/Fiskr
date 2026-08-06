@@ -38,6 +38,7 @@ from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORM
 from fiskr.database import (
     get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
+    safe_upload_filename,
     SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
@@ -126,6 +127,7 @@ from fiskr.settings import (
     watchlist_epoch, bump_watchlist_epoch
 )
 from fiskr import resources as resource_tables
+from fiskr import country_risk
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
@@ -1007,6 +1009,8 @@ def _ensure_watchlist_cache(db: Session) -> None:
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing Fiskr application...")
+    from fiskr.config import warn_on_insecure_defaults
+    warn_on_insecure_defaults()  # secrets restes a leur valeur par defaut : WARNING
     init_db()
     # Populate the cache from database
     db = next(get_db())
@@ -2493,7 +2497,11 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "alert_id": alert_id,
         "whitelisted": whitelist_pair_id is not None,
         "whitelist_pair_id": whitelist_pair_id,
-        "screening_lists": requested_lists or "ALL"
+        "screening_lists": requested_lists or "ALL",
+        # Lentille COMPLEMENTAIRE au criblage par nom : le client touche-t-il
+        # une juridiction à haut risque GAFI ? Calcul en lecture, à côté du
+        # moteur — n'altère ni score ni verdict (None si aucune).
+        "country_risk": country_risk.assess_client(client_dict),
     }
 
 def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
@@ -2705,7 +2713,11 @@ def ingest_snapshot(
     # 1. Create a temporary path
     temp_dir = PROJECT_ROOT / "temp_ingestion"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file_path = temp_dir / file.filename
+    # Le nom du televersement est reduit a un basename sur (jamais « / », « .. »
+    # ni chemin absolu) et prefixe d'un jeton unique : un fichier nomme
+    # « ../../passenger_wsgi.py » ne peut plus faire ecrire hors de temp_dir ni
+    # ecraser un autre import concurrent. Le nom d'origine reste affiche.
+    temp_file_path = temp_dir / f"{uuid.uuid4().hex[:8]}_{safe_upload_filename(file.filename, 'import.dat')}"
     keep_temp_file = False
     original_filename = file.filename
     
@@ -4266,7 +4278,7 @@ async def create_batch_campaign(
     requested_lists = _validate_screening_lists(
         [v for v in (screening_lists or "").split(",") if v.strip()]
     )
-    safe_upload_name = re.sub(r"[^\w.\-]", "_", file.filename or "clients.csv")
+    safe_upload_name = safe_upload_filename(file.filename, "clients.csv")
     temp_path = PROJECT_ROOT / "temp_ingestion" / f"batch_{uuid.uuid4().hex[:8]}_{safe_upload_name}"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
     with open(temp_path, "wb") as out:
@@ -5924,6 +5936,32 @@ async def app_version(current_user: Dict[str, Any] = Depends(get_current_user)):
     return {"static_version": buildinfo.STATIC_VERSION}
 
 
+@app.get("/api/country-risk")
+async def country_risk_reference(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Référentiel GAFI des juridictions à haut risque (appel à l'action + surveillance
+    renforcée), avec sa date de plénière. Sert la lentille de risque géographique
+    du front et permet à l'analyste de consulter la liste en vigueur. Surchargeable
+    à chaud par le bloc `country_risk` de config.yaml (mis à jour après plénière
+    sans redéploiement).
+    """
+    return country_risk.reference()
+
+
+@app.get("/api/country-risk/assess")
+async def country_risk_assess(
+    countries: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Évalue une liste de codes pays ISO2 (séparés par des virgules) contre le
+    référentiel GAFI. Retourne le niveau le plus sévère et le détail, ou
+    `{"country_risk": null}` si aucun n'est listé.
+    """
+    codes = [c.strip() for c in (countries or "").split(",") if c.strip()]
+    return {"country_risk": country_risk.assess(codes)}
+
+
 @app.get("/api/worker/status")
 async def worker_status(
     db: Session = Depends(get_db),
@@ -5956,6 +5994,17 @@ async def worker_restart(
     # l'etat, pour que le front reflete le resultat immediatement.
     time.sleep(2.0)
     return {"message": "Relance du démon demandée.", **_worker_status_view(db)}
+
+
+def _insecure_default_secrets() -> List[str]:
+    """Noms des secrets restes a leur valeur par defaut (jamais la valeur)."""
+    from fiskr import config as _cfg
+    out = []
+    if getattr(_cfg, "INSECURE_DEFAULT_SECRET_KEY", False):
+        out.append("SECRET_KEY")
+    if getattr(_cfg, "INSECURE_DEFAULT_ADMIN_PASSWORD", False):
+        out.append("ADMIN_PASSWORD")
+    return out
 
 
 def _tail_file(path, max_bytes: int = 16384, max_lines: int = 80) -> List[str]:
@@ -6120,6 +6169,10 @@ async def diagnostic_jobs(
         "slots": int(jobs_cfg.get("slots", 2) or 2),
         "screen_stall_timeout_s": jobs_cfg.get("screen_stall_timeout_s", 900),
         "worker_stale_after_s": WORKER_STALE_AFTER_S,
+        # Secrets restes a leur valeur par defaut du code source (jamais la
+        # valeur elle-meme) : visible du diagnostic pour ne pas dependre d'un
+        # WARNING perdu dans les logs.
+        "insecure_defaults": _insecure_default_secrets(),
     }
 
     return {
@@ -8224,7 +8277,7 @@ async def set_review_exclusions(
     evidence_name = None
     evidence_path = None
     if file is not None and file.filename:
-        safe_name = os.path.basename(file.filename).replace("..", "_")
+        safe_name = safe_upload_filename(file.filename, "piece_jointe.bin")
         target_dir = EXCLUSION_EVIDENCE_DIR / snap.snapshot_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
