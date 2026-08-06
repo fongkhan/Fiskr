@@ -2505,9 +2505,58 @@ function changeWatchlistPage(newPage) {
 
 // Handle Real-Time Sandbox Screening
 // Handle Real-Time Sandbox Screening
+// Vérification ad-hoc d'un nom : criblage à blanc, GET /api/screen/preview.
+// Aucune écriture côté serveur (ni audit ni alerte) — c'est un contrôle
+// d'appoint, pas un criblage réglementaire.
+async function handleAdhocScreen(event) {
+ event.preventDefault();
+ const btn = document.getElementById("adhoc-submit");
+ const results = document.getElementById("adhoc-results");
+ const name = document.getElementById("adhoc-name").value.trim();
+ if (name.length < 2) return;
+ const params = new URLSearchParams({ name, type: document.getElementById("adhoc-type").value });
+ const dob = document.getElementById("adhoc-dob").value;
+ if (dob) params.set("dob", dob);
+ const country = document.getElementById("adhoc-country").value.trim();
+ if (country) params.set("country", country);
+ if (btn) { btn.disabled = true; btn.textContent = _tr("Vérification…"); }
+ results.innerHTML = `<p class="section-desc">${_tr("Vérification en cours…")}</p>`;
+ try {
+ const response = await apiFetch(`/api/screen/preview?${params.toString()}`);
+ if (!response.ok) {
+ const err = await response.json().catch(() => ({}));
+ results.innerHTML = `<p class="anomaly-item warning">${escapeHtml((err && err.detail && err.detail.errors ? err.detail.errors.join(", ") : err.detail) || _tr("Vérification impossible."))}</p>`;
+ return;
+ }
+ const data = await response.json();
+ renderCountryRiskBanner(document.getElementById("adhoc-country-risk"), data.country_risk);
+ const matches = data.matches || [];
+ const alerts = matches.filter(m => m.status === "ALERT");
+ const entete = alerts.length
+ ? `<p class="anomaly-item warning"><strong>${alerts.length}</strong> ${_tr("correspondance(s) au-dessus du seuil")} — ${_tr("aperçu non journalisé")}</p>`
+ : `<p class="anomaly-item"><strong>${_tr("Aucune correspondance au-dessus du seuil")}</strong> (${data.candidates_count} ${_tr("candidat(s) examiné(s)")}) — ${_tr("aperçu non journalisé")}</p>`;
+ let table = "";
+ if (matches.length) {
+ table = `<div class="table-container"><table class="data-table"><thead><tr>
+ <th>${_tr("Score")}</th><th>${_tr("Fiche listée")}</th><th>${_tr("Liste")}</th><th>${_tr("Statut")}</th></tr></thead><tbody>` +
+ matches.map(m => `<tr>
+ <td><strong>${(m.final_score ?? 0).toFixed ? m.final_score.toFixed(1) : m.final_score}%</strong></td>
+ <td>${escapeHtml(m.watchlist_name || "—")}${m.hard_match ? ` <span class="badge-secondary">${_tr("Hard match")}</span>` : ""}</td>
+ <td>${listTypeBadge(m.list_type)}</td>
+ <td><span class="status-badge ${m.status === "ALERT" ? "alert" : "no_match"}">${escapeHtml(m.status || "")}</span></td>
+ </tr>`).join("") + `</tbody></table></div>`;
+ }
+ results.innerHTML = entete + table;
+ } catch (e) {
+ results.innerHTML = `<p class="anomaly-item warning">${_tr("Vérification impossible (réseau).")}</p>`;
+ } finally {
+ if (btn) { btn.disabled = false; btn.textContent = _tr("Vérifier"); }
+ }
+}
+
 async function handleScreening(event) {
  event.preventDefault();
- 
+
  const clientTypeSelect = document.getElementById("client-type").value;
  // Map select type to PP/PM for API compatibility
  const clientType = clientTypeSelect === "I" ? "PP" : "PM";

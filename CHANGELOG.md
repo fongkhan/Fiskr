@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — ad-hoc name check (dry-run screening, nothing logged)
+The only fuzzy path was `POST /api/screen`, which needs a full structured profile **and writes an audit record and may open an alert** — unusable for the everyday "is this name risky?" check during onboarding or doubt-clearing, since each check would pollute the regulatory trail and could spawn alerts. New `GET /api/screen/preview` runs the **same engine** (quality gate, blocking, transliteration, phonetics, DOB/gender/geography adjustments, per-list thresholds) but is **strictly read-only**: no audit row, no alert, no counter touched. Being a GET, it is available to the read-only auditor role too.
+
+When no country is supplied, the check broadens across every country partition of the blocking index (it looks up the `_{type}_{phonetic}` suffix) so a name-only query does not silently miss a listed record whose nationality happens to be unknown to the searcher. It also carries the FATF country-risk lens: a name unknown to the lists but tied to a high-risk jurisdiction is still flagged. Front: a compact "Vérification rapide d'un nom" card at the top of the real-time screening screen, clearly labelled as an unlogged preview (translated, RTL-aware). Pinned by tests that assert a fuzzy match is found **and that the alert/audit tables are untouched**.
+
 ### Security — two vulnerabilities fixed (stored XSS in the audit modal, path traversal on upload)
 A defensive review of the code and documentation found two exploitable issues, both now fixed and pinned by tests.
 
