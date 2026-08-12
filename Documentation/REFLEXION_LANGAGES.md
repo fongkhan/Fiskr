@@ -6,6 +6,33 @@ Analyse demandée : Python reste-t-il le bon choix, ou un autre langage
 pourrait payer est le **noyau de comparaison du criblage**, et seulement si
 un profilage le désigne — pas avant.
 
+> **Mise à jour — le profilage a été fait, et un premier palier de gain a été
+> pris EN PYTHON.** `tools/bench_screening.py` profile `screen_one` sur un
+> univers synthétique. Il a confirmé que le temps part presque entièrement
+> dans le noyau de matching : **Damerau-Levenshtein** (de loin le premier
+> poste — il bâtissait sa matrice dans un dict de tuples), le parse des dates,
+> les vérifications de capacités moteur et la normalisation des noms. Quatre
+> optimisations **à résultat identique** (suite verte, DL vérifié au bit près
+> sur 200 000 paires) ont fait passer le banc de **17,9 s à 8,9 s (~2×)** :
+> réécriture de DL en rangées glissantes, et mémoïsation du parse de dates, de
+> la résolution des capacités et de la normalisation. Ce gain profite à TOUS
+> les chemins (temps réel, batch, cahier de tests, re-criblage). Il valide la
+> démarche ci-dessous : **on optimise d'abord le Python**, et le levier
+> langage ne se pose que pour le palier SUIVANT.
+>
+> **Deux leviers restants, dans l'ordre :**
+> 1. **Paralléliser le re-criblage post-delta.** Il tourne aujourd'hui en
+>    boucle **séquentielle** (`rescreen.py`) alors qu'il repasse toute la base
+>    clients après chaque mise à jour de liste — c'est le criblage de
+>    production le plus fréquent. Le cahier de tests, lui, forke déjà un pool.
+>    Le paralléliser demande de gérer l'écriture concurrente des alertes en
+>    base (le pool actuel n'agrège que des résultats, sans écrire) : chantier
+>    réel mais **en Python**, sans changer de langage.
+> 2. **Accélérer le noyau de métrique** (DL + Jaro, désormais ~la moitié du
+>    temps restant). C'est ici, et seulement ici, qu'un noyau **Rust via
+>    PyO3** (in-process, sans sérialisation) prendrait le palier suivant —
+>    voir plus bas.
+
 ## 1. Où le temps passe réellement
 
 Le seul chemin coûteux de Fiskr est le **criblage d'un univers** (cahier de

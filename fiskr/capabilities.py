@@ -60,6 +60,7 @@ CONVENTIONS
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
 # Canaux de criblage. Le filtrage transactionnel travaille sur des donnees de
@@ -448,20 +449,33 @@ def current_context(channel: str = CHANNEL_SCREENING) -> FrozenSet[str]:
     return _context_cache[channel]
 
 
+@lru_cache(maxsize=256)
+def _effective_capabilities(active: FrozenSet[str], channel: str) -> FrozenSet[str]:
+    """
+    Capacites REELLEMENT actives : presentes ET dont tous les prerequis directs
+    le sont aussi. Memoise sur (contexte, canal) — le nombre de contextes
+    distincts vus dans un processus est minuscule (souvent 1), donc ceci
+    transforme la resolution des prerequis, faite des centaines de milliers de
+    fois par criblage, en une seule intersection par contexte. Un changement de
+    reglage produit un nouveau frozenset, donc une nouvelle entree : aucune
+    invalidation explicite necessaire.
+    """
+    return frozenset(
+        c for c in active
+        if (cap := CAPABILITY_CATALOG.get(c)) is not None
+        and all(dep in active for dep in cap.depends_on)
+    )
+
+
 def is_active(capability: str, channel: str = CHANNEL_SCREENING) -> bool:
     """
     Vrai si la capacite est active ET tous ses prerequis le sont.
 
-    La verification des prerequis est faite ICI, une fois pour toutes : une
-    garde du moteur n'a pas a savoir qu'une capacite en suppose une autre.
+    La verification des prerequis est faite une fois par contexte
+    (cf. `_effective_capabilities`), puis chaque appel n'est plus qu'un test
+    d'appartenance a un frozenset.
     """
-    active = current_context(channel)
-    if capability not in active:
-        return False
-    cap = CAPABILITY_CATALOG.get(capability)
-    if cap is None:
-        return False
-    return all(dep in active for dep in cap.depends_on)
+    return capability in _effective_capabilities(current_context(channel), channel)
 
 
 def describe_context(channel: str = CHANNEL_SCREENING) -> Optional[Dict[str, object]]:
@@ -484,25 +498,34 @@ def describe_context(channel: str = CHANNEL_SCREENING) -> Optional[Dict[str, obj
 
     Renvoie None quand le moteur tourne au parametrage standard.
     """
-    active = current_context(channel)
-    defaults = defaults_for_channel(channel)
-    disabled = sorted(cap_id for cap_id, on in defaults.items()
-                      if on and cap_id not in active)
-    enabled = sorted(cap_id for cap_id, on in defaults.items()
-                     if not on and cap_id in active)
-    # Une capacite cochee dont le prerequis est coupe n'a rien fait : le dire
-    # evite de laisser croire, a la relecture, qu'elle a joue.
-    inert = sorted(resolve_inactive_dependencies(active))
+    disabled, enabled, inert = _context_delta(current_context(channel), channel)
     if not (disabled or enabled or inert):
         return None
     trace: Dict[str, object] = {"channel": channel}
+    # Listes fraiches a chaque appel : le resultat memoise (tuples immuables)
+    # n'est jamais partage ni mutable par l'appelant, qui le range dans un
+    # decision_tree.
     if disabled:
-        trace["disabled"] = disabled
+        trace["disabled"] = list(disabled)
     if enabled:
-        trace["enabled"] = enabled
+        trace["enabled"] = list(enabled)
     if inert:
-        trace["inert"] = inert
+        trace["inert"] = list(inert)
     return trace
+
+
+@lru_cache(maxsize=256)
+def _context_delta(active: FrozenSet[str], channel: str):
+    """Ecart aux defauts (desactivees / activees / inertes), memoise par
+    (contexte, canal) — appele une fois par rapprochement, invariant sur tout
+    un criblage. Renvoie des tuples immuables (surs a mettre en cache)."""
+    defaults = defaults_for_channel(channel)
+    disabled = tuple(sorted(cap_id for cap_id, on in defaults.items()
+                            if on and cap_id not in active))
+    enabled = tuple(sorted(cap_id for cap_id, on in defaults.items()
+                           if not on and cap_id in active))
+    inert = tuple(sorted(resolve_inactive_dependencies(active)))
+    return disabled, enabled, inert
 
 
 @contextmanager
