@@ -922,6 +922,10 @@ async function checkAuthUser() {
  const canRules = isAdmin || roles.includes("rules");
  const blockingBtn = document.getElementById("sub-btn-alerts-blocking");
  if (blockingBtn) blockingBtn.classList.toggle("hidden", !canBlocking);
+ // La clé de blocage du canal FILTRAGE vit dans l'onglet Filtrage
+ // (paramétrage propre à ce canal), même rôle que le paramétrage criblage.
+ const filteringBlockingBtn = document.getElementById("sub-btn-filtering-blocking");
+ if (filteringBlockingBtn) filteringBlockingBtn.classList.toggle("hidden", !canBlocking);
  // Meme role que le blocking : les ressources linguistiques sont le
  // second volet du meme parametrage moteur, sur un ecran separe.
  const resourcesBtn = document.getElementById("sub-btn-alerts-resources");
@@ -1091,6 +1095,9 @@ function switchSubTab(sectionId, subTabId) {
  fetchBlockingSettings();
  fetchEngineSettings();
  loadSimulationPanels();
+ } else if (subTabId === "filtering-blocking") {
+ // Clé de blocage du canal FILTRAGE (déplacée dans l'onglet Filtrage)
+ fetchBlockingSettings();
  } else if (subTabId === "alerts-resources") {
  // Ressources linguistiques : équivalences + homonymes minés
  fetchResources();

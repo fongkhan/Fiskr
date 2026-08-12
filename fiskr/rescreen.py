@@ -17,6 +17,7 @@ from fiskr.database import (
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.alerts import open_or_redetect_alert, is_whitelisted
+from fiskr import screenpool
 
 logger = logging.getLogger("fiskr.rescreen")
 
@@ -142,37 +143,13 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
 
     clients = _client_dicts(db)
     total_clients = len(clients)
+    result["clients_screened"] = total_clients
 
-    for client in clients:
-        result["clients_screened"] += 1
-        done = result["clients_screened"]
-        if progress and (done % _PROGRESS_EVERY == 0 or done == total_clients):
-            try:
-                progress(done, total_clients)
-            except Exception:
-                pass  # une progression cassee n'interrompt jamais un re-criblage
-        # Cession explicite du GIL : sans elle, ce calcul en Python pur affame
-        # la boucle d'evenements et l'API cesse de repondre pendant tout le
-        # re-criblage (meme motif que le criblage a blanc).
-        if done % _YIELD_EVERY == 0:
-            time.sleep(0)
-        candidates: Dict[str, Dict[str, Any]] = {}
-        for key in lookup_blocking_keys(client, screening_cfg):
-            for ent in index.get(key, []):
-                candidates[ent["entity_id"]] = ent
-        if not candidates:
-            continue
-
-        best = None
-        for ent in candidates.values():
-            score = match_entities(client, ent, config)
-            score["watchlist_entity"] = ent
-            if best is None or score["final_score"] > best["final_score"]:
-                best = score
-
-        if not best or best.get("status") != "ALERT":
-            continue
-
+    def _persist_hit(client: Dict[str, Any], best: Dict[str, Any]) -> None:
+        """Ecrit en base la suite d'UNE correspondance en ALERT : liste
+        blanche, regles anti-FP, journal d'audit immuable, alerte de travail.
+        Toujours appelee dans le processus PARENT, dans l'ordre des clients —
+        les enfants du pool ne font que calculer."""
         pair = is_whitelisted(db, client.get("client_id"), best["watchlist_entity"].get("entity_id"))
         if pair:
             best["status"] = "WHITELISTED"
@@ -180,7 +157,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             log_compliance_decision(db, client, best["watchlist_entity"], best,
                                     watchlist_version, watchlist_hash)
             result["whitelisted_suppressed"] += 1
-            continue
+            return
 
         # Regles anti-faux positifs du canal SCREENING
         from fiskr.fprules import evaluate_fp_rules, build_screening_ctx, annotate_suppression
@@ -200,6 +177,71 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             result["rule_suppressed"] = result.get("rule_suppressed", 0) + 1
         else:
             result["new_alerts"] += 1
+
+    # ---- Phase 1 : trouver les correspondances (calcul pur, parallelisable) ----
+    # Le re-criblage repasse TOUTE la base clients apres chaque mise en
+    # production : c'est le criblage le plus frequent, et il etait entierement
+    # sequentiel. Le calcul part maintenant sur un pool de processus forkes ;
+    # seules les rares correspondances en ALERT reviennent au parent, qui garde
+    # l'ecriture pour lui. Resultat identique, dans le meme ordre.
+    resolved = screenpool.resolve_processes(len(clients) + len(changed_entities))
+    hits = None
+    if resolved > 1 and total_clients:
+        try:
+            db.rollback()  # aucune transaction ouverte au moment du fork
+        except Exception:
+            pass
+        try:
+            hits = screenpool.parallel_match(clients, index, screening_cfg,
+                                             processes=resolved, progress=progress)
+        except screenpool.PoolStalled as e:
+            # Auto-guerison : pool mort (OOM) ou fige — on recalcule en
+            # sequentiel dans CE processus plutot que d'abandonner le run.
+            logger.warning(f"Re-criblage parallèle interrompu : {e} Repli séquentiel.")
+            hits = None
+
+    if hits is not None:
+        # ---- Phase 2 : ecriture, sequentielle, dans l'ordre des clients ----
+        for i, best in hits:
+            _persist_hit(clients[i], best)
+        if progress:
+            try:
+                progress(total_clients, total_clients)
+            except Exception:
+                pass
+    else:
+        # Chemin sequentiel historique (un seul coeur, pool indisponible ou
+        # replie) : calcul et ecriture entrelaces, meme resultat.
+        done = 0
+        for client in clients:
+            done += 1
+            if progress and (done % _PROGRESS_EVERY == 0 or done == total_clients):
+                try:
+                    progress(done, total_clients)
+                except Exception:
+                    pass  # une progression cassee n'interrompt jamais un re-criblage
+            # Cession explicite du GIL : sans elle, ce calcul en Python pur affame
+            # la boucle d'evenements et l'API cesse de repondre pendant tout le
+            # re-criblage (meme motif que le criblage a blanc).
+            if done % _YIELD_EVERY == 0:
+                time.sleep(0)
+            candidates: Dict[str, Dict[str, Any]] = {}
+            for key in lookup_blocking_keys(client, screening_cfg):
+                for ent in index.get(key, []):
+                    candidates[ent["entity_id"]] = ent
+            if not candidates:
+                continue
+
+            best = None
+            for ent in candidates.values():
+                score = match_entities(client, ent, config)
+                score["watchlist_entity"] = ent
+                if best is None or score["final_score"] > best["final_score"]:
+                    best = score
+
+            if not best or best.get("status") != "ALERT":
+                continue
+            _persist_hit(client, best)
 
     logger.info(
         f"Re-criblage ({trigger_detail}) : {result['changed_entities']} entités changées, "

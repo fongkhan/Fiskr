@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — the post-delta rescreen now runs in parallel
+The automatic rescreen re-screens the **whole client base** after every list goes live — it is the most frequent screening in production, and it was the last fully **sequential** loop (it even had to yield the GIL by hand to keep the API responsive). It could not simply be handed to the existing fork pool, because unlike the test book it **writes**: audit records and work alerts.
+
+Splitting it along that seam solves it. The loop is now two phases: **(1)** finding each client's best match — pure computation, the near-totality of the time, and where most clients have no candidate at all — runs on a pool of forked processes that touch **no database at all**; **(2)** only the handful of clients that reach `ALERT` come back to the parent, which does every write itself, sequentially, in client order. So the writes keep exactly the transactional semantics and ordering they had.
+
+Measured (`tools/bench_rescreen.py`, added): **1.98× on 2 usable cores** — near-linear, and it scales with the cores the server actually has. Equivalence is pinned by a test that runs the same scenario sequentially and in parallel and asserts the resulting alerts, scores, matched entities and counters are **identical**; a second test kills the pool mid-run and checks the rescreen falls back to sequential and still completes rather than losing the run. Combined with the kernel work below, the rescreen is now roughly **4× faster** than before this release.
+
+### Performance — the screening kernel is ~2× faster (real-time, batch, backtest, rescreen)
+Profiling a realistic universe screen (`tools/bench_screening.py`, added) showed the time went almost entirely into the matching kernel. Four changes, each **result-identical** (the whole test suite stays green, and the Damerau-Levenshtein rewrite was checked bit-for-bit against the old one on 200,000 random pairs):
+
+- **Damerau-Levenshtein** was the top cost by far — it built its DP matrix in a **dict keyed by `(i, j)` tuples**, so every cell paid tuple-hashing and a `min()` call (tens of millions per test book). Rewritten to two rolling 1-D arrays with inline comparisons: same OSA distance, ~2.8× faster on that function.
+- **Date parsing** (`parse_dob`) was re-`strptime`-ing the same dates for every candidate comparison — now memoised.
+- **Engine-capability checks** (`caps.is_active`, called over a million times per screen) re-resolved prerequisites each time, and `describe_context` recomputed the same delta for every match — both now memoised on the effective capability set (a hashable frozenset, so a settings change yields a new key with no explicit invalidation).
+- **Name normalisation** (transliteration + accent folding) was recomputed for the same names on every candidate comparison — now cached, keyed on the effective capability context.
+- Plus an exact-equality fast path in the base score (frequent when a client is derived from a listed name), computed from the weights so it stays correct even with non-normalised weights.
+
+Measured on the synthetic bench (15k listed entities, 800 clients, ~65 candidates each): **17.9 s → 8.9 s** for the same work. The win applies to every screening path — the real-time `/api/screen`, batch campaigns, the test book, and the automatic post-delta rescreen. (A further, larger lever — parallelising the sequential rescreen loop, and a C-accelerated metric kernel — is noted in `Documentation/REFLEXION_LANGAGES.md`.)
+
+### Changed — the filtering channel's blocking key now lives in the Filtrage tab
+The blocking-key editor for the **transactional filtering** channel was showing under Criblage › Paramétrage moteur, next to the client-screening one. It moves to its own "Paramétrage moteur" sub-tab inside the **Filtrage** tab (same `blocking`/admin gating), so each channel's engine settings sit with that channel.
+
 ### Added — ad-hoc name check (dry-run screening, nothing logged)
 The only fuzzy path was `POST /api/screen`, which needs a full structured profile **and writes an audit record and may open an alert** — unusable for the everyday "is this name risky?" check during onboarding or doubt-clearing, since each check would pollute the regulatory trail and could spawn alerts. New `GET /api/screen/preview` runs the **same engine** (quality gate, blocking, transliteration, phonetics, DOB/gender/geography adjustments, per-list thresholds) but is **strictly read-only**: no audit row, no alert, no counter touched. Being a GET, it is available to the read-only auditor role too.
 

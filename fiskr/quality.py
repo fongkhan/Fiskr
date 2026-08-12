@@ -1,6 +1,7 @@
 import re
 import unicodedata
 from datetime import datetime
+from functools import lru_cache
 
 from fiskr import capabilities as caps
 
@@ -164,7 +165,22 @@ def strip_accents_for_matching(text: str, channel: str = caps.CHANNEL_SCREENING)
       « MULLER ».
 
     Toutes capacites actives, le resultat est celui de `strip_accents`.
+
+    Memoise : au criblage d'un univers, les memes noms (cote client comme cote
+    liste) traversent la normalisation des dizaines de fois — chaque nom client
+    est compare a chaque candidat, chaque nom liste a chaque client. La cle du
+    cache inclut le CONTEXTE effectif des capacites : un changement de reglage
+    (translitteration, ecritures, diacritiques) produit un contexte different,
+    donc une nouvelle entree, sans invalidation explicite.
     """
+    return _strip_accents_for_matching_cached(
+        text, channel, caps.current_context(channel))
+
+
+@lru_cache(maxsize=200_000)
+def _strip_accents_for_matching_cached(text, channel, _active):
+    # `_active` (frozenset du contexte effectif) ne sert QUE de cle de cache :
+    # le corps relit caps.is_active, qui rend la meme valeur pour ce contexte.
     if TRANSLIT_AVAILABLE and text and caps.is_active(caps.CAP_TRANSLIT, channel):
         scripts = detect_scripts(text)
         if scripts:

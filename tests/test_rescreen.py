@@ -75,6 +75,108 @@ def _seed_watchlist_snapshot(db, snap_id, entities):
     db.commit()
 
 
+# ------------------ PARALLELISATION (EQUIVALENCE STRICTE) ------------------
+# Le re-criblage repasse toute la base clients apres chaque mise en production.
+# Son calcul tourne desormais sur un pool de processus, l'ECRITURE restant au
+# parent. La garantie qui compte : le resultat doit etre le MEME qu'en
+# sequentiel — memes alertes, memes compteurs, meme ordre.
+
+def _seed_many_clients(db, count: int):
+    """Base clients de `count` fiches, dont une sur cinq matche « PETROV »."""
+    snap = Snapshot(snapshot_id=f"clients-{uuid.uuid4().hex[:6]}", file_type="CLIENT_BASE",
+                    file_name="clients.csv", file_hash=uuid.uuid4().hex,
+                    record_count=count, status="READY")
+    db.add(snap)
+    for i in range(count):
+        matche = (i % 5 == 0)
+        db.add(ClientEntity(
+            snapshot_id=snap.snapshot_id, client_id=f"CUST-{i:04d}", client_type="PP",
+            client_first_name="IGOR" if matche else f"PAUL{i}",
+            client_last_name="PETROV" if matche else f"TRANQUILLOV{i}",
+            client_dob="1965-03-12", client_gender="M",
+            client_countries={"nationality": ["RU"], "residence": [],
+                              "birth_country": [], "registration_country": []},
+            entity_checksum=uuid.uuid4().hex,
+        ))
+    db.commit()
+    return snap.snapshot_id
+
+
+def _rescreen_outcome(db):
+    """Photographie du resultat : compteurs d'alertes et paires client/listé."""
+    alerts = db.query(Alert).order_by(Alert.client_id).all()
+    return {
+        "count": len(alerts),
+        "pairs": sorted((a.client_id, a.watchlist_entity_id, round(a.final_score, 2))
+                        for a in alerts),
+    }
+
+
+@pytest.fixture
+def db2(tmp_path):
+    """Seconde base isolee : permet de rejouer le MEME scenario deux fois."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'rescreen_test_2.sqlite3'}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    yield session
+    session.close()
+
+
+def _run_scenario(session, monkeypatch, processes: int):
+    """Meme scenario (60 clients, une entite nouvelle qui matche), execute
+    avec `processes` processus de calcul."""
+    from fiskr import screenpool
+    monkeypatch.setattr(screenpool, "resolve_processes", lambda *a, **k: processes)
+    _seed_many_clients(session, 60)
+    _seed_watchlist_snapshot(session, "wlp-v1", [
+        _watchlist_entity("wlp-v1", "DGT-1", "Sofia MARQUEZ", "Sofia", "MARQUEZ")
+    ])
+    _seed_watchlist_snapshot(session, "wlp-v2", [
+        _watchlist_entity("wlp-v2", "DGT-1", "Sofia MARQUEZ", "Sofia", "MARQUEZ"),
+        _watchlist_entity("wlp-v2", "DGT-2", "Igor PETROV", "Igor", "PETROV"),
+    ])
+    result = rescreen_after_snapshot_change(session, "WATCHLIST_DGT", "wlp-v2", "wlp-v1")
+    return result, _rescreen_outcome(session)
+
+
+def test_parallel_rescreen_matches_sequential_exactly(db, db2, monkeypatch):
+    """Le criblage parallele et le criblage sequentiel produisent EXACTEMENT
+    le meme resultat : memes alertes, memes scores, memes compteurs."""
+    seq_result, seq_outcome = _run_scenario(db, monkeypatch, processes=1)
+    par_result, par_outcome = _run_scenario(db2, monkeypatch, processes=2)
+
+    # Le scenario doit reellement alerter, sinon le test ne prouve rien
+    assert seq_outcome["count"] == 12, seq_outcome  # 60 clients, 1 sur 5 matche
+    assert par_outcome == seq_outcome
+    for key in ("changed_entities", "clients_screened", "new_alerts",
+                "whitelisted_suppressed"):
+        assert par_result[key] == seq_result[key], key
+
+
+def test_parallel_rescreen_falls_back_when_the_pool_stalls(db, monkeypatch):
+    """Un pool mort (OOM) ne doit pas perdre le run : repli sequentiel, et le
+    resultat reste complet."""
+    from fiskr import screenpool
+    monkeypatch.setattr(screenpool, "resolve_processes", lambda *a, **k: 2)
+
+    def _stalled(*a, **k):
+        raise screenpool.PoolStalled("simulation : enfant tué")
+    monkeypatch.setattr(screenpool, "parallel_match", _stalled)
+
+    _seed_many_clients(db, 20)
+    _seed_watchlist_snapshot(db, "wls-v1", [
+        _watchlist_entity("wls-v1", "DGT-1", "Sofia MARQUEZ", "Sofia", "MARQUEZ")
+    ])
+    _seed_watchlist_snapshot(db, "wls-v2", [
+        _watchlist_entity("wls-v2", "DGT-1", "Sofia MARQUEZ", "Sofia", "MARQUEZ"),
+        _watchlist_entity("wls-v2", "DGT-2", "Igor PETROV", "Igor", "PETROV"),
+    ])
+    result = rescreen_after_snapshot_change(db, "WATCHLIST_DGT", "wls-v2", "wls-v1")
+    # 20 clients, 1 sur 5 matche -> 4 alertes, malgre la panne du pool
+    assert result["clients_screened"] == 20
+    assert result["new_alerts"] == 4
+
+
 # ------------------ MOTEUR (BASE ISOLEE) ------------------
 
 def test_rescreen_targets_changed_entities_only(db):
