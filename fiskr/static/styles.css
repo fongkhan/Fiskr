@@ -874,6 +874,37 @@ tr.filtered-out { display: none; }
 .worker-down-banner.hidden { display: none; }
 .worker-down-icon { font-size: 1.1rem; }
 .worker-down-text { flex: 1; }
+/* Bandeau de risque géographique GAFI (résultat de criblage) */
+.country-risk-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.4rem 0.9rem;
+    margin: 0 0 1rem;
+    padding: 0.7rem 1rem;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    border: 1px solid transparent;
+}
+.country-risk-banner.hidden { display: none; }
+.country-risk-black {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.4);
+}
+.country-risk-grey {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.4);
+}
+.country-risk-title { font-weight: 700; }
+.country-risk-black .country-risk-title { color: var(--color-alert); }
+.country-risk-grey .country-risk-title { color: var(--color-warning); }
+.country-risk-detail { flex: 1 1 auto; min-width: 0; }
+.country-risk-asof {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
 /* Bandeau « nouvelle version disponible » : l'onglet ouvert exécute encore
    l'ancien code. Flottant en bas à droite pour ne rien décaler dans la page. */
 .new-version-banner {

@@ -841,6 +841,24 @@ class HookDelivery(Base):
 
 import secrets
 import os
+import re
+from typing import Optional
+
+
+def safe_upload_filename(filename: Optional[str], default: str = "upload.bin") -> str:
+    """
+    Reduit un nom de televersement a un basename inoffensif : jamais de
+    separateur de chemin (ni « / » ni « \\ »), jamais « .. », jamais de nom
+    absolu, jamais de fichier cache. Un nom comme « ../../passenger_wsgi.py »
+    ou « /etc/cron.d/x » ne peut donc plus faire ecrire le televersement HORS
+    du repertoire prevu (path traversal / ecriture arbitraire). Le nom
+    d'origine reste affiche a l'utilisateur ailleurs ; SEUL le chemin disque
+    passe par ici.
+    """
+    base = os.path.basename((filename or "").replace("\\", "/"))
+    base = re.sub(r"[^\w.\-]", "_", base).lstrip(".")
+    return (base or default)[:200]
+
 
 def hash_password(password: str, salt_hex: str = None) -> tuple[str, str]:
     """Hashes a password securely using PBKDF2 HMAC SHA-256 and 100,000 iterations."""

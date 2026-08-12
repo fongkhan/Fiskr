@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — ad-hoc name check (dry-run screening, nothing logged)
+The only fuzzy path was `POST /api/screen`, which needs a full structured profile **and writes an audit record and may open an alert** — unusable for the everyday "is this name risky?" check during onboarding or doubt-clearing, since each check would pollute the regulatory trail and could spawn alerts. New `GET /api/screen/preview` runs the **same engine** (quality gate, blocking, transliteration, phonetics, DOB/gender/geography adjustments, per-list thresholds) but is **strictly read-only**: no audit row, no alert, no counter touched. Being a GET, it is available to the read-only auditor role too.
+
+When no country is supplied, the check broadens across every country partition of the blocking index (it looks up the `_{type}_{phonetic}` suffix) so a name-only query does not silently miss a listed record whose nationality happens to be unknown to the searcher. It also carries the FATF country-risk lens: a name unknown to the lists but tied to a high-risk jurisdiction is still flagged. Front: a compact "Vérification rapide d'un nom" card at the top of the real-time screening screen, clearly labelled as an unlogged preview (translated, RTL-aware). Pinned by tests that assert a fuzzy match is found **and that the alert/audit tables are untouched**.
+
+### Security — two vulnerabilities fixed (stored XSS in the audit modal, path traversal on upload)
+A defensive review of the code and documentation found two exploitable issues, both now fixed and pinned by tests.
+
+**Stored XSS in the audit modal.** The engine's decision-tree labels — the hard-match reason and the DOB/gender/geography adjustment descriptions — embed fields taken from the *screened* data (passport number and its country, "other identifier" type, country labels). Those fields arrive from a CSV upload, an ISO 20022 payment message, or an inbound webhook, so they can be attacker-controlled. They were interpolated **raw** into the audit modal's `innerHTML` (`viewAuditLogDetail`), where a forged profile could inject script that runs in a compliance officer's browser. All three sinks now pass through `escapeHtml`. The server-side twin (the printable dossier) already escaped via `html.escape`, and was verified clean. A static regression test guards the sinks.
+
+**Path traversal / arbitrary file write on ingestion.** `POST /api/ingest` built its temp path as `temp_dir / file.filename` with the **raw** upload name. A name like `../../passenger_wsgi.py` or `/etc/cron.d/x` would make the upload land outside the intended directory — an arbitrary-write primitive available to any authenticated user (potentially code execution by overwriting `passenger_wsgi.py`). Filenames are now reduced to a safe basename by a single shared helper, `safe_upload_filename` (no path separator, no `..`, no absolute path, no dot-file), prefixed with a unique token. The two already-sanitised upload sites (batch, exclusion evidence) were unified onto the same helper.
+
+**Hardening.** The app ships with a default `SECRET_KEY` and `ADMIN_PASSWORD` in the source (a known signing key lets anyone forge an admin session cookie). Startup now logs a prominent warning when either is still the built-in default, and the remote diagnostic (`/api/diagnostic/jobs`) reports which secrets are unset — by **name only**, never the value.
+
+### Added — geographic-risk lens: FATF high-risk jurisdictions
+Fiskr matched **names** against sanctions lists but carried no **jurisdiction-risk** view — a standard AML/CFT expectation. It now flags clients and payment parties tied to a FATF high-risk jurisdiction, whether or not their name is listed: **call for action** (counter-measures — Iran, DPRK, Myanmar) and **increased monitoring** (the grey list — 22 jurisdictions as of the 19 June 2026 plenary). New module `fiskr/country_risk.py`, endpoints `GET /api/country-risk` (the dated reference) and `GET /api/country-risk/assess`, and a `country_risk` summary added to the screening response, surfaced as a red/amber banner in the real-time screening result (translated, RTL-aware).
+
+Deliberately **outside** the scoring engine: it changes neither `final_score`, the `decision_tree`, nor the verdict — the name-matching engine and the test-book memoisation are untouched. The reference list is **hot-overridable** via a `country_risk` block in `config.yaml`, so the ~3×/year FATF plenary updates need no redeployment; the built-in default carries its `as_of` date so nobody applies it believing it current after a plenary has moved.
+
 ### Added — an open tab now says when a new version has been delivered
 Following on from the cache-busting fix below: assets are correctly refreshed on **reload**, but a tab left open keeps running the code it loaded when it was opened. After a deployment it therefore runs the **old** version with nothing to signal it — which is exactly what happened in production, where the screen looked frozen ("it seems to have crashed") while everything was in fact working; a reload was all it took.
 

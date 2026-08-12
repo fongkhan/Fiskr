@@ -2505,9 +2505,58 @@ function changeWatchlistPage(newPage) {
 
 // Handle Real-Time Sandbox Screening
 // Handle Real-Time Sandbox Screening
+// Vérification ad-hoc d'un nom : criblage à blanc, GET /api/screen/preview.
+// Aucune écriture côté serveur (ni audit ni alerte) — c'est un contrôle
+// d'appoint, pas un criblage réglementaire.
+async function handleAdhocScreen(event) {
+ event.preventDefault();
+ const btn = document.getElementById("adhoc-submit");
+ const results = document.getElementById("adhoc-results");
+ const name = document.getElementById("adhoc-name").value.trim();
+ if (name.length < 2) return;
+ const params = new URLSearchParams({ name, type: document.getElementById("adhoc-type").value });
+ const dob = document.getElementById("adhoc-dob").value;
+ if (dob) params.set("dob", dob);
+ const country = document.getElementById("adhoc-country").value.trim();
+ if (country) params.set("country", country);
+ if (btn) { btn.disabled = true; btn.textContent = _tr("Vérification…"); }
+ results.innerHTML = `<p class="section-desc">${_tr("Vérification en cours…")}</p>`;
+ try {
+ const response = await apiFetch(`/api/screen/preview?${params.toString()}`);
+ if (!response.ok) {
+ const err = await response.json().catch(() => ({}));
+ results.innerHTML = `<p class="anomaly-item warning">${escapeHtml((err && err.detail && err.detail.errors ? err.detail.errors.join(", ") : err.detail) || _tr("Vérification impossible."))}</p>`;
+ return;
+ }
+ const data = await response.json();
+ renderCountryRiskBanner(document.getElementById("adhoc-country-risk"), data.country_risk);
+ const matches = data.matches || [];
+ const alerts = matches.filter(m => m.status === "ALERT");
+ const entete = alerts.length
+ ? `<p class="anomaly-item warning"><strong>${alerts.length}</strong> ${_tr("correspondance(s) au-dessus du seuil")} — ${_tr("aperçu non journalisé")}</p>`
+ : `<p class="anomaly-item"><strong>${_tr("Aucune correspondance au-dessus du seuil")}</strong> (${data.candidates_count} ${_tr("candidat(s) examiné(s)")}) — ${_tr("aperçu non journalisé")}</p>`;
+ let table = "";
+ if (matches.length) {
+ table = `<div class="table-container"><table class="data-table"><thead><tr>
+ <th>${_tr("Score")}</th><th>${_tr("Fiche listée")}</th><th>${_tr("Liste")}</th><th>${_tr("Statut")}</th></tr></thead><tbody>` +
+ matches.map(m => `<tr>
+ <td><strong>${(m.final_score ?? 0).toFixed ? m.final_score.toFixed(1) : m.final_score}%</strong></td>
+ <td>${escapeHtml(m.watchlist_name || "—")}${m.hard_match ? ` <span class="badge-secondary">${_tr("Hard match")}</span>` : ""}</td>
+ <td>${listTypeBadge(m.list_type)}</td>
+ <td><span class="status-badge ${m.status === "ALERT" ? "alert" : "no_match"}">${escapeHtml(m.status || "")}</span></td>
+ </tr>`).join("") + `</tbody></table></div>`;
+ }
+ results.innerHTML = entete + table;
+ } catch (e) {
+ results.innerHTML = `<p class="anomaly-item warning">${_tr("Vérification impossible (réseau).")}</p>`;
+ } finally {
+ if (btn) { btn.disabled = false; btn.textContent = _tr("Vérifier"); }
+ }
+}
+
 async function handleScreening(event) {
  event.preventDefault();
- 
+
  const clientTypeSelect = document.getElementById("client-type").value;
  // Map select type to PP/PM for API compatibility
  const clientType = clientTypeSelect === "I" ? "PP" : "PM";
@@ -2681,6 +2730,9 @@ function renderScreeningResult(data) {
  qAnomalies.appendChild(div);
  }
  
+ // 1bis. Risque géographique GAFI (lentille complémentaire au nom)
+ renderCountryRiskBanner(document.getElementById("country-risk-banner"), data.country_risk);
+
  // 2. Metrics
  document.getElementById("metric-blocking-keys").textContent = keys.join(", ");
  document.getElementById("metric-blocking-keys").title = keys.join(", ");
@@ -2990,15 +3042,21 @@ function viewAuditLogDetail(logId) {
  let tree = typeof log.decision_tree === "string" ? JSON.parse(log.decision_tree) : log.decision_tree;
  let configState = typeof log.config_state === "string" ? JSON.parse(log.config_state) : log.config_state;
  
+ // Les libellés du moteur (motif de hard match, descriptions d'ajustement)
+ // incorporent des champs issus des données criblées — n° de passeport et
+ // son pays, type d'« autre identifiant », libellés de pays, etc. — qui
+ // proviennent d'un CSV, d'un message de paiement ou d'un webhook entrant.
+ // Rendus ici en innerHTML : ils DOIVENT être échappés, sinon un profil
+ // forgé injecterait du script dans la modale d'audit d'un analyste.
  let adjHtml = "";
  if (tree.hard_match_triggered) {
- adjHtml = `<p style="color:var(--color-warning); font-weight:700"> HARD MATCH déclenché : ${tree.hard_match_details}</p>`;
+ adjHtml = `<p style="color:var(--color-warning); font-weight:700"> HARD MATCH déclenché : ${escapeHtml(tree.hard_match_details)}</p>`;
  } else if (tree && tree.adjustments) {
  adjHtml = `
  <ul>
- <li>Date de Naissance : <strong>${tree.adjustments.dob.score} points</strong> (${tree.adjustments.dob.description})</li>
- <li>Genre : <strong>${tree.adjustments.gender.score} points</strong> (${tree.adjustments.gender.description})</li>
- <li>Géographie : <strong>${tree.adjustments.geography.score} points</strong> (${tree.adjustments.geography.description})</li>
+ <li>Date de Naissance : <strong>${escapeHtml(tree.adjustments.dob.score)} points</strong> (${escapeHtml(tree.adjustments.dob.description)})</li>
+ <li>Genre : <strong>${escapeHtml(tree.adjustments.gender.score)} points</strong> (${escapeHtml(tree.adjustments.gender.description)})</li>
+ <li>Géographie : <strong>${escapeHtml(tree.adjustments.geography.score)} points</strong> (${escapeHtml(tree.adjustments.geography.description)})</li>
  </ul>
  `;
  }
@@ -3068,6 +3126,46 @@ const def_escape = {
 function escapeHtml(text) {
  if (text === null || text === undefined) return "";
  return String(text).replace(/[&<>"']/g, function(m) { return def_escape[m]; });
+}
+
+// ------------------ RISQUE GEOGRAPHIQUE GAFI ------------------
+// Lentille complémentaire au criblage par nom : un client/une partie
+// rattaché(e) à une juridiction à haut risque GAFI est signalé(e), que son
+// nom figure ou non sur une liste. N'altère ni score ni verdict.
+
+function _countryRiskName(match) {
+ const en = window.fiskrI18n && fiskrI18n.currentLang() === "en";
+ return (en ? match.en : match.fr) || match.en || match.country;
+}
+
+function countryRiskTierLabel(tier) {
+ return tier === "BLACKLIST"
+ ? _tr("Appel à l'action (contre-mesures)")
+ : _tr("Surveillance renforcée");
+}
+
+// Rend le bandeau de risque géographique dans `el` (masqué si aucun risque).
+function renderCountryRiskBanner(el, cr) {
+ if (!el) return;
+ if (!cr || !cr.matches || !cr.matches.length) {
+ el.classList.add("hidden");
+ el.textContent = "";
+ return;
+ }
+ const noir = cr.tier === "BLACKLIST";
+ el.classList.remove("hidden");
+ el.classList.toggle("country-risk-black", noir);
+ el.classList.toggle("country-risk-grey", !noir);
+ const titre = noir
+ ? _tr("Juridiction GAFI sous appel à l'action")
+ : _tr("Juridiction GAFI sous surveillance renforcée");
+ const pays = cr.matches
+ .map(m => `<strong>${escapeHtml(_countryRiskName(m))}</strong> — ${escapeHtml(countryRiskTierLabel(m.tier))}`)
+ .join(" ; ");
+ el.innerHTML =
+ `<span class="country-risk-title">${escapeHtml(titre)}</span>` +
+ `<span class="country-risk-detail">${pays}</span>` +
+ `<span class="country-risk-asof">${escapeHtml(_tr("Référentiel GAFI au"))} ${escapeHtml(cr.as_of || "")}</span>`;
 }
 
 // (Le gestionnaire global de clic sur l'arrière-plan des modales est défini plus bas —

@@ -188,3 +188,92 @@ def test_api_key_admin_role_forbidden(client):
     response = client.post("/api/apikeys", json={"name": f"test_sec_{uuid.uuid4().hex[:6]}", "role": "admin"})
     assert response.status_code == 400
     assert "moindre privilège" in response.json()["detail"]
+
+
+# ------------------ ASSAINISSEMENT DES NOMS DE TELEVERSEMENT ------------------
+# Le nom d'un fichier televerse est reduit a un basename inoffensif AVANT de
+# construire un chemin disque : sinon « ../../passenger_wsgi.py » ou
+# « /etc/cron.d/x » ferait ecrire le televersement HORS du repertoire prevu
+# (ecriture arbitraire, potentiellement une execution de code).
+
+@pytest.mark.parametrize("entree,attendu", [
+    ("normal.csv", "normal.csv"),
+    ("../../passenger_wsgi.py", "passenger_wsgi.py"),   # traversee POSIX
+    ("/etc/cron.d/payload", "payload"),                  # chemin absolu
+    ("..\\..\\windows\\win.ini", "win.ini"),            # traversee Windows
+    (".bashrc", "bashrc"),                               # fichier cache
+    ("a/b/c/d.txt", "d.txt"),                            # sous-dossiers
+])
+def test_safe_upload_filename_neutralise_les_chemins(entree, attendu):
+    from fiskr.database import safe_upload_filename
+    out = safe_upload_filename(entree)
+    assert out == attendu
+    assert "/" not in out and "\\" not in out and ".." not in out
+    assert not out.startswith(".")
+
+
+def test_safe_upload_filename_valeur_par_defaut_si_vide():
+    from fiskr.database import safe_upload_filename
+    assert safe_upload_filename(None, "x.bin") == "x.bin"
+    assert safe_upload_filename("", "x.bin") == "x.bin"
+    assert safe_upload_filename("..", "x.bin") == "x.bin"
+
+
+def test_ingest_ne_peut_pas_ecrire_hors_du_repertoire_temporaire(client):
+    """Traversée de chemin à l'ingestion : le fichier ne doit pas atterrir à la
+    racine du projet (écrasement de passenger_wsgi.py, config.yaml…)."""
+    from fiskr.config import PROJECT_ROOT
+    sonde = PROJECT_ROOT / "SEC_PROBE_NE_DOIT_PAS_EXISTER.csv"
+    if sonde.exists():
+        sonde.unlink()
+    body = "entity_id,entity_type,primary_name,nationality,dob\nSEC1,I,Test Sec,RU,1970-01-01\n"
+    response = client.post(
+        "/api/ingest",
+        data={"file_type": "WATCHLIST_EU"},
+        files={"file": ("../SEC_PROBE_NE_DOIT_PAS_EXISTER.csv", body, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    assert not sonde.exists(), "traversée de chemin : fichier écrit à la racine du projet"
+
+
+# ------------------ SECRETS PAR DEFAUT SIGNALES ------------------
+
+def test_diagnostic_signale_les_secrets_par_defaut(client):
+    """Le diagnostic liste les secrets restés à leur valeur par défaut (nom
+    seulement, jamais la valeur)."""
+    data = client.get("/api/diagnostic/jobs").json()
+    assert "insecure_defaults" in data["config"]
+    defauts = data["config"]["insecure_defaults"]
+    assert isinstance(defauts, list)
+    for nom in defauts:
+        assert nom in ("SECRET_KEY", "ADMIN_PASSWORD")
+    from fiskr import config as cfg
+    if cfg.INSECURE_DEFAULT_SECRET_KEY:
+        assert "SECRET_KEY" in defauts
+
+
+# ------------------ XSS STOCKE DANS LA MODALE D'AUDIT ------------------
+# Les libellés du moteur (motif de hard match, descriptions d'ajustement)
+# incorporent des champs issus des données criblées (n° de passeport et son
+# pays, type d'« autre identifiant », libellés de pays), lesquels arrivent
+# d'un CSV, d'un message de paiement ou d'un webhook — donc potentiellement
+# forgés. Rendus en innerHTML dans la modale d'audit d'un analyste, ils
+# DOIVENT être échappés. Garde-fou statique contre une régression.
+
+def test_audit_modal_escapes_engine_supplied_labels():
+    import re
+    from pathlib import Path
+    src = Path("fiskr/static/app.js").read_text(encoding="utf-8")
+    debut = src.index("function viewAuditLogDetail")
+    bloc = src[debut:debut + 3000]
+    sinks = [
+        "tree.hard_match_details",
+        "tree.adjustments.dob.description",
+        "tree.adjustments.gender.description",
+        "tree.adjustments.geography.description",
+    ]
+    for sink in sinks:
+        # Aucune interpolation BRUTE « ${<sink>} » ne doit subsister…
+        assert f"${{{sink}}}" not in bloc, f"interpolation non échappée : {sink}"
+        # …et le champ doit apparaître enveloppé dans escapeHtml(...)
+        assert f"escapeHtml({sink})" in bloc, f"{sink} doit passer par escapeHtml"
