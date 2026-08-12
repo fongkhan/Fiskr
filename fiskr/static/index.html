@@ -1434,18 +1434,12 @@
  </div>
  
 <div id="sub-sec-alerts-blocking" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr 1fr;">
+ <div class="grid-layout" style="grid-template-columns: 1fr;">
  <div class="card form-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Blocking Key — Criblage Clients</h2>
  <p class="section-desc">Composantes ordonnées de la clé de blocking qui sélectionne les candidats du criblage. Toute modification <strong>recharge immédiatement le cache de production</strong>.</p>
  <div id="blocking-screening-editor"></div>
  <button class="btn btn-primary" onclick="saveBlocking('SCREENING')" style="margin-top: 1rem;">Enregistrer (recharge le cache)</button>
- </div>
- <div class="card form-card">
- <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Blocking Key — Filtrage Transactionnel</h2>
- <p class="section-desc">Clé propre au filtrage des paiements. Par défaut réduite à la phonétique (les données de paiement sont pauvres) ; le type PP/PM est testé dans les deux variantes.</p>
- <div id="blocking-filtering-editor"></div>
- <button class="btn btn-primary" onclick="saveBlocking('FILTERING')" style="margin-top: 1rem;">Enregistrer</button>
  </div>
  </div>
  <!-- ALGORITHMES DU MOTEUR (fusionné dans le paramétrage moteur) -->
@@ -1584,7 +1578,20 @@
  <button id="sub-btn-alerts-filtering" class="sub-tab-btn" onclick="switchSubTab('filtering', 'alerts-filtering')">
  Alertes <span id="alerts-filtering-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
  </button>
+ <button id="sub-btn-filtering-blocking" class="sub-tab-btn hidden" title="Paramétrage moteur" onclick="switchSubTab('filtering', 'filtering-blocking')">
+ Paramétrage moteur
+ </button>
  </div>
+<div id="sub-sec-filtering-blocking" class="sub-tab-content hidden">
+ <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="card form-card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Blocking Key — Filtrage Transactionnel</h2>
+ <p class="section-desc">Clé propre au filtrage des paiements. Par défaut réduite à la phonétique (les données de paiement sont pauvres) ; le type PP/PM est testé dans les deux variantes. Réglée <strong>indépendamment</strong> du criblage clients.</p>
+ <div id="blocking-filtering-editor"></div>
+ <button class="btn btn-primary" onclick="saveBlocking('FILTERING')" style="margin-top: 1rem;">Enregistrer</button>
+ </div>
+ </div>
+</div>
 <div id="sub-sec-screening-transactions" class="sub-tab-content active">
  <div class="card">
  <h2>Filtrage Transactionnel ISO 20022</h2>
@@ -1940,7 +1947,7 @@
  <tr><td><strong>Vue d'ensemble</strong></td><td>Tableau de bord personnalisable : compteurs, files à traiter, graphiques. Chaque utilisateur compose ses panneaux.</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('home')">Ouvrir</button></td></tr>
  <tr><td><strong>Gestion des Watchlists</strong></td><td>Production du référentiel : watchlist en production, imports, snapshots, ajout manuel, sources automatiques, homologation.</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('watchlist-mgmt')">Ouvrir</button></td></tr>
  <tr><td><strong>Criblage</strong></td><td>Criblage clients temps réel et batch, file d'alertes SCREENING, liste blanche, paramétrage moteur, ressources linguistiques, règles faux positifs.</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('screening')">Ouvrir</button></td></tr>
- <tr><td><strong>Filtrage</strong></td><td>Filtrage des paiements ISO 20022 (pain.001 / pacs.008) et file d'alertes FILTERING.</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('filtering')">Ouvrir</button></td></tr>
+ <tr><td><strong>Filtrage</strong></td><td>Filtrage des paiements ISO 20022 (pain.001 / pacs.008), file d'alertes FILTERING et paramétrage moteur (clé de blocage propre au canal).</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('filtering')">Ouvrir</button></td></tr>
  <tr><td><strong>Pilotage</strong></td><td>KPI conformité : vue d'ensemble, charge &amp; SLA, qualité des données clients, rapport d'activité réglementaire.</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('kpi')">Ouvrir</button></td></tr>
  <tr><td><strong>Audit</strong></td><td>Piste d'audit immuable des décisions de criblage + journal des actions d'administration.</td><td><button class="btn btn-sm btn-secondary" onclick="switchTab('audit')">Ouvrir</button></td></tr>
  <tr><td><strong>Paramètres</strong></td><td>Réglages à chaud (admin) : gouvernance, alertes, criblage, intégrations.</td><td></td></tr>
