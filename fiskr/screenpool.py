@@ -290,7 +290,7 @@ def _wait_with_watchdog(async_result, queue, pool, total_clients: int,
 # avant la creation du pool, lu par les tranches.
 _G = types.SimpleNamespace(index=None, cfg=None, wl=None, rules=None,
                            queue=None, caps_override=None, res_override=None,
-                           snapshot_id=None, projection=None)
+                           snapshot_id=None, projection=None, clients=None)
 
 
 def _child_init():
@@ -406,3 +406,105 @@ def _drain_count(queue) -> int:
     except Exception:
         pass
     return total
+
+
+# ------------------ PHASE DE CALCUL PUR (re-criblage) ------------------
+# Le re-criblage post-delta, lui, ECRIT (journal d'audit, alertes). Il ne peut
+# donc pas tourner entierement dans des enfants. Mais son travail se scinde
+# proprement en deux :
+#   1. trouver, pour chaque client, sa meilleure correspondance — du calcul
+#      PUR, qui represente la quasi-totalite du temps (la plupart des clients
+#      n'ont aucun candidat, et aucun n'ecrit quoi que ce soit) ;
+#   2. pour les SEULS clients qui alertent — une poignee — ecrire en base.
+# Seule la phase 1 est parallelisee ici ; la phase 2 reste sequentielle dans le
+# processus parent, dans l'ordre des clients, donc au resultat identique.
+
+
+def _match_chunk(bounds: Tuple[int, int, int]) -> Dict[str, Any]:
+    """Calcule les correspondances d'une tranche de clients deja en memoire
+    (heritee par fork). Ne touche JAMAIS la base. Retourne les seuls clients
+    en ALERT, reperes par leur indice dans la liste du parent."""
+    start, end, chunk_index = bounds
+    clients = _G.clients
+    cfg = _G.cfg
+    index = _G.index
+    hits: List[Tuple[int, Dict[str, Any]]] = []
+    seen = 0
+    for i in range(start, end):
+        client = clients[i]
+        seen += 1
+        if seen % _PROGRESS_EVERY == 0:
+            _G.queue.put(_PROGRESS_EVERY)
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for key in lookup_blocking_keys(client, cfg):
+            for ent in index.get(key, []):
+                candidates[ent["entity_id"]] = ent
+        if not candidates:
+            continue
+        best = None
+        for ent in candidates.values():
+            score = match_entities(client, ent, config)
+            score["watchlist_entity"] = ent
+            if best is None or score["final_score"] > best["final_score"]:
+                best = score
+        if best is not None and best.get("status") == "ALERT":
+            hits.append((i, best))
+    if seen % _PROGRESS_EVERY:
+        _G.queue.put(seen % _PROGRESS_EVERY)
+    return {"_chunk_index": chunk_index, "hits": hits}
+
+
+def parallel_match(clients: Sequence[Dict[str, Any]], index, screening_cfg,
+                   processes: int,
+                   progress: Optional[Callable[[int, int], None]] = None
+                   ) -> List[Tuple[int, Dict[str, Any]]]:
+    """
+    Phase de calcul du re-criblage, en parallele et EN LECTURE SEULE.
+
+    `clients` et `index` sont deja en memoire : les enfants les heritent par
+    fork (copy-on-write), rien n'est ni pickle ni recharge. Retourne la liste
+    `(indice du client, meilleure correspondance)` des clients en ALERT,
+    **triee par indice** — l'appelant ecrit ensuite en base dans cet ordre,
+    exactement comme le ferait la boucle sequentielle.
+
+    L'appelant doit avoir libere sa transaction (`db.rollback()`) avant
+    l'appel : aucune transaction ne doit etre ouverte au moment du fork.
+    Leve PoolStalled si le pool meurt ou se fige — a l'appelant de replier en
+    sequentiel.
+    """
+    from fiskr import capabilities as caps
+    from fiskr import resources
+
+    total = len(clients)
+    if total == 0:
+        return []
+
+    chunk_count = min(total, max(processes * 4, processes))
+    step = max(1, total // chunk_count)
+    bounds = [(start, min(start + step, total), n)
+              for n, start in enumerate(range(0, total, step))]
+
+    ctx = multiprocessing.get_context("fork")
+    _G.clients = clients
+    _G.index = index
+    _G.cfg = screening_cfg
+    _G.caps_override = getattr(caps._local, "override", None)
+    _G.res_override = getattr(resources._local, "override", None)
+    _G.queue = ctx.SimpleQueue()
+
+    gc.freeze()
+    try:
+        with ctx.Pool(processes=processes, initializer=_child_init) as pool:
+            async_result = pool.map_async(_match_chunk, bounds)
+            _wait_with_watchdog(async_result, _G.queue, pool, total, progress)
+            partials = async_result.get()  # propage l'exception d'une tranche
+    finally:
+        gc.unfreeze()
+        _G.clients = _G.index = _G.cfg = _G.queue = None
+        _G.caps_override = _G.res_override = None
+
+    hits: List[Tuple[int, Dict[str, Any]]] = []
+    for part in sorted(partials, key=lambda p: p["_chunk_index"]):
+        hits.extend(part["hits"])
+    hits.sort(key=lambda h: h[0])
+    return hits

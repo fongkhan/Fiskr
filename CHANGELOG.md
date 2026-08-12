@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — the post-delta rescreen now runs in parallel
+The automatic rescreen re-screens the **whole client base** after every list goes live — it is the most frequent screening in production, and it was the last fully **sequential** loop (it even had to yield the GIL by hand to keep the API responsive). It could not simply be handed to the existing fork pool, because unlike the test book it **writes**: audit records and work alerts.
+
+Splitting it along that seam solves it. The loop is now two phases: **(1)** finding each client's best match — pure computation, the near-totality of the time, and where most clients have no candidate at all — runs on a pool of forked processes that touch **no database at all**; **(2)** only the handful of clients that reach `ALERT` come back to the parent, which does every write itself, sequentially, in client order. So the writes keep exactly the transactional semantics and ordering they had.
+
+Measured (`tools/bench_rescreen.py`, added): **1.98× on 2 usable cores** — near-linear, and it scales with the cores the server actually has. Equivalence is pinned by a test that runs the same scenario sequentially and in parallel and asserts the resulting alerts, scores, matched entities and counters are **identical**; a second test kills the pool mid-run and checks the rescreen falls back to sequential and still completes rather than losing the run. Combined with the kernel work below, the rescreen is now roughly **4× faster** than before this release.
+
 ### Performance — the screening kernel is ~2× faster (real-time, batch, backtest, rescreen)
 Profiling a realistic universe screen (`tools/bench_screening.py`, added) showed the time went almost entirely into the matching kernel. Four changes, each **result-identical** (the whole test suite stays green, and the Damerau-Levenshtein rewrite was checked bit-for-bit against the old one on 200,000 random pairs):
 

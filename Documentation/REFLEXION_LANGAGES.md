@@ -20,18 +20,24 @@ un profilage le désigne — pas avant.
 > démarche ci-dessous : **on optimise d'abord le Python**, et le levier
 > langage ne se pose que pour le palier SUIVANT.
 >
-> **Deux leviers restants, dans l'ordre :**
-> 1. **Paralléliser le re-criblage post-delta.** Il tourne aujourd'hui en
->    boucle **séquentielle** (`rescreen.py`) alors qu'il repasse toute la base
->    clients après chaque mise à jour de liste — c'est le criblage de
->    production le plus fréquent. Le cahier de tests, lui, forke déjà un pool.
->    Le paralléliser demande de gérer l'écriture concurrente des alertes en
->    base (le pool actuel n'agrège que des résultats, sans écrire) : chantier
->    réel mais **en Python**, sans changer de langage.
-> 2. **Accélérer le noyau de métrique** (DL + Jaro, désormais ~la moitié du
->    temps restant). C'est ici, et seulement ici, qu'un noyau **Rust via
->    PyO3** (in-process, sans sérialisation) prendrait le palier suivant —
->    voir plus bas.
+> **Levier 1 — FAIT : le re-criblage post-delta est parallélisé.** Il
+> repassait toute la base clients en boucle **séquentielle** alors que c'est le
+> criblage le plus fréquent en production. Il ne pouvait pas être confié tel
+> quel au pool existant parce que, contrairement au cahier de tests, il
+> **écrit** (journal d'audit, alertes). La solution est de le couper sur cette
+> couture : la **recherche des correspondances** (calcul pur, la quasi-totalité
+> du temps) part sur le pool de processus forkés, qui ne touche pas la base ;
+> les **seules correspondances en ALERT** — une poignée — reviennent au parent,
+> qui écrit lui-même, séquentiellement, dans l'ordre des clients. Les écritures
+> gardent donc exactement leur sémantique transactionnelle et leur ordre.
+> Mesuré : **1,98× sur 2 cœurs utilisables** (quasi linéaire, `tools/bench_rescreen.py`),
+> et l'équivalence stricte séquentiel/parallèle est épinglée par un test.
+>
+> **Levier 2 — restant : accélérer le noyau de métrique** (DL + Jaro, désormais
+> ~la moitié du temps restant par cœur). C'est ici, et seulement ici, qu'un
+> noyau **Rust via PyO3** (in-process, sans sérialisation) prendrait le palier
+> suivant — voir plus bas. À noter : la parallélisation multiplie les cœurs,
+> le noyau Rust diviserait le coût *par* cœur ; les deux gains se composent.
 
 ## 1. Où le temps passe réellement
 
