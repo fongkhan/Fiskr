@@ -72,12 +72,58 @@ def _open_engine():
         return None
 
 
-def _trigram_statements():
-    yield ("pg_trgm", "CREATE EXTENSION IF NOT EXISTS pg_trgm")
+def trigram_support(live_engine):
+    """
+    État de l'extension `pg_trgm` : ("installed" | "available" | "absent").
+
+    Elle n'est pas fournie par tous les hébergeurs — sur un mutualisé, le
+    fichier de contrôle de l'extension peut tout simplement ne pas exister sur
+    le serveur. Sans cette vérification préalable, l'outil enchaînait trois
+    échecs SQL bruts (« n'a pas pu ouvrir le fichier de contrôle », puis deux
+    fois « la classe d'opérateur gin_trgm_ops n'existe pas »), ce qui donne
+    l'impression d'une manipulation ratée alors que rien, côté exploitant, ne
+    peut y changer quoi que ce soit. On le constate donc AVANT, et on
+    l'explique en une phrase.
+    """
+    from sqlalchemy import text
+    try:
+        with live_engine.connect() as conn:
+            if conn.execute(text(
+                    "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'")).first():
+                return "installed"
+            if conn.execute(text(
+                    "SELECT 1 FROM pg_available_extensions WHERE name = 'pg_trgm'")).first():
+                return "available"
+    except Exception:
+        # Inspection impossible : on ne bloque pas, la tentative dira la vérité.
+        return "available"
+    return "absent"
+
+
+def _trigram_statements(state: str):
+    if state != "installed":
+        yield ("pg_trgm", "CREATE EXTENSION IF NOT EXISTS pg_trgm")
     for name, table, column in TRIGRAM_SEARCH_INDEXES:
         yield (name,
                f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} "
                f"USING gin ({column} gin_trgm_ops) WHERE excluded IS NOT TRUE")
+
+
+TRIGRAM_ABSENT_MESSAGE = """
+La recherche plein texte ne peut pas être accélérée sur ce serveur.
+
+  L'extension PostgreSQL « pg_trgm » n'est pas fournie par cet hébergeur :
+  son fichier de contrôle est absent de l'installation. Ce n'est pas un
+  réglage de votre côté — seul l'hébergeur peut l'ajouter.
+
+  Rien n'a été tenté : les index de consultation ci-dessus, eux, sont bien
+  en place et c'est ce qui règle la lenteur d'affichage des listes.
+
+  Options, si la recherche vous gêne :
+    • demander l'activation de pg_trgm à l'hébergeur (contrib PostgreSQL) ;
+    • sinon, la recherche restera un balayage — aucun index SQL ne peut
+      accélérer un « ILIKE %terme% » sans cette extension.
+""".rstrip()
 
 
 def main() -> int:
@@ -106,8 +152,16 @@ def main() -> int:
         return 0
 
     statements = list(BROWSE_INDEXES)
+    trigram_state = None
     if args.search:
-        statements += list(_trigram_statements())
+        # Constate AVANT d'agir : un hébergeur mutualisé peut simplement ne pas
+        # fournir pg_trgm, et l'exploitant n'y peut rien. Mieux vaut une phrase
+        # claire que trois échecs SQL en cascade.
+        trigram_state = trigram_support(live_engine)
+        if trigram_state == "absent":
+            args.search = False
+        else:
+            statements += list(_trigram_statements(trigram_state))
 
     from sqlalchemy import text
     print(f"{len(statements)} instruction(s) — construction CONCURRENTLY, "
@@ -138,7 +192,11 @@ def main() -> int:
               f"DROP INDEX CONCURRENTLY <nom>, puis se relance.")
         return 1
     print("\nTerminé. La consultation des listes doit repasser sous la seconde.")
-    if not args.search:
+    if trigram_state == "absent":
+        # L'extension manque sur CE serveur : ce n'est pas un échec de
+        # l'exploitant, et aucune commande de sa part n'y changera rien.
+        print(TRIGRAM_ABSENT_MESSAGE)
+    elif not args.search:
         print("La recherche plein texte reste lente : relancez avec --search "
               "si vous acceptez ~78 % d'écriture en plus à l'ingestion.")
     return 0

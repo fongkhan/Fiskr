@@ -104,6 +104,75 @@ def test_tool_never_migrates_the_schema():
     assert "init_db" not in importes
 
 
+# ------------------ EXTENSION pg_trgm ABSENTE DU SERVEUR ------------------
+# Constaté en production (o2switch) : l'extension n'est pas fournie par
+# l'hébergeur. L'outil enchaînait alors TROIS échecs SQL bruts, ce qui donne
+# l'impression d'une manipulation ratée alors que l'exploitant n'y peut rien.
+
+class _FauxResultat:
+    def __init__(self, valeur):
+        self._valeur = valeur
+
+    def first(self):
+        return self._valeur
+
+
+class _FausseConnexion:
+    def __init__(self, installee, disponible):
+        self._reponses = [installee, disponible]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, _stmt):
+        return _FauxResultat(self._reponses.pop(0) if self._reponses else None)
+
+
+class _FauxMoteur:
+    def __init__(self, installee=None, disponible=None):
+        self._installee, self._disponible = installee, disponible
+
+    def connect(self):
+        return _FausseConnexion(self._installee, self._disponible)
+
+
+def _outil():
+    import importlib
+    return importlib.import_module("tools.create_perf_indexes")
+
+
+def test_absent_trigram_extension_is_detected_before_any_attempt():
+    """Serveur qui ne fournit pas pg_trgm : constaté AVANT d'agir."""
+    outil = _outil()
+    assert outil.trigram_support(_FauxMoteur(None, None)) == "absent"
+    assert outil.trigram_support(_FauxMoteur(None, 1)) == "available"
+    assert outil.trigram_support(_FauxMoteur(1, None)) == "installed"
+
+
+def test_absent_extension_message_blames_the_host_not_the_operator():
+    """Le message doit dire que rien n'a été tenté, que ce n'est pas un réglage
+    de l'exploitant, et que les index de consultation sont bien posés."""
+    message = _outil().TRIGRAM_ABSENT_MESSAGE
+    assert "n'est pas fournie par cet hébergeur" in message
+    assert "Ce n'est pas un" in message and "votre côté" in message
+    assert "Rien n'a été tenté" in message
+    assert "consultation" in message  # rassure sur ce qui, lui, a marché
+
+
+def test_extension_creation_is_skipped_when_already_installed():
+    """Extension déjà installée : on ne réémet pas le CREATE EXTENSION."""
+    outil = _outil()
+    noms_installee = [n for n, _ in outil._trigram_statements("installed")]
+    noms_dispo = [n for n, _ in outil._trigram_statements("available")]
+    assert "pg_trgm" not in noms_installee
+    assert "pg_trgm" in noms_dispo
+    # Les index, eux, sont proposés dans les deux cas
+    assert len(noms_installee) == len(outil.TRIGRAM_SEARCH_INDEXES)
+
+
 def test_trigram_search_indexes_are_opt_in():
     """Les index trigramme accélèrent la recherche (x73 mesuré) mais coûtent
     ~78 % d'écriture en plus à l'ingestion : ils restent explicitement
