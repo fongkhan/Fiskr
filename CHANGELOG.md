@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the index tool now says when the host simply doesn't provide `pg_trgm`
+Reported from production (o2switch): running `tools/create_perf_indexes.py --search` produced **three raw SQL failures** in a row — "could not open extension control file", then twice "operator class gin_trgm_ops does not exist". The cause is not a misconfiguration: the host does not ship the `pg_trgm` extension at all, and nothing the operator does can change that. But the output read like a botched command.
+
+The tool now checks the extension **before attempting anything** (`pg_extension` / `pg_available_extensions`) and, when it is absent, explains it in one sentence: the host doesn't provide it, nothing was attempted, and — importantly — the browse indexes above *are* in place, which is what fixes the slow list screen. It also no longer re-issues `CREATE EXTENSION` when the extension is already installed. On a host that does provide it, the nominal path is unchanged (verified end to end: extension created, both trigram indexes built).
+
+`Documentation/PERFORMANCE_BASE.md` records the finding: on this host the search trade-off does not even arise, and the way out would be the engine's in-memory index (the one already serving Ctrl+K) rather than SQL.
+
+
+### Fixed — a missing column no longer wipes the entire database on startup
+`init_db()` contained a legacy shortcut: if `watchlist_entities` lacked the `place_of_birth` column, it called `Base.metadata.drop_all()` — **destroying every table**: approved lists, alerts, and the immutable audit trail. One absent *nullable* column, exactly the kind of gap an additive migration closes in a second, and a plain restart erased everything. No backup was requested, no confirmation asked, and the log line said only `Database schema outdated. Dropping and recreating tables...` — at INFO level. The fault was reproduced in real conditions: **2.79 million records lost to a single startup** against an incomplete schema.
+
+A nullable column is *added*, not paid for with the database. Startup now ends with a generic sweep (`_add_missing_nullable_columns`) that aligns every existing table with the model, deriving each column's DDL type from SQLAlchemy for the current dialect — so it works on PostgreSQL and SQLite alike, with no hand-maintained list to forget. The declared additive migrations still run first and are untouched; the sweep is the safety net behind them. A `NOT NULL` column without a default genuinely cannot be added to a populated table: it is now **reported** with an explicit warning for manual action, instead of being "solved" by destruction.
+
+Pinned by tests, including the exact scenario that caused the loss: a populated table missing `place_of_birth` keeps its rows and gains the column; a stripped-down table recovers every nullable column of the model; a `NOT NULL` gap is reported while the data stays intact; the sweep is idempotent; and `init_db` is checked on its **syntax tree** to ensure no destructive call ever returns.
+
+
 ### Performance — browsing the lists went from 18 seconds to milliseconds (missing indexes)
 Reported from production: reads felt very slow, on a 9 GB database. Measured against the live service rather than guessed — every read endpoint answered in about a second **except** `GET /api/watchlist/db` (the "Watchlist Active" screen), which took **18 seconds to return 50 rows**, and 54 s with a search term.
 

@@ -99,7 +99,28 @@ python tools/create_perf_indexes.py --dry-run  # montre sans rien faire
 Idempotent (`IF NOT EXISTS`), relançable. Il **ne migre rien** et n'appelle
 jamais `init_db()` — un outil de performance n'a pas à toucher au schéma.
 
-## Recherche plein texte : un compromis à arbitrer
+## Recherche plein texte : d'abord, l'hébergeur doit la permettre
+
+**Constaté en production (o2switch) : l'extension `pg_trgm` n'y est pas
+fournie.** Son fichier de contrôle est absent de l'installation PostgreSQL —
+ce n'est pas un réglage d'exploitation, seul l'hébergeur peut l'ajouter.
+
+Conséquence directe : sur ce serveur, **aucun index SQL ne peut accélérer un
+`ILIKE '%terme%'`**. Le compromis décrit ci-dessous ne se pose donc même pas ;
+la recherche restera un balayage tant que l'extension n'est pas activée.
+
+L'outil le constate désormais **avant d'agir** et l'explique en une phrase. Il
+n'essaie plus : auparavant il enchaînait trois échecs SQL bruts (« n'a pas pu
+ouvrir le fichier de contrôle d'extension », puis deux fois « la classe
+d'opérateur `gin_trgm_ops` n'existe pas »), ce qui laissait croire à une
+manipulation ratée alors que rien, côté exploitant, ne pouvait y changer quoi
+que ce soit.
+
+Si la recherche devient gênante sans `pg_trgm`, la voie n'est pas la base mais
+l'application : le moteur tient déjà un index mémoire (celui qui sert le
+Ctrl+K), qui pourrait servir aussi la recherche de l'écran des listes.
+
+## Recherche plein texte : un compromis à arbitrer (là où pg_trgm existe)
 
 La recherche `ILIKE '%terme%'` ne peut utiliser aucun index btree. Des index
 **trigramme GIN** la rendent utilisable, à un coût réel :
