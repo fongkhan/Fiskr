@@ -8,7 +8,14 @@
 #   3. installe les dépendances ;
 #   4. tue le démon travailleur — il garde l'ANCIEN code tant qu'il vit ;
 #   5. le relance aussitôt sur le nouveau code (le verrou flock rend toute
-#      course avec le cron inoffensive : un seul démon vivra).
+#      course avec le cron inoffensive : un seul démon vivra) ;
+#   6. redémarre l'application web (Passenger) — elle AUSSI garde l'ancien
+#      code tant que son processus vit.
+#
+# Les DEUX moitiés doivent redémarrer. Constaté en production : après un
+# rafraîchissement, `versions.worker.outdated` passait bien à false pendant
+# que `versions.api.outdated` restait true — le démon tournait sur le code
+# neuf, le site sur l'ancien.
 #
 # Garde-fous :
 #   - s'arrête à la première erreur (set -euo pipefail) ;
@@ -116,6 +123,27 @@ else
     log "ATTENTION : pas de verrou vivant après 3 s — le filet cron le relancera."
 fi
 
+# --- Redémarrage de l'application web (Passenger) -------------------------
+# Le démon n'est que LA MOITIÉ de la production : les processus web servis par
+# Passenger gardent eux aussi en mémoire le code chargé à leur démarrage.
+# Toucher « tmp/restart.txt » est le mécanisme documenté de Passenger : il
+# relit le fichier, constate une date de modification plus récente et redémarre
+# proprement l'application à la requête suivante (pas de kill, pas de coupure
+# — la requête en cours se termine normalement).
+#
+# On ne touche PAS passenger_wsgi.py : cPanel le régénère à chaque passage
+# dans « Setup Python App », ce qui rendrait la manœuvre non reproductible.
+RESTART_FILE="$FISKR_DIR/tmp/restart.txt"
+mkdir -p "$FISKR_DIR/tmp"
+if touch "$RESTART_FILE" 2>/dev/null; then
+    log "Application web : redémarrage demandé (tmp/restart.txt touché)."
+else
+    log "ATTENTION : impossible de toucher $RESTART_FILE — redémarrez"
+    log "            l'application depuis cPanel → Setup Python App → Restart."
+fi
+
 log "Dernières lignes de worker.log :"
 tail -n 8 "$FISKR_DIR/worker.log" 2>/dev/null || true
-log "Terminé. Vérifiez ensuite GET /api/diagnostic/jobs : versions.worker.outdated doit être false."
+log "Terminé. Vérifiez ensuite GET /api/diagnostic/jobs : versions.worker.outdated"
+log "ET versions.api.outdated doivent être false (l'API redémarre à la première"
+log "requête reçue — ouvrez une page si le drapeau est encore à true)."

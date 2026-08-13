@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `refresh_prod.sh` restarted only half of production
+Observed live right after a refresh: `versions.worker.outdated` was `false` while `versions.api.outdated` was still `true`. The daemon was running the newly merged code; the website was not. The script killed and relaunched `python -m fiskr.worker` but never touched the web processes, which keep serving whatever code they imported at boot — so a refresh silently left the two halves on different revisions.
+
+The script now also touches `tmp/restart.txt`, Passenger's documented restart trigger: it reloads the application on the next request, with no kill and no cutover (in-flight requests finish normally). `passenger_wsgi.py` is deliberately left alone — cPanel regenerates it on every visit to "Setup Python App", which would make the manoeuvre unreproducible. If the file cannot be written, the script says so and points at cPanel → Setup Python App → Restart rather than reporting success. The closing message now names **both** flags to check.
+
+
 ### Fixed — the index tool now says when the host simply doesn't provide `pg_trgm`
 Reported from production (o2switch): running `tools/create_perf_indexes.py --search` produced **three raw SQL failures** in a row — "could not open extension control file", then twice "operator class gin_trgm_ops does not exist". The cause is not a misconfiguration: the host does not ship the `pg_trgm` extension at all, and nothing the operator does can change that. But the output read like a botched command.
 
