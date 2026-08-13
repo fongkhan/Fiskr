@@ -475,7 +475,77 @@ _PERFORMANCE_INDEXES = (
     Index("ix_client_entities_client_id", ClientEntity.client_id),
     # File de travaux : le claim parcourt QUEUED par priorite puis anciennete
     Index("ix_jobs_claim", Job.status, Job.priority, Job.id),
+    # ---- Consultation des listes (/api/watchlist/db) ----
+    # Sans eux, afficher UNE page de 50 fiches lisait la table ENTIERE : le
+    # perimetre « production » se definit par des colonnes de `snapshots`
+    # (statut, type) et par `excluded`, dont aucune n'etait indexee. Mesure sur
+    # un jeu aux proportions reelles (2,79 M lignes, 92 % hors production) :
+    # parcours sequentiel de 2,79 M lignes pour rendre 50 — 327 ms pour la page
+    # et 263 ms pour le compte ; en production (11,2 M lignes, 9 Go) : 18 s.
+    Index("ix_snapshots_status_type", Snapshot.status, Snapshot.file_type),
+    Index("ix_snapshots_uploaded_at", Snapshot.uploaded_at),
+    # Index PARTIEL : n'indexe que les fiches non exclues, c'est-a-dire
+    # exactement le perimetre lu. Il porte (snapshot_id, id) : le planificateur
+    # y trouve les fiches d'un lot deja triees par id, ce qui sert aussi le
+    # tri par defaut (les lots sont ordonnes par date de televersement).
+    # Meme mesure, avec : page 1,8 ms (x182), compte 55 ms (x4,7).
+    Index("ix_wl_entities_production", WatchlistEntity.snapshot_id, WatchlistEntity.id,
+          postgresql_where=WatchlistEntity.excluded.isnot(True)),
 )
+
+# Index de RECHERCHE plein texte (ILIKE « %terme% »), separes parce qu'ils ont
+# un cout d'ecriture : ce sont des index GIN trigramme, qui exigent l'extension
+# pg_trgm et ralentissent l'insertion d'environ 78 % (mesure : 50 000 fiches en
+# 1,58 s sans, 2,82 s avec). Ils rendent en echange la recherche utilisable :
+# 1 270 ms -> 17 ms sur le meme jeu (x73), et la production mesurait 54 s.
+# Creation reservee a l'outil dedie (tools/create_perf_indexes.py) : ils ne
+# sont PAS crees au demarrage, pour laisser l'exploitant arbitrer ce compromis.
+TRIGRAM_SEARCH_INDEXES = (
+    ("ix_wl_primary_name_trgm", "watchlist_entities", "primary_name"),
+    ("ix_wl_entity_id_trgm", "watchlist_entities", "entity_id"),
+)
+
+# Au-dela de ce nombre de lignes, `init_db` NE CREE PAS un index manquant :
+# un `CREATE INDEX` ordinaire prend un verrou exclusif pendant toute sa
+# construction et figerait la production plusieurs minutes. L'exploitant lance
+# alors tools/create_perf_indexes.py, qui construit en CONCURRENTLY, sans
+# interruption de service. Les installations neuves (table vide) sont
+# indexees automatiquement.
+LARGE_TABLE_ROW_GUARD = 200_000
+
+
+def _index_exists(engine, index_name: str) -> bool:
+    """Vrai si l'index existe deja (tous moteurs). Jamais bloquant."""
+    try:
+        from sqlalchemy import inspect as _sa_inspect
+        insp = _sa_inspect(engine)
+        for table in insp.get_table_names():
+            if any(ix.get("name") == index_name for ix in insp.get_indexes(table)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _table_row_estimate(engine, table_name: str) -> int:
+    """
+    Estimation du nombre de lignes — JAMAIS un COUNT(*) : sur une table de
+    plusieurs millions de lignes il coute lui-meme des secondes, au demarrage.
+    PostgreSQL : statistiques du planificateur (`pg_class.reltuples`, gratuit).
+    Ailleurs (SQLite de developpement) : 0, donc aucun garde-fou — les bases de
+    test sont petites et doivent recevoir leurs index.
+    """
+    try:
+        if engine.dialect.name != "postgresql":
+            return 0
+        from sqlalchemy import text as _t
+        with engine.connect() as conn:
+            row = conn.execute(_t(
+                "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = :n"
+            ), {"n": table_name}).first()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
 
 
 def refresh_source_relationships(db, source: str, relations) -> int:
@@ -1090,12 +1160,32 @@ def init_db():
     except Exception as e:
         logger.warning(f"Failed to inspect database schema: {e}")
     Base.metadata.create_all(bind=engine)
-    # Index de performance idempotents (les tables existantes n'en heritent pas)
+    # Index de performance idempotents (les tables existantes n'en heritent pas).
+    # GARDE-FOU : un `CREATE INDEX` ordinaire verrouille la table pendant toute
+    # sa construction. Sur une grosse table de production (11 M de lignes
+    # constatees), cela figerait le service plusieurs minutes au demarrage. On
+    # ne cree donc au demarrage que ce qui est sans risque — table petite ou
+    # neuve — et on DIT quoi faire pour le reste.
+    _deferred_indexes = []
     for perf_index in _PERFORMANCE_INDEXES:
         try:
+            table_name = perf_index.table.name
+            if _table_row_estimate(engine, table_name) > LARGE_TABLE_ROW_GUARD:
+                if not _index_exists(engine, perf_index.name):
+                    _deferred_indexes.append((perf_index.name, table_name))
+                continue
             perf_index.create(bind=engine, checkfirst=True)
         except Exception as e:
             logger.warning(f"Index {perf_index.name} non créé : {e}")
+    if _deferred_indexes:
+        noms = ", ".join(n for n, _ in _deferred_indexes)
+        logger.warning(
+            "PERFORMANCE : %d index manquant(s) sur des tables volumineuses (%s). "
+            "Ils ne sont PAS créés au démarrage — un CREATE INDEX ordinaire "
+            "verrouillerait la table plusieurs minutes. Lancez, service allumé : "
+            "python tools/create_perf_indexes.py  (construction CONCURRENTLY, "
+            "sans interruption).", len(_deferred_indexes), noms,
+        )
     
     # Check if we need to alter column lengths (e.g. if we are on postgresql)
     if engine.dialect.name == "postgresql":

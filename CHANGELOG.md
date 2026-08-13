@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — browsing the lists went from 18 seconds to milliseconds (missing indexes)
+Reported from production: reads felt very slow, on a 9 GB database. Measured against the live service rather than guessed — every read endpoint answered in about a second **except** `GET /api/watchlist/db` (the "Watchlist Active" screen), which took **18 seconds to return 50 rows**, and 54 s with a search term.
+
+The signature said it wasn't serialisation: asking for 10 rows cost the same as 50, and filtering by list type answered in 1.2 s. **The "production" scope is defined by columns that were not indexed** — `snapshots.status`, `snapshots.file_type` and `watchlist_entities.excluded` — so PostgreSQL scanned the whole table for every page. Two facts made it brutal: production holds **11.16 M rows** of which only **898 k are live** — 287 superseded snapshots account for **9.4 M rows, 92 % dead weight** — and the default ordering is on the *joined* table (`snapshots.uploaded_at`), forcing a full materialise-and-sort.
+
+Three indexes fix it, with **no change to any query**: `snapshots(status, file_type)`, `snapshots(uploaded_at)`, and a **partial** index `watchlist_entities(snapshot_id, id) WHERE excluded IS NOT TRUE` — partial so it covers exactly the scope that is read instead of carrying the 92 % that isn't. Reproduced on a local PostgreSQL 16 at production proportions (1.4 M rows): the page went **173 ms → 1.6 ms (×106)** and the count **431 ms → 26.7 ms (×16)**, both switching from a sequential scan to an index-only scan. Production is 8× larger, where the scan cost scales linearly.
+
+Two safeguards, because this is a live 9 GB database:
+- **Startup never builds them on a big table.** An ordinary `CREATE INDEX` holds an exclusive lock for its whole build — minutes here — which would freeze the service on restart. `init_db` now creates missing performance indexes only below a row guard (fresh installs, dev), and otherwise logs exactly what to run. The row estimate uses the planner's statistics, never a `COUNT(*)`.
+- **`tools/create_perf_indexes.py`** builds them with `CREATE INDEX CONCURRENTLY`, service running, no downtime, idempotent. It deliberately **never calls `init_db()`** and cannot touch the schema — pinned by a test that checks the syntax tree, not the prose.
+
+Full-text search (`ILIKE '%…%'`) is a separate trade-off and stays **opt-in** (`--search`): trigram GIN indexes take it from 1 270 ms to 17 ms (×73) but cost about **78 % more write time on ingestion** (measured: 50 000 rows in 1.58 s without, 2.82 s with) — the operator arbitrates, so they are never created automatically.
+
 ### Performance — the post-delta rescreen now runs in parallel
 The automatic rescreen re-screens the **whole client base** after every list goes live — it is the most frequent screening in production, and it was the last fully **sequential** loop (it even had to yield the GIL by hand to keep the API responsive). It could not simply be handed to the existing fork pool, because unlike the test book it **writes**: audit records and work alerts.
 
