@@ -514,6 +514,78 @@ TRIGRAM_SEARCH_INDEXES = (
 LARGE_TABLE_ROW_GUARD = 200_000
 
 
+def _add_missing_nullable_columns(engine, inspector) -> list:
+    """
+    Aligne les tables existantes sur le modele en AJOUTANT les colonnes
+    manquantes. Ne supprime jamais rien.
+
+    POURQUOI CETTE FONCTION EXISTE
+    ------------------------------
+    Le demarrage portait ceci :
+
+        if "place_of_birth" not in columns:
+            Base.metadata.drop_all(bind=engine)   # TOUTES les tables
+
+    Autrement dit : une seule colonne NULLABLE absente — le genre d'ecart
+    qu'une migration additive regle en une seconde — et l'application
+    DETRUISAIT l'integralite de la base au demarrage, listes homologuees,
+    alertes et journal d'audit immuable compris. Le defaut a ete constate en
+    conditions reelles : 2,79 millions de fiches effacees par un simple
+    demarrage sur un schema incomplet. Aucune sauvegarde n'est demandee,
+    aucune confirmation, et le message journalise ne dit pas qu'il y a
+    destruction (« Database schema outdated. Dropping and recreating
+    tables... » au niveau INFO).
+
+    Une colonne nullable s'AJOUTE : c'est ce que fait cette fonction, pour
+    toutes les tables du modele et sans liste a tenir a la main — le type DDL
+    est compile par SQLAlchemy pour le dialecte courant, donc valable aussi
+    bien sur PostgreSQL que sur SQLite.
+
+    Une colonne NOT NULL sans valeur par defaut, elle, ne peut pas etre
+    ajoutee a une table deja peuplee : elle est SIGNALEE (avertissement
+    explicite, action manuelle) plutot que traitee par une destruction.
+
+    Retourne la liste des colonnes ajoutees, pour le journal et les tests.
+    """
+    from sqlalchemy import text as _t
+
+    added = []
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue  # table absente : `create_all` la creera complete
+        present = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
+                continue
+            addable = (column.nullable
+                       or column.default is not None
+                       or column.server_default is not None)
+            if not addable:
+                logger.warning(
+                    "Colonne %s.%s absente et NON NULL sans valeur par défaut : "
+                    "elle ne peut pas être ajoutée à une table déjà peuplée. "
+                    "Intervention manuelle requise — AUCUNE donnée n'est touchée.",
+                    table.name, column.name,
+                )
+                continue
+            ddl_type = column.type.compile(engine.dialect)
+            # Identifiants issus du MODELE (jamais d'une entree utilisateur).
+            try:
+                with engine.begin() as conn:
+                    conn.execute(_t(
+                        f'ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl_type}'
+                    ))
+                added.append(f"{table.name}.{column.name}")
+            except Exception as e:
+                logger.warning("Ajout de %s.%s impossible : %s",
+                               table.name, column.name, e)
+    if added:
+        logger.info("Schéma mis à niveau — %d colonne(s) ajoutée(s) : %s",
+                    len(added), ", ".join(added))
+    return added
+
+
 def _index_exists(engine, index_name: str) -> bool:
     """Vrai si l'index existe deja (tous moteurs). Jamais bloquant."""
     try:
@@ -1029,16 +1101,6 @@ def init_db():
     from sqlalchemy import inspect, text
     try:
         inspector = inspect(engine)
-        if "watchlist_entities" in inspector.get_table_names():
-            columns = [c["name"] for c in inspector.get_columns("watchlist_entities")]
-            if "place_of_birth" not in columns:
-                logger.info("Database schema outdated. Dropping and recreating tables...")
-                Base.metadata.drop_all(bind=engine)
-            elif "designation_reasons" not in columns:
-                # Migration additive (colonne nullable) : les donnees existantes sont conservees
-                logger.info("Adding missing column watchlist_entities.designation_reasons...")
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE watchlist_entities ADD COLUMN designation_reasons TEXT"))
 
         # Migrations additives (colonnes nullables) : homologation / exclusions
         _additive_migrations = {
@@ -1146,6 +1208,14 @@ def init_db():
                     logger.info(f"Adding missing column {table_name}.{col_name}...")
                     with engine.begin() as conn:
                         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+
+        # Filet GENERIQUE, apres les migrations declarees ci-dessus : toute
+        # colonne nullable du modele encore absente est AJOUTEE. C'est ce qui
+        # a remplace un `drop_all()` — le demarrage effacait toute la base des
+        # qu'une colonne nullable manquait (cf. _add_missing_nullable_columns).
+        # Rien n'est jamais supprime ; les colonnes NOT NULL sans defaut sont
+        # signalees, pas traitees par une destruction.
+        _add_missing_nullable_columns(engine, inspect(engine))
 
         # Backfill idempotent du canal des alertes existantes : les alertes de
         # filtrage transactionnel sont reconnaissables a leur client_id TXN:

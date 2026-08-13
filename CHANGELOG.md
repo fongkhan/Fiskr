@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a missing column no longer wipes the entire database on startup
+`init_db()` contained a legacy shortcut: if `watchlist_entities` lacked the `place_of_birth` column, it called `Base.metadata.drop_all()` — **destroying every table**: approved lists, alerts, and the immutable audit trail. One absent *nullable* column, exactly the kind of gap an additive migration closes in a second, and a plain restart erased everything. No backup was requested, no confirmation asked, and the log line said only `Database schema outdated. Dropping and recreating tables...` — at INFO level. The fault was reproduced in real conditions: **2.79 million records lost to a single startup** against an incomplete schema.
+
+A nullable column is *added*, not paid for with the database. Startup now ends with a generic sweep (`_add_missing_nullable_columns`) that aligns every existing table with the model, deriving each column's DDL type from SQLAlchemy for the current dialect — so it works on PostgreSQL and SQLite alike, with no hand-maintained list to forget. The declared additive migrations still run first and are untouched; the sweep is the safety net behind them. A `NOT NULL` column without a default genuinely cannot be added to a populated table: it is now **reported** with an explicit warning for manual action, instead of being "solved" by destruction.
+
+Pinned by tests, including the exact scenario that caused the loss: a populated table missing `place_of_birth` keeps its rows and gains the column; a stripped-down table recovers every nullable column of the model; a `NOT NULL` gap is reported while the data stays intact; the sweep is idempotent; and `init_db` is checked on its **syntax tree** to ensure no destructive call ever returns.
+
+
 ### Performance — browsing the lists went from 18 seconds to milliseconds (missing indexes)
 Reported from production: reads felt very slow, on a 9 GB database. Measured against the live service rather than guessed — every read endpoint answered in about a second **except** `GET /api/watchlist/db` (the "Watchlist Active" screen), which took **18 seconds to return 50 rows**, and 54 s with a search term.
 
