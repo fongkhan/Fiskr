@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — under Passenger the engine cache never loaded, and screening silently cleared everyone
+Reported from production as a cosmetic detail: the sidebar's **"Hash Actif"** badge showed `N/A`. Measured against the live service, it was the visible end of a chain that reached the screening engine itself.
+
+**Root cause.** Passenger serves the app through `a2wsgi.ASGIMiddleware`. Reading that library's source: its `__call__` only ever builds a per-request `http` scope — it does **not** implement the ASGI `lifespan` protocol. FastAPI's `lifespan` therefore never runs in a web process, so `load_watchlist_cache()` is never called there and `watchlist_index`, `watchlist_store`, `watchlist_search_index` and `watchlist_hash` keep their initial module values. Nothing fails loudly, because `get_db()` calls `init_db()` lazily — so every database endpoint works and hides the hole.
+
+Three consequences, in increasing order of seriousness:
+
+- **The badge.** `GET /api/watchlist/summary` returned the in-process globals verbatim: `hash: "N/A"`, `count: 0`, while the database held more than thirty READY `WATCHLIST_*` snapshots. It now reads the **database**: the hash of the most recent READY watchlist snapshot and the live record count, following the same rule as the engine cache. That is the correct source anyway — the active hash is a property of the snapshot in production ("the exact referential version, the reference to cite in a case file"), not of a process's memory. With no production referential it returns `null` and the badge shows its empty state, never a fabricated hash.
+- **The Ctrl+K palette was out of service.** `GET /api/search/quick` *did* guard its cache — by building it inside the HTTP request: ~900 000 records plus the blocking index. Measured against production: **no response after more than 100 seconds**. It no longer builds anything. It uses the in-memory index when it is already there (worker, development) and otherwise falls back to a bounded SQL query on the production scope. Two differences are accepted on the fallback path, for want of `pg_trgm` on this host: it matches primary name and identifier but not aliases (stored as JSON), and it follows server collation, so `francois` will not find `François`. A partial answer from a bounded query beats an endpoint that never replies; the in-memory path keeps its full reach.
+- **`POST /api/screen` cleared listed parties, silently.** This is the one that matters. `screen_client_profile` reads `watchlist_index` with no guard, and the endpoint never ensured it was loaded. On an empty index the candidate set is empty, so screening returns `NO_MATCH` — **a listed person declared not listed, with no error, no warning and nothing in the audit trail to show it happened**. The ISO 20022 filtering endpoint (`POST /api/transactions/screen`) had the same hole, and additionally logged `"N/A"` as the watchlist hash of every decision it recorded. Both now call `_ensure_watchlist_cache(db)` before screening. The first screening after a restart pays for the load; that is the price of correctness on a regulatory endpoint, and it is now the only path that still pays it.
+
+Pinned by tests that reproduce the production condition — module globals emptied, exactly as a Passenger web process starts. Including a syntax-tree guard asserting that **every** screening route calls `_ensure_watchlist_cache`, so a fourth one cannot be added without the guarantee, and an equivalence test checking that the SQL fallback returns the same keys as the in-memory path.
+
+Not changed here, because it is an operational trade-off rather than a defect: preloading the cache at import in `fiskr/wsgi.py` would move the cost to boot instead of to the first screening, at the price of a slower start and the cache's memory footprint multiplied by the number of Passenger processes.
+
+
 ### Fixed — `refresh_prod.sh` restarted only half of production
 Observed live right after a refresh: `versions.worker.outdated` was `false` while `versions.api.outdated` was still `true`. The daemon was running the newly merged code; the website was not. The script killed and relaunched `python -m fiskr.worker` but never touched the web processes, which keep serving whatever code they imported at boot — so a refresh silently left the two halves on different revisions.
 
