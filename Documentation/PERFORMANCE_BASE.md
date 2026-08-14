@@ -117,8 +117,39 @@ manipulation ratée alors que rien, côté exploitant, ne pouvait y changer quoi
 que ce soit.
 
 Si la recherche devient gênante sans `pg_trgm`, la voie n'est pas la base mais
-l'application : le moteur tient déjà un index mémoire (celui qui sert le
-Ctrl+K), qui pourrait servir aussi la recherche de l'écran des listes.
+l'application : le moteur tient un index mémoire (celui qui sert le Ctrl+K),
+qui pourrait servir aussi la recherche de l'écran des listes.
+
+**Réserve importante, constatée depuis :** cet index n'existe pas dans les
+processus web. Passenger sert l'application via `a2wsgi.ASGIMiddleware`, qui
+n'implémente pas le protocole ASGI `lifespan` — le démarrage FastAPI, donc le
+chargement du cache moteur, n'y tourne jamais. S'appuyer sur cet index depuis
+un endpoint web suppose donc de le charger d'abord, et ce chargement coûte
+plusieurs minutes en pleine requête (mesuré : la palette Ctrl+K ne répondait
+plus du tout). Voir « Le cache moteur dans un processus web » ci-dessous.
+
+## Le cache moteur dans un processus web
+
+Le cache moteur (référentiel en mémoire + index de blocking + index de
+recherche) est bâti par `load_watchlist_cache()`, appelée depuis le `lifespan`
+de FastAPI. Sous Passenger, **ce `lifespan` ne s'exécute pas**. Rien ne le
+signale : `get_db()` appelle `init_db()` paresseusement, donc tous les
+endpoints de base de données fonctionnent et masquent le trou.
+
+Règles qui en découlent, et qui sont désormais vérifiées par les tests :
+
+1. **Un endpoint qui crible garantit son cache** (`_ensure_watchlist_cache`).
+   Sans cette garantie, l'index de blocking est vide, aucun candidat n'en sort
+   et le criblage rend `NO_MATCH` : un listé déclaré non listé, silencieusement.
+2. **Un endpoint de consultation ne bâtit jamais le cache.** Le coût est de
+   plusieurs minutes ; il n'a rien à faire dans une requête d'affichage. Le
+   badge « Hash Actif » lit la base ; la palette Ctrl+K utilise l'index s'il est
+   déjà là, et se replie sinon sur une requête bornée.
+
+Le premier criblage après un redémarrage paie donc le chargement. L'alternative
+— précharger à l'import dans `fiskr/wsgi.py` — déplacerait ce coût au démarrage,
+au prix d'un lancement plus lent et de l'empreinte mémoire du cache multipliée
+par le nombre de processus Passenger. Arbitrage d'exploitation, non tranché ici.
 
 ## Recherche plein texte : un compromis à arbitrer (là où pg_trgm existe)
 

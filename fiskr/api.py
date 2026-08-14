@@ -2633,7 +2633,17 @@ async def screen_client(
     1. Runs Data Quality Gate evaluation.
     2. Runs exact Hard Match priority sequences.
     3. Runs fuzzy matching and contextual adjustment calculations.
+
+    Le cache moteur est GARANTI charge avant de cribler. Sans cette garantie,
+    `screen_client_profile` lisait un `watchlist_index` potentiellement vide :
+    aucun candidat n'en sortait, et le criblage rendait NO_MATCH — un listé
+    déclaré non listé, sans la moindre erreur. Le cas n'etait pas theorique :
+    sous Passenger le lifespan ASGI ne tourne pas, donc un processus web n'a
+    jamais charge son cache. Le premier criblage apres un redemarrage paie
+    donc le chargement ; c'est le prix de la justesse sur un endpoint
+    reglementaire, et le seul chemin ou il se paie encore.
     """
+    _ensure_watchlist_cache(db)
     client_dict = request.model_dump()
     # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
     client_dict.pop("screening_lists", None)
@@ -2697,6 +2707,11 @@ async def screen_transaction_message(
         parsed = parse_iso20022_payment(content)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    # Cache garanti charge AVANT de cribler (voir POST /api/screen) : sur un
+    # index vide, le filtrage rendait PASS sur toutes les parties et journalisait
+    # « N/A » comme hash de liste. Place apres le parsing : un message invalide
+    # est rejete sans payer le chargement.
+    _ensure_watchlist_cache(db)
     result = screen_payment_message(
         db, parsed, watchlist_index, watchlist_version, watchlist_hash,
         current_user["username"], screening_lists=requested_lists
@@ -4165,20 +4180,48 @@ async def delete_relationship(
     db.commit()
     return {"message": "Relation supprimée."}
 
+def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
+    """
+    Hash et volume du referentiel EN PRODUCTION, lus en base.
+
+    Meme regle que le cache moteur (`load_watchlist_cache`) : les snapshots
+    READY de type WATCHLIST_*, le plus recent donnant le hash opposable.
+    Deux requetes bornees, servies par les index de consultation.
+    """
+    snapshots = db.query(Snapshot).filter(
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+        Snapshot.status == "READY",
+    ).order_by(Snapshot.uploaded_at.desc()).all()
+    if not snapshots:
+        # Aucun referentiel en production : le badge affiche son etat vide
+        # (« NONE »), jamais un hash inventé.
+        return {"version": watchlist_version, "hash": None, "count": 0}
+    count = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id.in_([s.snapshot_id for s in snapshots]),
+        WatchlistEntity.excluded.isnot(True),
+    ).count()
+    return {"version": watchlist_version, "hash": snapshots[0].file_hash, "count": int(count)}
+
+
 @app.get("/api/watchlist/summary")
-async def get_watchlist_summary(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_watchlist_summary(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
-    Etat du moteur en trois champs (hash actif, version, nombre de fiches).
-    Le badge « Hash Actif » de la barre laterale appelait GET /api/watchlist,
-    qui serialise TOUT le referentiel en memoire : sur une production de
-    centaines de milliers de fiches, la reponse ne revenait jamais et le
-    badge restait sur « Loading... ». Trois champs suffisent.
+    Etat du referentiel en production (hash actif, version, nombre de fiches).
+
+    Lu EN BASE, pas dans la memoire du processus. Le hash actif est une
+    propriete du snapshot en production — « la version exacte du referentiel,
+    la reference a citer dans un dossier » — pas de l'etat d'un processus.
+    Cette distinction n'est pas theorique : sous Passenger, l'application est
+    servie par `a2wsgi.ASGIMiddleware`, qui n'implemente pas le protocole ASGI
+    `lifespan`. Le demarrage FastAPI ne tourne donc jamais dans un processus
+    web, `load_watchlist_cache` n'y est jamais appele, et ces variables
+    gardent leur valeur initiale de module. Le badge « Hash Actif » affichait
+    ainsi « N/A » en production alors que le referentiel etait bien en place.
     """
-    return {
-        "version": watchlist_version,
-        "hash": watchlist_hash,
-        "count": len(watchlist_store or []),
-    }
+    return _production_watchlist_summary(db)
 
 @app.get("/api/watchlist")
 async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -4726,6 +4769,67 @@ def _wl_search_clauses(field: str, needle: str):
     ]
 
 
+def _quick_search_in_memory(index, term: str, limit: int):
+    """
+    Chemin nominal : balayage lineaire de l'index memoire du moteur, classement
+    par position du match (prefixe d'abord) puis longueur du texte. Insensible
+    aux accents et a la casse, alias compris — les blobs sont deja normalises.
+    """
+    import heapq
+    from fiskr.quality import strip_accents
+
+    needle = strip_accents(term).upper()
+    total = 0
+    scored: List[Tuple[int, int, int]] = []  # (position, longueur, n° d'ordre)
+    for i, (blob, _ent) in enumerate(index):
+        pos = blob.find(needle)
+        if pos < 0:
+            continue
+        total += 1
+        scored.append((pos, len(blob), i))
+    items = []
+    for _pos, _blen, i in heapq.nsmallest(limit, scored):
+        ent = index[i][1]
+        d = dict(ent)  # copie superficielle : memes cles que le cache moteur
+        d["list_type"] = ent.get("_list_type")
+        items.append(d)
+    return total, items
+
+
+def _quick_search_in_db(db: Session, term: str, limit: int):
+    """
+    Repli quand l'index memoire n'est pas charge dans CE processus (cas des
+    processus web sous Passenger). Requete bornee sur le perimetre de
+    production, memes cles de sortie que le chemin memoire.
+
+    Deux differences assumees, faute d'index adapte sur ce type d'hebergement
+    (pg_trgm n'y est pas fourni) : la recherche porte sur le nom principal et
+    l'identifiant — pas sur les alias, ranges en JSON — et elle suit la
+    collation du serveur, donc « francois » ne trouve pas « François ». Un
+    resultat partiel en une requete bornee vaut mieux qu'un endpoint qui ne
+    repond pas ; le chemin memoire, lui, garde tout son perimetre.
+    """
+    from sqlalchemy import or_
+
+    like = f"%{term}%"
+    query = _wl_scope_query(db, "production", None).filter(or_(
+        WatchlistEntity.primary_name.ilike(like),
+        WatchlistEntity.entity_id.ilike(like),
+    ))
+    total = query.count()
+    items = []
+    for ent, snap in query.order_by(WatchlistEntity.id).limit(limit).all():
+        d = {c.name: getattr(ent, c.name) for c in ent.__table__.columns}
+        # Memes cles que le chemin memoire : `_list_type` est la cle interne du
+        # cache moteur, `list_type` celle que lit le frontal. Les deux chemins
+        # doivent rendre le meme objet, sinon la modale de details se comporte
+        # differemment selon le processus qui a repondu.
+        d["_list_type"] = snap.file_type
+        d["list_type"] = snap.file_type
+        items.append(d)
+    return total, items
+
+
 @app.get("/api/search/quick")
 async def quick_search(
     q: str = Query(..., min_length=2, max_length=120),
@@ -4735,38 +4839,32 @@ async def quick_search(
 ):
     """
     Recherche globale instantanee (palette Ctrl+K). Les listes sont cherches
-    dans l'index memoire du moteur (blobs normalises construits avec le cache
-    de criblage : zero acces disque, zero jointure), les alertes par UNE
-    requete SQL bornee. Un seul aller-retour la ou l'ancienne palette payait
-    deux endpoints lourds — dont le repli fuzzy plein referentiel de
-    /api/watchlist/db des que la frappe ne matchait pas encore.
+    dans l'index memoire du moteur quand il est charge (blobs normalises : zero
+    acces disque, zero jointure), et sinon par une requete bornee en base. Les
+    alertes par UNE requete SQL bornee. Un seul aller-retour la ou l'ancienne
+    palette payait deux endpoints
+    lourds — dont le repli fuzzy plein referentiel de /api/watchlist/db des que
+    la frappe ne matchait pas encore.
+
+    Cet endpoint ne CONSTRUIT jamais le cache moteur : cela demandait plusieurs
+    minutes dans la requete et la palette restait muette en production.
     """
-    import heapq
     from sqlalchemy import or_
-    from fiskr.quality import strip_accents
 
-    _ensure_watchlist_cache(db)
     term = q.strip()
-    needle = strip_accents(term).upper()
 
-    # --- Listes : balayage lineaire de l'index memoire, classement par
-    # position du match (prefixe d'abord) puis longueur du texte ---
-    wl_total = 0
-    scored: List[Tuple[int, int, int]] = []  # (position, longueur, n° d'ordre)
-    snapshot_index = watchlist_search_index
-    for i, (blob, _ent) in enumerate(snapshot_index):
-        pos = blob.find(needle)
-        if pos < 0:
-            continue
-        wl_total += 1
-        scored.append((pos, len(blob), i))
-    best = heapq.nsmallest(limit, scored)
-    wl_items = []
-    for _pos, _blen, i in best:
-        ent = snapshot_index[i][1]
-        d = dict(ent)  # copie superficielle : memes cles que le cache moteur
-        d["list_type"] = ent.get("_list_type")
-        wl_items.append(d)
+    # --- Listes ---
+    # Le cache moteur n'est PAS construit ici. Sous Passenger, le lifespan ASGI
+    # ne tourne pas (a2wsgi.ASGIMiddleware ne l'implemente pas) : le cache d'un
+    # processus web demarre vide, et le batir dans la requete demande de lire
+    # des centaines de milliers de fiches — mesure en production : la palette
+    # ne repondait JAMAIS (plus de 100 s sans reponse). On se sert donc de
+    # l'index memoire s'il est deja la (demon travailleur, developpement), et
+    # sinon on interroge la base, borne.
+    if watchlist_search_index:
+        wl_total, wl_items = _quick_search_in_memory(watchlist_search_index, term, limit)
+    else:
+        wl_total, wl_items = _quick_search_in_db(db, term, limit)
 
     # --- Alertes : une seule requete, tri par identifiant (index PK) ---
     like = f"%{term}%"
