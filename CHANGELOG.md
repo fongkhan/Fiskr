@@ -22,6 +22,8 @@ Three consequences, in increasing order of seriousness:
 
 Pinned by tests that reproduce the production condition — module globals emptied, exactly as a Passenger web process starts. Including a syntax-tree guard asserting that **every** screening route calls `_ensure_watchlist_cache`, so a fourth one cannot be added without the guarantee, and an equivalence test checking that the SQL fallback returns the same keys as the in-memory path.
 
+**`tools/audit_empty_cache_decisions.py`** lists the decisions already recorded that way, so the damage can be scoped rather than guessed. The audit trail kept everything: when no candidate is found the engine still writes a row, with `watchlist_id = 'NONE'`, `status = 'NO_MATCH'` and the process's hash — so `watchlist_hash = 'N/A'` isolates exactly the decisions taken with no lists in memory, since a loaded process always writes the real snapshot hash. The tool reads and only reads: it never rewrites the journal (immutable by design), never touches the schema, never calls `init_db()`. It reports the volume, the period, the distinct clients, and exports the list to CSV for re-screening; it also flags any row that contradicts the signature, which would mean the criterion is wrong.
+
 Not changed here, because it is an operational trade-off rather than a defect: preloading the cache at import in `fiskr/wsgi.py` would move the cost to boot instead of to the first screening, at the price of a slower start and the cache's memory footprint multiplied by the number of Passenger processes.
 
 
