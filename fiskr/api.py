@@ -988,21 +988,81 @@ async def _watchlist_epoch_watcher():
             logger.warning(f"Veilleur d'époque du cache en échec : {e}")
 
 
+# Un seul chargement de cache a la fois DANS CE PROCESSUS. Sans ce verrou, le
+# prechargement de demarrage (fiskr/wsgi.py, thread de fond) et le premier
+# criblage arrive entre-temps lanceraient DEUX lectures completes du
+# referentiel en parallele : deux fois le temps, deux fois la memoire, pour un
+# resultat identique. Le criblage attend simplement le chargement en cours.
+_cache_lock = threading.Lock()
+
+# Un fork (le pool de criblage en cree) ne copie pas les threads : un verrou
+# tenu au moment du fork resterait tenu POUR TOUJOURS dans l'enfant, qui se
+# figerait au premier criblage. On le remplace donc a neuf dans l'enfant.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=lambda: globals().__setitem__(
+        "_cache_lock", threading.Lock()))
+
+
+def _cache_is_stale(epoch) -> bool:
+    return not watchlist_index or (
+        _last_epoch_seen is not None and epoch != _last_epoch_seen)
+
+
 def _ensure_watchlist_cache(db: Session) -> None:
     """
     Garantit un cache de listes charge ET a jour dans CE processus, avant un
     criblage unitaire hors requete HTTP (campagne batch, banc d'essai).
-    Dans un processus API le cache est charge au demarrage et rafraichi par le
-    veilleur d'epoque : cet appel ne coute qu'une lecture d'AppSetting.
+    Dans un processus API le cache est precharge au demarrage (voir
+    `warm_watchlist_cache`) et rafraichi par le veilleur d'epoque : cet appel
+    ne coute alors qu'une lecture d'AppSetting.
     Dans le demon travailleur il n'y a ni demarrage-lifespan ni veilleur :
     c'est ici que le cache se charge (premiere campagne) puis se recharge
     quand l'epoque bumpee par une sync/approbation/import a change.
     """
     global _last_epoch_seen
     epoch = watchlist_epoch(db)
-    if not watchlist_index or (_last_epoch_seen is not None and epoch != _last_epoch_seen):
-        load_watchlist_cache(db)
+    if _cache_is_stale(epoch):
+        with _cache_lock:
+            # Re-teste SOUS le verrou : pendant l'attente, le prechargement (ou
+            # un autre appel) a pu terminer le travail. On ne le refait pas.
+            if _cache_is_stale(epoch):
+                load_watchlist_cache(db)
     _last_epoch_seen = epoch
+
+
+def warm_watchlist_cache() -> bool:
+    """
+    Precharge le cache moteur de CE processus, avec sa propre session.
+
+    Appele au demarrage d'un processus web (fiskr/wsgi.py). Sous Passenger, le
+    `lifespan` de FastAPI ne tourne pas — a2wsgi.ASGIMiddleware ne construit
+    qu'un scope `http` par requete — donc rien n'avait jamais charge ce cache :
+    la palette Ctrl+K se repliait sur la base et le PREMIER criblage payait le
+    chargement complet en pleine requete (mesure en production : 64 s, puis
+    5,6 s a chaud). Le prechargement deplace ce cout hors des requetes.
+
+    Ne leve jamais : un demarrage doit aboutir meme si la base est momentanement
+    indisponible. En cas d'echec, `_ensure_watchlist_cache` reste le filet — le
+    criblage se chargera de charger, comme avant.
+    """
+    global _last_epoch_seen
+    try:
+        db = next(get_db())
+    except Exception as e:
+        logger.warning(f"Prechargement du cache : base indisponible ({e}).")
+        return False
+    try:
+        with _cache_lock:
+            if watchlist_index:
+                return True  # deja chaud (un criblage a devance le thread)
+            load_watchlist_cache(db)
+            _last_epoch_seen = watchlist_epoch(db)
+        return bool(watchlist_index)
+    except Exception as e:
+        logger.warning(f"Prechargement du cache moteur en echec : {e}")
+        return False
+    finally:
+        db.close()
 
 
 @asynccontextmanager

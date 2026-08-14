@@ -145,11 +145,37 @@ Règles qui en découlent, et qui sont désormais vérifiées par les tests :
    plusieurs minutes ; il n'a rien à faire dans une requête d'affichage. Le
    badge « Hash Actif » lit la base ; la palette Ctrl+K utilise l'index s'il est
    déjà là, et se replie sinon sur une requête bornée.
+3. **Le démarrage précharge**, pour que personne ne paie ce coût en requête.
 
-Le premier criblage après un redémarrage paie donc le chargement. L'alternative
-— précharger à l'import dans `fiskr/wsgi.py` — déplacerait ce coût au démarrage,
-au prix d'un lancement plus lent et de l'empreinte mémoire du cache multipliée
-par le nombre de processus Passenger. Arbitrage d'exploitation, non tranché ici.
+### Le préchargement, et pourquoi il est en thread
+
+Mesures relevées sur la production après le correctif de justesse :
+
+| | Mesuré |
+|---|---:|
+| Premier criblage après redémarrage | **64 s** |
+| Le même, cache chaud | 5,6 s |
+| Palette Ctrl+K (repli SQL) | 30,9 s |
+
+Le coût n'était pas de trop, il était **mal placé** : il tombait sur le premier
+utilisateur. `fiskr/wsgi.py` chauffe donc le cache au démarrage du processus.
+
+Trois choix, tous délibérés :
+
+- **en thread de fond, pas en ligne.** Bloquer le démarrage une minute
+  risquerait `passenger_start_timeout` (90 s par défaut), et un processus tué
+  au démarrage met le site à terre — bien pire que la lenteur corrigée.
+  L'application répond immédiatement pendant que le cache chauffe ;
+- **sous verrou.** Sans lui, la chauffe et un criblage arrivé entre-temps
+  liraient le référentiel **deux fois en parallèle** : deux fois le temps et la
+  mémoire pour un résultat identique. Le verrou est remis à neuf après `fork()`
+  — le pool de criblage forke, et un verrou tenu au moment du fork resterait
+  tenu pour toujours dans l'enfant ;
+- **jamais fatal.** Une base momentanément indisponible ne doit pas empêcher un
+  processus de démarrer. En cas d'échec, `_ensure_watchlist_cache` reste le
+  filet. `FISKR_PRELOAD_CACHE=0` coupe la chauffe sans redéploiement :
+  l'empreinte mémoire est multipliée par le nombre de processus Passenger, et
+  sur un mutualisé cet arbitrage appartient à l'exploitant.
 
 ## Recherche plein texte : un compromis à arbitrer (là où pg_trgm existe)
 

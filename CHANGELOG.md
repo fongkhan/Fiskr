@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — the engine cache is now preloaded at web-process startup
+Follow-up to the Passenger `lifespan` fix, and this time driven by measurements taken against the live service rather than by an estimate. With the correctness hole closed, the remaining cost was simply misplaced: the cache still loaded **inside the first request that needed it**.
+
+| | Measured in production |
+|---|---:|
+| First screening after a restart | **64 s** |
+| Same screening, cache warm | 5.6 s |
+| Ctrl+K palette (SQL fallback) | 30.9 s |
+
+`fiskr/wsgi.py` now warms the cache when the process starts, so no user pays for it. Three deliberate choices:
+
+- **In a background thread, not inline.** Blocking the boot for a minute would risk `passenger_start_timeout` (90 s by default), and a process killed at boot takes the site down — far worse than the slowness being fixed. The application answers immediately while the cache warms; a request arriving meanwhile behaves exactly as before.
+- **Guarded by a lock.** Warm-up and a screening arriving mid-warm-up would otherwise read the whole referential twice in parallel — twice the time and twice the memory for an identical result. The screening now waits for the load in flight. The lock is replaced fresh after `fork()` (the screening pool forks, and a lock held at fork time stays held forever in the child, which would freeze on its first screening).
+- **Never fatal.** A database that is briefly unavailable must not stop a process from starting. On failure the boot continues and `_ensure_watchlist_cache` remains the safety net, exactly as before. `FISKR_PRELOAD_CACHE=0` disables the warm-up without redeploying — the memory footprint is multiplied by the number of Passenger processes, and on shared hosting that trade-off belongs to the operator.
+
+Pinned by tests, including a concurrency test asserting that a simultaneous warm-up and screening produce exactly **one** load, and a syntax-tree check that the boot never calls the loader at import time — a threaded call is the point, a synchronous one would be the regression.
+
 ### Fixed — under Passenger the engine cache never loaded, and screening silently cleared everyone
 Reported from production as a cosmetic detail: the sidebar's **"Hash Actif"** badge showed `N/A`. Measured against the live service, it was the visible end of a chain that reached the screening engine itself.
 
