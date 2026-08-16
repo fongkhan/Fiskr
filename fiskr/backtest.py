@@ -54,14 +54,40 @@ _NEUTRAL_COUNTRIES = ["FR", "DE", "BE", "CH", "ES", "IT", "GB", "US", "NL", "PT"
 
 # ------------------ UNIVERS A/B ------------------
 
-def _universe_snapshot_ids(db, pending_snap: Snapshot) -> Tuple[List[str], List[str]]:
+def normalize_pending(pending) -> List[Snapshot]:
+    """
+    Accepte un snapshot ou une liste, et rend une liste SAINE : un seul
+    candidat par type de liste, le plus recent.
+
+    Deux candidats du meme type seraient deux versions concurrentes d'une meme
+    liste — l'univers candidat ne peut pas contenir les deux sans compter deux
+    fois les memes listes.
+    """
+    snaps = [pending] if isinstance(pending, Snapshot) else list(pending)
+    par_type: Dict[str, Snapshot] = {}
+    for snap in snaps:
+        garde = par_type.get(snap.file_type)
+        if garde is None or (snap.uploaded_at or datetime.min) >= (garde.uploaded_at or datetime.min):
+            par_type[snap.file_type] = snap
+    # Ordre stable : par type, pour que deux executions identiques produisent
+    # exactement les memes cles de memoisation et le meme rapport.
+    return [par_type[t] for t in sorted(par_type)]
+
+
+def _universe_snapshot_ids(db, pending) -> Tuple[List[str], List[str]]:
     """
     (ids production actuelle, ids univers candidat). L'univers candidat est le
-    miroir exact d'une approbation : les snapshots READY du meme type sont
-    remplaces par le candidat, le snapshot manuel et les autres types restent.
+    miroir exact d'une approbation : les snapshots READY des types testes sont
+    remplaces par les candidats, le snapshot manuel et les autres types restent.
+
+    Accepte PLUSIEURS candidats — une vague de synchronisations produit un
+    delta par source, et les homologuer separement ferait recribler l'univers
+    autant de fois qu'il y a de sources.
     """
     from fiskr.api import WATCHLIST_FILE_TYPES
     from fiskr.sync import MANUAL_SNAPSHOT_ID  # prefixe commun aux snapshots manuels
+    pendings = normalize_pending(pending)
+    types_testes = {s.file_type for s in pendings}
     prod = db.query(Snapshot).filter(
         Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
         Snapshot.status == "READY"
@@ -69,10 +95,32 @@ def _universe_snapshot_ids(db, pending_snap: Snapshot) -> Tuple[List[str], List[
     current_ids = [s.snapshot_id for s in prod]
     candidate_ids = [
         s.snapshot_id for s in prod
-        if s.file_type != pending_snap.file_type or s.snapshot_id.startswith(MANUAL_SNAPSHOT_ID)
+        if s.file_type not in types_testes or s.snapshot_id.startswith(MANUAL_SNAPSHOT_ID)
     ]
-    candidate_ids.append(pending_snap.snapshot_id)
+    candidate_ids.extend(s.snapshot_id for s in pendings)
     return current_ids, candidate_ids
+
+
+def _old_ids_by_type(db, pendings: List[Snapshot]) -> Dict[str, List[str]]:
+    """Snapshots de production remplaces, PAR TYPE de liste.
+
+    Le delta se calcule type par type : melanger les identifiants d'entites de
+    deux listes differentes ferait passer une fiche pour supprimee au seul
+    motif qu'elle n'existe pas dans l'autre liste.
+    """
+    from fiskr.sync import MANUAL_SNAPSHOT_ID
+    types_testes = {s.file_type for s in pendings}
+    if not types_testes:
+        return {}
+    prod = db.query(Snapshot).filter(
+        Snapshot.file_type.in_(types_testes),
+        Snapshot.status == "READY"
+    ).all()
+    par_type: Dict[str, List[str]] = {t: [] for t in types_testes}
+    for snap in prod:
+        if not snap.snapshot_id.startswith(MANUAL_SNAPSHOT_ID):
+            par_type[snap.file_type].append(snap.snapshot_id)
+    return par_type
 
 
 def _delta_entity_ids(db, pending_snap: Snapshot,
@@ -321,16 +369,19 @@ def _engine_fingerprint(db, current_rules) -> str:
 
 
 def _shared_pass_key(db, panel_snapshot_id: str, shared_ids: List[str],
-                     pending_snapshot_id: str, unchanged: Set[str],
+                     unchanged_par_snapshot: Dict[str, Set[str]],
                      current_rules) -> str:
     """Identite EXACTE de la passe partagee : panel, univers, parametrage."""
     return _hash_parts(
         panel_snapshot_id,
         sorted(shared_ids),
-        # Les fiches inchangees de la liste testee font partie de l'univers
+        # Les fiches inchangees des listes testees font partie de l'univers
         # partage : deux listes differentes n'ont pas le meme partage.
-        pending_snapshot_id if unchanged else None,
-        _hash_parts(sorted(unchanged)) if unchanged else "",
+        [
+            (sid, _hash_parts(sorted(unchanged)))
+            for sid, unchanged in sorted(unchanged_par_snapshot.items())
+            if unchanged
+        ],
         _engine_fingerprint(db, current_rules),
     )
 
@@ -389,6 +440,12 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     chargements d'univers sont annonces (LOAD_UNIVERSE) au lieu de laisser la
     barre muette pendant des minutes.
 
+    `pending_snap` accepte UN snapshot ou PLUSIEURS. Une vague de
+    synchronisations produit un delta par source : les homologuer une par une
+    recriblerait l'univers autant de fois qu'il y a de sources, alors que le
+    cout dominant — la passe partagee — est le MEME pour toutes. Un seul cahier
+    couvrant tous les deltas rend le meme verdict pour une fraction du travail.
+
     Leve ValueError si la regle candidate est invalide (l'endpoint valide en
     amont pour repondre 400 avant de lancer le job).
     """
@@ -397,7 +454,11 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     from fiskr import screenpool
     from fiskr.fprules import active_rules
 
-    current_ids, candidate_ids = _universe_snapshot_ids(db, pending_snap)
+    pendings = normalize_pending(pending_snap)
+    if not pendings:
+        raise ValueError("Aucun snapshot candidat à tester.")
+    pending_ids = {s.snapshot_id for s in pendings}
+    current_ids, candidate_ids = _universe_snapshot_ids(db, pendings)
     panel_size = _panel_count(db, panel_snapshot_id)
 
     current_rules = active_rules(db, "SCREENING")
@@ -460,7 +521,18 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         sid for sid in current_ids
         if sid not in candidate_ids
     ]
-    delta = _delta_entity_ids(db, pending_snap, old_type_ids) if candidate_rule is None else None
+    # Delta calcule LISTE PAR LISTE (melanger les identifiants d'entites de
+    # deux listes ferait passer une fiche pour supprimee au seul motif qu'elle
+    # n'existe pas dans l'autre), puis reuni pour les passes.
+    delta_par_snapshot: Dict[str, Dict[str, Set[str]]] = {}
+    delta = None
+    if candidate_rule is None:
+        anciens_par_type = _old_ids_by_type(db, pendings)
+        for snap in pendings:
+            delta_par_snapshot[snap.snapshot_id] = _delta_entity_ids(
+                db, snap, anciens_par_type.get(snap.file_type, []))
+        delta = {cle: set().union(*(d[cle] for d in delta_par_snapshot.values()))
+                 for cle in ("added", "removed", "modified", "unchanged")}
 
     def _combine(shared_part, delta_part):
         merged = {
@@ -478,19 +550,19 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     shared_reused = False
     if delta is not None:
         overall["total"] = panel_size * 3  # partage + retirees + ajoutees
-        changed_old = delta["removed"] | delta["modified"]
-        changed_new = delta["added"] | delta["modified"]
         # Univers partage : toutes les autres listes + les fiches INCHANGEES
-        # de la liste testee (chargees depuis le candidat : meme checksum,
-        # meme contenu). C'est la seule passe de la taille d'un univers.
-        shared_ids = [sid for sid in candidate_ids if sid != pending_snap.snapshot_id]
+        # des listes testees (chargees depuis les candidats : meme checksum,
+        # meme contenu). C'est la seule passe de la taille d'un univers — et
+        # elle reste UNE, quel que soit le nombre de listes testees.
+        shared_ids = [sid for sid in candidate_ids if sid not in pending_ids]
         # Passe partagee : reemployee telle quelle si RIEN de ce qui la
         # determine n'a bouge depuis le cahier precedent (meme panel, meme
         # univers partage, meme parametrage moteur). C'est ce qui fait passer
         # une vague de cahiers de « N x plusieurs minutes » a « une fois ».
-        memo_key = _shared_pass_key(db, panel_snapshot_id, shared_ids,
-                                    pending_snap.snapshot_id, delta["unchanged"],
-                                    current_rules)
+        memo_key = _shared_pass_key(
+            db, panel_snapshot_id, shared_ids,
+            {sid: d["unchanged"] for sid, d in delta_par_snapshot.items()},
+            current_rules)
         if _SHARED_PASS_MEMO["key"] == memo_key:
             shared = _SHARED_PASS_MEMO["value"]
             shared_reused = True
@@ -502,9 +574,12 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             shared_reused = False
             _loading()
             shared_entities = _entity_dicts(db, shared_ids, projection=projection) if shared_ids else []
-            shared_entities.extend(_entity_dicts(
-                db, [pending_snap.snapshot_id], projection=projection,
-                entity_ids=delta["unchanged"]))
+            for snap in pendings:
+                inchangees = delta_par_snapshot[snap.snapshot_id]["unchanged"]
+                if inchangees:
+                    shared_entities.extend(_entity_dicts(
+                        db, [snap.snapshot_id], projection=projection,
+                        entity_ids=inchangees))
             shared = _dry_run_screen(db, None, shared_entities, rule_set=current_rules,
                                      progress=_phase_progress("SCREEN_SHARED"),
                                      panel_snapshot_id=panel_snapshot_id)
@@ -516,9 +591,18 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             _SHARED_PASS_MEMO["value"] = shared
         _pass_done()
 
+        # Retirees/anciennes versions : lues dans les snapshots remplaces DE
+        # LEUR PROPRE TYPE, jamais dans l'ensemble — deux listes peuvent
+        # employer le meme identifiant d'entite pour des fiches differentes.
         _loading()
-        removed_entities = _entity_dicts(db, old_type_ids, projection=projection,
-                                         entity_ids=changed_old) if old_type_ids else []
+        removed_entities = []
+        for snap in pendings:
+            anciens = anciens_par_type.get(snap.file_type, [])
+            d = delta_par_snapshot[snap.snapshot_id]
+            changees = d["removed"] | d["modified"]
+            if anciens and changees:
+                removed_entities.extend(_entity_dicts(
+                    db, anciens, projection=projection, entity_ids=changees))
         removed_hits = _dry_run_screen(db, None, removed_entities, rule_set=current_rules,
                                        progress=_phase_progress("SCREEN_REMOVED"),
                                        panel_snapshot_id=panel_snapshot_id)
@@ -526,8 +610,14 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         _pass_done()
 
         _loading()
-        added_entities = _entity_dicts(db, [pending_snap.snapshot_id], projection=projection,
-                                       entity_ids=changed_new)
+        added_entities = []
+        for snap in pendings:
+            d = delta_par_snapshot[snap.snapshot_id]
+            changees = d["added"] | d["modified"]
+            if changees:
+                added_entities.extend(_entity_dicts(
+                    db, [snap.snapshot_id], projection=projection,
+                    entity_ids=changees))
         added_hits = _dry_run_screen(db, None, added_entities, rule_set=candidate_rules,
                                      progress=_phase_progress("SCREEN_ADDED"),
                                      panel_snapshot_id=panel_snapshot_id)
@@ -596,6 +686,14 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         "panel_snapshot_id": panel_snapshot_id,
         "panel_size": panel_size,
         "mode": "delta" if delta is not None else "full",
+        # Perimetre couvert : un cahier peut porter PLUSIEURS listes (vague de
+        # synchronisations). Le reviseur doit voir lesquelles d'un coup d'oeil.
+        "snapshots": [
+            {"snapshot_id": s.snapshot_id, "file_type": s.file_type,
+             "delta_sizes": ({k: len(v) for k, v in delta_par_snapshot[s.snapshot_id].items()}
+                             if s.snapshot_id in delta_par_snapshot else None)}
+            for s in pendings
+        ],
         # Tracabilite : ce cahier a-t-il reemploye la passe partagee d'un
         # cahier precedent (meme univers, meme panel, meme parametrage) ?
         "shared_pass_reused": shared_reused,

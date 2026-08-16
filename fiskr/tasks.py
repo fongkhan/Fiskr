@@ -38,13 +38,44 @@ def _refresh_production_cache(session) -> None:
         load_watchlist_cache(session)
 
 
+CONSOLIDATED_BACKTEST_TOKEN = "backtest:homologation"
+
+
+def pending_backtest_scope(session) -> List[Snapshot]:
+    """
+    Snapshots en attente d'homologation qui restent a tester.
+
+    Resolu A L'EXECUTION, jamais fige a la soumission : une vague de
+    synchronisations depose ses snapshots au fil de l'eau, et un cahier
+    consolide encore en file doit couvrir ceux qui arrivent apres lui.
+    """
+    snaps = session.query(Snapshot).filter(
+        Snapshot.status == "PENDING_REVIEW",
+        Snapshot.backtest_report.is_(None),
+    ).order_by(Snapshot.uploaded_at.asc()).all()
+    # Un snapshot sans delta n'a rien a prouver : le tester ferait une passe
+    # d'univers pour un rapport vide.
+    return [s for s in snaps if (s.record_count or 0) > 0]
+
+
 @jobs.task("backtest")
-def backtest_task(ctx: jobs.JobContext, *, snapshot_id: str, panel_snapshot_id: str,
+def backtest_task(ctx: jobs.JobContext, *, snapshot_id: Optional[str] = None,
+                  snapshot_ids: Optional[List[str]] = None,
+                  panel_snapshot_id: str = "", resolve_pending: bool = False,
                   candidate_rule_id: Optional[int] = None, username: str = "?") -> None:
     """
     Cahier de tests d'homologation : criblage A/B a blanc. Persiste le rapport
-    sur le snapshot — le front le relit par GET /api/review/snapshots/{id},
-    y compris apres un rechargement de page ou un redemarrage.
+    sur CHAQUE snapshot couvert — le front le relit par
+    GET /api/review/snapshots/{id}, y compris apres un rechargement de page ou
+    un redemarrage.
+
+    Trois facons de designer le perimetre :
+    - `snapshot_id` : un seul snapshot (lancement manuel, regle candidate) ;
+    - `snapshot_ids` : une liste figee ;
+    - `resolve_pending` : la liste est resolue A L'EXECUTION (tous les
+      snapshots en attente restant a tester). C'est le mode des vagues de
+      synchronisation : un cahier encore en file couvre les snapshots deposes
+      apres sa soumission, au lieu d'en faire naitre un par source.
     """
     from fiskr.backtest import run_backtest
     from fiskr.notifier import emit
@@ -52,25 +83,40 @@ def backtest_task(ctx: jobs.JobContext, *, snapshot_id: str, panel_snapshot_id: 
 
     session = ctx.session()
     try:
-        snap = session.query(Snapshot).filter(Snapshot.snapshot_id == snapshot_id).first()
-        if snap is None:
-            raise ValueError("Snapshot introuvable.")
+        if resolve_pending:
+            snaps = pending_backtest_scope(session)
+        else:
+            ids = list(snapshot_ids or ([snapshot_id] if snapshot_id else []))
+            snaps = session.query(Snapshot).filter(
+                Snapshot.snapshot_id.in_(ids)).all() if ids else []
+        if not snaps:
+            # Rien a tester : ce n'est pas une erreur (les snapshots ont pu
+            # etre approuves ou rejetes entre la soumission et l'execution).
+            ctx.set_result({"skipped": True, "reason": "aucun snapshot à tester"})
+            return
 
-        report = run_backtest(session, snap, panel_snapshot_id,
+        premier = snaps[0].snapshot_id
+        report = run_backtest(session, snaps, panel_snapshot_id,
                               threshold_pct=backtest_max_gap_pct(session),
                               executed_by=username,
                               candidate_rule_id=candidate_rule_id,
                               progress=lambda phase, done, total: ctx.update(
                                   phase=phase, processed=done, total=total,
-                                  snapshot_id=snapshot_id))
-        snap.backtest_report = report
-        snap.backtest_at = datetime.utcnow()
-        snap.backtest_by = username
+                                  snapshot_id=premier))
+        acheve = datetime.utcnow()
+        for snap in snaps:
+            # Le MEME rapport sur chaque snapshot couvert : l'univers candidat
+            # les contenait tous, le verdict porte donc sur leur ensemble et
+            # n'aurait aucun sens decoupe liste par liste.
+            snap.backtest_report = report
+            snap.backtest_at = acheve
+            snap.backtest_by = username
         session.commit()
         # Un ecart eleve doit remonter tout de suite (il bloque l'approbation) ;
         # un verdict OK part dans le recapitulatif periodique
         emit(session, "backtest_completed", {
-            "Snapshot": snap.snapshot_id, "Liste": snap.file_type,
+            "Snapshot": ", ".join(s.snapshot_id for s in snaps),
+            "Liste": ", ".join(sorted({s.file_type for s in snaps})),
             "Verdict": report.get("verdict"),
             "Écart": f"{report.get('gap_pct')} % (seuil {report.get('threshold_pct')} %)",
             "Alertes production": (report.get("current") or {}).get("alerts"),
@@ -79,7 +125,26 @@ def backtest_task(ctx: jobs.JobContext, *, snapshot_id: str, panel_snapshot_id: 
             "Exécuté par": username,
         }, urgency_override="immediate" if report.get("verdict") != "OK" else None)
         ctx.set_result({"verdict": report.get("verdict"), "gap_pct": report.get("gap_pct"),
-                        "snapshot_id": snapshot_id})
+                        "snapshot_id": premier,
+                        "snapshot_ids": [s.snapshot_id for s in snaps]})
+
+        # Des snapshots deposes PENDANT ce cahier ne sont pas couverts par lui :
+        # on relance alors un cahier consolide pour eux, et un seul. Sans cela,
+        # une synchronisation terminee en cours de route resterait sans rapport.
+        if resolve_pending:
+            restants = pending_backtest_scope(session)
+            if restants:
+                try:
+                    jobs.submit("backtest", token=CONSOLIDATED_BACKTEST_TOKEN,
+                                label=f"Cahier de tests — {len(restants)} liste(s) en attente",
+                                params={"resolve_pending": True,
+                                        "panel_snapshot_id": panel_snapshot_id,
+                                        "candidate_rule_id": None,
+                                        "username": "système"},
+                                created_by="système",
+                                dedupe_key=CONSOLIDATED_BACKTEST_TOKEN)
+                except jobs.JobConflict:
+                    pass  # un cahier consolide est deja en file : il les prendra
     finally:
         session.close()
 
@@ -200,18 +265,29 @@ def _maybe_auto_backtest(session, report) -> Optional[Dict[str, Any]]:
     if panel_id is None:
         return {"submitted": False,
                 "reason": "aucun panel de test généré disponible (générez-en un dans l'homologation)"}
-    token = f"backtest:{report.snapshot_id}"  # meme dedupe que le lancement manuel
+    # UN SEUL cahier pour toute la vague. Synchroniser les sources activées
+    # deposait autant de snapshots que de sources, donc autant de cahiers — et
+    # comme les cahiers sont serialises, la file s'allongeait de plusieurs
+    # dizaines de minutes pour un travail largement redondant : chacun
+    # recriblait le MEME univers partage. Le jeton commun fait que le second
+    # depot ne cree rien, et le cahier resout son perimetre a l'execution : il
+    # couvre donc aussi les synchronisations terminees apres lui.
+    token = CONSOLIDATED_BACKTEST_TOKEN
     try:
         jobs.submit("backtest", token=token,
-                    label=f"Cahier de tests — {report.source} (auto)",
-                    params={"snapshot_id": report.snapshot_id,
+                    label="Cahier de tests — listes en attente d'homologation",
+                    params={"resolve_pending": True,
                             "panel_snapshot_id": panel_id,
                             "candidate_rule_id": None, "username": "système"},
-                    created_by="système", dedupe_key=token,
-                    snapshot_id=report.snapshot_id)
+                    created_by="système", dedupe_key=token)
     except jobs.JobConflict:
-        return {"submitted": False, "reason": "un cahier de tests est déjà en cours"}
-    return {"submitted": True, "panel_snapshot_id": panel_id, "job_token": token}
+        # Deja en file : il resoudra son perimetre a l'execution et prendra ce
+        # snapshot avec les autres. Rien a relancer.
+        return {"submitted": False, "consolidated": True,
+                "reason": "rattaché au cahier de tests consolidé déjà en file",
+                "job_token": token}
+    return {"submitted": True, "consolidated": True,
+            "panel_snapshot_id": panel_id, "job_token": token}
 
 
 @jobs.task("sync")
