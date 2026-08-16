@@ -57,25 +57,44 @@ except Exception:
     raise
 
 
-# --- Prechargement du cache moteur ----------------------------------------
+# --- Prechargement du cache moteur (OPTIONNEL, desactive par defaut) -------
 # ASGIMiddleware ne construit qu'un scope « http » par requete : elle
 # n'implemente PAS le protocole ASGI `lifespan`. Le demarrage de FastAPI ne
-# s'execute donc jamais ici, et rien n'avait jamais charge le cache moteur de
-# ce processus. Consequence mesuree en production : le PREMIER criblage payait
-# le chargement complet en pleine requete (64 s, puis 5,6 s a chaud) et la
-# palette Ctrl+K se repliait sur la base (30,9 s).
+# s'execute donc jamais ici, et rien ne charge le cache moteur de ce processus
+# — c'est le premier criblage qui s'en charge (`_ensure_watchlist_cache`).
 #
-# On le charge donc au demarrage — mais DANS UN THREAD DE FOND, et c'est
-# deliberé : bloquer ici retarderait le demarrage d'une minute, et Passenger
-# tue un processus qui n'a pas fini de demarrer (`passenger_start_timeout`,
-# 90 s par defaut). Un depassement mettrait le site a terre — bien pire que la
-# lenteur qu'on corrige. L'application repond donc immediatement pendant que
-# le cache chauffe ; une requete arrivee entre-temps se comporte exactement
-# comme avant, et le verrou de `fiskr.api` garantit qu'un criblage attendra ce
-# chargement-ci au lieu d'en lancer un second en parallele.
+# Pourquoi ce prechargement existe, et pourquoi il est DESACTIVE PAR DEFAUT
+# -------------------------------------------------------------------------
+# Il a ete ajoute pour epargner ce chargement au premier visiteur. Mesures
+# relevees ensuite sur la production (o2switch, mutualise) :
 #
-# FISKR_PRELOAD_CACHE=0 desactive le prechargement sans redeploiement.
-if os.environ.get("FISKR_PRELOAD_CACHE", "1").strip() not in ("0", "false", "no"):
+#   sans `passenger_min_instances`, Passenger recycle les processus des qu'ils
+#   sont inactifs — un processus naissait A LA SECONDE de la requete. Le thread
+#   de chauffe et la requete se disputaient alors le meme CPU : le premier
+#   criblage passait de 64 s a 118 s. Le prechargement coutait plus qu'il ne
+#   rapportait, parce que le processus mourait avant d'en profiter.
+#
+#   avec `passenger_min_instances 1`, le processus survit (verifie : plus de
+#   12 min). Le cache charge une fois sert alors TOUTES les requetes suivantes
+#   — criblage 5,2 s, palette Ctrl+K 1,4 s — et le prechargement n'epargne plus
+#   que le tout premier criblage apres un redemarrage, pour 60 s de CPU et
+#   l'empreinte du referentiel dans CHAQUE processus qui naitrait, y compris
+#   ceux que Passenger cree en renfort sous charge.
+#
+# Le bon reglage sur un mutualise est donc `passenger_min_instances 1` SANS
+# prechargement. Celui-ci reste disponible pour un hebergement dedie, ou le
+# demarrage n'est pas contraint et la memoire pas partagee :
+#
+#     FISKR_PRELOAD_CACHE=1
+#
+# S'il est active, il part DANS UN THREAD DE FOND, et c'est deliberé : bloquer
+# ici retarderait le demarrage d'une minute, et Passenger tue un processus qui
+# n'a pas fini de demarrer (`passenger_start_timeout`, 90 s par defaut). Un
+# depassement mettrait le site a terre — bien pire que la lenteur corrigee.
+# L'application repond donc immediatement pendant que le cache chauffe, et le
+# verrou de `fiskr.api` garantit qu'un criblage attendra ce chargement-ci au
+# lieu d'en lancer un second en parallele.
+if os.environ.get("FISKR_PRELOAD_CACHE", "0").strip().lower() in ("1", "true", "yes", "on"):
     import threading
 
     def _prechauffer():

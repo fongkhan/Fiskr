@@ -173,9 +173,40 @@ Trois choix, tous délibérés :
   tenu pour toujours dans l'enfant ;
 - **jamais fatal.** Une base momentanément indisponible ne doit pas empêcher un
   processus de démarrer. En cas d'échec, `_ensure_watchlist_cache` reste le
-  filet. `FISKR_PRELOAD_CACHE=0` coupe la chauffe sans redéploiement :
-  l'empreinte mémoire est multipliée par le nombre de processus Passenger, et
-  sur un mutualisé cet arbitrage appartient à l'exploitant.
+  filet.
+
+### …et pourquoi il est désactivé par défaut
+
+La suite des mesures a renversé la conclusion. Sur un mutualisé, **le vrai
+levier n'est pas le préchargement mais la survie du processus** :
+
+| | Palette Ctrl+K | Criblage à chaud | Survie du processus |
+|---|---:|---:|---:|
+| Sans `passenger_min_instances` | 31 s | — | recyclé aussitôt |
+| Avec `passenger_min_instances 1` | **1,4 s** | **5,2 s** | > 12 min |
+
+Sans ce réglage, Passenger recycle les processus dès qu'ils sont inactifs — un
+processus naissait **à la seconde même** de la requête. Le thread de chauffe se
+disputait alors le CPU avec la requête : le premier criblage passait de 64 s à
+118 s. Le préchargement coûtait plus qu'il ne rapportait, parce que le
+processus mourait avant d'en profiter.
+
+Avec `passenger_min_instances 1`, le processus survit et le cache chargé une
+fois sert toutes les requêtes suivantes. Le préchargement n'épargne alors plus
+que **le tout premier criblage après un redémarrage**, au prix de 60 s de CPU
+et de l'empreinte du référentiel dans chaque processus qui naît — y compris
+ceux que Passenger crée en renfort sous charge.
+
+Le bon réglage sur un mutualisé est donc `passenger_min_instances 1` **sans**
+préchargement. Celui-ci reste activable par `FISKR_PRELOAD_CACHE=1`, pour un
+hébergement dédié où le démarrage n'est pas contraint et la mémoire pas
+partagée.
+
+**Réserve sur les chiffres à froid.** Les valeurs 64 s / 118 s ont été relevées
+à une heure d'intervalle ; une mesure ultérieure a dépassé 280 s pour la même
+opération. L'explication la plus probable est le throttling CPU du compte
+(CloudLinux) après une dizaine de chargements complets en une demi-heure. Les
+temps *à chaud* (5,2 s, 1,4 s), eux, sont stables et reproductibles.
 
 ## Recherche plein texte : un compromis à arbitrer (là où pg_trgm existe)
 

@@ -483,10 +483,17 @@ Réglages (`config.yaml`, section `jobs:` — lus au démarrage du processus) :
 | `jobs.screen_processes` | `0` | Processus du pool de criblage : `0` = auto (budget CPU/mémoire), `1` = séquentiel forcé, `N` = imposé |
 | `jobs.autostart` | `true` | L'API relance le démon absent (watchdog 60 s) |
 
-> **Passenger (mutualisé)** : réglez `passenger_min_instances 1` pour que le
-> premier visiteur n'attende pas le démarrage à froid, et laissez
-> `jobs.autostart: true` — c'est l'API qui fait naître le démon, aucun accès
-> systemd/cron n'est nécessaire. Budget de connexions PostgreSQL : N processus
+> **Passenger (mutualisé)** : réglez `passenger_min_instances 1` — c'est le
+> réglage le plus rentable de tout le déploiement, et il est mesuré. Sans lui,
+> Passenger recycle le processus dès qu'il est inactif : chaque visiteur tombe
+> sur un processus neuf, dont le cache moteur est vide, et la palette Ctrl+K
+> met 31 s. Avec lui, le processus survit (vérifié au-delà de 12 min) et le
+> cache chargé une fois sert tout le monde : **palette 1,4 s, criblage 5,2 s**.
+> Le préchargement au démarrage (`FISKR_PRELOAD_CACHE=1`) ne remplace PAS ce
+> réglage et n'a d'intérêt que sur un hébergement dédié — voir
+> `Documentation/PERFORMANCE_BASE.md`. Laissez enfin `jobs.autostart: true` —
+> c'est l'API qui fait naître le démon, aucun accès systemd/cron n'est
+> nécessaire. Budget de connexions PostgreSQL : N processus
 > API (pool SQLAlchemy) + le démon (2 slots) + les tranches de criblage (une
 > connexion éphémère chacune, ≤ `screen_processes`) — largement sous le
 > `max_connections = 100` par défaut.

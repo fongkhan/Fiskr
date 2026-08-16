@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — cache preloading is now opt-in, because measurement said so
+The preloading added just before was **enabled by default**. Measuring it against the live service reversed the conclusion, so the default is reversed too: it is now off unless `FISKR_PRELOAD_CACHE=1`.
+
+On shared hosting the real lever turned out not to be preloading at all, but **process survival**. Without `passenger_min_instances`, Passenger recycles a process as soon as it goes idle — one was observed being born *at the very second* of the request. The warm-up thread then competed for CPU with the request it was meant to help, and the first screening went from 64 s to 118 s: the preload cost more than it returned, because the process died before benefiting from it.
+
+With `passenger_min_instances 1` (already recommended in the README, and now demonstrated), the process survives — verified over 12 minutes — and the cache loaded once serves every later request:
+
+| | Ctrl+K palette | Warm screening | Process survival |
+|---|---:|---:|---:|
+| Without `passenger_min_instances` | 31 s | — | recycled immediately |
+| With `passenger_min_instances 1` | **1.4 s** | **5.2 s** | > 12 min |
+
+The palette drops from 31 s to 1.4 s because it finally takes the in-memory path instead of the SQL fallback — and returns 123 results instead of 77, the in-memory index also covering aliases, exactly the documented difference between the two paths.
+
+Preloading then only spares the very first screening after a restart, at the price of 60 s of CPU and the referential's footprint in *every* process that spawns, including the extra ones Passenger creates under load. It stays available for dedicated hosting, where startup is not constrained and memory is not shared. Pinned by a test that reads the default off the syntax tree, so it cannot drift back silently.
+
+**Caveat on the cold numbers**, stated rather than smoothed over: 64 s and 118 s were measured an hour apart, and a later attempt at the same operation exceeded 280 s. The likely cause is account CPU throttling (CloudLinux) after a dozen full cache loads in half an hour — so those three figures are not a comparable series. The *warm* timings (5.2 s, 1.4 s) are stable and reproducible.
+
 ### Performance — the engine cache is now preloaded at web-process startup
 Follow-up to the Passenger `lifespan` fix, and this time driven by measurements taken against the live service rather than by an estimate. With the correctness hole closed, the remaining cost was simply misplaced: the cache still loaded **inside the first request that needed it**.
 

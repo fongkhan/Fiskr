@@ -151,8 +151,31 @@ def test_preload_never_blocks_startup():
     assert "load_watchlist_cache" not in a_l_import
 
 
-def test_preload_can_be_disabled_without_redeploying():
-    """Sur un mutualisé, l'exploitant doit pouvoir couper le préchargement
-    (mémoire, démarrage) sans attendre un déploiement."""
+def test_preload_is_opt_in_and_off_by_default():
+    """Le préchargement est DÉSACTIVÉ par défaut, et c'est une conclusion de
+    mesure, pas une préférence : sans `passenger_min_instances`, Passenger
+    recycle les processus dès qu'ils sont inactifs, le thread de chauffe se
+    dispute le CPU avec la requête et le premier criblage passait de 64 s à
+    118 s. Avec `passenger_min_instances 1`, le processus survit et le cache
+    chargé une fois suffit — le préchargement n'épargne plus que le tout
+    premier criblage, pour 60 s de CPU et l'empreinte du référentiel dans
+    chaque processus qui naît."""
+    arbre = _wsgi_arbre()
+    defauts = [n.args[1].value for n in ast.walk(arbre)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "get" and len(n.args) == 2
+               and isinstance(n.args[0], ast.Constant)
+               and n.args[0].value == "FISKR_PRELOAD_CACHE"
+               and isinstance(n.args[1], ast.Constant)]
+    assert defauts, "le défaut de FISKR_PRELOAD_CACHE doit être explicite"
+    assert defauts[0].strip().lower() in ("0", "false", "no", "off"), (
+        f"préchargement actif par défaut ({defauts[0]!r}) : sur un mutualisé "
+        f"il coûte plus qu'il ne rapporte")
+
+
+def test_preload_can_be_enabled_without_redeploying():
+    """…mais reste activable sans redéploiement, pour un hébergement dédié où
+    le démarrage n'est pas contraint et la mémoire pas partagée."""
     source = Path("fiskr/wsgi.py").read_text(encoding="utf-8")
     assert "FISKR_PRELOAD_CACHE" in source
+    assert "FISKR_PRELOAD_CACHE=1" in source, "la façon de l'activer doit être écrite"
