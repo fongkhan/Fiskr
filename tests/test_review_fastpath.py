@@ -179,10 +179,19 @@ def test_auto_backtest_submitted_with_latest_generated_panel(client, db_session,
     assert outcome["submitted"] is True
     assert outcome["panel_snapshot_id"] == panel.snapshot_id
     assert submitted["kind"] == "backtest"
-    assert submitted["params"]["snapshot_id"] == pending.snapshot_id
     assert submitted["params"]["panel_snapshot_id"] == panel.snapshot_id
-    # Meme dedupe que le lancement manuel : jamais deux cahiers en parallele
-    assert submitted["dedupe_key"] == f"backtest:{pending.snapshot_id}"
+    # Le cahier automatique est CONSOLIDE : il ne fige pas un snapshot, il
+    # resout son perimetre a l'execution. C'est ce qui fait qu'une vague de
+    # synchronisations ne depose qu'un cahier au lieu d'un par source — et que
+    # les snapshots deposes apres lui sont couverts quand meme.
+    assert submitted["params"]["resolve_pending"] is True
+    assert "snapshot_id" not in submitted["params"]
+    # Jeton COMMUN : c'est le dedoublonnage de la file qui fait le regroupement
+    assert submitted["dedupe_key"] == tasks_module.CONSOLIDATED_BACKTEST_TOKEN
+    # …et le snapshot qui a declenche cette soumission est bien dans le
+    # perimetre que le cahier resoudra
+    assert pending.snapshot_id in {
+        s.snapshot_id for s in tasks_module.pending_backtest_scope(db_session)}
 
 
 def test_auto_backtest_prefers_configured_panel(client, db_session, monkeypatch):

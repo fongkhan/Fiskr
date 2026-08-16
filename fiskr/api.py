@@ -4030,11 +4030,58 @@ def _relation_view(rel: EntityRelationship, names: Dict[str, str]) -> Dict[str, 
         "created_at": rel.created_at.isoformat() if rel.created_at else None,
     }
 
+OWNERSHIP_THRESHOLD_PCT = 50.0
+
+
+def _listed_entity_ids(db: Session, entity_ids) -> set:
+    """
+    Sous-ensemble des identifiants qui correspondent a une fiche EN PRODUCTION.
+
+    Le cumul des detentions ne vaut qu'entre personnes DESIGNEES : additionner
+    la part d'un liste et celle d'un actionnaire ordinaire fabriquerait un gel
+    imaginaire. Ce filtre est donc ce qui separe un signal d'un faux positif.
+    """
+    ids = [i for i in set(entity_ids) if i]
+    if not ids:
+        return set()
+    rows = (
+        db.query(WatchlistEntity.entity_id)
+          .join(Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id)
+          .filter(WatchlistEntity.entity_id.in_(ids),
+                  Snapshot.status == "READY",
+                  WatchlistEntity.excluded.isnot(True))
+          .distinct().all()
+    )
+    return {r[0] for r in rows}
+
+
 def compute_inherited_risk(db: Session, entity_id: str, max_depth: int = 3) -> List[Dict[str, Any]]:
     """
-    Regle des 50 % (OFAC) : remonte les liens OWNED_BY dont la detention est
-    majoritaire (>= 50 %) ou presumee (relation OFAC sans pourcentage — figurer
-    au SDN comme « Owned or Controlled By » vaut presomption de controle).
+    Regle des 50 % : remonte les liens OWNED_BY vers les detenteurs designes.
+
+    Deux voies mènent au seuil, et la seconde manquait :
+
+    1. **Detention individuelle** — un detenteur seul a >= 50 %, ou une relation
+       OFAC sans pourcentage (figurer au SDN comme « Owned or Controlled By »
+       vaut presomption de controle).
+    2. **Detention CUMULEE** — plusieurs designes atteignent 50 % ENSEMBLE.
+       C'est le cas que les deux regulateurs visent explicitement :
+
+         OFAC : « if Blocked Person X owns 25 percent of Entity A, and Blocked
+         Person Y owns another 25 percent of Entity A, Entity A is considered
+         to be blocked » — et le cumul joue meme entre programmes differents.
+
+         UE (bonnes pratiques, 2024) : « Ownership interests of EU-designated
+         persons in an entity should be aggregated to determine whether such
+         entity is owned 50% or more by EU-designated persons. »
+
+       Sans ce cumul, une societe detenue a 30 % par un liste et 25 % par un
+       autre — gelee en droit — ne ressortait pas du tout.
+
+    Le cumul ne porte QUE sur des detenteurs en production (`_listed_entity_ids`) :
+    additionner la part d'un liste et celle d'un actionnaire ordinaire
+    fabriquerait un gel imaginaire.
+
     Transitive avec garde de profondeur et de cycles.
     """
     chains: List[Dict[str, Any]] = []
@@ -4047,17 +4094,53 @@ def compute_inherited_risk(db: Session, entity_id: str, max_depth: int = 3) -> L
             EntityRelationship.from_entity_id == current_id,
             EntityRelationship.relation_type == "OWNED_BY",
         ).all()
+        if not edges:
+            return
+        listed = _listed_entity_ids(db, [e.to_entity_id for e in edges])
+
+        # Un detenteur atteint-il DEJA le seuil a lui seul ?
+        seuil_atteint_seul = any(
+            (e.ownership_pct is not None and e.ownership_pct >= OWNERSHIP_THRESHOLD_PCT)
+            or (e.ownership_pct is None and e.source == "OFAC")
+            for e in edges
+        )
+
+        # Cumul des parts declarees par les detenteurs DESIGNES (une seule part
+        # par detenteur : plusieurs lignes pour le meme owner ne se somment pas).
+        parts: Dict[str, float] = {}
+        for edge in edges:
+            if edge.ownership_pct is None or edge.to_entity_id not in listed:
+                continue
+            parts[edge.to_entity_id] = max(parts.get(edge.to_entity_id, 0.0),
+                                           float(edge.ownership_pct))
+        cumul = sum(parts.values())
+        # Le cumul ne sert QUE lorsque personne n'atteint le seuil seul. Si un
+        # detenteur bloque deja l'entite, la question est tranchee : ajouter ses
+        # co-actionnaires minoritaires n'y change rien et noierait le signal.
+        # Ce choix rend le correctif strictement ADDITIF — il ne modifie aucun
+        # cas deja detecte, il en detecte de nouveaux.
+        cumul_atteint = (not seuil_atteint_seul and len(parts) > 1
+                         and cumul >= OWNERSHIP_THRESHOLD_PCT)
+
         for edge in edges:
             owner = edge.to_entity_id
-            majority = (edge.ownership_pct is not None and edge.ownership_pct >= 50.0)
+            majority = (edge.ownership_pct is not None
+                        and edge.ownership_pct >= OWNERSHIP_THRESHOLD_PCT)
             presumed = (edge.ownership_pct is None and edge.source == "OFAC")
-            if not (majority or presumed) or owner in visited:
+            # Retenu aussi s'il PARTICIPE a un cumul qui franchit le seuil
+            par_cumul = cumul_atteint and owner in parts
+            if not (majority or presumed or par_cumul) or owner in visited:
                 continue
             visited.add(owner)
             chains.append({
                 "owner_entity_id": owner,
                 "ownership_pct": edge.ownership_pct,
                 "presumed": presumed,
+                # Tracabilite : dire POURQUOI ce detenteur est retenu, et sur
+                # quel total — un reviseur doit pouvoir refaire le calcul.
+                "via_aggregation": bool(par_cumul and not majority and not presumed),
+                "aggregated_pct": round(cumul, 4) if par_cumul else None,
+                "aggregated_owners": sorted(parts) if par_cumul else None,
                 "via": list(path),
             })
             walk(owner, path + [owner], depth + 1)
@@ -8312,9 +8395,19 @@ async def get_review_detail(
     # une mise en file doit se voir DANS l'ecran d'homologation (avec relance
     # ou annulation), pas seulement au fond du panneau des travaux.
     from fiskr.database import Job
+    from fiskr.tasks import CONSOLIDATED_BACKTEST_TOKEN
     last_bt_job = db.query(Job).filter(
         Job.kind == "backtest", Job.snapshot_id == snapshot_id
     ).order_by(Job.id.desc()).first()
+    if last_bt_job is None:
+        # Repli sur le cahier CONSOLIDE : une vague de synchronisations n'en
+        # lance qu'un pour toutes les listes en attente, et il ne porte donc
+        # pas d'identifiant de snapshot. Sans ce repli, l'ecran d'homologation
+        # affichait « aucun cahier » alors qu'un cahier tournait pour lui.
+        last_bt_job = db.query(Job).filter(
+            Job.kind == "backtest", Job.token == CONSOLIDATED_BACKTEST_TOKEN,
+            Job.status.in_(("QUEUED", "RUNNING", "ERROR")),
+        ).order_by(Job.id.desc()).first()
     backtest_job = None
     if last_bt_job is not None:
         backtest_job = {

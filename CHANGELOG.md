@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the 50% rule ignored aggregate ownership
+`compute_inherited_risk` tested `ownership_pct >= 50` **on a single edge**. Verified by running it rather than by reading it:
+
+```
+25 % + 25 % aggregated  ->  NO RISK DETECTED
+60 % from one owner     ->  detected
+```
+
+That is precisely the case both regulators target. OFAC: *"if Blocked Person X owns 25 percent of Entity A, and Blocked Person Y owns another 25 percent of Entity A, Entity A is considered to be blocked"* — and holdings aggregate even across different sanctions programmes. The EU's updated best practices (2024): *"Ownership interests of EU-designated persons in an entity should be aggregated to determine whether such entity is owned 50% or more by EU-designated persons."* In practice, a company held 30% by one designated person and 25% by another is frozen in law, and Fiskr said nothing.
+
+Holdings are now aggregated per target entity before the threshold is applied, at every level of the chain. Each retained owner carries *why* it was retained (`via_aggregation`, `aggregated_pct`, `aggregated_owners`) so a reviewer can redo the arithmetic.
+
+Three guards matter as much as the feature, and all are pinned by tests:
+- **Only designated holders aggregate.** Summing a listed person's stake with an ordinary shareholder's would manufacture an imaginary freeze — a listed person at 30% plus a bank at 30% is not a freeze. Only holders matching a production record count.
+- **Duplicate edges for one owner do not add up.** Two rows for the same holder (two sources) would fabricate 50% out of 30% real.
+- **Aggregation only settles undecided cases.** If a holder already crosses the threshold alone, the question is answered; adding its minority co-shareholders would drown the signal without changing the decision. This keeps the fix strictly *additive* — no previously detected case changes, new ones are detected. The first draft did not have this restriction, and three unrelated tests caught it by failing: the extra chains propagated into screening decision trees.
+
+### Changed — one backtest for a whole sync wave, instead of one per source
+"Synchronise enabled sources" dropped one snapshot per source, hence one backtest per source. Backtests are serialised (`SERIAL_KINDS`), so the queue stretched by tens of minutes — observed in production: six backtests waiting, the oldest for 57 minutes — for largely redundant work, each one re-screening the **same shared universe**.
+
+A single consolidated backtest now covers every pending delta. `run_backtest` accepts several candidate snapshots and mirrors what approving all of them would produce: each tested list's production snapshots leave the candidate universe, the others stay. The delta is computed **list by list** — mixing entity ids across lists would make a record look deleted merely because it does not exist in the other list — then merged for the three passes. The number of screening passes stays at three whatever the number of lists, which is the whole point: the dominant cost is the shared pass, and it is shared.
+
+The scope is resolved **at execution, not at submission**: a wave drops its snapshots over several minutes, and a backtest still queued must cover the ones landing after it. The queue's dedupe key does the grouping — the second sync submits nothing. Snapshots that land while the backtest is already running are picked up by one follow-up run, submitted only if such snapshots exist. The same report is stored on every covered snapshot, since the candidate universe contained them all and the verdict has no meaning sliced per list; the review screen falls back to the consolidated job so it no longer shows "no backtest" while one is running for it.
+
 ### Changed — cache preloading is now opt-in, because measurement said so
 The preloading added just before was **enabled by default**. Measuring it against the live service reversed the conclusion, so the default is reversed too: it is now off unless `FISKR_PRELOAD_CACHE=1`.
 
