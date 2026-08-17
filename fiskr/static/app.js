@@ -1080,6 +1080,8 @@ function switchSubTab(sectionId, subTabId) {
  // Rupture de flux corrigée : les snapshots en attente d'homologation
  // sont rechargés à chaque ouverture du sous-onglet, plus seulement au load
  fetchPendingReviews();
+ } else if (subTabId === "watchlist-history") {
+ fetchReviewHistory(1);
  } else if (subTabId === "alerts-screening") {
  fetchAlerts("SCREENING");
  populateAssigneeFilters();
@@ -4682,6 +4684,171 @@ function renderReviewDeltaDetails(deltaDetails) {
  section(" Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
  section(" Modifications (avant → après)", modified.length, `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>${modifiedRows}</tbody>`) +
  section(" Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
+}
+
+// ------------------ HISTORIQUE DES HOMOLOGATIONS ------------------
+// Chaque décision constitue un dossier FIGÉ : le delta d'une liste candidate se
+// lit « par rapport à la production », et l'approuver EN FAIT la production —
+// après coup, la comparaison d'origine n'est plus reproductible. Ces écrans ne
+// relisent donc que du figé, jamais du recalculé.
+
+let historyPage = 1;
+const HISTORY_PER_PAGE = 25;
+
+function deltaSummaryLabel(summary) {
+ const s = summary || {};
+ const parts = [];
+ if (s.added_count) parts.push(`+${s.added_count}`);
+ if (s.modified_count) parts.push(`~${s.modified_count}`);
+ if (s.removed_count) parts.push(`−${s.removed_count}`);
+ return parts.length ? parts.join(" / ") : "aucun écart";
+}
+
+async function fetchReviewHistory(page = 1) {
+ const tbody = document.querySelector("#review-history-table tbody");
+ if (!tbody) return;
+ historyPage = Math.max(1, page);
+ const decision = document.getElementById("history-decision-filter")?.value || "";
+ const fileType = document.getElementById("history-type-filter")?.value || "";
+ const params = new URLSearchParams({
+  limit: HISTORY_PER_PAGE,
+  offset: (historyPage - 1) * HISTORY_PER_PAGE,
+ });
+ // Filtres portés CÔTÉ SERVEUR : filtrer au navigateur ne verrait que la page
+ // affichée, alors qu'une recherche d'audit porte sur tout l'historique.
+ if (decision) params.set("decision", decision);
+ if (fileType) params.set("file_type", fileType);
+
+ tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Chargement…</td></tr>';
+ try {
+  const response = await apiFetch(`/api/review/history?${params}`);
+  if (!response.ok) throw new Error("chargement impossible");
+  const data = await response.json();
+  const rows = data.history || [];
+  populateHistoryTypeFilter(rows);
+
+  if (!rows.length) {
+   tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Aucune homologation dans l\'historique.</td></tr>';
+  } else {
+   tbody.innerHTML = rows.map(r => {
+    const approuve = r.decision === "APPROVED";
+    const verdict = r.backtest_verdict
+     ? `<span class="status-badge ${r.backtest_verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(r.backtest_verdict)}</span>`
+       + (r.backtest_gap_pct !== null && r.backtest_gap_pct !== undefined
+          ? ` <small style="color:var(--text-muted)">écart ${r.backtest_gap_pct} %</small>` : "")
+     : '<small style="color:var(--text-muted)">aucun</small>';
+    return `
+    <tr>
+     <td>${r.decided_at ? formatDateTime(r.decided_at) : "-"}</td>
+     <td>${listTypeBadge(r.file_type)}<br><small style="color:var(--text-muted)">${escapeHtml(r.file_name || "")}</small></td>
+     <td><span class="status-badge ${approuve ? "no_match" : "alert"}">${approuve ? "Approuvée" : "Rejetée"}</span></td>
+     <td>${escapeHtml(deltaSummaryLabel(r.delta_summary))}</td>
+     <td>${verdict}</td>
+     <td>${escapeHtml(r.decided_by || "-")}</td>
+     <td><button class="btn btn-sm btn-secondary" onclick="openReviewHistoryDetail(${r.id})">Rouvrir</button></td>
+    </tr>`;
+   }).join("");
+  }
+
+  const total = data.total || 0;
+  const pages = Math.max(1, Math.ceil(total / HISTORY_PER_PAGE));
+  const countEl = document.getElementById("history-count");
+  if (countEl) countEl.textContent = `${total} homologation(s)`;
+  const label = document.getElementById("history-page-label");
+  if (label) label.textContent = `Page ${historyPage} / ${pages}`;
+  const prev = document.getElementById("history-prev");
+  const next = document.getElementById("history-next");
+  if (prev) prev.disabled = historyPage <= 1;
+  if (next) next.disabled = historyPage >= pages;
+ } catch (e) {
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--color-danger);">Erreur de chargement de l\'historique.</td></tr>';
+ }
+}
+
+function populateHistoryTypeFilter(rows) {
+ const select = document.getElementById("history-type-filter");
+ if (!select || select.dataset.filled === "1") return;
+ const types = [...new Set(rows.map(r => r.file_type).filter(Boolean))].sort();
+ if (!types.length) return;
+ const courant = select.value;
+ select.innerHTML = '<option value="">Toutes les listes</option>'
+  + types.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(listTypeLabel(t))}</option>`).join("");
+ select.value = courant;
+ select.dataset.filled = "1";
+}
+
+async function openReviewHistoryDetail(recordId) {
+ const modal = document.getElementById("details-modal");
+ const title = document.getElementById("modal-title");
+ const body = document.getElementById("modal-body");
+ if (!modal || !body) return;
+ title.textContent = "Dossier d'homologation";
+ body.innerHTML = '<p class="section-desc">Chargement du dossier…</p>';
+ modal.classList.remove("hidden");
+
+ try {
+  const response = await apiFetch(`/api/review/history/${recordId}`);
+  if (!response.ok) throw new Error("dossier introuvable");
+  const d = await response.json();
+  const approuve = d.decision === "APPROVED";
+  const report = d.backtest_report;
+
+  const ligne = (label, valeur) => `
+   <tr><td style="color:var(--text-muted); white-space:nowrap;">${escapeHtml(label)}</td>
+   <td>${valeur}</td></tr>`;
+
+  const details = (d.delta_details && d.delta_details.details) || d.delta_details || {};
+  const bloc = (titre, items, rendu) => (items && items.length) ? `
+   <details style="margin-bottom:0.6rem;">
+    <summary style="cursor:pointer; font-weight:600; padding:0.4rem 0;">${titre} (${items.length})</summary>
+    <div class="table-container" style="max-height:240px; overflow-y:auto;"><table>${rendu(items)}</table></div>
+   </details>` : "";
+  const lignesSimples = items => `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>`
+   + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td><td>${escapeHtml(e.primary_name || "")}</td></tr>`).join("")
+   + `</tbody>`;
+  const lignesModifiees = items => `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>`
+   + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.primary_name || "")}</td><td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td></tr>`).join("")
+   + `</tbody>`;
+
+  const cahier = report ? `
+   <table style="width:100%; margin-bottom:0.8rem;"><tbody>
+    ${ligne("Verdict", `<span class="status-badge ${report.verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(report.verdict || "-")}</span>`)}
+    ${ligne("Écart", `${report.gap_pct} % (seuil ${report.threshold_pct} %)`)}
+    ${ligne("Alertes production", (report.current || {}).alerts)}
+    ${ligne("Alertes candidate", (report.candidate || {}).alerts)}
+    ${ligne("Panel", `${escapeHtml(report.panel_snapshot_id || "-")} — ${report.panel_size} client(s)`)}
+    ${ligne("Mode", escapeHtml(report.mode || "-"))}
+    ${report.snapshots && report.snapshots.length > 1
+      ? ligne("Listes couvertes", report.snapshots.map(s => escapeHtml(s.file_type)).join(", "))
+      : ""}
+    ${ligne("Exécuté", `${d.backtest_at ? formatDateTime(d.backtest_at) : "-"} par ${escapeHtml(d.backtest_by || "-")}`)}
+   </tbody></table>`
+   : '<p class="section-desc">Aucun cahier de tests n\'avait été exécuté sur ce snapshot.</p>';
+
+  body.innerHTML = `
+   <p class="section-desc">Ce dossier a été figé au moment de la décision : il montre ce que le réviseur avait sous les yeux, même si la liste a été remplacée depuis.</p>
+   <table style="width:100%; margin-bottom:1rem;"><tbody>
+    ${ligne("Décision", `<span class="status-badge ${approuve ? "no_match" : "alert"}">${approuve ? "Approuvée" : "Rejetée"}</span>`)}
+    ${ligne("Décidée le", d.decided_at ? formatDateTime(d.decided_at) : "-")}
+    ${ligne("Réviseur", escapeHtml(d.decided_by || "-"))}
+    ${ligne("Commentaire", escapeHtml(d.comment || "—"))}
+    ${ligne("Liste", `${listTypeBadge(d.file_type)} ${escapeHtml(d.file_name || "")}`)}
+    ${ligne("Snapshot", `<code>${escapeHtml(d.snapshot_id)}</code>${d.snapshot_status ? ` <small style="color:var(--text-muted)">(statut actuel : ${escapeHtml(d.snapshot_status)})</small>` : ""}`)}
+    ${ligne("Comparé à", d.production_snapshot_id ? `<code>${escapeHtml(d.production_snapshot_id)}</code>` : "premier import (aucune production)")}
+    ${ligne("Fiches", `${d.record_count ?? "-"}${d.excluded_count ? ` · ${d.excluded_count} exclue(s)` : ""}`)}
+   </tbody></table>
+
+   <h3 style="margin:1rem 0 0.5rem;">Delta au moment de la décision</h3>
+   <p class="section-desc">${escapeHtml(deltaSummaryLabel(d.delta_summary))}</p>
+   ${bloc("Ajouts", details.added, lignesSimples)}
+   ${bloc("Modifications", details.modified, lignesModifiees)}
+   ${bloc("Suppressions", details.removed, lignesSimples)}
+
+   <h3 style="margin:1rem 0 0.5rem;">Cahier de tests</h3>
+   ${cahier}`;
+ } catch (e) {
+  body.innerHTML = '<p class="section-desc" style="color: var(--color-danger);">Dossier d\'homologation introuvable.</p>';
+ }
 }
 
 // ------------------ ÉTAPE 3 : CAHIER DE TESTS (BACKTEST) ------------------
