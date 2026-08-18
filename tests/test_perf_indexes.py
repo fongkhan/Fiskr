@@ -64,24 +64,47 @@ def _tool_source() -> str:
     return Path("tools/create_perf_indexes.py").read_text(encoding="utf-8")
 
 
-def _tool_sql_literals() -> list:
-    """Les chaînes SQL RÉELLES de l'outil — pas la prose des commentaires."""
-    import ast
-    arbre = ast.parse(_tool_source())
-    return [n.value for n in ast.walk(arbre)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            and "CREATE INDEX" in n.value]
+def _tool_sql_statements() -> list:
+    """Les instructions RÉELLEMENT produites par l'outil — plus fiable que
+    lire des littéraux, depuis qu'elles sont dérivées du modèle."""
+    outil = _outil()
+    sqls = [ddl for _nom, ddl in outil.browse_indexes()]
+    sqls += [ddl for _nom, ddl in outil._trigram_statements("installed")]
+    return sqls
 
 
 def test_tool_builds_indexes_without_locking_the_table():
     """Toute création passe par CONCURRENTLY (pas de verrou exclusif) et par
-    IF NOT EXISTS (relançable sans risque). Vérifié sur les chaînes SQL du
-    code, pas sur les commentaires."""
-    sqls = _tool_sql_literals()
-    assert sqls, "aucune instruction CREATE INDEX trouvée dans l'outil"
+    IF NOT EXISTS (relançable sans risque)."""
+    sqls = _tool_sql_statements()
+    assert sqls, "l'outil ne produit aucune instruction"
     for sql in sqls:
         assert "CONCURRENTLY" in sql, sql
         assert "IF NOT EXISTS" in sql, sql
+
+
+def test_tool_covers_every_declared_index():
+    """LE garde-fou : l'outil doit couvrir TOUS les index du modèle.
+
+    La liste était codée en dur et n'en couvrait que trois sur quinze. Or le
+    démarrage diffère tout index manquant sur une table volumineuse et renvoie
+    vers cet outil : un index déclaré mais inconnu de l'outil n'aurait JAMAIS
+    été créé en production, alors que le journal affirmait le contraire."""
+    couverts = {nom for nom, _ in _outil().browse_indexes()}
+    declares = {ix.name for ix in database._PERFORMANCE_INDEXES}
+    manquants = declares - couverts
+    assert not manquants, (
+        f"index déclarés que l'outil ne créerait jamais : {sorted(manquants)}")
+
+
+def test_partial_index_keeps_its_where_clause():
+    """L'index partiel perd tout son intérêt sans son WHERE : il porterait
+    alors les 92 % de fiches hors production qu'il est censé éviter."""
+    ddl = next(d for n, d in _outil().browse_indexes()
+               if n == "ix_wl_entities_production")
+    # SQLAlchemy compile le littéral en minuscules (« IS NOT true ») : c'est
+    # du SQL valide, la casse n'a pas à faire échouer le garde-fou.
+    assert "WHERE EXCLUDED IS NOT TRUE" in ddl.upper(), ddl
 
 
 def test_tool_never_migrates_the_schema():

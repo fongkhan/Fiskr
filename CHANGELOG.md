@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a manually added listed person was invisible to the worker daemon
+Found while hunting for optimisations, and more serious than what was being looked for.
+
+The engine cache lives in each process's memory. The **epoch** — one integer in the database — is the only invalidation channel between processes: the worker daemon cannot touch a web process's memory, it can only notice a number that changed.
+
+Four endpoints modified the production referential while reloading **only their own** cache: manual addition of a listed entity, batch addition, correction of a record, and retention purge. In production, where Passenger runs several web processes and the daemon carries batch campaigns and re-screening:
+
+> a listed person entered by hand was **not screened against by the daemon's campaigns**, until some synchronisation happened to bump the epoch.
+
+That is a screening miss, not a display lag. All four now go through `_refresh_production_cache`, which bumps the epoch and reloads locally — exactly what the ingestion path already did.
+
+Five settings routes had the same shape (blocking layout, engine capabilities, linguistic resources, learned equivalences, ingestion settings). Their own comments say the index must be rebuilt for the setting to take effect — but they rebuilt only the local one, so two web processes could screen with different engine parameters. They now share the same channel. The reasoning is uniform: **a route that reloads the cache has already decided the cache is stale, and in a multi-process deployment that decision has to be shared.**
+
+Pinned by tests on each path, plus a syntax-tree guard: no writing route may call `load_watchlist_cache` without also going through the shared channel. That guard is what found the five settings routes.
+
+### Measured, and deliberately not changed
+Two investigations that produced negative results, recorded so they are not redone:
+
+- **The write path is sound.** Ingestion looked like one SQL statement per record — until the same measurement on PostgreSQL showed **37 queries for 20 records as for 200**. SQLAlchemy batches inserts properly there; the per-record behaviour was a SQLite artefact of the test environment, not a production problem.
+- **The list-browsing indexes work.** A local PostgreSQL 16 at production proportions (780 k rows, 92% out of production) first showed a `Parallel Seq Scan` on the production-scope count — but that was an unvacuumed bulk load. After `VACUUM ANALYZE` the plan is an **Index Only Scan with zero heap fetches**, 54 ms to count 270 k live rows. The partial index does its job.
+
+
+### Performance — the approval screen cost three queries per pending list
+Found by counting SQL statements per endpoint at two data sizes — deterministic, unlike a stopwatch, and load-independent. Across nine read endpoints, exactly one grew with the data:
+
+```
+/api/review/pending    1 pending snapshot -> 4 queries
+                      11 pending snapshots -> 34 queries      <== N+1
+```
+
+Three queries per row: a `COUNT` of excluded records (on `watchlist_entities`, 11 M rows in production), a lookup of the list currently in production, and the stored sync delta. After a synchronisation wave — nineteen lists pending, observed in production — that screen issued about sixty queries to render nineteen rows.
+
+The three are now read in batch: one `GROUP BY` for the excluded counts, one query for the production snapshot of every type involved, one for the stored deltas. **34 queries → 4, and constant** whatever the number of pending lists.
+
+Batching is only worth anything if it returns exactly the same thing, so a test compares the endpoint's output, field by field, against the original row-by-row loop, on the cases where a careless batch would diverge: a stored delta still valid, a stale one that must *not* be served, a list with no production yet, exclusions that must land on the right snapshot. A second test asserts the query count does not grow with the number of rows — a reintroduced loop would show up there and nowhere else.
+
+### Fixed — the index tool ignored twelve of the fifteen indexes it was told to create
+Startup **defers** any missing index on a large table (an ordinary `CREATE INDEX` would lock it for minutes) and logs: *"run `python tools/create_perf_indexes.py`"*. But that tool carried its own **hard-coded** list of three indexes, unrelated to the model's declarations. Any index added to `_PERFORMANCE_INDEXES` after the tool was written was therefore **never created on a large production database** — while the log claimed the opposite.
+
+The tool now derives its statements from `_PERFORMANCE_INDEXES` itself, compiling each declared index to PostgreSQL DDL and adding `CONCURRENTLY IF NOT EXISTS`. Three statements became fourteen. Partial indexes keep their `WHERE` clause — without it the production index would carry the 92% of records it exists to avoid, which a test now checks explicitly. Another test asserts every declared index is covered, so the two lists cannot drift apart again.
+
+
 ### Performance — the snapshots list carried 2.57 MB of backtest reports it never showed
 Measured against production, and load-independent unlike a timing: `GET /api/snapshots` returned **2.84 MB**, of which **95.1% was `backtest_report`** — 2.57 MB for 518 snapshots, re-downloaded on **every page load**, since the endpoint returned whole ORM objects and FastAPI serialised everything on them.
 
