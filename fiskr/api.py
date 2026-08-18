@@ -3448,13 +3448,46 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             pass
 
 
+# Colonnes du snapshot servies par la LISTE. Le rapport de cahier de tests en
+# est deliberement absent : il porte le detail des paires (client x liste) et
+# pesait a lui seul 95 % de la reponse — 2,57 Mo sur 2,84, pour 518 snapshots,
+# retelecharges a CHAQUE chargement de page alors qu'aucun ecran ne les lit
+# depuis cette liste. Les trois endroits du frontal qui affichent un rapport le
+# prennent d'un endpoint de detail. La liste n'en garde que le verdict et
+# l'ecart, qui suffisent a la pastille de statut.
+_SNAPSHOT_LIST_COLUMNS = (
+    "snapshot_id", "file_type", "file_name", "file_hash", "record_count",
+    "processed_count", "uploaded_at", "status", "phase", "reviewed_by",
+    "reviewed_at", "review_comment", "backtest_at", "backtest_by",
+)
+
+
+def _snapshot_list_row(snap: Snapshot) -> Dict[str, Any]:
+    row: Dict[str, Any] = {}
+    for name in _SNAPSHOT_LIST_COLUMNS:
+        if not hasattr(snap, name):
+            continue  # colonne ajoutee plus tard : la liste reste servie
+        value = getattr(snap, name)
+        row[name] = value.isoformat() if isinstance(value, datetime) else value
+    report = snap.backtest_report or {}
+    row["backtest_verdict"] = report.get("verdict")
+    row["backtest_gap_pct"] = report.get("gap_pct")
+    return row
+
+
 @app.get("/api/snapshots")
 async def get_snapshots(
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Lists loaded snapshots."""
-    return db.query(Snapshot).order_by(Snapshot.uploaded_at.desc()).all()
+    """
+    Liste des snapshots charges, SANS les rapports de cahier de tests.
+
+    Le detail complet d'un rapport se lit par GET /api/review/snapshots/{id}
+    (liste en attente) ou GET /api/review/history/{id} (decision archivee).
+    """
+    snaps = db.query(Snapshot).order_by(Snapshot.uploaded_at.desc()).all()
+    return [_snapshot_list_row(s) for s in snaps]
 
 @app.post("/api/snapshots/compare")
 async def compare_snapshots(

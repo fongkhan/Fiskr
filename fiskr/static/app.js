@@ -4819,7 +4819,7 @@ async function openReviewHistoryDetail(recordId) {
     ${ligne("Panel", `${escapeHtml(report.panel_snapshot_id || "-")} — ${report.panel_size} client(s)`)}
     ${ligne("Mode", escapeHtml(report.mode || "-"))}
     ${report.snapshots && report.snapshots.length > 1
-      ? ligne("Listes couvertes", report.snapshots.map(s => escapeHtml(s.file_type)).join(", "))
+      ? ligne("Listes couvertes", `${report.snapshots.length} listes`)
       : ""}
     ${ligne("Exécuté", `${d.backtest_at ? formatDateTime(d.backtest_at) : "-"} par ${escapeHtml(d.backtest_by || "-")}`)}
    </tbody></table>`
@@ -4845,7 +4845,8 @@ async function openReviewHistoryDetail(recordId) {
    ${bloc("Suppressions", details.removed, lignesSimples)}
 
    <h3 style="margin:1rem 0 0.5rem;">Cahier de tests</h3>
-   ${cahier}`;
+   ${cahier}
+   ${report ? attributionParListe(report) : ""}`;
  } catch (e) {
   body.innerHTML = '<p class="section-desc" style="color: var(--color-danger);">Dossier d\'homologation introuvable.</p>';
  }
@@ -5055,6 +5056,40 @@ async function cancelReviewBacktest(jobId, snapshotId) {
  setTimeout(() => openReviewDetail(snapshotId), 800);
 }
 
+// Écart imputable à CHAQUE liste. Un cahier consolidé couvre toute une vague de
+// synchronisations : sans cette ventilation, le réviseur lit « 13,69 % » sans
+// savoir laquelle des dix-neuf listes en est responsable — ce qu'un cahier par
+// liste disait de lui-même. Les comptes viennent du serveur, où chaque paire
+// porte le type de liste de l'entité qui l'a déclenchée.
+function attributionParListe(report) {
+ const listes = report.snapshots || [];
+ if (listes.length < 2) return "";  // une seule liste : l'écart lui revient en entier
+ const horsPerimetre = report.unattributed_pairs || {};
+ const lignes = listes.map(s => {
+  const d = s.delta_sizes || {};
+  return `<tr>
+   <td>${listTypeBadge(s.file_type)}</td>
+   <td>${(d.added || 0)} / ${(d.modified || 0)} / ${(d.removed || 0)}</td>
+   <td>${s.new_pairs_count ? `<strong>+${s.new_pairs_count}</strong>` : "—"}</td>
+   <td>${s.resolved_pairs_count ? `−${s.resolved_pairs_count}` : "—"}</td>
+  </tr>`;
+ }).join("");
+ const reste = (horsPerimetre.new_pairs_count || horsPerimetre.resolved_pairs_count)
+  ? `<tr><td><em>Hors listes testées</em></td><td>—</td>
+     <td>${horsPerimetre.new_pairs_count ? `+${horsPerimetre.new_pairs_count}` : "—"}</td>
+     <td>${horsPerimetre.resolved_pairs_count ? `−${horsPerimetre.resolved_pairs_count}` : "—"}</td></tr>`
+  : "";
+ return `
+  <h4 style="margin: 0.75rem 0 0.4rem;">Écart par liste (${listes.length} listes couvertes)</h4>
+  <p class="section-desc">Ce cahier couvre plusieurs listes en une passe. Chaque paire est attribuée à la liste de l'entité qui l'a déclenchée : la colonne « Alertes gagnées » dit laquelle pèse dans l'écart global.</p>
+  <div class="table-container" style="max-height: 260px; overflow-y: auto;">
+   <table>
+    <thead><tr><th>Liste</th><th>Delta (+ / ~ / −)</th><th>Alertes gagnées</th><th>Alertes perdues</th></tr></thead>
+    <tbody>${lignes}${reste}</tbody>
+   </table>
+  </div>`;
+}
+
 function renderBacktestReport(report) {
  const container = document.getElementById("backtest-results");
  const reminder = document.getElementById("review-backtest-reminder");
@@ -5103,6 +5138,7 @@ function renderBacktestReport(report) {
  <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
  </div>
  </div>
+ ${attributionParListe(report)}
  ${newPairs.length ? `
  <h4 style="margin: 0.75rem 0 0.4rem;">Nouvelles alertes avec la liste candidate (${report.new_pairs_count})</h4>
  <p class="section-desc">Vérifiez chaque paire : s'il s'agit d'un homonyme avéré (« Good Guy »), mettez-la en liste blanche puis relancez le cahier de tests.</p>
