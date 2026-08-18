@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
 from fiskr.quality import evaluate_and_clean
-from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
+from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
+                            BLOCKING_FIELDS as _BLOCKING_FIELDS)
 from fiskr.scoring import match_entities, jaro_wink_similarity
 from fiskr.delta import calculate_delta
 from fiskr.tasks import _refresh_production_cache
@@ -100,7 +101,8 @@ from fiskr.settings import (
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
     SETTING_AUTO_BACKTEST_ENABLED, SETTING_AUTO_BACKTEST_PANEL,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
-    BLOCKING_COMPONENTS, blocking_layout, blocking_layout_with_source, blocking_config_for,
+    BLOCKING_COMPONENTS, MAX_BLOCKING_FIELDS,
+    blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
@@ -7172,11 +7174,15 @@ def _blocking_payload(db: Session) -> Dict[str, Any]:
     filtering = blocking_layout_with_source(db, "FILTERING")
     return {
         "components": list(BLOCKING_COMPONENTS),
+        # Libellés DÉRIVÉS du registre : ajouter un champ dans fiskr/blocking.py
+        # suffit à le voir apparaître ici, sans liste à tenir en double.
         "component_labels": {
             "COUNTRY_ISO": "Pays (ISO)",
             "ENTITY_TYPE": "Type d'entité (PP/PM)",
             "PHONETIC_FIRST": "Phonétique du nom",
+            **{nom: libelle for nom, (libelle, _c, _l) in _BLOCKING_FIELDS.items()},
         },
+        "max_field_components": MAX_BLOCKING_FIELDS,
         "screening": {"layout": screening["layout"], "source": screening["source"]},
         "filtering": {"layout": filtering["layout"], "source": filtering["source"]},
         "active_screening_layout": watchlist_index_layout,

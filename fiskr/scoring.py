@@ -124,6 +124,54 @@ def token_sort_similarity(s1: str, s2: str) -> float:
     return jaro_wink_similarity(sorted_s1, sorted_s2)
 
 
+def token_set_similarity(s1: str, s2: str) -> float:
+    """
+    Similarite par ENSEMBLES de tokens : tolere qu'un cote porte des tokens que
+    l'autre n'a pas.
+
+    Pourquoi cette metrique manquait
+    --------------------------------
+    `token_sort` corrige l'ORDRE, pas l'INCLUSION. Or une liste de sanctions
+    porte des noms longs — patronyme russe, double nom espagnol, filiation
+    arabe — la ou le referentiel client n'en garde qu'une partie. Mesure sur le
+    moteur, sans donnee contextuelle (ni date de naissance, ni genre, ni pays,
+    cas frequent des fiches listees) :
+
+        Vladimir Putin      vs  Vladimir Vladimirovich Putin      60,6
+        Igor Sechin         vs  Sechin Igor Ivanovich             63,2
+        Maria Carmen Lopez  vs  Maria del Carmen Lopez Hernandez  63,9
+
+    — tous sous le seuil de 75, donc NON alertes, alors qu'il s'agit de la
+    meme personne. (Avec date de naissance et nationalite concordantes, les
+    ajustements les rattrapent : c'est bien l'absence de contexte qui fait
+    reposer la decision sur le seul nom.)
+
+    La metrique compare l'intersection des tokens aux deux ensembles complets
+    et retient le meilleur des trois rapprochements : un nom entierement
+    contenu dans l'autre marque alors 100.
+    """
+    tokens1 = set(s1.split())
+    tokens2 = set(s2.split())
+    if not tokens1 or not tokens2:
+        return 0.0
+
+    intersection = " ".join(sorted(tokens1 & tokens2))
+    if not intersection:
+        # Aucun token commun : rien a dire de plus que la comparaison brute
+        return damerau_levenshtein_similarity(s1, s2)
+
+    reste1 = " ".join(sorted(tokens1 - tokens2))
+    reste2 = " ".join(sorted(tokens2 - tokens1))
+    complet1 = (intersection + " " + reste1).strip()
+    complet2 = (intersection + " " + reste2).strip()
+
+    return max(
+        damerau_levenshtein_similarity(intersection, complet1),
+        damerau_levenshtein_similarity(intersection, complet2),
+        damerau_levenshtein_similarity(complet1, complet2),
+    )
+
+
 def resolve_cut_off(config: dict, watchlist_entry: dict = None) -> float:
     """
     Seuil de cut-off applicable : surcharge par type de liste
@@ -214,19 +262,27 @@ def compute_base_score(s1: str, s2: str, config: dict) -> float:
     w_jw = weights.get("jaro_winkler", 0.4)
     w_dl = weights.get("damerau_levenshtein", 0.4)
     w_ts = weights.get("token_sort", 0.2)
+    # Poids par defaut NUL : ajouter une metrique au score deplacerait TOUS les
+    # scores d'un coup, donc les seuils calibres, les regles anti-faux positifs
+    # et les cahiers de tests deja homologues. L'exploitant l'active quand il
+    # veut, mesure l'ecart avec le cahier de tests, puis decide.
+    w_tset = weights.get("token_set", 0.0)
 
     # Chaines normalisees identiques : les trois metriques valent 100. Le score
     # est alors exactement (w_jw + w_dl + w_ts) * 100 — quels que soient les
     # poids, meme s'ils ne somment pas a 1. Frequent au criblage d'un univers
     # (beaucoup de clients derivent d'une fiche listee) : evite trois calculs.
     if s1_norm == s2_norm:
-        return (w_jw + w_dl + w_ts) * 100.0
+        return (w_jw + w_dl + w_ts + w_tset) * 100.0
 
     jw = jaro_wink_similarity(s1_norm, s2_norm)
     dl = damerau_levenshtein_similarity(s1_norm, s2_norm)
     ts = token_sort_similarity(s1_norm, s2_norm)
+    # Non calculee tant qu'elle ne pese pas : au criblage d'un univers entier,
+    # une metrique inutile coute autant que les autres.
+    tset = token_set_similarity(s1_norm, s2_norm) if w_tset else 0.0
 
-    return (w_jw * jw) + (w_dl * dl) + (w_ts * ts)
+    return (w_jw * jw) + (w_dl * dl) + (w_ts * ts) + (w_tset * tset)
 
 
 # ------------------ HARD MATCH SÉQUENCE ------------------
