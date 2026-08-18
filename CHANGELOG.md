@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — page load went from 670 KB to 7.4 KB
+Startup eagerly loaded **six screens the user is not looking at** — and the application **re-downloads every one of them** when its tab is opened. The spend bought nothing.
+
+Measured against production:
+
+| Preloaded screen | Weight |
+|---|---:|
+| Listed records (`/api/watchlist/db`) | 247 KB |
+| Snapshots | 267 KB |
+| Audit trail | 132 KB |
+| Pending approvals | 11 KB |
+| Alerts + whitelist | 4 KB |
+| **Total invisible** | **661 KB of 670 KB** |
+
+Startup now loads only what the home screen shows plus the sidebar's own state: home dashboard, active-hash badge, configuration, ingestion settings, counters. **7.4 KB — 98.9% less.**
+
+The removal is only legitimate because the other half holds: every screen still loads when its tab opens. `switchSubTab` covers the sub-tabs, `switchTab` covers entering a section, and a deep link goes through **both** (`applyHashRoute` calls them in turn), so `#watchlist-mgmt/watchlist-review` still arrives populated. The approval badge was checked separately: it comes from the lightweight counters endpoint, not from the approval screen, which is what makes dropping that preload safe.
+
+Both halves are pinned by tests, per screen: none of the six is called at page load, and each one *is* reachable from the tab routing. A future preload — or a screen removed from the routing — fails there.
+
+
 ### Fixed — a manually added listed person was invisible to the worker daemon
 Found while hunting for optimisations, and more serious than what was being looked for.
 

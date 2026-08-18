@@ -824,18 +824,22 @@ document.addEventListener("DOMContentLoaded", () => {
  attachTableFilters("quality-segments-table", { search: true, searchPlaceholder: "Filtrer les segments…" });
  attachTableFilters("mining-table", { search: true, searchPlaceholder: "Filtrer les équivalences…", columns: [{ index: 1, label: "Champ" }, { index: 2, label: "Source" }] });
  attachTableFilters("fprules-table", { search: true, searchPlaceholder: "Filtrer les règles…", columns: [{ index: 2, label: "Statut" }] });
- // Initial data loading — l'accueil d'abord (onglet par défaut)
+ // Chargement initial : UNIQUEMENT ce que l'écran d'accueil affiche, plus
+ // l'état de la barre latérale. Les écrans des autres onglets ne sont PAS
+ // préchargés — ils se chargent à l'ouverture de leur onglet (switchTab et
+ // switchSubTab s'en chargent, y compris pour un lien profond, puisque
+ // applyHashRoute passe par les deux).
+ //
+ // Mesuré en production : ce préchargement téléchargeait 661 Ko d'écrans
+ // invisibles — la base des listés (247 Ko), le journal d'audit (132 Ko),
+ // les snapshots (267 Ko), l'homologation, les alertes, la liste blanche —
+ // sur 670 Ko de chargement total. Et tout était RETÉLÉCHARGÉ à l'ouverture
+ // de l'onglet correspondant : la dépense n'achetait donc rien.
  fetchHomeDashboard();
- fetchWatchlist();
- fetchWatchlistHash();
- fetchAuditHistory();
- fetchSnapshots();
- fetchConfig();
- fetchIngestionSettings();
- fetchPendingReviews();
- fetchAlerts("SCREENING");
- fetchWhitelist();
- refreshSidebarCounters();
+ fetchWatchlistHash();        // badge « Hash Actif » de la barre latérale
+ fetchConfig();               // paramétrage lu par plusieurs rendus
+ fetchIngestionSettings();    // mode homologation : bandeau et libellés
+ refreshSidebarCounters();    // pastilles (dont le compte d'homologations)
  // Badges vivants : compteurs légers rafraîchis toutes les 60 s
  setInterval(refreshSidebarCounters, 60_000);
  // Supervision du démon travailleur : bandeau si arrêté (prod « worker »)
