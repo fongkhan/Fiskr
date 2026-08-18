@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — the snapshots list carried 2.57 MB of backtest reports it never showed
+Measured against production, and load-independent unlike a timing: `GET /api/snapshots` returned **2.84 MB**, of which **95.1% was `backtest_report`** — 2.57 MB for 518 snapshots, re-downloaded on **every page load**, since the endpoint returned whole ORM objects and FastAPI serialised everything on them.
+
+No screen reads it from that list. The snapshots table uses `uploaded_at`, `file_name`, `file_hash`, `file_type`, `status`, `record_count`, `processed_count` and `phase`; the three places in the frontend that render a report fetch it from a detail endpoint. The list now serves an explicit set of columns plus `backtest_verdict` and `backtest_gap_pct`, which is all the status badge needs — under 150 KB, with **no frontend change**. Unknown columns are skipped rather than raising, so a column added later cannot break the list.
+
+Two other payloads were measured and deliberately left alone for now: `/api/sync/reports?limit=25` (581 KB, 98.9% `delta_report`) and `/api/history?limit=25` (138 KB, 97% `config_state` + `decision_tree`). Both feed detail panels that reuse the **already-loaded row** instead of refetching, so lightening the list would break the detail — they need a detail endpoint and a screen change, which is a different kind of work.
+
+A note on method: a first round of timings suggested `/api/counters` at 5.9 s and `/api/watchlist/summary` at 10.4 s. A second round minutes later gave 1.13 s and 1.63 s for the same endpoints. Those numbers were noise, and nothing here rests on them — response *sizes*, unlike timings, do not depend on server load.
+
+### Fixed — a consolidated backtest now says which list caused the gap
+Consolidating the backtest (previous release) had a consequence that was not anticipated: the verdict became a single figure for the whole wave. Observed on the first production run — verdict WARN, gap 13.69%, **nineteen lists covered** — with nothing to say which list was responsible. One backtest per list attributed it implicitly; consolidation lost that.
+
+Every pair (client × listed entity) already carries the list type of the entity that triggered it, so attribution is **exact, never an estimate**. Each covered list now reports its own `new_pairs_count` and `resolved_pairs_count` alongside its delta sizes, and both review screens show the breakdown when more than one list is covered.
+
+Movements attributable to no tested list — a candidate anti-false-positive rule can suppress pairs on lists that are not part of the backtest — are reported separately as `unattributed_pairs` rather than being silently dropped. A test asserts that the attributions plus that remainder sum back exactly to the report's global counts: an attribution that does not add up would be lying by omission.
+
+
 ### Added — approval history: reopen a decision months later
 Approvals left no reviewable trace. The backtest report lives on the snapshot, but its *context* does not survive: the delta of a candidate list reads "against production", and approving the list **makes it production**. After the fact, recomputing would compare the snapshot to itself and return an empty delta — precisely the information worth keeping. One more synchronisation and the baseline is gone for good.
 

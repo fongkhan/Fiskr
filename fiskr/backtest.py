@@ -656,6 +656,25 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     new_keys = [k for k in candidate["pairs"] if k not in current["pairs"]]
     resolved_keys = [k for k in current["pairs"] if k not in candidate["pairs"]]
 
+    # ------- ATTRIBUTION DE L'ECART, LISTE PAR LISTE -------
+    # Un cahier consolide rend UN ecart pour toutes les listes testees. Sans
+    # attribution, le reviseur voit « 13,69 % » et ne sait pas laquelle en est
+    # responsable — la ou un cahier par liste le disait de lui-meme. Chaque
+    # paire porte le type de liste de l'entite qui l'a declenchee : le compte
+    # est donc EXACT, pas une estimation.
+    from collections import Counter
+
+    gagnees = Counter(candidate["pairs"][k].get("list_type") for k in new_keys)
+    perdues = Counter(current["pairs"][k].get("list_type") for k in resolved_keys)
+    types_testes = {s.file_type for s in pendings}
+    # Une regle candidate peut supprimer des paires sur des listes NON testees :
+    # ces mouvements existent, ils ne sont simplement imputables a aucune des
+    # listes du cahier. On les rend a part plutot que de les taire.
+    hors_perimetre = {
+        "new_pairs_count": sum(n for t, n in gagnees.items() if t not in types_testes),
+        "resolved_pairs_count": sum(n for t, n in perdues.items() if t not in types_testes),
+    }
+
     # Ecart relatif du nombre d'alertes (100 % si on part de zero)
     if current["alerts"] == 0:
         gap_pct = 0.0 if candidate["alerts"] == 0 else 100.0
@@ -691,9 +710,14 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         "snapshots": [
             {"snapshot_id": s.snapshot_id, "file_type": s.file_type,
              "delta_sizes": ({k: len(v) for k, v in delta_par_snapshot[s.snapshot_id].items()}
-                             if s.snapshot_id in delta_par_snapshot else None)}
+                             if s.snapshot_id in delta_par_snapshot else None),
+             # Ecart imputable A CETTE liste : sans quoi un cahier consolide
+             # rend un chiffre global que personne ne sait attribuer.
+             "new_pairs_count": gagnees.get(s.file_type, 0),
+             "resolved_pairs_count": perdues.get(s.file_type, 0)}
             for s in pendings
         ],
+        "unattributed_pairs": hors_perimetre,
         # Tracabilite : ce cahier a-t-il reemploye la passe partagee d'un
         # cahier precedent (meme univers, meme panel, meme parametrage) ?
         "shared_pass_reused": shared_reused,
