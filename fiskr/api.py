@@ -8310,6 +8310,136 @@ def _snapshot_summary(db: Session, snap: Snapshot) -> Dict[str, Any]:
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
     }
 
+def _capture_review_record(db: Session, snap: Snapshot, decision: str,
+                           reviewer: str, comment: Optional[str]) -> "ReviewRecord":
+    """
+    Constitue le dossier d'homologation, A APPELER AVANT de changer le statut.
+
+    L'ordre n'est pas un detail : le delta se lit « par rapport a la
+    production », et approuver la liste EN FAIT la production. Appele apres la
+    bascule, ce calcul comparerait le snapshot a lui-meme et figerait un delta
+    vide — exactement l'information qu'on cherche a conserver.
+    """
+    from fiskr.database import ReviewRecord
+
+    production = _latest_ready_snapshot(db, snap.file_type)
+    production_id = production.snapshot_id if production else None
+
+    stored = _stored_sync_delta(db, snap.snapshot_id, production_id)
+    if stored is not None:
+        delta_summary, delta_details = stored.get("summary"), stored
+    else:
+        # Import manuel, ou production changee depuis la synchronisation : on
+        # recalcule pour que le dossier porte le vrai ecart, pas un trou.
+        old_entities = _snapshot_entity_dicts(db, production_id) if production_id else []
+        new_entities = _snapshot_entity_dicts(db, snap.snapshot_id)
+        delta = calculate_delta(old_entities, new_entities, "entity_id")
+        delta_summary, delta_details = delta["summary"], _truncate_delta_details(delta)
+
+    excluded_count = db.query(WatchlistEntity).filter(
+        WatchlistEntity.snapshot_id == snap.snapshot_id,
+        WatchlistEntity.excluded.is_(True)
+    ).count()
+
+    record = ReviewRecord(
+        snapshot_id=snap.snapshot_id, file_type=snap.file_type,
+        file_name=snap.file_name, decision=decision, decided_by=reviewer,
+        decided_at=datetime.utcnow(), comment=(comment or "").strip() or None,
+        production_snapshot_id=production_id, record_count=snap.record_count,
+        excluded_count=excluded_count,
+        delta_summary=delta_summary, delta_details=delta_details,
+        backtest_report=snap.backtest_report, backtest_at=snap.backtest_at,
+        backtest_by=snap.backtest_by,
+    )
+    db.add(record)
+    return record
+
+
+def _review_record_row(record) -> Dict[str, Any]:
+    """Ligne d'historique : de quoi decider quoi rouvrir, sans charger le detail."""
+    summary = record.delta_summary or {}
+    report = record.backtest_report or {}
+    return {
+        "id": record.id,
+        "snapshot_id": record.snapshot_id,
+        "file_type": record.file_type,
+        "file_name": record.file_name,
+        "decision": record.decision,
+        "decided_by": record.decided_by,
+        "decided_at": record.decided_at.isoformat() if record.decided_at else None,
+        "comment": record.comment,
+        "record_count": record.record_count,
+        "excluded_count": record.excluded_count,
+        "delta_summary": summary,
+        "backtest_verdict": report.get("verdict"),
+        "backtest_gap_pct": report.get("gap_pct"),
+        "has_backtest": bool(report),
+    }
+
+
+@app.get("/api/review/history")
+async def list_review_history(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    file_type: Optional[str] = Query(None),
+    decision: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Historique des homologations : ce qui a ete decide, par qui, sur quelle base.
+
+    Les filtres portent COTE SERVEUR : un filtre applique au navigateur ne
+    verrait que la page affichee, alors qu'une recherche d'audit porte sur tout
+    l'historique.
+    """
+    from fiskr.database import ReviewRecord
+
+    query = db.query(ReviewRecord)
+    if file_type:
+        query = query.filter(ReviewRecord.file_type == file_type.strip().upper())
+    if decision:
+        valeurs = [d.strip().upper() for d in decision.split(",") if d.strip()]
+        if valeurs:
+            query = query.filter(ReviewRecord.decision.in_(valeurs))
+    total = query.count()
+    rows = query.order_by(ReviewRecord.decided_at.desc(), ReviewRecord.id.desc()) \
+                .offset(offset).limit(limit).all()
+    return {"total": total, "limit": limit, "offset": offset,
+            "history": [_review_record_row(r) for r in rows]}
+
+
+@app.get("/api/review/history/{record_id}")
+async def get_review_history_detail(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Dossier complet d'une homologation : delta et cahier de tests TELS QU'ILS
+    ETAIENT au moment de la decision, jamais recalcules.
+    """
+    from fiskr.database import ReviewRecord
+
+    record = db.query(ReviewRecord).filter(ReviewRecord.id == record_id).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dossier d'homologation introuvable.")
+    snap = db.query(Snapshot).filter(
+        Snapshot.snapshot_id == record.snapshot_id).first()
+    return {
+        **_review_record_row(record),
+        "production_snapshot_id": record.production_snapshot_id,
+        "delta_details": record.delta_details,
+        "backtest_report": record.backtest_report,
+        "backtest_at": record.backtest_at.isoformat() if record.backtest_at else None,
+        "backtest_by": record.backtest_by,
+        # Etat ACTUEL du snapshot : une liste approuvee a pu etre remplacee
+        # depuis. Le dossier, lui, ne bouge pas.
+        "snapshot_status": snap.status if snap else None,
+        "snapshot_exists": snap is not None,
+    }
+
+
 @app.get("/api/review/pending")
 async def list_pending_reviews(
     db: Session = Depends(get_db),
@@ -8792,6 +8922,10 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
     # Snapshot de production remplace (pour cibler le re-criblage post-delta)
     previous_prod = _latest_ready_snapshot(db, snap.file_type)
 
+    # Dossier d'homologation constitue AVANT la bascule : ensuite, ce snapshot
+    # EST la production et le delta ne serait plus calculable (voir ReviewRecord).
+    _capture_review_record(db, snap, "APPROVED", reviewer["username"], comment)
+
     snap.status = "READY"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
@@ -8917,6 +9051,9 @@ async def reject_pending_snapshot(
     comment = (payload.comment or "").strip()
     if not comment:
         raise HTTPException(status_code=400, detail="Un commentaire est requis pour rejeter un snapshot.")
+    # Un rejet s'historise autant qu'une approbation : c'est la trace de ce qui
+    # a ete ecarte, et de ce qu'on avait sous les yeux pour l'ecarter.
+    _capture_review_record(db, snap, "REJECTED", reviewer["username"], comment)
     snap.status = "REJECTED"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()

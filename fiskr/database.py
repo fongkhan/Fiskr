@@ -239,6 +239,49 @@ class AuditTrail(Base):
     # jamais reecrit) et sur les decisions sans candidat
     list_type = Column(String(30), nullable=True)
 
+class ReviewRecord(Base):
+    """
+    Dossier d'homologation : ce qui a ete decide, sur quelle base, et pourquoi.
+
+    Pourquoi FIGER plutot que recalculer
+    ------------------------------------
+    Le delta d'une liste candidate se lit « par rapport a la production ». Or
+    approuver la liste EN FAIT la production : la comparaison d'origine devient
+    irreproductible, et un recalcul apres coup comparerait le snapshot a
+    lui-meme. Le rapport du cahier de tests, lui, vit sur le snapshot, mais son
+    contexte (base de comparaison, exclusions posees, verdict au moment de la
+    decision) se perd des la synchronisation suivante.
+
+    Un dossier est donc constitue AU MOMENT DE LA DECISION et n'est plus jamais
+    reecrit : c'est ce qui permet de rouvrir des mois plus tard une
+    homologation et d'y retrouver exactement ce que le reviseur avait sous les
+    yeux. Meme principe que la piste d'audit de criblage.
+    """
+    __tablename__ = "review_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id = Column(String(50), nullable=False, index=True)
+    file_type = Column(String(50), nullable=False, index=True)
+    file_name = Column(String(255), nullable=True)
+    # APPROVED : mis en production · REJECTED : ecarte definitivement
+    decision = Column(String(20), nullable=False, index=True)
+    decided_by = Column(String(100), nullable=True)
+    decided_at = Column(DateTime, default=datetime.utcnow, index=True)
+    comment = Column(Text, nullable=True)
+    # Base de comparaison : la liste qui etait en production a cet instant
+    production_snapshot_id = Column(String(50), nullable=True)
+    record_count = Column(Integer, nullable=True)
+    excluded_count = Column(Integer, default=0)
+    # Delta fige (memes formes que l'ecran d'homologation : resume exact,
+    # details bornes par _truncate_delta_details)
+    delta_summary = Column(JSON, nullable=True)
+    delta_details = Column(JSON, nullable=True)
+    # Cahier de tests tel qu'il etait au moment de la decision
+    backtest_report = Column(JSON, nullable=True)
+    backtest_at = Column(DateTime, nullable=True)
+    backtest_by = Column(String(100), nullable=True)
+
+
 class SyncReport(Base):
     __tablename__ = "sync_reports"
 

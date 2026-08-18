@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — approval history: reopen a decision months later
+Approvals left no reviewable trace. The backtest report lives on the snapshot, but its *context* does not survive: the delta of a candidate list reads "against production", and approving the list **makes it production**. After the fact, recomputing would compare the snapshot to itself and return an empty delta — precisely the information worth keeping. One more synchronisation and the baseline is gone for good.
+
+Every decision — approval **and** rejection — now creates a `ReviewRecord` frozen at the moment it is taken: the delta against the list then in production (summary and bounded details), the backtest report with its verdict, the exclusions applied, the compared-against baseline, the reviewer and their comment. These records are never rewritten, on the same principle as the screening audit trail.
+
+The ordering is the whole point and is pinned by a test: the record is captured **before** the status flips. Captured after, it would freeze an empty delta and the feature would silently record nothing.
+
+`GET /api/review/history` (paginated, filters on decision and list type applied **server-side** — a browser-side filter would only see the displayed page, whereas an audit search covers the whole history) and `GET /api/review/history/{id}` for the full record. A new *Historique* tab under Watchlists lists the decisions and reopens any of them in place, showing delta and backtest as they stood, alongside the snapshot's *current* status — a list approved back then may well have been superseded since.
+
 ### Fixed — the 50% rule ignored aggregate ownership
 `compute_inherited_risk` tested `ownership_pct >= 50` **on a single edge**. Verified by running it rather than by reading it:
 

@@ -212,6 +212,9 @@
  <button id="sub-btn-watchlist-review" class="sub-tab-btn" onclick="switchSubTab('watchlist-mgmt', 'watchlist-review')">
  Homologation <span id="review-pending-badge" class="status-badge warning hidden" style="margin-left: 0.35rem;">0</span>
  </button>
+ <button id="sub-btn-watchlist-history" class="sub-tab-btn" title="Historique des homologations" onclick="switchSubTab('watchlist-mgmt', 'watchlist-history')">
+ Historique
+ </button>
  </div>
 
  <div id="sub-sec-watchlist-active" class="sub-tab-content active">
@@ -914,6 +917,48 @@
  <button class="btn btn-danger" onclick="rejectPendingSnapshot()" style="background: rgba(239, 68, 68, 0.85);"> Rejeter</button>
  </div>
  </div>
+ </div>
+ </div>
+ </div>
+ </div>
+
+ <div id="sub-sec-watchlist-history" class="sub-tab-content hidden">
+ <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="card result-card">
+ <h2>Historique des Homologations</h2>
+ <p class="section-desc">Chaque décision d'homologation — approbation comme rejet — constitue un dossier figé au moment où elle est prise : le delta par rapport à la liste alors en production, le cahier de tests avec son verdict, les exclusions posées, le réviseur et son commentaire. Ces dossiers ne sont jamais réécrits : rouvrir une homologation des mois plus tard montre exactement ce que le réviseur avait sous les yeux, même si la liste a été remplacée dix fois depuis.</p>
+ <div class="filter-bar" style="margin-bottom: 1rem;">
+ <select id="history-decision-filter" onchange="fetchReviewHistory(1)">
+ <option value="">Toutes les décisions</option>
+ <option value="APPROVED">Approuvées</option>
+ <option value="REJECTED">Rejetées</option>
+ </select>
+ <select id="history-type-filter" onchange="fetchReviewHistory(1)">
+ <option value="">Toutes les listes</option>
+ </select>
+ <button class="btn btn-sm btn-secondary" onclick="fetchReviewHistory(1)"><svg class="ui-icon" aria-hidden="true"><use href="#i-refresh"></use></svg> Actualiser</button>
+ <span id="history-count" style="margin-left:auto; color: var(--text-muted); font-size: 0.85rem;"></span>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="review-history-table">
+ <thead>
+ <tr>
+ <th>Décidé le</th>
+ <th>Liste</th>
+ <th>Décision</th>
+ <th>Delta</th>
+ <th>Cahier de tests</th>
+ <th>Réviseur</th>
+ <th>Action</th>
+ </tr>
+ </thead>
+ <tbody><tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Chargement…</td></tr></tbody>
+ </table>
+ </div>
+ <div class="filter-bar" style="margin-top: 1rem;">
+ <button id="history-prev" class="btn btn-sm btn-secondary" onclick="fetchReviewHistory(historyPage - 1)">Précédent</button>
+ <span id="history-page-label" style="color: var(--text-muted); font-size: 0.85rem;"></span>
+ <button id="history-next" class="btn btn-sm btn-secondary" onclick="fetchReviewHistory(historyPage + 1)">Suivant</button>
  </div>
  </div>
  </div>
