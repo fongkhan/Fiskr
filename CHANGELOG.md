@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — the list screen shipped 2.6 KB per row to display a handful of columns
+Measured on production: a page of 100 listed records weighed **255 KB**, i.e. 2 615 bytes each, while the table shows about a dozen columns. The bulk of it — aliases, designation reasons, addresses, identity documents — appears only in the details modal, which is opened on **one** record at a time.
+
+The list now serves only the displayed columns (**392 bytes per record, −85%**) and the modal loads the full record when it is opened, through a new `GET /api/watchlist/db/{id}`. This is the screen used most, and it is paginated, so the saving applies to every page turn.
+
+Two details that make it safe rather than merely smaller:
+
+- **The table must keep everything it reads.** A missing field would render an empty column with no error — the worst kind of failure. A test derives the list of fields the table reads *from the frontend source* and asserts each one is served; adding a column to the table without adding it to the row now fails there.
+- **A record that is already complete is not refetched.** The Ctrl+K palette and the post-edit refresh hand over full records; the modal only fetches when `aliases` is absent, which is exactly what distinguishes a light row.
+
+A routing trap was paid once and is now pinned: declared as `/api/watchlist/db/{id}`, the detail route captured `/api/watchlist/db/fuzzy` — FastAPI read "fuzzy" as an identifier and the fuzzy scan answered 422. The path is explicit (`/entity/{id}`) rather than relying on declaration order, which would have re-set the same trap for the next literal sub-path. Four existing tests caught it, and a fifth now guards it directly.
+
+Provenance fields (`snapshot_id`, `snapshot_uploaded_at`, `snapshot_file_name`, list type, status) stay on the row: no screen reads them, but they are part of this public endpoint's contract and cost about sixty bytes. Removing them would have saved little and broken a consumer not visible from here — it is the per-entity JSON blocks that weigh, and only those moved to the detail.
+
+
 ### Performance — page load went from 670 KB to 7.4 KB
 Startup eagerly loaded **six screens the user is not looking at** — and the application **re-downloads every one of them** when its tab is opened. The spend bought nothing.
 

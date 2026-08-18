@@ -3238,7 +3238,25 @@ function canEditWatchlistEntity(item) {
  return Boolean(item && item.id && item.snapshot_status === "READY" && !item.excluded);
 }
 
-function showWatchlistDetails(item) {
+// Ouvre la modale de détails. La ligne du tableau ne porte QUE les colonnes
+// affichées : le détail complet (alias, motifs de désignation, adresses,
+// documents) se charge ici, pour la fiche qu'on ouvre — au lieu d'être
+// transporté pour les cent lignes de la page (255 Ko contre 38 Ko mesurés).
+// Un item déjà complet (cache moteur, palette Ctrl+K) est affiché tel quel.
+async function showWatchlistDetails(item) {
+ if (item && item.id && item.aliases === undefined) {
+  try {
+   const reponse = await apiFetch(`/api/watchlist/db/entity/${item.id}`);
+   if (reponse.ok) item = await reponse.json();
+  } catch (e) {
+   // Détail indisponible : on affiche ce que la ligne porte plutôt que rien.
+   console.error("Détail de la fiche indisponible :", e);
+  }
+ }
+ renderWatchlistDetails(item);
+}
+
+function renderWatchlistDetails(item) {
  wlDetailsItem = item;
  const modal = document.getElementById("details-modal");
  const title = document.getElementById("modal-title");
@@ -3579,7 +3597,7 @@ function showWatchlistEntityEditForm() {
  ${_editInput("crypto_wallets", "Adresses crypto (DEVISE: adresse ; …)", cryptoWalletsText(item.crypto_wallets), true)}
  </div>
  <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
- <button class="btn-secondary" onclick="showWatchlistDetails(wlDetailsItem)">Annuler</button>
+ <button class="btn-secondary" onclick="renderWatchlistDetails(wlDetailsItem)">Annuler</button>
  <button class="btn-primary" id="edit-ent-save-btn" onclick="saveWatchlistEntityEdits()"> Enregistrer les modifications</button>
  </div>
  `;

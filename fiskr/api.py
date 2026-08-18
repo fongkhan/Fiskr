@@ -3823,6 +3823,39 @@ def _serialize_watchlist_entity(entity: WatchlistEntity, snap: Snapshot) -> Dict
     return d
 
 
+# Colonnes REELLEMENT affichees par le tableau des listes. Le reste — alias,
+# motifs de designation, adresses, documents d'identite — n'apparait que dans
+# la modale de details, ouverte sur une fiche a la fois.
+#
+# Mesure sur la production : la fiche complete pese 2 615 octets, ces colonnes
+# 392. Une page de 100 fiches passe donc de 255 Ko a 38 Ko (-85 %), et la
+# modale lit le detail par GET /api/watchlist/db/{id} au moment ou on l'ouvre.
+_WL_ROW_COLUMNS = (
+    "id", "snapshot_id", "entity_id", "entity_type", "primary_name", "gender",
+    "excluded", "is_deceased", "dates_of_birth", "countries", "imo_number",
+    "lei_number",
+)
+
+
+def _serialize_watchlist_row(entity: WatchlistEntity, snap: Snapshot) -> Dict[str, Any]:
+    """
+    Ligne de tableau : ce qui est affiche, plus la PROVENANCE.
+
+    Les metadonnees de snapshot (type, statut, date, fichier) ne sont lues par
+    aucun ecran, mais elles font partie du contrat de cet endpoint public et ne
+    pesent qu'une soixantaine d'octets par fiche. Les retirer economiserait peu
+    et casserait un consommateur qu'on ne voit pas d'ici ; ce sont les blocs
+    JSON par entite qui pesent, et eux seuls sont deportes vers le detail.
+    """
+    d = {name: getattr(entity, name) for name in _WL_ROW_COLUMNS
+         if hasattr(entity, name)}
+    d["_list_type"] = snap.file_type
+    d["snapshot_status"] = snap.status
+    d["snapshot_uploaded_at"] = snap.uploaded_at.isoformat() if snap.uploaded_at else None
+    d["snapshot_file_name"] = snap.file_name
+    return d
+
+
 # Dates reconnues dans la reference officielle : ISO (YYYY-MM-DD) ou JJ/MM/AAAA
 OFFICIAL_REF_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})")
 
@@ -5119,6 +5152,34 @@ def _wl_scope_query(db: Session, scope: str, list_type: Optional[str]):
     return query
 
 
+# Chemin EXPLICITE (« /entity/ ») et non « /api/watchlist/db/{id} » : cette
+# derniere forme masquait /api/watchlist/db/fuzzy, que FastAPI routait alors
+# vers cette fonction (422 sur un entier invalide). Dependre de l'ordre de
+# declaration aurait retendu le meme piege au prochain sous-chemin litteral.
+@app.get("/api/watchlist/db/entity/{entity_pk}")
+async def get_watchlist_db_entity(
+    entity_pk: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Fiche COMPLETE d'un liste, pour la modale de details.
+
+    Le tableau ne transporte que les colonnes qu'il affiche (voir
+    `_WL_ROW_COLUMNS`) : une page de 100 fiches pesait 255 Ko de champs dont
+    l'ecrasante majorite — alias, motifs de designation, adresses, documents —
+    n'apparait que dans cette modale, ouverte sur UNE fiche a la fois. Le
+    detail se lit donc ici, au moment ou on l'ouvre.
+    """
+    ligne = (db.query(WatchlistEntity, Snapshot)
+               .join(Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id)
+               .filter(WatchlistEntity.id == entity_pk).first())
+    if ligne is None:
+        raise HTTPException(status_code=404, detail="Fiche introuvable.")
+    entity, snap = ligne
+    return _serialize_watchlist_entity(entity, snap)
+
+
 @app.get("/api/watchlist/db")
 async def browse_watchlist_db(
     scope: str = Query("production"),
@@ -5191,7 +5252,7 @@ async def browse_watchlist_db(
             page_rows = scored[(page - 1) * page_size: (page - 1) * page_size + page_size]
             items = []
             for score_value, entity, snap in page_rows:
-                d = _serialize_watchlist_entity(entity, snap)
+                d = _serialize_watchlist_row(entity, snap)
                 d["_fuzzy_score"] = round(score_value, 1)
                 items.append(d)
             return {"total": total, "page": page, "page_size": page_size, "scope": scope,
@@ -5208,7 +5269,7 @@ async def browse_watchlist_db(
         query = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc())
     rows = query.offset((page - 1) * page_size).limit(page_size).all()
 
-    items = [_serialize_watchlist_entity(entity, snap) for entity, snap in rows]
+    items = [_serialize_watchlist_row(entity, snap) for entity, snap in rows]
 
     return {"total": total, "page": page, "page_size": page_size, "scope": scope,
             "match_mode": match_mode, "items": items}
@@ -5284,7 +5345,7 @@ async def scan_watchlist_db_fuzzy(
             pair = by_id.get(ent_id)
             if not pair:
                 continue
-            d = _serialize_watchlist_entity(pair[0], pair[1])
+            d = _serialize_watchlist_row(pair[0], pair[1])
             d["_fuzzy_score"] = round(score_value, 1)
             matches.append(d)
 

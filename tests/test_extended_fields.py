@@ -372,7 +372,11 @@ def _upload_extended_entity(client, name, **extended):
     assert response.status_code == 200, response.text
     found = client.get("/api/watchlist/db", params={"search": name}).json()
     assert found["total"] == 1
-    return found["items"][0]
+    # La LISTE ne transporte que les colonnes affichees (voir _WL_ROW_COLUMNS).
+    # Ces tests portent sur les colonnes ETENDUES, qui sont du detail : on relit
+    # la fiche complete, exactement comme le fait la modale du frontal.
+    return client.get(
+        f"/api/watchlist/db/entity/{found['items'][0]['id']}").json()
 
 
 def test_csv_ingestion_extended_columns_and_field_search(client):
