@@ -82,7 +82,11 @@ def _upload_entity(client, name, official_reference=None):
     assert response.status_code == 200, response.text
     found = client.get("/api/watchlist/db", params={"search": name}).json()
     assert found["total"] == 1
-    item = found["items"][0]
+    ligne = found["items"][0]
+    # La LISTE ne transporte que les colonnes affichees (voir _WL_ROW_COLUMNS) ;
+    # ces tests portent sur des champs de detail — checksum, colonnes etendues.
+    # On relit donc la fiche complete, ce que fait aussi la modale du frontal.
+    item = client.get(f"/api/watchlist/db/entity/{ligne['id']}").json()
     return item["id"], item
 
 

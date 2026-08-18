@@ -403,7 +403,12 @@ def test_end_to_end_upload_then_screen(api):
     # La fiche est consultable et porte sa base legale suisse
     found = api.get("/api/watchlist/db", params={"search": f"IVANOV{marker}"}).json()
     assert found["total"] >= 1
-    entity = found["items"][0]
+    ligne = found["items"][0]
+    # La reference officielle est un champ de DETAIL : la liste ne transporte
+    # plus que les colonnes affichees (voir _WL_ROW_COLUMNS). Ce que ce test
+    # verifie — l'ingestion SECO renseigne bien la reference — se lit donc sur
+    # la fiche complete.
+    entity = api.get(f"/api/watchlist/db/entity/{ligne['id']}").json()
     assert "RS 946.231.176.72" in (entity.get("official_reference") or "")
 
     result = api.post("/api/screen", json={
