@@ -246,6 +246,15 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                     company = entity.get("client_company_name", "") or ""
                     if company.strip():
                         names.append(company)
+                # Alias du client : sans cle de blocking sur l'alias, la paire
+                # ne serait JAMAIS candidate et le scoring ne le verrait pas.
+                # Meme capacite que le scoring : couper l'une coupe l'autre, et
+                # l'index reste coherent avec la sonde.
+                if caps.is_active(caps.CAP_NAMES_ALIASES_CLIENT, channel):
+                    for alias in (entity.get("client_aliases")
+                                  or entity.get("aliases") or []):
+                        if alias and str(alias).strip():
+                            names.append(str(alias))
             else:
                 primary_name = entity.get("primary_name", "") or ""
                 if primary_name.strip():

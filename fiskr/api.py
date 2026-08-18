@@ -1219,6 +1219,9 @@ class ScreenClientRequest(BaseModel):
     client_first_name: Optional[str] = Field(None, json_schema_extra={"example": "Vladimir"})
     client_last_name: Optional[str] = Field(None, json_schema_extra={"example": "Putin"})
     client_maiden_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+    # Denominations alternatives : criblees comme le nom principal
+    client_aliases: Optional[List[str]] = Field(
+        None, json_schema_extra={"example": ["Vladimir Poutine"]})
     client_company_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
     client_dob: Optional[str] = Field(None, json_schema_extra={"example": "1952-10-07"})
     client_gender: Optional[str] = Field("U", json_schema_extra={"example": "M"})
@@ -3317,6 +3320,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     client_first_name=item.get("client_first_name"),
                     client_last_name=item.get("client_last_name"),
                     client_maiden_name=item.get("client_maiden_name"),
+                    client_aliases=_client_alias_list(item),
                     client_company_name=item.get("client_company_name"),
                     client_dob=item.get("client_dob"),
                     client_gender=report["resolved_gender"],
@@ -4471,6 +4475,32 @@ async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)
 
 BATCH_MAX_ROWS = 20000
 
+def _client_alias_list(source) -> Optional[List[str]]:
+    """
+    Alias d'un profil client, quelle que soit la porte d'entree.
+
+    Accepte une liste (API, webhook) ou une chaine separee par « ; » ou « , »
+    (import CSV). Rend None plutot qu'une liste vide : une colonne absente ne
+    doit pas se distinguer d'une colonne vide en base.
+    """
+    brut = None
+    for cle in ("client_aliases", "aliases"):
+        if isinstance(source, dict) and source.get(cle):
+            brut = source.get(cle)
+            break
+    if not brut:
+        return None
+    if isinstance(brut, str):
+        separateur = ";" if ";" in brut else ","
+        valeurs = [a.strip() for a in brut.split(separateur)]
+    elif isinstance(brut, (list, tuple)):
+        valeurs = [str(a).strip() for a in brut]
+    else:
+        return None
+    valeurs = [a for a in valeurs if a]
+    return valeurs or None
+
+
 def _batch_row_to_profile(row: Dict[str, str]) -> Dict[str, Any]:
     """Ligne CSV -> profil de criblage (memes colonnes que CLIENT_BASE)."""
     def val(*keys):
@@ -4490,6 +4520,8 @@ def _batch_row_to_profile(row: Dict[str, str]) -> Dict[str, Any]:
         "client_first_name": val("client_first_name", "first_name") or "",
         "client_last_name": val("client_last_name", "last_name") or "",
         "client_maiden_name": val("client_maiden_name", "maiden_name") or "",
+        "client_aliases": _client_alias_list(
+            {"client_aliases": row.get("client_aliases") or row.get("aliases")}),
         "client_company_name": val("client_company_name", "company_name", "name") or "",
         "client_dob": val("client_dob", "dob", "birth_date"),
         "client_gender": val("client_gender", "gender") or "U",

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — client aliases were screened by the engine, but no door let them in
+The question was whether screening uses aliases. Answer, measured rather than assumed:
+
+| | Blocking | Scoring |
+|---|---|---|
+| Alias of the **listed** record | yes | yes |
+| Alias of the **client** | **no** | yes |
+
+So the case first asked about — a listed record whose *alias* is "Vladimir Putin" against a client named "Vladimir Putin" — already worked end to end, and still scores 90/ALERT. The missing half was the other direction: `fiskr/scoring.py` reads `client["aliases"]`, but **no entry path could carry them** — no column on `ClientEntity`, no field on the screening request, no column recognised at import. The branch was dead code.
+
+`client_aliases` now exists and crosses every door: CSV import of the client referential (separated by `;` or `,`), batch campaign, direct API call, webhook, and re-screening — which picks it up for free since it copies every column.
+
+**The part that mattered more than the field itself**: an alias now produces a **blocking key**. Without it the pair is never a candidate, so the scoring — which would have handled it — never sees it. An alias accepted into the database and silently ignored at screening time would be worse than refusing it. Blocking and scoring are commanded by the same capability, so cutting it cuts both and the index stays consistent with the probe; a test asserts exactly that.
+
+Aliases on the listed side remain **high-priority only**, unchanged: weak aliases are the classic source of false positives, and that arbitration is not modified here.
+
+
 ### Added — token-set similarity, for the case the engine could not see
 `token_sort` fixes token **order**, not **inclusion**. A sanctions list carries long names — Russian patronymics, Spanish double surnames, Arabic filiation — where the client referential keeps only part. Measured on the engine, with **no contextual data** (no date of birth, no gender, no country — the common shape of a listed record, where the decision then rests on the name alone):
 
