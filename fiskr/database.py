@@ -166,6 +166,12 @@ class ClientEntity(Base):
     client_first_name = Column(String(100), nullable=True)
     client_last_name = Column(String(100), nullable=True)
     client_maiden_name = Column(String(100), nullable=True)
+    # Denominations alternatives declarees au referentiel : nom d'usage, nom de
+    # scene, translitteration differente, ancienne raison sociale. Le moteur les
+    # criblait deja s'il les recevait (fiskr/scoring.py), mais AUCUN chemin
+    # d'entree ne permettait de les porter : la moitie cliente de la
+    # correspondance par alias etait donc inatteignable.
+    client_aliases = Column(JSON, nullable=True)
     client_company_name = Column(String(1000), nullable=True)
     client_dob = Column(String(50), nullable=True)
     client_gender = Column(String(5), default="U")

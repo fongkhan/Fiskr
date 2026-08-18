@@ -51,6 +51,111 @@ def _equivalence_keys(word: str) -> Set[str]:
     return keys
 
 
+# ------------------ CHAMPS UTILISABLES EN CLE DE BLOCKING ------------------
+#
+# Une composante de cle doit se calculer DES DEUX COTES — profil client et
+# fiche listee — sinon la cle produite ne se rencontre jamais et le candidat
+# est perdu en silence. Chaque entree porte donc les deux extracteurs.
+#
+# JOKER : un champ absent rend `None`, traduit en « * ». La sonde interroge
+# alors AUSSI les variantes ou ce champ est joker (voir lookup_blocking_keys),
+# faute de quoi ajouter un champ ferait disparaitre toute fiche listee qui ne
+# le renseigne pas — c'est-a-dire l'essentiel des listes officielles.
+
+FIELD_WILDCARD = "*"
+
+
+def _premier(valeurs) -> str:
+    for v in (valeurs or []):
+        if v and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def _annee(valeur: str) -> str:
+    """Annee d'une date, quel que soit le format (les listes publient des
+    dates partielles : « 1960 », « 1960-00-00 », « 03/05/1960 »)."""
+    trouve = re.search(r"(1[89]\d{2}|20\d{2})", str(valeur or ""))
+    return trouve.group(1) if trouve else ""
+
+
+def _alphanum(valeur: str) -> str:
+    """Identifiants : on ne compare que les caracteres significatifs — un IBAN
+    ecrit avec des espaces et le meme sans espaces doivent se rencontrer."""
+    return re.sub(r"[^A-Z0-9]", "", str(valeur or "").upper())
+
+
+def _mot_normalise(valeur: str) -> str:
+    return strip_accents_for_matching(str(valeur or "").strip()).upper()
+
+
+# nom -> (libelle, extracteur client, extracteur fiche listee)
+BLOCKING_FIELDS = {
+    "DOB_YEAR": (
+        "Année de naissance",
+        lambda e: _annee(e.get("client_dob")),
+        lambda e: _annee(_premier(e.get("dates_of_birth"))),
+    ),
+    "GENDER": (
+        "Genre",
+        lambda e: (e.get("client_gender") or "").strip().upper()[:1],
+        lambda e: (e.get("gender") or "").strip().upper()[:1],
+    ),
+    "PLACE_OF_BIRTH": (
+        "Lieu de naissance",
+        lambda e: _mot_normalise(e.get("client_place_of_birth")),
+        lambda e: _mot_normalise(e.get("place_of_birth")),
+    ),
+    "CITY": (
+        "Ville",
+        lambda e: _mot_normalise(e.get("client_city")),
+        lambda e: _mot_normalise(e.get("city")),
+    ),
+    "TAX_ID": (
+        "Identifiant fiscal",
+        lambda e: _alphanum(e.get("client_tax_id")),
+        lambda e: _alphanum(e.get("tax_id")),
+    ),
+    "LEI": (
+        "Identifiant LEI",
+        lambda e: _alphanum(e.get("client_lei_number")),
+        lambda e: _alphanum(e.get("lei_number")),
+    ),
+    "BIC": (
+        "Code BIC/SWIFT",
+        lambda e: _alphanum(e.get("client_bic")),
+        lambda e: _alphanum(e.get("bic_swift")),
+    ),
+    "IBAN": (
+        "IBAN",
+        lambda e: _alphanum(e.get("client_iban")),
+        lambda e: _alphanum(e.get("iban")),
+    ),
+    "IMO": (
+        "Numéro IMO (navire)",
+        lambda e: _alphanum(e.get("client_imo_number")),
+        lambda e: _alphanum(e.get("imo_number")),
+    ),
+    "NATIONAL_REGISTRY": (
+        "Identifiant de registre national",
+        lambda e: _alphanum(_premier(e.get("client_national_registry_ids"))),
+        lambda e: _alphanum(_premier(e.get("national_registry_ids"))),
+    ),
+}
+
+
+def field_component_value(item: str, entity: dict, is_client: bool) -> str:
+    """Valeur de blocking d'un champ, ou le joker si le champ est absent."""
+    if entity.get(f"__joker_{item}"):
+        return FIELD_WILDCARD  # variante de sonde : ce champ est jokerise
+    _libelle, cote_client, cote_liste = BLOCKING_FIELDS[item]
+    try:
+        valeur = cote_client(entity) if is_client else cote_liste(entity)
+    except Exception:
+        valeur = ""
+    return valeur if valeur else FIELD_WILDCARD
+
+
 def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
     """
     Generates a set of blocking keys for an entity based on the configured layout.
@@ -117,6 +222,12 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                 else:
                     components_values[item] = ["XX"]
                     
+        elif item in BLOCKING_FIELDS:
+            # Champ libre : sa valeur, ou le joker s'il est absent. Le joker
+            # est ce qui empeche un champ ajoute de faire disparaitre toutes
+            # les fiches listees qui ne le renseignent pas.
+            components_values[item] = [field_component_value(item, entity, is_client)]
+
         elif item == "PHONETIC_FIRST":
             names = []
             if is_client:
@@ -135,6 +246,15 @@ def generate_blocking_keys(entity: dict, config: dict) -> Set[str]:
                     company = entity.get("client_company_name", "") or ""
                     if company.strip():
                         names.append(company)
+                # Alias du client : sans cle de blocking sur l'alias, la paire
+                # ne serait JAMAIS candidate et le scoring ne le verrait pas.
+                # Meme capacite que le scoring : couper l'une coupe l'autre, et
+                # l'index reste coherent avec la sonde.
+                if caps.is_active(caps.CAP_NAMES_ALIASES_CLIENT, channel):
+                    for alias in (entity.get("client_aliases")
+                                  or entity.get("aliases") or []):
+                        if alias and str(alias).strip():
+                            names.append(str(alias))
             else:
                 primary_name = entity.get("primary_name", "") or ""
                 if primary_name.strip():
@@ -272,6 +392,24 @@ def lookup_blocking_keys(entity: dict, config: dict) -> Set[str]:
     blocking_cfg = config.get("blocking", {}) or {}
     layout = blocking_cfg.get(
         "custom_key_layout", ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"])
+
+    # --- Jokers des composantes de CHAMP ---
+    # Une fiche listee qui ne renseigne pas le champ porte le joker. Sans
+    # interroger aussi les variantes jokerisees, ajouter « Année de naissance »
+    # ferait perdre toutes les fiches sans date — soit l'essentiel des listes
+    # officielles. On interroge donc toutes les combinaisons de jokers : un
+    # meme criblage doit atteindre une fiche a qui il manque n'importe quel
+    # sous-ensemble de ces champs.
+    champs = [c for c in layout if c in BLOCKING_FIELDS]
+    if champs:
+        from itertools import combinations
+        for taille in range(1, len(champs) + 1):
+            for jokerises in combinations(champs, taille):
+                variante = dict(entity)
+                for item in jokerises:
+                    variante[f"__joker_{item}"] = True
+                keys |= generate_blocking_keys(variante, config)
+
     if "COUNTRY_ISO" not in layout:
         return keys
     # Deux interrupteurs, et le plus restrictif gagne : le reglage de fichier

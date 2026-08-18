@@ -154,7 +154,24 @@ SETTING_WHITELIST_EXPIRY_NOTIFIED = "notifications.whitelist_expiry_notified"
 SETTING_QUALITY_MIN_SCORE = "quality.min_score_pct"
 SETTING_QUALITY_LAST = "quality.last_report"
 
-BLOCKING_COMPONENTS = ("COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST")
+# Composantes historiques, puis TOUS les champs utilisables en cle (registre
+# fiskr/blocking.py, derive : ajouter un champ la-bas suffit a le proposer ici).
+_BLOCKING_CORE_COMPONENTS = ("COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST")
+
+
+def _field_components() -> tuple:
+    from fiskr.blocking import BLOCKING_FIELDS
+    return tuple(BLOCKING_FIELDS)
+
+
+BLOCKING_COMPONENTS = _BLOCKING_CORE_COMPONENTS + _field_components()
+
+# Chaque composante de champ AJOUTEE double le nombre de sondes (il faut
+# interroger la variante ou elle est jokerisee, sans quoi une fiche listee qui
+# ne renseigne pas ce champ devient inatteignable). Au-dela de trois, le
+# criblage paierait plus de huit sondes par client pour un gain de selectivite
+# qui, lui, ne double pas. Le plafond est explicite plutot que subi.
+MAX_BLOCKING_FIELDS = 3
 DEFAULT_FILTERING_LAYOUT = ["PHONETIC_FIRST"]
 
 
@@ -272,11 +289,11 @@ def auto_backtest_panel(db):
 
 
 def _valid_layout(value) -> bool:
-    return (
-        isinstance(value, list) and len(value) > 0
-        and all(isinstance(c, str) and c in BLOCKING_COMPONENTS for c in value)
-        and len(set(value)) == len(value)
-    )
+    if not (isinstance(value, list) and len(value) > 0
+            and all(isinstance(c, str) and c in BLOCKING_COMPONENTS for c in value)
+            and len(set(value)) == len(value)):
+        return False
+    return len([c for c in value if c in _field_components()]) <= MAX_BLOCKING_FIELDS
 
 
 def blocking_layout_with_source(db, channel: str) -> Dict[str, Any]:

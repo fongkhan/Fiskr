@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — client aliases were screened by the engine, but no door let them in
+The question was whether screening uses aliases. Answer, measured rather than assumed:
+
+| | Blocking | Scoring |
+|---|---|---|
+| Alias of the **listed** record | yes | yes |
+| Alias of the **client** | **no** | yes |
+
+So the case first asked about — a listed record whose *alias* is "Vladimir Putin" against a client named "Vladimir Putin" — already worked end to end, and still scores 90/ALERT. The missing half was the other direction: `fiskr/scoring.py` reads `client["aliases"]`, but **no entry path could carry them** — no column on `ClientEntity`, no field on the screening request, no column recognised at import. The branch was dead code.
+
+`client_aliases` now exists and crosses every door: CSV import of the client referential (separated by `;` or `,`), batch campaign, direct API call, webhook, and re-screening — which picks it up for free since it copies every column.
+
+**The part that mattered more than the field itself**: an alias now produces a **blocking key**. Without it the pair is never a candidate, so the scoring — which would have handled it — never sees it. An alias accepted into the database and silently ignored at screening time would be worse than refusing it. Blocking and scoring are commanded by the same capability, so cutting it cuts both and the index stays consistent with the probe; a test asserts exactly that.
+
+Aliases on the listed side remain **high-priority only**, unchanged: weak aliases are the classic source of false positives, and that arbitration is not modified here.
+
+
+### Added — token-set similarity, for the case the engine could not see
+`token_sort` fixes token **order**, not **inclusion**. A sanctions list carries long names — Russian patronymics, Spanish double surnames, Arabic filiation — where the client referential keeps only part. Measured on the engine, with **no contextual data** (no date of birth, no gender, no country — the common shape of a listed record, where the decision then rests on the name alone):
+
+```
+Vladimir Putin      vs Vladimir Vladimirovich Putin      60.6
+Igor Sechin         vs Sechin Igor Ivanovich             63.2
+Maria Carmen Lopez  vs Maria del Carmen Lopez Hernandez  63.9
+```
+
+All under the 75 cut-off: the same person did not raise an alert. **Correction to a first reading of my own measurements**: with matching date of birth and nationality, the contextual adjustments rescue every one of those pairs (92 to 99) — the weakness is real but bounded to records without context, which is precisely where a list is weakest.
+
+`token_set_similarity` compares the token intersection against both full sets and keeps the best of the three, so a name entirely contained in the other scores 100. Sweeping its weight over 15 pairs (8 same person, 7 different people):
+
+| Weight | Same person found | Different people alerted |
+|---:|---:|---:|
+| 0.0 | 1/8 | 4/7 |
+| 0.2 | 4/8 | 4/7 |
+| **0.4** | **7/8** | **4/7** |
+
+Detection goes from 1/8 to 7/8 **with no added noise on this set**. The set is mine, not production data: the real answer comes from running the backtest against the 500-client panel and the live referential, which is what it exists for.
+
+**The default weight is zero.** Adding a metric to the score would shift every score at once — therefore the calibrated thresholds, the anti-false-positive rules and the backtests already approved. A compliance engine does not change behaviour on the occasion of an update; the operator enables it, measures the gap with a backtest, then decides. A test asserts the neutrality of the default.
+
+### Added — every field can now be part of the blocking key
+Blocking offered three components (country, entity type, name phonetics). All fields are now available: year of birth, gender, place of birth, city, tax id, LEI, BIC, IBAN, IMO, national registry — thirteen components in total, derived from one registry so that adding a field there is enough to offer it in the settings screen.
+
+Two properties make the opening safe rather than merely richer, and both are pinned by tests:
+
+- **Symmetry.** A component must compute on **both** sides — client profile and listed record. One that computed on a single side would produce a key that is never met: the listed party would become unreachable, with no error anywhere. Each registry entry therefore carries both extractors, and a test asserts that every field extracts on both sides and reads the same value for the same person. Identifiers ignore formatting (`FR 123 456 789` and `FR123456789` are one key), and partial dates still yield a year — lists publish `1960`, `1960-00-00`, `circa 1960`.
+- **Wildcards.** A listed record that does not fill the field carries a wildcard, and the probe queries the wildcarded variants too. Without this, adding "year of birth" would lose every record without a date — that is, most of the official lists. Tests cover one missing field and several missing at once.
+
+Because each added field **doubles** the number of probes, the layout accepts at most three of them. The cap is explicit rather than suffered.
+
+
 ### Performance — the list screen shipped 2.6 KB per row to display a handful of columns
 Measured on production: a page of 100 listed records weighed **255 KB**, i.e. 2 615 bytes each, while the table shows about a dozen columns. The bulk of it — aliases, designation reasons, addresses, identity documents — appears only in the details modal, which is opened on **one** record at a time.
 
