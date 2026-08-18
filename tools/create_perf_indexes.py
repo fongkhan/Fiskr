@@ -35,21 +35,38 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fiskr.database import engine, TRIGRAM_SEARCH_INDEXES  # noqa: E402
+from fiskr.database import (engine, TRIGRAM_SEARCH_INDEXES,  # noqa: E402
+                            _PERFORMANCE_INDEXES)
 
-# (nom, instruction). L'ordre compte peu : chaque création est indépendante.
-BROWSE_INDEXES = [
-    ("ix_snapshots_status_type",
-     "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_snapshots_status_type "
-     "ON snapshots (status, file_type)"),
-    ("ix_snapshots_uploaded_at",
-     "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_snapshots_uploaded_at "
-     "ON snapshots (uploaded_at)"),
-    # Index partiel : uniquement les fiches non exclues — le périmètre lu.
-    ("ix_wl_entities_production",
-     "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_wl_entities_production "
-     "ON watchlist_entities (snapshot_id, id) WHERE excluded IS NOT TRUE"),
-]
+
+def browse_indexes():
+    """
+    (nom, instruction) pour CHAQUE index de performance déclaré par le modèle.
+
+    DÉRIVÉ du modèle, jamais recopié. Cette liste était auparavant codée en dur
+    ici et ne couvrait que trois index sur les quinze déclarés. Or le démarrage
+    DIFFÈRE tout index manquant sur une table volumineuse — un CREATE INDEX
+    ordinaire la verrouillerait plusieurs minutes — et renvoie l'exploitant vers
+    cet outil. Un index ajouté au modèle après l'écriture de l'outil n'était donc
+    JAMAIS créé en production, alors que le journal affirmait le contraire.
+    Dériver supprime la divergence à la racine.
+    """
+    from sqlalchemy.schema import CreateIndex
+    from sqlalchemy.dialects import postgresql
+
+    sorties = []
+    for index in _PERFORMANCE_INDEXES:
+        ddl = " ".join(str(CreateIndex(index).compile(
+            dialect=postgresql.dialect())).split())
+        # CONCURRENTLY : aucun verrou exclusif. IF NOT EXISTS : relançable.
+        for prefixe in ("CREATE UNIQUE INDEX ", "CREATE INDEX "):
+            if ddl.startswith(prefixe):
+                ddl = prefixe[:-1] + " CONCURRENTLY IF NOT EXISTS " + ddl[len(prefixe):]
+                break
+        else:  # forme inattendue : on ne devine pas une instruction DDL
+            raise RuntimeError(f"instruction d'index inattendue : {ddl[:60]}")
+        sorties.append((index.name, ddl))
+    return sorties
 
 
 def _open_engine():
@@ -151,7 +168,7 @@ def main() -> int:
               f"démarrage, cet outil ne sert que pour PostgreSQL.")
         return 0
 
-    statements = list(BROWSE_INDEXES)
+    statements = list(browse_indexes())
     trigram_state = None
     if args.search:
         # Constate AVANT d'agir : un hébergeur mutualisé peut simplement ne pas

@@ -8319,11 +8319,15 @@ def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
         )
     return snap
 
-def _snapshot_summary(db: Session, snap: Snapshot) -> Dict[str, Any]:
-    excluded_count = db.query(WatchlistEntity).filter(
-        WatchlistEntity.snapshot_id == snap.snapshot_id,
-        WatchlistEntity.excluded.is_(True)
-    ).count()
+def _snapshot_summary(db: Session, snap: Snapshot,
+                      excluded_count: Optional[int] = None) -> Dict[str, Any]:
+    # `excluded_count` fourni : l'appelant l'a deja compte pour tout un lot
+    # (voir _excluded_counts). Sinon on compte pour ce seul snapshot.
+    if excluded_count is None:
+        excluded_count = db.query(WatchlistEntity).filter(
+            WatchlistEntity.snapshot_id == snap.snapshot_id,
+            WatchlistEntity.excluded.is_(True)
+        ).count()
     return {
         "snapshot_id": snap.snapshot_id,
         "file_type": snap.file_type,
@@ -8494,17 +8498,79 @@ async def list_pending_reviews(
         Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
         Snapshot.status == "PENDING_REVIEW"
     ).order_by(Snapshot.uploaded_at.desc()).all()
+    # Trois lectures GROUPEES, plus une par snapshot. La boucle naive coutait
+    # 3 requetes par ligne — dont un COUNT sur watchlist_entities, 11 millions
+    # de lignes en production. Apres une vague de synchronisations (19 listes en
+    # attente relevees en production), cet ecran demandait donc une soixantaine
+    # de requetes pour afficher dix-neuf lignes.
+    ids = [s.snapshot_id for s in snaps]
+    types = {s.file_type for s in snaps}
+    exclus = _excluded_counts(db, ids)
+    productions = _latest_ready_by_type(db, types)
+    rapports = _stored_sync_deltas(db, ids)
+
     pending = []
     for snap in snaps:
-        row = _snapshot_summary(db, snap)
-        production = _latest_ready_snapshot(db, snap.file_type)
-        stored = _stored_sync_delta(db, snap.snapshot_id,
-                                    production.snapshot_id if production else None)
+        row = _snapshot_summary(db, snap, excluded_count=exclus.get(snap.snapshot_id, 0))
+        production = productions.get(snap.file_type)
+        production_id = production.snapshot_id if production else None
+        rapport = rapports.get(snap.snapshot_id)
+        # MEME regle qu'avant : le delta memorise ne vaut que si sa base de
+        # comparaison est TOUJOURS la production courante.
+        stored = None
+        if rapport is not None and rapport.previous_snapshot_id == production_id:
+            contenu = rapport.delta_report or {}
+            if "summary" in contenu:
+                stored = contenu
         row["delta_summary"] = stored["summary"] if stored else None
         row["delta_available"] = stored is not None
         row["is_first_import"] = production is None
         pending.append(row)
     return {"pending": pending}
+
+
+def _excluded_counts(db: Session, snapshot_ids: List[str]) -> Dict[str, int]:
+    """Nombre de fiches exclues PAR snapshot, en une requete groupee."""
+    if not snapshot_ids:
+        return {}
+    from sqlalchemy import func
+    rows = (db.query(WatchlistEntity.snapshot_id, func.count(WatchlistEntity.id))
+              .filter(WatchlistEntity.snapshot_id.in_(snapshot_ids),
+                      WatchlistEntity.excluded.is_(True))
+              .group_by(WatchlistEntity.snapshot_id).all())
+    return {sid: n for sid, n in rows}
+
+
+def _latest_ready_by_type(db: Session, file_types) -> Dict[str, Snapshot]:
+    """Snapshot en production par type de liste, en une requete.
+
+    Memes regles que `_latest_ready_snapshot` : statut READY, snapshots manuels
+    ecartes, le plus recemment televerse gagne.
+    """
+    types = [t for t in file_types if t]
+    if not types:
+        return {}
+    from fiskr.sync import MANUAL_SNAPSHOT_LIKE
+    rows = (db.query(Snapshot)
+              .filter(Snapshot.file_type.in_(types), Snapshot.status == "READY",
+                      Snapshot.snapshot_id.notlike(MANUAL_SNAPSHOT_LIKE))
+              .order_by(Snapshot.uploaded_at.asc()).all())
+    # Ordre croissant : le dernier ecrit par type est le plus recent — meme
+    # resultat que le `.desc().first()` d'origine, en une seule requete.
+    return {snap.file_type: snap for snap in rows}
+
+
+def _stored_sync_deltas(db: Session, snapshot_ids: List[str]) -> Dict[str, SyncReport]:
+    """Dernier rapport de synchronisation PORTANT UN DELTA, par snapshot."""
+    if not snapshot_ids:
+        return {}
+    rows = (db.query(SyncReport)
+              .filter(SyncReport.snapshot_id.in_(snapshot_ids),
+                      SyncReport.delta_report.isnot(None))
+              .order_by(SyncReport.id.asc()).all())
+    # Ordre croissant : le dernier ecrit par snapshot est le plus recent —
+    # meme resultat que le `.desc().first()` d'origine.
+    return {r.snapshot_id: r for r in rows}
 
 def _stored_sync_delta(db: Session, snapshot_id: str, production_id: Optional[str]):
     """
