@@ -26,6 +26,7 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities, jaro_wink_similarity
 from fiskr.delta import calculate_delta
+from fiskr.tasks import _refresh_production_cache
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
     parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
@@ -3742,7 +3743,13 @@ async def create_watchlist_entity(
     snap = _manual_snapshot_for(db, payload.list_type)
     result = _insert_manual_entity(db, snap, payload)
     db.commit()
-    load_watchlist_cache(db)
+    # Epoque INCREMENTEE, pas seulement le cache local : c'est le seul canal
+    # qui previent les AUTRES processus (les N processus web de Passenger et
+    # surtout le demon travailleur, qui porte les campagnes batch et le
+    # re-criblage). Sans elle, une fiche ajoutee, corrigee ou purgee a la main
+    # restait invisible du demon : un liste saisi manuellement n'etait pas
+    # crible par les campagnes.
+    _refresh_production_cache(db)
     return {
         "message": "Entité ajoutée avec succès.",
         "entity_id": result["entity_id"],
@@ -3786,7 +3793,13 @@ async def create_watchlist_entities_batch(
                              "errors": detail.get("errors") or [detail.get("message", "refusée")]})
     if added:
         db.commit()
-        load_watchlist_cache(db)
+        # Epoque INCREMENTEE, pas seulement le cache local : c'est le seul canal
+        # qui previent les AUTRES processus (les N processus web de Passenger et
+        # surtout le demon travailleur, qui porte les campagnes batch et le
+        # re-criblage). Sans elle, une fiche ajoutee, corrigee ou purgee a la main
+        # restait invisible du demon : un liste saisi manuellement n'etait pas
+        # crible par les campagnes.
+        _refresh_production_cache(db)
     else:
         db.rollback()
     return {
@@ -3984,7 +3997,13 @@ async def patch_watchlist_entity(
     db.commit()
 
     # Les nouvelles valeurs criblent immediatement
-    load_watchlist_cache(db)
+    # Epoque INCREMENTEE, pas seulement le cache local : c'est le seul canal
+    # qui previent les AUTRES processus (les N processus web de Passenger et
+    # surtout le demon travailleur, qui porte les campagnes batch et le
+    # re-criblage). Sans elle, une fiche ajoutee, corrigee ou purgee a la main
+    # restait invisible du demon : un liste saisi manuellement n'etait pas
+    # crible par les campagnes.
+    _refresh_production_cache(db)
     db.refresh(row)
 
     return {
@@ -5818,7 +5837,13 @@ async def purge_failed_snapshots(
         db.commit()
         
         # Reload cache to ensure in-memory items are in sync
-        load_watchlist_cache(db)
+        # Epoque INCREMENTEE, pas seulement le cache local : c'est le seul canal
+        # qui previent les AUTRES processus (les N processus web de Passenger et
+        # surtout le demon travailleur, qui porte les campagnes batch et le
+        # re-criblage). Sans elle, une fiche ajoutee, corrigee ou purgee a la main
+        # restait invisible du demon : un liste saisi manuellement n'etait pas
+        # crible par les campagnes.
+        _refresh_production_cache(db)
         
         return {
             "message": f"Purge réussie : {deleted_snapshots} snapshot(s), {deleted_watchlist} fiches watchlist, et {deleted_client} fiches client supprimées.",
@@ -6945,7 +6970,10 @@ async def update_ingestion_settings(
             # chargement. Sans rechargement, seule la sonde du client
             # gagnerait ses cles d'equivalence : les deux cotes ne se
             # rencontreraient jamais et le reglage serait sans aucun effet.
-            load_watchlist_cache(db)
+            # Recharger SON cache ne suffit pas : ce reglage change la facon dont
+            # l'index est bati, donc les autres processus (web et demon) doivent le
+            # rebatir aussi. L'epoque est le seul canal qui les previent.
+            _refresh_production_cache(db)
     if payload.resource_mining is not None:
         from fiskr.cron import parse_cron, CronError
 
@@ -7134,7 +7162,10 @@ async def update_blocking_settings(
         _validate(payload.screening_layout, "Layout criblage")
         set_setting(db, SETTING_BLOCKING_SCREENING, list(payload.screening_layout),
                     updated_by=param_user["username"])
-        load_watchlist_cache(db)  # coherence index/sonde immediate
+        # Recharger SON cache ne suffit pas : ce reglage change la facon dont
+        # l'index est bati, donc les autres processus (web et demon) doivent le
+        # rebatir aussi. L'epoque est le seul canal qui les previent.
+        _refresh_production_cache(db)  # coherence index/sonde immediate
         reloaded = True
     if payload.filtering_layout is not None:
         _validate(payload.filtering_layout, "Layout filtrage")
@@ -7254,7 +7285,10 @@ async def update_engine_settings(
     delta = {c: after[c] for c in after if before.get(c) != after[c]}
     reloaded = False
     if delta and payload.channel == caps.CHANNEL_SCREENING:
-        load_watchlist_cache(db)
+        # Recharger SON cache ne suffit pas : ce reglage change la facon dont
+        # l'index est bati, donc les autres processus (web et demon) doivent le
+        # rebatir aussi. L'epoque est le seul canal qui les previent.
+        _refresh_production_cache(db)
         reloaded = True
 
     log_admin_action(
@@ -7386,7 +7420,10 @@ async def reload_resources(
     if index.content_hash != before and resources_active(db):
         # Les classes ont change : les cles d'equivalence de l'index des
         # fiches listees sont perimees, il faut les recalculer
-        load_watchlist_cache(db)
+        # Recharger SON cache ne suffit pas : ce reglage change la facon dont
+        # l'index est bati, donc les autres processus (web et demon) doivent le
+        # rebatir aussi. L'epoque est le seul canal qui les previent.
+        _refresh_production_cache(db)
         reloaded_cache = True
     log_admin_action(db, admin_user["username"], "RESOURCES_RELOADED", target="resources",
                      before={"content_hash": before},
@@ -7626,7 +7663,10 @@ async def decide_learned_equivalence(
         # reconstruit, et le cache de criblage avec lui si un type est actif
         resource_tables.reload_index(db=db)
         if resources_active(db):
-            load_watchlist_cache(db)
+            # Recharger SON cache ne suffit pas : ce reglage change la facon dont
+            # l'index est bati, donc les autres processus (web et demon) doivent le
+            # rebatir aussi. L'epoque est le seul canal qui les previent.
+            _refresh_production_cache(db)
         reloaded = True
     return {
         "message": ("Équivalence appliquée au criblage." if decision == "APPROVE"

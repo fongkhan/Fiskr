@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a manually added listed person was invisible to the worker daemon
+Found while hunting for optimisations, and more serious than what was being looked for.
+
+The engine cache lives in each process's memory. The **epoch** — one integer in the database — is the only invalidation channel between processes: the worker daemon cannot touch a web process's memory, it can only notice a number that changed.
+
+Four endpoints modified the production referential while reloading **only their own** cache: manual addition of a listed entity, batch addition, correction of a record, and retention purge. In production, where Passenger runs several web processes and the daemon carries batch campaigns and re-screening:
+
+> a listed person entered by hand was **not screened against by the daemon's campaigns**, until some synchronisation happened to bump the epoch.
+
+That is a screening miss, not a display lag. All four now go through `_refresh_production_cache`, which bumps the epoch and reloads locally — exactly what the ingestion path already did.
+
+Five settings routes had the same shape (blocking layout, engine capabilities, linguistic resources, learned equivalences, ingestion settings). Their own comments say the index must be rebuilt for the setting to take effect — but they rebuilt only the local one, so two web processes could screen with different engine parameters. They now share the same channel. The reasoning is uniform: **a route that reloads the cache has already decided the cache is stale, and in a multi-process deployment that decision has to be shared.**
+
+Pinned by tests on each path, plus a syntax-tree guard: no writing route may call `load_watchlist_cache` without also going through the shared channel. That guard is what found the five settings routes.
+
+### Measured, and deliberately not changed
+Two investigations that produced negative results, recorded so they are not redone:
+
+- **The write path is sound.** Ingestion looked like one SQL statement per record — until the same measurement on PostgreSQL showed **37 queries for 20 records as for 200**. SQLAlchemy batches inserts properly there; the per-record behaviour was a SQLite artefact of the test environment, not a production problem.
+- **The list-browsing indexes work.** A local PostgreSQL 16 at production proportions (780 k rows, 92% out of production) first showed a `Parallel Seq Scan` on the production-scope count — but that was an unvacuumed bulk load. After `VACUUM ANALYZE` the plan is an **Index Only Scan with zero heap fetches**, 54 ms to count 270 k live rows. The partial index does its job.
+
+
 ### Performance — the approval screen cost three queries per pending list
 Found by counting SQL statements per endpoint at two data sizes — deterministic, unlike a stopwatch, and load-independent. Across nine read endpoints, exactly one grew with the data:
 
