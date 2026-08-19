@@ -3430,19 +3430,81 @@ def _snapshot_list_row(snap: Snapshot) -> Dict[str, Any]:
     return row
 
 
+# Colonnes STRICTEMENT necessaires aux listes deroulantes de comparaison :
+# nom, type et date suffisent a designer un lot. Le reste — hash, compteurs,
+# statut, metadonnees d'homologation — n'y est jamais lu.
+_SNAPSHOT_OPTION_COLUMNS = (Snapshot.snapshot_id, Snapshot.file_type,
+                            Snapshot.file_name, Snapshot.uploaded_at)
+
+
+def _apply_snapshot_filters(query, file_type: Optional[str], status_filter: Optional[str]):
+    """Filtres serveur de l'historique des lots. Portes cote serveur et non
+    cote client : la liste etant paginee, un filtre client ne verrait que la
+    page chargee — il manquerait tout le reste de l'historique."""
+    if file_type:
+        valeurs = [v.strip().upper() for v in file_type.split(",") if v.strip()]
+        if valeurs:
+            query = query.filter(Snapshot.file_type.in_(valeurs))
+    if status_filter:
+        valeurs = [v.strip().upper() for v in status_filter.split(",") if v.strip()]
+        if valeurs:
+            query = query.filter(Snapshot.status.in_(valeurs))
+    return query
+
+
 @app.get("/api/snapshots")
 async def get_snapshots(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    file_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Liste des snapshots charges, SANS les rapports de cahier de tests.
+    Historique PAGINE des lots importes, SANS les rapports de cahier de tests.
 
-    Le detail complet d'un rapport se lit par GET /api/review/snapshots/{id}
-    (liste en attente) ou GET /api/review/history/{id} (decision archivee).
+    L'enveloppe `{total, page, page_size, items}` remplace le vidage complet de
+    la table : la production en comptait 547 pour 282 Ko, et il en nait un par
+    source et par jour — 42 sources. Cette reponse etait rechargee apres chaque
+    import, synchronisation, homologation et purge.
+
+    Filtres serveur `file_type` et `status` (listes separees par des virgules) :
+    la liste etant paginee, un filtre client ne verrait que la page chargee.
+
+    Le detail complet d'un rapport de cahier de tests se lit par
+    GET /api/review/snapshots/{id} (liste en attente) ou
+    GET /api/review/history/{id} (decision archivee).
     """
-    snaps = db.query(Snapshot).order_by(Snapshot.uploaded_at.desc()).all()
-    return [_snapshot_list_row(s) for s in snaps]
+    query = _apply_snapshot_filters(db.query(Snapshot), file_type, status_filter)
+    total = query.count()
+    snaps = (query.order_by(Snapshot.uploaded_at.desc())
+                  .offset((page - 1) * page_size).limit(page_size).all())
+    return {"total": total, "page": page, "page_size": page_size,
+            "items": [_snapshot_list_row(s) for s in snaps]}
+
+
+@app.get("/api/snapshots/options")
+async def get_snapshot_options(
+    file_type: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Lots disponibles pour la comparaison, reduits a ce qu'une liste deroulante
+    affiche : identifiant, type, nom, date.
+
+    Non pagine — a dessein : comparer deux lots suppose de pouvoir choisir
+    n'importe quel couple de l'historique, y compris un lot ancien. C'est
+    justement pourquoi cette liste ne transporte que quatre colonnes.
+    """
+    query = _apply_snapshot_filters(db.query(*_SNAPSHOT_OPTION_COLUMNS), file_type, None)
+    return [
+        {"snapshot_id": sid, "file_type": ftype, "file_name": fname,
+         "uploaded_at": uploaded.isoformat() if uploaded else None}
+        for sid, ftype, fname, uploaded
+        in query.order_by(Snapshot.uploaded_at.desc()).all()
+    ]
 
 @app.post("/api/snapshots/compare")
 async def compare_snapshots(
@@ -4436,13 +4498,46 @@ async def get_watchlist_summary(
     """
     return _production_watchlist_summary(db)
 
+# Nombre de fiches du cache rendues par defaut. Cet endpoint est un point de
+# CONTROLE du cache moteur (« la fiche que je viens de modifier est-elle bien
+# rechargee ? »), pas un moyen de parcourir le referentiel : pour cela il y a
+# GET /api/watchlist/db, pagine et filtrable.
+WATCHLIST_CACHE_PREVIEW = 100
+
+
 @app.get("/api/watchlist")
-async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Returns the active loaded in-memory watchlist."""
+async def get_watchlist(
+    limit: int = Query(WATCHLIST_CACHE_PREVIEW, ge=1, le=1000),
+    entity_id: Optional[str] = Query(None),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Etat du cache de criblage CHARGE EN MEMOIRE par ce processus.
+
+    La reponse est BORNEE. Elle rendait auparavant `watchlist_store` en entier :
+    en production, 895 157 fiches a ~1,8 Ko chacune, soit plus de 1,5 Go
+    serialises en memoire dans le processus web. Un seul appel suffisait a
+    l'abattre — sur un hebergement mutualise, l'application avec.
+
+    `total` reste EXACT et `truncated` dit franchement que la liste est coupee :
+    le chiffre qui sert au controle n'est jamais faux, seul l'echantillon l'est.
+    `entity_id` rend la fiche cachee d'une entite precise, ce que ce controle
+    demande le plus souvent — sans dependre de sa position dans le cache.
+
+    Pour PARCOURIR le referentiel, c'est GET /api/watchlist/db : pagine,
+    filtrable, et lu en base plutot que dans la memoire d'un processus.
+    """
+    if entity_id:
+        cible = (entity_id or "").strip()
+        items = [e for e in watchlist_store if e.get("entity_id") == cible]
+    else:
+        items = watchlist_store[:limit]
     return {
         "version": watchlist_version,
         "hash": watchlist_hash,
-        "items": watchlist_store
+        "total": len(watchlist_store),
+        "truncated": len(items) < len(watchlist_store),
+        "items": items,
     }
 
 # ------------------ CAMPAGNES DE CRIBLAGE BATCH (upload manuel / inbox CFT) ------------------
@@ -12051,7 +12146,46 @@ async def get_compliance_kpis(
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+class _StaticVersionne(StaticFiles):
+    """
+    Ressources statiques, avec la duree de cache que leur URL autorise.
+
+    Les pages referencent leurs ressources par l'EMPREINTE DE LEUR CONTENU
+    (`app.js?v=<hash>`, voir `_serve_page`) : l'URL change des que le fichier
+    change, et jamais autrement. Une reponse versionnee est donc immuable, et
+    le navigateur n'a aucune raison de la revalider.
+
+    Sans en-tete de cache, il la revalidait a CHAQUE chargement de page :
+    mesure en production, trois allers-retours (app.js, i18n.js, styles.css)
+    de 0,66 a 1,01 s chacun, pour recevoir trois 304 vides. Le corps etait
+    deja epargne (le front comprime en brotli : 476 Ko d'app.js passent a
+    167 Ko), mais pas les allers-retours.
+
+    Une requete SANS version — quelqu'un qui ouvre /static/app.js a la main —
+    garde la revalidation : rien ne garantit alors que l'URL suive le contenu.
+    """
+
+    IMMUABLE = "public, max-age=31536000, immutable"
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if _version_demandee(scope.get("query_string") or b""):
+            response.headers["Cache-Control"] = self.IMMUABLE
+        return response
+
+
+def _version_demandee(query_string: bytes) -> bool:
+    """Vrai si la requete porte un parametre `v` non vide — la marque d'une URL
+    generee par `_serve_page`, donc liee au contenu servi."""
+    from urllib.parse import parse_qs
+    try:
+        valeurs = parse_qs(query_string.decode("latin-1")).get("v") or []
+    except Exception:
+        return False
+    return any(v.strip() for v in valeurs)
+
+
+app.mount("/static", _StaticVersionne(directory=str(static_dir)), name="static")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -12062,6 +12196,29 @@ async def serve_favicon():
     return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
 
 _STATIC_VERSION_RE = re.compile(r'(\.(?:js|css))\?v=[^"\']*')
+
+
+def _reponse_page(path, request: "Request") -> HTMLResponse:
+    """
+    Page HTML avec revalidation EXPLICITE et 304 quand rien n'a change.
+
+    Cette page ne peut pas etre mise en cache longuement : c'est elle qui porte
+    la version des ressources. Servie depuis un cache perime, elle referencerait
+    les ANCIENNES — precisement le defaut que l'empreinte de contenu corrige.
+
+    Elle porte donc `no-cache` (revalider toujours) plus un ETag : le
+    navigateur redemande la page a chaque chargement, mais recoit un 304 vide
+    tant que ni le fichier ni la version des ressources n'ont bouge. Son
+    contenu ne depend pas de l'utilisateur — seul l'acces y depend — donc
+    l'empreinte est la meme pour tous.
+    """
+    html = _serve_page(path)
+    empreinte = hashlib.sha256(html.encode("utf-8")).hexdigest()[:16]
+    etag = f'W/"{empreinte}"'
+    entetes = {"Cache-Control": "no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return HTMLResponse(content="", status_code=304, headers=entetes)
+    return HTMLResponse(content=html, status_code=200, headers=entetes)
 
 
 def _serve_page(path) -> str:
@@ -12085,17 +12242,16 @@ def _serve_page(path) -> str:
 
 @app.get("/login", response_class=HTMLResponse)
 @app.get("/login.html", response_class=HTMLResponse)
-async def serve_login():
+async def serve_login(request: Request):
     login_path = static_dir / "login.html"
     if not login_path.exists():
         raise HTTPException(status_code=404, detail="Login page not found")
-    return HTMLResponse(content=_serve_page(login_path), status_code=200)
+    return _reponse_page(login_path, request)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
     token = request.cookies.get("fiskr_access_token")
     if token and decode_access_token(token):
-        return HTMLResponse(content=_serve_page(static_dir / "index.html"),
-                            status_code=200)
+        return _reponse_page(static_dir / "index.html", request)
     return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
 

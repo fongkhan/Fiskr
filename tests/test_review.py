@@ -84,7 +84,17 @@ def _set_approval(client, enabled: bool, **extra):
 
 
 def _watchlist_names(client):
-    data = client.get("/api/watchlist").json()
+    """Noms presents dans le cache de criblage charge en memoire.
+
+    `limit` est porte au maximum : l'endpoint n'en rend qu'un echantillon par
+    defaut (il rendait auparavant le cache ENTIER — plus d'un giga-octet en
+    production), et un « absent » conclu depuis un echantillon ne vaudrait
+    rien. Le controle porte donc aussi sur `truncated`, qui dirait franchement
+    que la reponse ne permet plus de conclure."""
+    data = client.get("/api/watchlist?limit=1000").json()
+    assert not data["truncated"], (
+        f"{data['total']} fiches en cache : l'echantillon ne permet plus de "
+        "conclure a l'absence d'un nom")
     return {item["primary_name"] for item in data["items"]}
 
 

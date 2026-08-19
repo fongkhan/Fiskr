@@ -153,7 +153,9 @@ def test_api_ingest_ssie_snapshot(client, tmp_path):
     assert payload["snapshot_id"]
 
     # Le snapshot SSIE doit apparaitre dans l'historique
-    snaps = client.get("/api/snapshots").json()
+    # L'historique des lots est pagine et filtrable cote serveur : on demande
+    # directement le type cherche, sans dependre de la page ou il atterrit.
+    snaps = client.get("/api/snapshots?file_type=WATCHLIST_SSIE").json()["items"]
     ssie_snaps = [s for s in snaps if s["file_type"] == "WATCHLIST_SSIE"]
     assert any(s["snapshot_id"] == payload["snapshot_id"] and s["status"] == "READY" for s in ssie_snaps)
 

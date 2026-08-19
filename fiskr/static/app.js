@@ -9,6 +9,9 @@ function uiIcon(name) {
 let currentUser = null;
 let auditHistory = [];
 let activeSnapshots = [];
+// Les listes deroulantes de comparaison couvrent tout l'historique : on ne
+// les recharge qu'apres un changement de lot, pas a chaque retour sur l'onglet.
+let optionsDeComparaisonAJour = false;
 let wlCurrentPage = 1;
 const wlItemsPerPage = 100;
 let wlSearchDebounce = null;
@@ -841,18 +844,49 @@ document.addEventListener("DOMContentLoaded", () => {
  fetchIngestionSettings();    // mode homologation : bandeau et libellés
  refreshSidebarCounters();    // pastilles (dont le compte d'homologations)
  // Badges vivants : compteurs légers rafraîchis toutes les 60 s
- setInterval(refreshSidebarCounters, 60_000);
+ setInterval(siVisible(refreshSidebarCounters), 60_000);
  // Supervision du démon travailleur : bandeau si arrêté (prod « worker »)
  refreshWorkerStatus();
- setInterval(refreshWorkerStatus, 30_000);
+ setInterval(siVisible(refreshWorkerStatus), 30_000);
  // Nouvelle version livrée pendant que l'onglet est ouvert : bandeau discret
  // proposant de recharger, au lieu d'un écran qui semble figé.
- setInterval(checkForNewVersion, VERSION_CHECK_MS);
+ setInterval(siVisible(checkForNewVersion), VERSION_CHECK_MS);
+ // Un onglet masqué ne consomme plus rien ; il se remet à jour d'un coup
+ // quand on y revient.
+ document.addEventListener("visibilitychange", auRetourDeLOnglet);
  // Opérations de fond : cadence adaptative (2 s en activité, 8 s au repos).
  // Repeuple aussi la pastille au chargement — une opération lancée avant le
  // rechargement de la page reste suivie.
  startOperationsPolling();
 });
+
+// ---- Sondages de fond : rien ne tourne pendant qu'on ne regarde pas ----
+//
+// Un onglet laissé ouvert interrogeait le serveur sans fin : les opérations en
+// cours toutes les 8 s, le démon toutes les 30 s, les compteurs toutes les
+// 60 s, la version toutes les 5 min. Soit ~460 requêtes par heure et par
+// onglet, pour un écran que personne ne regarde — sur un hébergement mutualisé
+// où chaque requête coûte ~0,15 s de serveur.
+//
+// Masqué, l'onglet ne sonde plus. Il rattrape tout d'un coup au retour, ce qui
+// rend l'information PLUS fraîche au moment où elle est lue qu'un sondage
+// périodique tombé juste avant le retour.
+function ongletMasque() {
+ return typeof document.visibilityState === "string" && document.hidden;
+}
+
+// Emballe une fonction de sondage : elle ne part pas si l'onglet est masqué.
+function siVisible(fn) {
+ return () => { if (!ongletMasque()) fn(); };
+}
+
+function auRetourDeLOnglet() {
+ if (ongletMasque()) return;
+ refreshSidebarCounters();
+ refreshWorkerStatus();
+ checkForNewVersion();
+ fetchActiveOperations();   // reprend aussi la cadence du suivi d'opérations
+}
 
 // Check current logged-in user profile
 async function checkAuthUser() {
@@ -990,8 +1024,27 @@ function rafraichirSiAffichee(sectionId, subTabId, fn) {
  if (vueAffichee(sectionId, subTabId)) fn();
 }
 
+// Historique des lots : page 1 du tableau ET listes deroulantes de
+// comparaison, qui ont leur propre source allegee. La pagination, elle,
+// n'appelle que fetchSnapshots — changer de page ne change pas la liste des
+// lots comparables.
+function rafraichirHistoriqueDesLots() {
+ fetchSnapshots(1);
+ fetchSnapshotOptions();
+}
+
+// Un lot vient d'etre cree, homologue, rejete ou purge : les listes
+// deroulantes de comparaison sont perimees. On les MARQUE perimees au lieu de
+// les retelecharger — elles couvrent tout l'historique (96 Ko en production)
+// et ne changent qu'a ces moments-la, alors que revenir sur l'onglet est
+// frequent.
+function signalerChangementDeLots() {
+ optionsDeComparaisonAJour = false;
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", rafraichirHistoriqueDesLots);
+}
+
 function rafraichirLotsEtWatchlist() {
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  rafraichirSiAffichee("watchlist-mgmt", "watchlist-active", fetchWatchlist);
 }
 
@@ -1049,11 +1102,11 @@ function switchTab(tabId) {
  if (subTabId === "watchlist-active") {
  fetchWatchlist();
  } else if (subTabId === "watchlist-snapshots") {
- fetchSnapshots();
+ rafraichirHistoriqueDesLots();
  }
  } else {
  fetchWatchlist();
- fetchSnapshots();
+ rafraichirHistoriqueDesLots();
  }
  } else if (tabId === "audit") {
  fetchAuditHistory();
@@ -1105,7 +1158,7 @@ function switchSubTab(sectionId, subTabId) {
  if (subTabId === "watchlist-active") {
  fetchWatchlist();
  } else if (subTabId === "watchlist-snapshots") {
- fetchSnapshots();
+ rafraichirHistoriqueDesLots();
  } else if (subTabId === "watchlist-review") {
  // Rupture de flux corrigée : les snapshots en attente d'homologation
  // sont rechargés à chaque ouverture du sous-onglet, plus seulement au load
@@ -1460,27 +1513,67 @@ function toggleAccordion(id) {
  }
 }
 
-// Fetch Snapshots List
-async function fetchSnapshots() {
- try {
- const response = await apiFetch("/api/snapshots");
- activeSnapshots = await response.json();
+// Historique des lots : PAGINE cote serveur.
+//
+// La table en comptait 547 en production pour 282 Ko, et il en nait un par
+// source et par jour — 42 sources. Cette reponse etait rechargee apres chaque
+// import, synchronisation, homologation et purge.
+let snapshotsCurrentPage = 1;
+const SNAPSHOTS_PAR_PAGE = 50;
 
- renderSnapshotsFiltered();
- populateCompareSelects(activeSnapshots);
+async function fetchSnapshots(page = 1) {
+ snapshotsCurrentPage = page;
+ try {
+ const params = new URLSearchParams({
+ page: String(page), page_size: String(SNAPSHOTS_PAR_PAGE) });
+ // Filtre porte cote SERVEUR : la liste etant paginee, un filtre client
+ // ne verrait que la page chargee et manquerait tout le reste.
+ const filterEl = document.getElementById("snapshots-list-filter");
+ if (filterEl && filterEl.value) params.set("file_type", filterEl.value);
+
+ const response = await apiFetch(`/api/snapshots?${params}`);
+ const data = await response.json();
+ activeSnapshots = data.items || [];
+
+ renderSnapshotsTable(activeSnapshots);
+ renderSnapshotsPagination(data.total || 0, data.page || 1,
+ data.page_size || SNAPSHOTS_PAR_PAGE);
  } catch (e) {
  console.error("Error fetching snapshots:", e);
  }
 }
 
-// Filtre client-side de l'historique des snapshots par type de liste
+// Le filtre par type de liste relance la requete, page 1 : il porte sur TOUT
+// l'historique et plus seulement sur les lignes affichees.
 function renderSnapshotsFiltered() {
- const filterEl = document.getElementById("snapshots-list-filter");
- const selected = filterEl ? filterEl.value : "";
- const snaps = selected
- ? activeSnapshots.filter(s => s.file_type === selected)
- : activeSnapshots;
- renderSnapshotsTable(snaps);
+ fetchSnapshots(1);
+}
+
+function renderSnapshotsPagination(total, page, pageSize) {
+ const container = document.getElementById("snapshots-pagination");
+ if (!container) return;
+ const totalPages = Math.max(1, Math.ceil(total / pageSize));
+ container.innerHTML = `
+ <span class="pagination-info">${total} lot(s) — page ${page} / ${totalPages}</span>
+ <button class="pagination-btn" ${page <= 1 ? "disabled" : ""} onclick="fetchSnapshots(${page - 1})">Précédent</button>
+ <button class="pagination-btn" ${page >= totalPages ? "disabled" : ""} onclick="fetchSnapshots(${page + 1})">Suivant</button>
+ `;
+}
+
+// Listes deroulantes de comparaison : elles ont besoin de TOUT l'historique
+// (on compare volontiers un lot ancien), mais seulement de quatre colonnes.
+// Elles ont donc leur propre source, allegee, au lieu de se servir dans la
+// liste complete que le tableau n'affiche plus.
+async function fetchSnapshotOptions() {
+ if (optionsDeComparaisonAJour) return;   // rien n'a bouge depuis le dernier chargement
+ try {
+ const response = await apiFetch("/api/snapshots/options");
+ if (!response.ok) return;
+ populateCompareSelects(await response.json());
+ optionsDeComparaisonAJour = true;
+ } catch (e) {
+ console.error("Error fetching snapshot options:", e);
+ }
 }
 
 // Render Snapshots Table
@@ -1714,7 +1807,7 @@ async function handleIngestion(event) {
  });
  if (!finalState || finalState.status === "ERROR") {
  showToast(`Erreur d'importation : ${(finalState && finalState.error) || "erreur inconnue"}`, "error", 9000);
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  return;
  }
  data = finalState.result || {};
@@ -5501,7 +5594,7 @@ async function approvePendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  onOperationDone(data.job_token, () => {
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
@@ -5536,7 +5629,7 @@ async function rejectPendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  } catch (e) {
  console.error("Error rejecting snapshot:", e);
  showToast("Erreur réseau de communication.", "error");
@@ -8858,6 +8951,7 @@ let _opsPollDelay = 0;
 
 const OPS_POLL_BUSY_MS = 2000; // quelque chose tourne : suivi fluide
 const OPS_POLL_IDLE_MS = 8000; // au repos : inutile de marteler le serveur
+const OPS_POLL_HIDDEN_MS = 120000; // onglet masque et rien en cours : presque rien
 
 // ------------------ NOUVELLE VERSION DISPONIBLE ------------------
 // Un onglet déjà ouvert continue d'exécuter le code chargé à son ouverture :
@@ -8936,7 +9030,12 @@ async function fetchActiveOperations() {
  // expressions cron en cours d'édition (elles « se décochaient »
  // au tick suivant, avant l'enregistrement).
  updateSyncStateCells();
- scheduleOpsPoll(data.running > 0 ? OPS_POLL_BUSY_MS : OPS_POLL_IDLE_MS);
+ // Onglet masqué et rien en cours : on espace fortement. Si une opération
+ // TOURNE, on garde la cadence — sa fin doit être signalée sans attendre le
+ // retour de l'utilisateur (rappels d'écran, toast de fin).
+ scheduleOpsPoll(data.running > 0
+ ? OPS_POLL_BUSY_MS
+ : (ongletMasque() ? OPS_POLL_HIDDEN_MS : OPS_POLL_IDLE_MS));
  } catch (e) {
  scheduleOpsPoll(OPS_POLL_IDLE_MS); // une panne de suivi ne stoppe pas le suivi
  }

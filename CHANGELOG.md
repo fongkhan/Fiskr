@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — one call to `GET /api/watchlist` would have taken production down
+The endpoint returned `watchlist_store` **whole**. Measured on the real cache: ~1.8 KB per record. With 895 157 records in production, that is **over 1.5 GB** serialized in memory inside the web process, for a single authenticated call — on shared hosting, the application with it. The figure is an estimate derived from a local measurement: calling that endpoint against production would have been triggering the very thing being described.
+
+The front end never used it (`fetchWatchlist` has always gone to `/api/watchlist/db`), which is why it went unnoticed — but it is a documented endpoint and the tests reached for it.
+
+The response is now bounded, and it **says so**: `total` stays exact and `truncated` reports the cut, so the number the check relies on is never wrong — only the sample is. `entity_id` returns one record's cached entry, which is what this check actually asks most of the time, without depending on its position in the cache. Browsing the reference data was never this endpoint's job: `GET /api/watchlist/db` is paginated, filterable, and read from the database rather than from one process's memory.
+
+Two existing tests depended on finding their record inside the full dump. They pass unchanged today only because the dev cache holds fewer than a hundred entries — a silent trap. One now queries by `entity_id`; the other raises `limit` and **asserts `truncated` is false**, since concluding "this name is absent" from a sample would be worth nothing.
+
+### Changed — three round trips per page load, for nothing
+Pages reference their assets by the **fingerprint of their content** (`app.js?v=<hash>`): the URL changes when the file changes, and never otherwise. But no response carried a cache header, so the browser revalidated all of them on **every** page load. Measured on production:
+
+```
+app.js       304, 0 bytes, 1.01 s
+i18n.js      304, 0 bytes, 0.66 s
+styles.css   304, 0 bytes, 0.70 s
+```
+
+**Correction to a first, too-quick reading of my own measurement**: I nearly reported the assets as uncompressed. They are not — the front end serves brotli, and 476 KB of `app.js` arrive as 167 KB. Only the round trips were being paid.
+
+A versioned URL is now `immutable` for a year, so it is not requested again at all. An URL **without** a version keeps revalidating: nothing guarantees a bare URL follows the content, and freezing it for a year would serve a stale file after a deploy. The parameter detection is parsed, not substring-matched — `version=`, `nv=`, `v=` and `v=%20` all correctly count as unversioned.
+
+The HTML page cannot be cached for long: it is the thing carrying the asset version, and served stale it would reference the old assets — exactly the fault the fingerprint was built to fix. It now carries `no-cache` plus an ETag: still requested on every load, but answered with an empty 304 while nothing has moved. Its body does not depend on the user — only access to it does — so one fingerprint serves everyone.
+
+A test ties the two halves together: the assets can only be declared immutable *because* the page rewrites their version, so it asserts the page really does carry the current fingerprint, and that no asset in the markup is referenced without one.
+
+### Changed — a hidden tab no longer polls the server
+A Fiskr tab left open questioned the server forever:
+
+| Poll | Cadence | Requests/hour |
+|---|---:|---:|
+| `/api/progress/active` | 8 s | 450 |
+| `/api/worker/status` | 30 s | 120 |
+| `/api/counters` | 60 s | 60 |
+| `/api/version` | 5 min | 12 |
+
+~640 requests per hour **per tab**, for a screen nobody is looking at — on shared hosting where a request costs ~0.15 s of server time, close to 100 s of server per hour per forgotten tab.
+
+Hidden, the tab stops polling and catches up in one go on return, which makes the figures *fresher* at the moment they are read than a periodic poll that happened to land just before. One exception, and it matters: if an operation **is running**, the cadence is kept even hidden — its completion fires screen callbacks and a toast that must not wait for the user to come back. A test asserts the running branch is taken before the visibility test, not after.
+
+The visibility check is deliberately conservative: without `visibilityState`, it polls as before rather than going silent forever.
+
+### Changed — the snapshot history is paginated (breaking: `GET /api/snapshots` now returns an envelope)
+The previous round measured this endpoint and left it alone: the weight was not a field to drop (the row had already lost its backtest report) but the **number of rows**, which grows on its own. Production: **547 snapshots for 282 KB**, one born per source per day across 42 sources, and that response was reloaded after every import, sync, approval and purge.
+
+`GET /api/snapshots` now returns `{total, page, page_size, items}` — 50 rows by default, 500 at most — with server-side `file_type` and `status` filters (comma-separated). This **changes the response shape**, as `/api/history` did before it: a bare list is no longer returned. The screen's list-type filter moved to the server with it, because on a paginated list a client-side filter only ever sees the loaded page.
+
+The comparison drop-downs are the reason this could not be a plain paginate-and-done: comparing two snapshots means picking any pair from the whole history, including an old one. They now have their own source, `GET /api/snapshots/options`, cut to the four columns a drop-down actually displays.
+
+Measured on the production data:
+
+| | |
+|---|---:|
+| Old response | 283 872 B |
+| New — page of 50 | 25 985 B (−90.8 %) |
+| New — comparison options | 96 515 B (−66.0 %) |
+| **Opening the screen** | **122 500 B (−56.8 %)** |
+
+Then the options became the heavier half, so they are cached client-side: reloaded only when a snapshot is created, approved, rejected or purged — not on every return to the tab. Page turns move 26 KB and nothing else.
+
+**Not done, and why**: denormalizing `backtest_verdict` / `backtest_gap_pct` into real columns, so the serializer stops reading `backtest_report` for two scalars. Pagination already divides that read by eleven (50 rows instead of 547), which leaves a schema change, a backfill and two write sites to save the measured ~18 ms of the previous round.
+
+### Fixed — two tests that were passing for the wrong reason
+Widening the front-end call detection to `nom(` instead of `nom()` — needed once pagination gave `fetchSnapshots` an argument — revealed that the previous round's regex matched **nothing** at all after the change, so every test in that file would have passed vacuously. The file now has a guard test asserting the detection finds something, and the allow-list of callers permitted to reload without the visibility guard is explicit: navigation, plus the screen's own controls (sort, filter, pagination, record edit), which the narrow regex had been silently skipping. The guarded code was correct; the test covering it was narrower than it claimed.
+
+The page-load test asserted each loader appears literally in the tab-routing block. Reaching `fetchSnapshots` through a small wrapper is legitimate, so the test now expands one level of `rafraichir*` wrappers instead of matching the bare name — the property checked ("opening the tab loads the screen") is unchanged.
+
+
 ### Fixed — the last N+1 in the application
 `GET /api/kpi` computed the average decision time **one query per analyst**, each pulling that analyst's 200 most recent decisions. The cost grew with the team, on a landing screen (~0.67 s of server work on production).
 
