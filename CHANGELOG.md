@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — a hidden tab no longer polls the server
+A Fiskr tab left open questioned the server forever:
+
+| Poll | Cadence | Requests/hour |
+|---|---:|---:|
+| `/api/progress/active` | 8 s | 450 |
+| `/api/worker/status` | 30 s | 120 |
+| `/api/counters` | 60 s | 60 |
+| `/api/version` | 5 min | 12 |
+
+~640 requests per hour **per tab**, for a screen nobody is looking at — on shared hosting where a request costs ~0.15 s of server time, close to 100 s of server per hour per forgotten tab.
+
+Hidden, the tab stops polling and catches up in one go on return, which makes the figures *fresher* at the moment they are read than a periodic poll that happened to land just before. One exception, and it matters: if an operation **is running**, the cadence is kept even hidden — its completion fires screen callbacks and a toast that must not wait for the user to come back. A test asserts the running branch is taken before the visibility test, not after.
+
+The visibility check is deliberately conservative: without `visibilityState`, it polls as before rather than going silent forever.
+
 ### Changed — the snapshot history is paginated (breaking: `GET /api/snapshots` now returns an envelope)
 The previous round measured this endpoint and left it alone: the weight was not a field to drop (the row had already lost its backtest report) but the **number of rows**, which grows on its own. Production: **547 snapshots for 282 KB**, one born per source per day across 42 sources, and that response was reloaded after every import, sync, approval and purge.
 

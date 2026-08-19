@@ -844,18 +844,49 @@ document.addEventListener("DOMContentLoaded", () => {
  fetchIngestionSettings();    // mode homologation : bandeau et libellés
  refreshSidebarCounters();    // pastilles (dont le compte d'homologations)
  // Badges vivants : compteurs légers rafraîchis toutes les 60 s
- setInterval(refreshSidebarCounters, 60_000);
+ setInterval(siVisible(refreshSidebarCounters), 60_000);
  // Supervision du démon travailleur : bandeau si arrêté (prod « worker »)
  refreshWorkerStatus();
- setInterval(refreshWorkerStatus, 30_000);
+ setInterval(siVisible(refreshWorkerStatus), 30_000);
  // Nouvelle version livrée pendant que l'onglet est ouvert : bandeau discret
  // proposant de recharger, au lieu d'un écran qui semble figé.
- setInterval(checkForNewVersion, VERSION_CHECK_MS);
+ setInterval(siVisible(checkForNewVersion), VERSION_CHECK_MS);
+ // Un onglet masqué ne consomme plus rien ; il se remet à jour d'un coup
+ // quand on y revient.
+ document.addEventListener("visibilitychange", auRetourDeLOnglet);
  // Opérations de fond : cadence adaptative (2 s en activité, 8 s au repos).
  // Repeuple aussi la pastille au chargement — une opération lancée avant le
  // rechargement de la page reste suivie.
  startOperationsPolling();
 });
+
+// ---- Sondages de fond : rien ne tourne pendant qu'on ne regarde pas ----
+//
+// Un onglet laissé ouvert interrogeait le serveur sans fin : les opérations en
+// cours toutes les 8 s, le démon toutes les 30 s, les compteurs toutes les
+// 60 s, la version toutes les 5 min. Soit ~460 requêtes par heure et par
+// onglet, pour un écran que personne ne regarde — sur un hébergement mutualisé
+// où chaque requête coûte ~0,15 s de serveur.
+//
+// Masqué, l'onglet ne sonde plus. Il rattrape tout d'un coup au retour, ce qui
+// rend l'information PLUS fraîche au moment où elle est lue qu'un sondage
+// périodique tombé juste avant le retour.
+function ongletMasque() {
+ return typeof document.visibilityState === "string" && document.hidden;
+}
+
+// Emballe une fonction de sondage : elle ne part pas si l'onglet est masqué.
+function siVisible(fn) {
+ return () => { if (!ongletMasque()) fn(); };
+}
+
+function auRetourDeLOnglet() {
+ if (ongletMasque()) return;
+ refreshSidebarCounters();
+ refreshWorkerStatus();
+ checkForNewVersion();
+ fetchActiveOperations();   // reprend aussi la cadence du suivi d'opérations
+}
 
 // Check current logged-in user profile
 async function checkAuthUser() {
@@ -8920,6 +8951,7 @@ let _opsPollDelay = 0;
 
 const OPS_POLL_BUSY_MS = 2000; // quelque chose tourne : suivi fluide
 const OPS_POLL_IDLE_MS = 8000; // au repos : inutile de marteler le serveur
+const OPS_POLL_HIDDEN_MS = 120000; // onglet masque et rien en cours : presque rien
 
 // ------------------ NOUVELLE VERSION DISPONIBLE ------------------
 // Un onglet déjà ouvert continue d'exécuter le code chargé à son ouverture :
@@ -8998,7 +9030,12 @@ async function fetchActiveOperations() {
  // expressions cron en cours d'édition (elles « se décochaient »
  // au tick suivant, avant l'enregistrement).
  updateSyncStateCells();
- scheduleOpsPoll(data.running > 0 ? OPS_POLL_BUSY_MS : OPS_POLL_IDLE_MS);
+ // Onglet masqué et rien en cours : on espace fortement. Si une opération
+ // TOURNE, on garde la cadence — sa fin doit être signalée sans attendre le
+ // retour de l'utilisateur (rappels d'écran, toast de fin).
+ scheduleOpsPoll(data.running > 0
+ ? OPS_POLL_BUSY_MS
+ : (ongletMasque() ? OPS_POLL_HIDDEN_MS : OPS_POLL_IDLE_MS));
  } catch (e) {
  scheduleOpsPoll(OPS_POLL_IDLE_MS); // une panne de suivi ne stoppe pas le suivi
  }
