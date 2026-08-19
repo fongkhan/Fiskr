@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the last N+1 in the application
+`GET /api/kpi` computed the average decision time **one query per analyst**, each pulling that analyst's 200 most recent decisions. The cost grew with the team, on a landing screen (~0.67 s of server work on production).
+
+A window function numbers each analyst's decisions from newest to oldest and **one** query returns everyone's first 200. The date subtraction stays in Python — it is not portable in SQL (PostgreSQL `interval` versus SQLite text dates) and the figure has to stay identical.
+
+Two things the regrouping had to preserve, both easy to break and both locked by test:
+
+- the decision **count** filters on closed statuses, the **delay** does not — it takes any alert carrying a decision date. An alert decided then reopened counts in the delay and not in the count;
+- the 200 bound is **per analyst**, not global. The fixture makes the two wrong ways fail differently: 250 decisions at 1 h and 50 at 100 h for one analyst — the correct bound gives 1.0, no bound gives 17.5, reversed ordering gives 100.
+
+A query-counting test asserts the cost no longer moves between 3 and 13 analysts.
+
+An AST sweep over the endpoint layer and the rest of the package found no other query inside a loop: what remains is a bounded BFS (relationship graph, depth ≤ 3), chunked bulk reads (re-screening) and a fixed loop over four retention families.
+
+### Changed — background refreshes only reload what is on screen
+A sync, an import, an approval or a purge reloaded the snapshot history (**282 KB, 547 rows** on production) *and* the paginated watchlist, whether or not the user was looking at those tables. Doubly pointless: `switchTab` and `switchSubTab` already reload both views on entering their tab, so fresh data is guaranteed on arrival — the background refresh only paid the weight for nobody.
+
+Both are now behind a visibility guard, and one duplicate call is gone: after a manual entity add the code called `fetchWatchlist()` and then `switchSubTab('watchlist-mgmt', 'watchlist-active')`, which reloads it — the same request twice.
+
+The tests read the front end from both sides, because getting it wrong one way breaks navigation and the other way cancels the gain: navigation paths must reload unconditionally, background paths must all go through the guard.
+
+### Measured and left alone — `/api/snapshots`
+The list serializer reads `backtest_report` on every row to extract two scalars (`verdict`, `gap_pct`), so PostgreSQL detoasts the whole document 547 times for two numbers — the same shape of waste as the watchlist row. Denormalizing the two scalars into real columns would fix it, at the price of a migration, a backfill and two write sites.
+
+Measured before doing it, at the real production volume (547 snapshots, ~2.6 MB of reports over the ~60 that carry one): **20.3 ms versus 2.1 ms** (×9.7). Roughly 18 ms out of ~1050 ms of server time. The ratio looks impressive and the absolute figure does not justify a schema change — so it was not made. (A first run at 66 KB per report gave ×55; that fixture was 13× heavier than production and its ratio meant nothing.)
+
+What actually weighs on that endpoint is the 547 rows themselves, growing daily across 42 sources. The honest fix is pagination with server-side filters, which is a screen change — the comparison drop-downs need the whole list and the table filters client-side today.
+
 ### Fixed — the "Excluded" scope took 21 to 35 seconds to return nothing
 `ix_wl_entities_production` is a **partial** index on `excluded IS NOT TRUE`. A partial index only serves queries whose clause its own implies, so `WHERE excluded IS TRUE` was covered by nothing and scanned all 11.2 M rows — to return zero rows, since nothing is excluded today. Measured on production: **21 to 35 s**.
 

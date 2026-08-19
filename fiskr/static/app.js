@@ -969,6 +969,32 @@ async function fetchConfig() {
 // (Le journal d'audit est géré plus bas : fetchAuditHistory / renderAuditHistoryTable /
 // viewAuditLogDetail — les anciennes versions dupliquées et boguées ont été supprimées.)
 
+// Une vue est-elle REELLEMENT a l'ecran ? (onglet actif + sous-onglet actif)
+function vueAffichee(sectionId, subTabId) {
+ const section = document.getElementById(`sec-${sectionId}`);
+ if (!section || !section.classList.contains("active")) return false;
+ if (!subTabId) return true;
+ const panneau = document.getElementById(`sub-sec-${subTabId}`);
+ return !!panneau && panneau.classList.contains("active");
+}
+
+// Rafraichit une vue seulement si elle est affichee.
+//
+// Une synchronisation, un import, une homologation ou une purge rechargeaient
+// l'historique des lots (282 Ko, 547 lignes) ET la watchlist paginee, que
+// l'utilisateur regarde ces tableaux ou pas. C'etait doublement inutile :
+// switchTab et switchSubTab rechargent DEJA ces vues a chaque ouverture de
+// leur onglet, donc la donnee fraiche est garantie a l'arrivee. Rafraichir en
+// fond ne faisait que payer le poids sans que personne ne le voie.
+function rafraichirSiAffichee(sectionId, subTabId, fn) {
+ if (vueAffichee(sectionId, subTabId)) fn();
+}
+
+function rafraichirLotsEtWatchlist() {
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-active", fetchWatchlist);
+}
+
 // Tab navigation
 function switchTab(tabId) {
  // Compatibilité : l'ancien onglet « Alertes » a été scindé — tout appel
@@ -1305,7 +1331,7 @@ async function handleManualBatch() {
  }
  if (data.added.length) {
  document.getElementById("manual-batch-lines").value = "";
- fetchWatchlist();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-active", fetchWatchlist);
  fetchWatchlistHash();
  }
  } catch (e) {
@@ -1405,8 +1431,8 @@ async function handleManualEntity(event) {
  document.getElementById("manual-entity-form").reset();
  toggleManualFormFields();
  
- // Switch back to Active Watchlist and refresh
- fetchWatchlist();
+ // Retour sur la watchlist active : switchSubTab la recharge lui-meme,
+ // l'appel qui le precedait faisait la meme requete une seconde fois.
  fetchWatchlistHash();
  switchSubTab('watchlist-mgmt', 'watchlist-active');
  
@@ -1688,15 +1714,14 @@ async function handleIngestion(event) {
  });
  if (!finalState || finalState.status === "ERROR") {
  showToast(`Erreur d'importation : ${(finalState && finalState.error) || "erreur inconnue"}`, "error", 9000);
- fetchSnapshots();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
  return;
  }
  data = finalState.result || {};
  }
  showToast(`Instantané importé avec succès ! ${data.message}`, "success");
  fileInput.value = "";
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  fetchPendingReviews();
  // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
@@ -1782,8 +1807,7 @@ async function handleSourceSync(source) {
 // restitution du rapport, publié sur le jeton de l'opération.
 async function finishSourceSync(state) {
  fetchSyncReports();
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  fetchPendingReviews();
  refreshSidebarCounters();
@@ -3240,8 +3264,7 @@ async function purgeFailedSnapshots() {
  
  const data = await response.json();
  showToast(`Purge terminée : ${data.message}`, "success");
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  } catch (e) {
  console.error("Purge failed:", e);
@@ -5478,10 +5501,9 @@ async function approvePendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- fetchSnapshots();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
  onOperationDone(data.job_token, () => {
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  refreshSidebarCounters();
  });
@@ -5514,7 +5536,7 @@ async function rejectPendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- fetchSnapshots();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
  } catch (e) {
  console.error("Error rejecting snapshot:", e);
  showToast("Erreur réseau de communication.", "error");

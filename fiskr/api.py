@@ -11965,15 +11965,31 @@ async def get_compliance_kpis(
                   Alert.decided_by.isnot(None))
           .group_by(Alert.decided_by).all()
     )
+    # Delai moyen de decision, par analyste, sur ses 200 dernieres decisions.
+    # C'etait UNE requete PAR analyste : le seul N+1 restant de l'application,
+    # sur un tableau de bord. Une fonction de fenetrage numerote les decisions
+    # de chaque analyste de la plus recente a la plus ancienne, et une seule
+    # requete rend les 200 premieres de chacun. La soustraction de dates reste
+    # en Python — elle n'est pas portable en SQL (`interval` PostgreSQL contre
+    # dates texte SQLite) et le resultat doit rester au chiffre pres.
+    from sqlalchemy import func as _f
+    rang = _f.row_number().over(partition_by=Alert.decided_by,
+                                order_by=Alert.decided_at.desc()).label("rang")
+    numerotees = (db.query(Alert.decided_by.label("analyste"),
+                           Alert.created_at.label("cree"),
+                           Alert.decided_at.label("decide"), rang)
+                    .filter(Alert.decided_by.isnot(None),
+                            Alert.decided_at.isnot(None))
+                    .subquery())
+    delais: Dict[str, List[float]] = {}
+    for analyste, cree, decide, _rang in db.query(numerotees).filter(
+            numerotees.c.rang <= 200).all():
+        delais.setdefault(analyste, []).append((decide - cree).total_seconds())
+
     by_analyst = []
     for username, decided_count in sorted(analyst_rows, key=lambda r: -r[1]):
-        pair_rows = db.query(Alert.created_at, Alert.decided_at).filter(
-            Alert.decided_by == username, Alert.decided_at.isnot(None)
-        ).order_by(Alert.decided_at.desc()).limit(200).all()
-        avg_h = (
-            round(sum((dec - cre).total_seconds() for cre, dec in pair_rows) / len(pair_rows) / 3600.0, 1)
-            if pair_rows else None
-        )
+        secondes = delais.get(username) or []
+        avg_h = round(sum(secondes) / len(secondes) / 3600.0, 1) if secondes else None
         by_analyst.append({"analyst": username, "decided": int(decided_count), "avg_decision_hours": avg_h})
 
     # ---- Efficacite des regles anti-faux positifs (hit_count en base) ----
