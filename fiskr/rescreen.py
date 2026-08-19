@@ -145,38 +145,63 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     total_clients = len(clients)
     result["clients_screened"] = total_clients
 
-    def _persist_hit(client: Dict[str, Any], best: Dict[str, Any]) -> None:
-        """Ecrit en base la suite d'UNE correspondance en ALERT : liste
-        blanche, regles anti-FP, journal d'audit immuable, alerte de travail.
-        Toujours appelee dans le processus PARENT, dans l'ordre des clients —
-        les enfants du pool ne font que calculer."""
-        pair = is_whitelisted(db, client.get("client_id"), best["watchlist_entity"].get("entity_id"))
-        if pair:
-            best["status"] = "WHITELISTED"
-            best["whitelist_pair_id"] = pair.id
-            log_compliance_decision(db, client, best["watchlist_entity"], best,
-                                    watchlist_version, watchlist_hash)
-            result["whitelisted_suppressed"] += 1
-            return
+    def _persist_hits(client: Dict[str, Any], hits: List[Dict[str, Any]]) -> None:
+        """Ecrit en base la suite de TOUTES les correspondances en ALERT d'un
+        client : liste blanche, regles anti-FP, journal d'audit immuable,
+        alertes de travail. Toujours appelee dans le processus PARENT, dans
+        l'ordre des clients — les enfants du pool ne font que calculer.
 
-        # Regles anti-faux positifs du canal SCREENING
+        Le re-criblage ne gardait que la MEILLEURE correspondance par client.
+        Une mise en production de liste effacait donc des correspondances que
+        le criblage unitaire, lui, conserve : deux canaux, deux verites. Elles
+        sont desormais toutes ecrites, ici comme ailleurs.
+        """
         from fiskr.fprules import evaluate_fp_rules, build_screening_ctx, annotate_suppression
-        ctx = build_screening_ctx(client, best["watchlist_entity"], best)
-        suppressed_by_rule = evaluate_fp_rules(db, "SCREENING", ctx)
-        if suppressed_by_rule is not None:
-            annotate_suppression(best, suppressed_by_rule)
+        from fiskr.alerts import whitelisted_pairs, open_or_redetect_alerts
+        from fiskr.database import log_compliance_decisions
 
-        audit = log_compliance_decision(db, client, best["watchlist_entity"], best,
-                                        watchlist_version, watchlist_hash)
-        open_or_redetect_alert(
-            db, audit, client.get("client_id"), best, RESCREEN_USERNAME,
-            channel="SCREENING", suppressed_by_rule=suppressed_by_rule,
-            detail_suffix=f" {trigger_detail}"
-        )
-        if suppressed_by_rule is not None:
-            result["rule_suppressed"] = result.get("rule_suppressed", 0) + 1
-        else:
-            result["new_alerts"] += 1
+        client_ref = client.get("client_id")
+        hits = sorted(hits, key=lambda h: -h["final_score"])
+        paires = whitelisted_pairs(
+            db, client_ref,
+            [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits])
+
+        from fiskr.fprules import active_rules
+        regles_actives = active_rules(db, "SCREENING")
+
+        a_journaliser = []
+        for position, hit in enumerate(hits, start=1):
+            fiche = hit.get("watchlist_entity") or {}
+            paire = paires.get(fiche.get("entity_id"))
+            if paire is not None:
+                hit["status"] = "WHITELISTED"
+                hit["whitelist_pair_id"] = paire.id
+                result["whitelisted_suppressed"] += 1
+                a_journaliser.append((hit, None))
+                continue
+            ctx = build_screening_ctx(client, fiche, hit,
+                                      hits_count=len(hits), hit_rank=position)
+            regle = evaluate_fp_rules(db, "SCREENING", ctx, rules=regles_actives)
+            if regle is not None:
+                annotate_suppression(hit, regle)
+                result["rule_suppressed"] = result.get("rule_suppressed", 0) + 1
+            else:
+                result["new_alerts"] += 1
+            a_journaliser.append((hit, regle))
+
+        lignes = log_compliance_decisions(
+            db, client,
+            [(h.get("watchlist_entity") or {}, h) for h, _r in a_journaliser],
+            watchlist_version, watchlist_hash, commit=False)
+        a_alerter = [{"audit": ligne, "match": h, "rule": r}
+                     for (h, r), ligne in zip(a_journaliser, lignes)
+                     if h.get("status") == "ALERT"]
+        if not a_alerter:
+            db.commit()
+        if a_alerter:
+            open_or_redetect_alerts(
+                db, a_alerter, client_id=client_ref, username=RESCREEN_USERNAME,
+                channel="SCREENING", detail_suffix=f" {trigger_detail}")
 
     # ---- Phase 1 : trouver les correspondances (calcul pur, parallelisable) ----
     # Le re-criblage repasse TOUTE la base clients apres chaque mise en
@@ -202,8 +227,8 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
 
     if hits is not None:
         # ---- Phase 2 : ecriture, sequentielle, dans l'ordre des clients ----
-        for i, best in hits:
-            _persist_hit(clients[i], best)
+        for i, trouvees in hits:
+            _persist_hits(clients[i], trouvees)
         if progress:
             try:
                 progress(total_clients, total_clients)
@@ -232,16 +257,16 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             if not candidates:
                 continue
 
-            best = None
+            trouvees = []
             for ent in candidates.values():
                 score = match_entities(client, ent, config)
                 score["watchlist_entity"] = ent
-                if best is None or score["final_score"] > best["final_score"]:
-                    best = score
+                if score.get("status") == "ALERT":
+                    trouvees.append(score)
 
-            if not best or best.get("status") != "ALERT":
+            if not trouvees:
                 continue
-            _persist_hit(client, best)
+            _persist_hits(client, trouvees)
 
     logger.info(
         f"Re-criblage ({trigger_detail}) : {result['changed_entities']} entités changées, "

@@ -143,6 +143,16 @@ EVENT_CATALOG: Dict[str, Event] = {
         urgency=DIGEST, default_enabled=False,      # volume le plus eleve : opt-in
         link="#alerts/alerts-screening",
     ),
+    "alert_volume": Event(
+        label="Volumétrie d'alertes sur un même criblage",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE,
+        # Un homonyme d'un nom tres courant sans contexte discriminant peut
+        # ouvrir des milliers d'alertes d'un coup. Elles sont TOUTES creees
+        # (exigence d'audit), mais les notifier une par une serait un incident
+        # en soi : au-dela du seuil, une seule notification les resume.
+        link="#alerts/alerts-screening",
+    ),
     "alert_assigned": Event(
         label="Alerte assignée à un analyste",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_ASSIGNEE,),

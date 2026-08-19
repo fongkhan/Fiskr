@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a screening kept one hit out of 2 976
+The engine persisted only the **best** match. Measured on production through `GET /api/screen/preview` (read-only, same engine):
+
+| Profile screened | Candidates | Hits ≥ cut-off | Traces written |
+|---|---:|---:|---:|
+| Mohammed Ali, no country | 17 649 | 2 976 | **1** |
+| Ivan Ivanov, no country | 28 940 | 538 | **1** |
+| Ivan Ivanov + RU | 1 223 | 453 | **1** |
+
+And the twelve best for "Mohammed Ali" all sit at **100.00** — "ALI MUHAMMED", "MOHAMMAD ALI", real homonyms, not scoring noise. 2 975 regulatory hits vanished without a written trace, on all four channels: single screening, batch, post-delta re-screening and transaction filtering.
+
+Every match at or above the cut-off is now written: one audit line, one alert, each alert pointing at **its own** audit line. Those a false-positive rule decides are **created and then closed** `CLOSED_BY_RULE`, with the rule's name and version in the alert's decision comment and in its event — never suppressed silently. The whitelist keeps its own path: logged `WHITELISTED`, no alert.
+
+`best_match`, `audit_trail_id` and `alert_id` still designate the top match — the response contract is unchanged, and `hits` now reports what was written (`hits`, `opened`, `closed_by_rule`, `redetected`, `whitelisted`).
+
+### Fixed — writing N hits must not mean reading N times
+Turning one hit into thousands exposed four read amplifications, all now measured by a test that compares the **read** count between 11 and 12 hits (writes obviously scale — that is the feature):
+
+- the whitelist was queried per hit → one batched `whitelisted_pairs`;
+- the active rules were reloaded per hit → loaded once per screening;
+- the SLA setting was read per alert → read once per batch;
+- **and the subtle one**: `commit()` expires the session's objects, so re-reading `ligne.id` afterwards fired one `SELECT` per row. The N+1 came back through the back door, after the writes had been grouped. The audit lines are now flushed, ids read, and a single commit covers audit and alerts together — atomically.
+
+Rule code was also being recompiled on every evaluation; it is now memoised on the rule text.
+
+**A bug this branch introduced and its own test caught**: the commit went through alert creation, so a screening with nothing to alert — everything whitelisted, or no hit at all — left its audit lines written but never committed, and therefore lost. Two tests now read the journal back **from a separate session**, which is what a controller does.
+
+### Added — what a rule can now see, and three templates that use it
+No string metric separates "MOHAMMED ALI" from "MOHAMMED ALI". What is missing is not precision, it is **identification** — date of birth, country, identity document. The rule context now carries that distinction explicitly:
+
+- `hits_count` and `hit_rank`: the volumetry of the screening that produced this hit, and its rank by descending score;
+- `corroboration`: `has_dob`, `has_country`, `has_identity_document`, `name_only`, `corroborated`, plus the three adjustment scores.
+
+`GET /api/fprules/templates` serves three ready-to-install rules built on it — name-only in volume, no corroboration beyond the top hits, and the filtering equivalent where a payment party rarely carries a date of birth. **None is active by default**: these are compliance trade-offs, not comfort settings, so each carries a `loss` field saying plainly what it costs, and a test asserts none of them ever closes a hard match — an identical official identifier is an identification, not a homonymy.
+
+### Changed — a burst of alerts no longer means a burst of notifications
+One screening can now open thousands of alerts at once. Individual `alert_created` notifications stop at ten and give way to a single `alert_volume` event carrying the count and the top score. Alerts already closed by a rule no longer get a re-detection event on every pass either: post-delta re-screening replays the whole client base after each list goes live, and one event row per rule-closed alert per pass would grow the journal without teaching anything — the audit line for each screening is still written every time.
+
+
 ### Fixed — a screening returned every candidate it had scored
 `POST /api/screen` returned `all_matches`: **every** scored candidate, each carrying its full listed record. Measured on production through `GET /api/screen/preview` (read-only, same engine), the scope a screening actually covers:
 
