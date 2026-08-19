@@ -99,6 +99,23 @@ def run_rule(code: str, ctx: Dict[str, Any]) -> Tuple[Optional[bool], Optional[s
         return None, f"{type(e).__name__}: {e}"
 
 
+def rule_perimeters(db_rule) -> List[str]:
+    """Perimetres declares d'une regle. Vide = tous (regles anterieures a la
+    colonne : leur portee ne change pas)."""
+    from fiskr.perimeters import PERIMETRES
+    brut = getattr(db_rule, "perimeters", None)
+    if not brut:
+        return []
+    if isinstance(brut, str):
+        brut = [v for v in brut.split(",")]
+    valeurs = [str(v).strip().upper() for v in brut if str(v).strip()]
+    retenues = [v for v in valeurs if v in PERIMETRES]
+    # Une declaration entierement invalide ne doit pas ELARGIR la portee en
+    # silence : elle vaut alors « aucun perimetre reconnu », donc la regle ne
+    # s'applique nulle part plutot que partout.
+    return retenues if retenues else ["__AUCUN__"]
+
+
 def active_rules(db, channel: str) -> List[FpRule]:
     """Regles appliquees en production : ACTIVE + activees, dans l'ordre."""
     return db.query(FpRule).filter(
@@ -121,7 +138,15 @@ def evaluate_fp_rules(db, channel: str, ctx: Dict[str, Any],
     les relire a chaque fois remettait un N+1 sur le chemin le plus chaud.
     L'appelant qui boucle les charge UNE fois et les passe ici.
     """
+    perimetre = str(ctx.get("perimeter") or "").strip().upper()
     for db_rule in (active_rules(db, channel) if rules is None else rules):
+        # Portee de la regle : filtree par le MOTEUR, pas par le code de la
+        # regle. Une regle limitee au hors-sanction ne peut pas cloturer une
+        # correspondance de gel d'avoirs, meme si son code l'oublie — et un
+        # controleur lit la portee sur la regle plutot que dans son code.
+        portee = rule_perimeters(db_rule)
+        if portee and perimetre and perimetre not in portee:
+            continue
         result, error = run_rule(db_rule.code, ctx)
         if error:
             logger.error(
@@ -191,7 +216,8 @@ def corroboration_context(client: Dict[str, Any],
 
 def build_screening_ctx(client: Dict[str, Any], entity: Dict[str, Any],
                         best_match: Dict[str, Any],
-                        hits_count: int = 1, hit_rank: int = 1) -> Dict[str, Any]:
+                        hits_count: int = 1, hit_rank: int = 1,
+                        perimeter_overrides: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Contexte d'alerte du canal criblage clients, passe a rule(ctx).
 
@@ -201,9 +227,14 @@ def build_screening_ctx(client: Dict[str, Any], entity: Dict[str, Any],
     au-dessus du seuil : une regle doit pouvoir raisonner sur le lot, pas
     seulement sur la ligne.
     """
+    from fiskr.perimeters import perimetre_de
     return {
         "hits_count": int(hits_count),
         "hit_rank": int(hit_rank),
+        # SANCTION (gel des avoirs) ou HORS_SANCTION (PEP, regulateurs,
+        # exclusions). Manquer une sanction est constatable a l'audit et
+        # sanctionnable ; manquer un PEP ne l'est pas de la meme facon.
+        "perimeter": perimetre_de(entity.get("_list_type"), perimeter_overrides),
         "corroboration": corroboration_context(client, best_match),
         "channel": "SCREENING",
         "client_id": client.get("client_id"),
@@ -227,7 +258,8 @@ def build_screening_ctx(client: Dict[str, Any], entity: Dict[str, Any],
 def build_filtering_ctx(party: Dict[str, Any], entity: Dict[str, Any],
                         best_match: Dict[str, Any], parsed_message: Dict[str, Any],
                         client_id: str,
-                        hits_count: int = 1, hit_rank: int = 1) -> Dict[str, Any]:
+                        hits_count: int = 1, hit_rank: int = 1,
+                        perimeter_overrides: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Contexte d'alerte du canal filtrage transactionnel, passe a rule(ctx).
 
@@ -235,9 +267,11 @@ def build_filtering_ctx(party: Dict[str, Any], entity: Dict[str, Any],
     porte rarement une date de naissance ou une piece d'identite, donc le cas
     « nom seul » y est la norme plutot que l'exception.
     """
+    from fiskr.perimeters import perimetre_de
     return {
         "hits_count": int(hits_count),
         "hit_rank": int(hit_rank),
+        "perimeter": perimetre_de(entity.get("_list_type"), perimeter_overrides),
         "corroboration": corroboration_context(party, best_match),
         "channel": "FILTERING",
         "client_id": client_id,
@@ -499,24 +533,39 @@ _CODE_FILTRAGE_NOM_SEUL = '\n'.join([
     '',
 ])
 
+_CODE_SANCTION_REPERE = '\n'.join([
+    'def rule(ctx):',
+    '    """Perimetre SANCTION : ne cloture rien par volumetrie.',
+    '',
+    '    Manquer un gel d avoirs est constatable a l audit et sanctionnable',
+    '    financierement. Une regle de ce perimetre doit viser une famille de',
+    '    faux positifs identifiee et justifiee, jamais trier par le nombre.',
+    '    """',
+    '    return False',
+    '',
+])
+
 RULE_TEMPLATES = (
     {
         "key": "name_only_volume",
-        "name": "Nom seul, sans élément corroborant, en volume",
+        "name": "Hors sanctions — nom seul, sans élément corroborant, en volume",
         "channel": "SCREENING",
+        "perimeters": ["HORS_SANCTION"],
         "summary": ("Clôture les correspondances d'un criblage qui ne repose que sur le "
                     "nom — aucun élément d'identification au profil — et qui en produit "
                     "plus que le seuil de volumétrie."),
-        "loss": ("Un listé réellement porteur de ce nom sera clôturé comme les autres "
-                 "tant que le profil client ne porte ni date de naissance, ni pays, ni "
-                 "pièce d'identité. C'est un arbitrage assumé : sans ces éléments, "
-                 "aucune des N fiches ne peut être distinguée des autres."),
+        "loss": ("Un PEP ou une exclusion réellement porteur de ce nom sera clôturé "
+                 "comme les autres tant que le profil client ne porte ni date de "
+                 "naissance, ni pays, ni pièce d'identité. Le périmètre SANCTION est "
+                 "HORS DE PORTÉE de cette règle : un gel d'avoirs manqué est "
+                 "constatable à l'audit, un PEP manqué ne l'est pas de la même façon."),
         "code": _CODE_NOM_SEUL_VOLUME,
     },
     {
         "key": "no_corroboration_beyond_top",
-        "name": "Aucune corroboration au-delà des premières correspondances",
+        "name": "Hors sanctions — aucune corroboration au-delà des premières",
         "channel": "SCREENING",
+        "perimeters": ["HORS_SANCTION"],
         "summary": ("Garde ouvertes les meilleures correspondances et clôture les "
                     "suivantes quand rien dans le profil ne corrobore la fiche listée "
                     "(ni date de naissance concordante, ni géographie)."),
@@ -527,14 +576,31 @@ RULE_TEMPLATES = (
     },
     {
         "key": "filtering_name_only",
-        "name": "Filtrage : partie de paiement sans pays ni identifiant",
+        "name": "Hors sanctions — filtrage, partie sans pays ni identifiant",
         "channel": "FILTERING",
+        "perimeters": ["HORS_SANCTION"],
         "summary": ("Une partie de message ISO 20022 porte rarement une date de "
                     "naissance. Clôture les correspondances nom-seul en volume, en "
                     "gardant intactes les correspondances exactes d'identifiant."),
         "loss": ("Même arbitrage que pour le criblage, sur un canal où l'absence de "
                  "contexte est la norme plutôt que l'exception."),
         "code": _CODE_FILTRAGE_NOM_SEUL,
+    },
+    {
+        "key": "sanction_never_auto_closed",
+        "name": "Sanctions — repère : ce périmètre ne se clôture pas en volume",
+        "channel": "SCREENING",
+        "perimeters": ["SANCTION"],
+        "summary": ("Modèle de référence, volontairement inerte : il ne clôture rien. "
+                    "Il sert de point de départ à une règle de faux positif visant "
+                    "précisément une famille de cas sur le périmètre sanctions, jamais "
+                    "un tri par volumétrie."),
+        "loss": ("Aucune : tel quel, ce modèle ne clôture aucune correspondance. Toute "
+                 "modification qui le rendrait volumétrique ferait perdre, sur le "
+                 "périmètre où le manquement est constatable à l'audit et sanctionnable "
+                 "financièrement, ce que les deux autres modèles font perdre sur un "
+                 "périmètre où il ne l'est pas."),
+        "code": _CODE_SANCTION_REPERE,
     },
 )
 

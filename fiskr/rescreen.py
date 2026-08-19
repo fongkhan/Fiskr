@@ -167,7 +167,9 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits])
 
         from fiskr.fprules import active_rules
+        from fiskr.settings import perimeter_overrides
         regles_actives = active_rules(db, "SCREENING")
+        classement = perimeter_overrides(db)
 
         a_journaliser = []
         for position, hit in enumerate(hits, start=1):
@@ -180,7 +182,9 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
                 a_journaliser.append((hit, None))
                 continue
             ctx = build_screening_ctx(client, fiche, hit,
-                                      hits_count=len(hits), hit_rank=position)
+                                      hits_count=len(hits), hit_rank=position,
+                                      perimeter_overrides=classement)
+            hit["screening_perimeter"] = ctx["perimeter"]
             regle = evaluate_fp_rules(db, "SCREENING", ctx, rules=regles_actives)
             if regle is not None:
                 annotate_suppression(hit, regle)

@@ -802,6 +802,12 @@ class FpRule(Base):
     status = Column(String(30), default="DRAFT", index=True)
     enabled = Column(Boolean, default=True)   # interrupteur des regles ACTIVE
     run_order = Column(Integer, default=100)
+    # Perimetres ou la regle s'applique (liste JSON : SANCTION, HORS_SANCTION).
+    # NULL = tous, ce qui est le comportement des regles ecrites avant cette
+    # colonne. Le moteur FILTRE dessus : une regle limitee au hors-sanction ne
+    # peut pas cloturer une correspondance de gel d'avoirs, meme si son code
+    # l'oublie. Un controleur lit la portee sur la regle, pas dans son code.
+    perimeters = Column(JSON, nullable=True)
     hit_count = Column(Integer, default=0)
     version = Column(Integer, default=1)
     replaces_rule_id = Column(Integer, nullable=True)  # version ACTIVE remplacee

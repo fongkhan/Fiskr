@@ -2563,7 +2563,12 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     alert_id = None
     whitelist_pair_id = None
     hits_summary = {"hits": 0, "opened": 0, "closed_by_rule": 0,
-                    "redetected": 0, "whitelisted": 0}
+                    "redetected": 0, "whitelisted": 0,
+                    # Ventilation par perimetre : sur SANCTION, un ecart entre
+                    # ce qui est trouve et ce qui reste ouvert doit sauter aux
+                    # yeux — c'est le perimetre ou un manquement est
+                    # constatable a l'audit.
+                    "by_perimeter": {}}
     if best_match:
         client_ref = client_dict.get("client_id")
         # Rang par score decroissant : une regle peut raisonner sur la place
@@ -2580,7 +2585,9 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
 
         # Regles anti-faux positifs chargees UNE fois pour tout le lot
         from fiskr.fprules import active_rules
+        from fiskr.settings import perimeter_overrides
         regles_actives = active_rules(db, "SCREENING") if hits else []
+        classement = perimeter_overrides(db) if hits else {}
 
         a_journaliser: List[Any] = []
         for position, hit in enumerate(hits, start=1):
@@ -2604,7 +2611,9 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                     hit["ownership_inherited_risk"] = inherited
             hit["screening_lists_restriction"] = requested_lists or "ALL"
             ctx = build_screening_ctx(client_dict, fiche, hit,
-                                      hits_count=len(hits), hit_rank=position)
+                                      hits_count=len(hits), hit_rank=position,
+                                      perimeter_overrides=classement)
+            hit["screening_perimeter"] = ctx["perimeter"]
             regle = evaluate_fp_rules(db, "SCREENING", ctx, rules=regles_actives)
             if regle is not None:
                 annotate_suppression(hit, regle)
@@ -2621,6 +2630,10 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                 if inherited:
                     best_match["ownership_inherited_risk"] = inherited
             a_journaliser.append((best_match, None))
+
+        for hit, _regle in a_journaliser:
+            cle = hit.get("screening_perimeter") or "SANCTION"
+            hits_summary["by_perimeter"][cle] = hits_summary["by_perimeter"].get(cle, 0) + 1
 
         lignes = log_compliance_decisions(
             db, client_dict,
@@ -8184,6 +8197,51 @@ def _ctx_from_alert(db: Session, alert: Alert) -> Dict[str, Any]:
         "adjustments": tree.get("adjustments") or {},
         "client": None, "entity": (tree.get("watchlist_entity") or {}),
         "party": None, "message": None,
+    }
+
+
+@app.get("/api/screening/perimeters")
+async def get_screening_perimeters(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Classement des listes en deux perimetres, et ce que chacun autorise.
+
+    SANCTION — designations avec obligation de gel. Manquer une correspondance
+    est constatable a l'audit et sanctionnable financierement : tout est
+    genere, rien n'est cloture par volumetrie.
+
+    HORS_SANCTION — PEP, alertes de regulateurs, exclusions de bailleurs. Ce
+    sont des signaux de vigilance : le seuil de coupure peut y monter (la
+    correspondance n'est alors jamais creee) et les regles volumetriques s'y
+    appliquent.
+
+    Le classement par defaut derive de la famille declaree au registre des
+    sources ; `overrides` porte les decisions prises a chaud.
+    """
+    from fiskr.perimeters import (perimetres_par_defaut, perimetre_de,
+                                  PERIMETRES, PERIMETRE_LABELS)
+    from fiskr.settings import perimeter_overrides
+    surcharges = perimeter_overrides(db)
+    seuils = score_thresholds(db)
+    effectif = {t: perimetre_de(t, surcharges) for t in sorted(perimetres_par_defaut())}
+    repartition = {p: sorted(t for t, v in effectif.items() if v == p) for p in PERIMETRES}
+    return {
+        "perimeters": [
+            {"key": p, "label": PERIMETRE_LABELS[p],
+             "list_types": repartition[p],
+             "cut_off": (seuils.get("cut_off_by_perimeter") or {}).get(
+                 p, seuils["cut_off_threshold"]),
+             "cut_off_source": ("perimetre"
+                                if p in (seuils.get("cut_off_by_perimeter") or {})
+                                else "seuil global")}
+            for p in PERIMETRES
+        ],
+        "by_list_type": effectif,
+        "overrides": surcharges,
+        "cut_off_threshold": seuils["cut_off_threshold"],
+        "cut_off_overrides": seuils["cut_off_overrides"],
     }
 
 

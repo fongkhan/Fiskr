@@ -188,6 +188,21 @@ def resolve_cut_off(config: dict, watchlist_entry: dict = None) -> float:
             return float(overrides[list_type])
         except (TypeError, ValueError):
             return float(cut_off)
+    # Seuil par PERIMETRE, entre la surcharge par liste et le seuil global.
+    # Sur le perimetre hors sanction (PEP, regulateurs, exclusions), une
+    # correspondance manquee n'expose pas aux memes consequences qu'un gel
+    # d'avoirs manque : c'est la que le seuil peut monter. La coupure est
+    # « naturelle » — la correspondance n'est jamais creee, donc rien a
+    # cloturer ensuite. Table vide par defaut : aucun score ne bouge.
+    par_perimetre = scoring_cfg.get("cut_off_by_perimeter") or {}
+    if list_type and par_perimetre:
+        from fiskr.perimeters import perimetre_de
+        perimetre = perimetre_de(list_type, scoring_cfg.get("perimeter_overrides"))
+        if perimetre in par_perimetre:
+            try:
+                return float(par_perimetre[perimetre])
+            except (TypeError, ValueError):
+                return float(cut_off)
     return float(cut_off)
 
 

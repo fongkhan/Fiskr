@@ -399,7 +399,9 @@ def screen_payment_message(db, parsed: Dict[str, Any],
         if best is not None:
             hits.sort(key=lambda t: -t[0]["final_score"])
             from fiskr.fprules import active_rules
+            from fiskr.settings import perimeter_overrides
             regles_actives = active_rules(db, "FILTERING") if hits else []
+            classement = perimeter_overrides(db) if hits else {}
 
             a_journaliser = []
             for position, (hit, hit_client) in enumerate(hits, start=1):
@@ -407,7 +409,9 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                 # Regles anti-faux positifs du canal FILTERING : appliquees
                 # avant de tracer, pour marquer la decision dans le journal
                 ctx = build_filtering_ctx(party, hit["watchlist_entity"], hit, parsed,
-                                          client_id, hits_count=len(hits), hit_rank=position)
+                                          client_id, hits_count=len(hits), hit_rank=position,
+                                          perimeter_overrides=classement)
+                hit["screening_perimeter"] = ctx["perimeter"]
                 regle = evaluate_fp_rules(db, "FILTERING", ctx, rules=regles_actives)
                 if regle is not None:
                     annotate_suppression(hit, regle)

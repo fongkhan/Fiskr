@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — two screening perimeters, because the two risks are not the same
+Keeping every hit is a regulatory requirement; the volumetry is its consequence. But the two are not one problem — they are two, and they call for opposite treatment:
+
+**SANCTION** — designations carrying a freezing obligation (OFAC, EU, UN, DGT, OFSI, national counter-terrorism lists). A missed match is a missed terrorist or sanctioned party: observable at audit, financially sanctionable. Everything is generated, nothing is closed by volumetry.
+
+**HORS_SANCTION** — PEPs, regulator alert lists, multilateral debarment. Vigilance signals, not freezing obligations. This perimeter takes a more aggressive closure.
+
+What makes the split worth having, measured on production: **709 511 records out of 895 157 (79 %)** sit on the non-sanction side, almost all of them `WATCHLIST_PEP`. That is exactly where common-name homonymy explodes — and therefore exactly where the cut-off can rise, so the match is never created rather than having to be closed afterwards.
+
+The classification derives from the `family` already declared in the source registry, so a source added there is classified without touching anything. The fifteen list types predating that registry are classified one by one, with the reason. **An unknown type falls on the SANCTION side** — the side that closes nothing: a list wrongly placed on the non-sanction side would have its matches closed in volume, so the default leans toward what loses nothing. Being a compliance call, the whole map is overridable through `screening.perimeters`.
+
+Two levers per perimeter:
+
+- **A cut-off per perimeter**, between the per-list override and the global threshold (`scoring.cut_off_by_perimeter`). The cut is *natural*: below it the match is never created, so there is nothing to close. **Empty by default** — introducing perimeters moves no score, and therefore no already-approved test book.
+- **A declared scope on each rule** (`FpRule.perimeters`, nullable, `NULL` = every perimeter, so existing rules behave exactly as before). The **engine** filters on it, not the rule's code: a non-sanction rule cannot close a freezing-obligation match even if its code forgets to check — and a controller reads the scope on the rule instead of hunting through its code. A broken declaration applies **nowhere** rather than everywhere.
+
+The three volumetric templates now declare `HORS_SANCTION`. A fourth, `SANCTION`-scoped, ships deliberately inert: it closes nothing, and exists as the starting point for a rule targeting one identified family of false positives on that perimeter, never a sort by count.
+
+`GET /api/screening/perimeters` serves the classification, the effective cut-off per perimeter and where it comes from. Screening responses carry `hits.by_perimeter`, so a gap between what was found and what stays open is visible on the side where a shortfall is observable at audit.
+
+
 ### Fixed — a screening kept one hit out of 2 976
 The engine persisted only the **best** match. Measured on production through `GET /api/screen/preview` (read-only, same engine):
 
