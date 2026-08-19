@@ -540,6 +540,15 @@ _PERFORMANCE_INDEXES = (
     # Meme mesure, avec : page 1,8 ms (x182), compte 55 ms (x4,7).
     Index("ix_wl_entities_production", WatchlistEntity.snapshot_id, WatchlistEntity.id,
           postgresql_where=WatchlistEntity.excluded.isnot(True)),
+    # Index partiel SYMETRIQUE, pour le perimetre « Exclues ». Celui du dessus
+    # ne sert QUE la negation : un index partiel sur `excluded IS NOT TRUE`
+    # n'aide en rien la requete `excluded IS TRUE`, qui n'avait donc aucun
+    # index et parcourait la table entiere. Mesure en production : le
+    # perimetre EXCLUDED mettait 21 a 35 s pour rendre... zero ligne.
+    # Celui-ci n'indexe que les fiches effectivement exclues — une poignee,
+    # la ou l'autre en indexe des centaines de milliers.
+    Index("ix_wl_entities_excluded", WatchlistEntity.snapshot_id, WatchlistEntity.id,
+          postgresql_where=WatchlistEntity.excluded.is_(True)),
 )
 
 # Index de RECHERCHE plein texte (ILIKE « %terme% »), separes parce qu'ils ont

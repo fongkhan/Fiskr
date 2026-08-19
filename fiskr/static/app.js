@@ -969,6 +969,32 @@ async function fetchConfig() {
 // (Le journal d'audit est géré plus bas : fetchAuditHistory / renderAuditHistoryTable /
 // viewAuditLogDetail — les anciennes versions dupliquées et boguées ont été supprimées.)
 
+// Une vue est-elle REELLEMENT a l'ecran ? (onglet actif + sous-onglet actif)
+function vueAffichee(sectionId, subTabId) {
+ const section = document.getElementById(`sec-${sectionId}`);
+ if (!section || !section.classList.contains("active")) return false;
+ if (!subTabId) return true;
+ const panneau = document.getElementById(`sub-sec-${subTabId}`);
+ return !!panneau && panneau.classList.contains("active");
+}
+
+// Rafraichit une vue seulement si elle est affichee.
+//
+// Une synchronisation, un import, une homologation ou une purge rechargeaient
+// l'historique des lots (282 Ko, 547 lignes) ET la watchlist paginee, que
+// l'utilisateur regarde ces tableaux ou pas. C'etait doublement inutile :
+// switchTab et switchSubTab rechargent DEJA ces vues a chaque ouverture de
+// leur onglet, donc la donnee fraiche est garantie a l'arrivee. Rafraichir en
+// fond ne faisait que payer le poids sans que personne ne le voie.
+function rafraichirSiAffichee(sectionId, subTabId, fn) {
+ if (vueAffichee(sectionId, subTabId)) fn();
+}
+
+function rafraichirLotsEtWatchlist() {
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-active", fetchWatchlist);
+}
+
 // Tab navigation
 function switchTab(tabId) {
  // Compatibilité : l'ancien onglet « Alertes » a été scindé — tout appel
@@ -1305,7 +1331,7 @@ async function handleManualBatch() {
  }
  if (data.added.length) {
  document.getElementById("manual-batch-lines").value = "";
- fetchWatchlist();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-active", fetchWatchlist);
  fetchWatchlistHash();
  }
  } catch (e) {
@@ -1405,8 +1431,8 @@ async function handleManualEntity(event) {
  document.getElementById("manual-entity-form").reset();
  toggleManualFormFields();
  
- // Switch back to Active Watchlist and refresh
- fetchWatchlist();
+ // Retour sur la watchlist active : switchSubTab la recharge lui-meme,
+ // l'appel qui le precedait faisait la meme requete une seconde fois.
  fetchWatchlistHash();
  switchSubTab('watchlist-mgmt', 'watchlist-active');
  
@@ -1688,15 +1714,14 @@ async function handleIngestion(event) {
  });
  if (!finalState || finalState.status === "ERROR") {
  showToast(`Erreur d'importation : ${(finalState && finalState.error) || "erreur inconnue"}`, "error", 9000);
- fetchSnapshots();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
  return;
  }
  data = finalState.result || {};
  }
  showToast(`Instantané importé avec succès ! ${data.message}`, "success");
  fileInput.value = "";
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  fetchPendingReviews();
  // Fluidité du parcours : proposer d'enchaîner directement sur l'homologation
@@ -1782,8 +1807,7 @@ async function handleSourceSync(source) {
 // restitution du rapport, publié sur le jeton de l'opération.
 async function finishSourceSync(state) {
  fetchSyncReports();
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  fetchPendingReviews();
  refreshSidebarCounters();
@@ -1812,7 +1836,9 @@ async function finishSourceSync(state) {
 // Load and render the synchronization reports history
 async function fetchSyncReports() {
  try {
- const response = await apiFetch("/api/sync/reports");
+ // Liste allegee : le delta complet (99 % du poids) n'est lu qu'a l'ouverture
+ // du detail, le tableau se contente du compteur d'echecs partiels.
+ const response = await apiFetch("/api/sync/reports?include_details=false");
  if (!response.ok) return;
  const reports = await response.json();
  renderSyncReportsTable(reports);
@@ -1842,8 +1868,7 @@ function renderSyncReportsTable(reports) {
 
  // Echecs partiels (actes/PDF inaccessibles) : la synchronisation a
  // abouti mais une partie de la source n'a pas pu être récupérée
- const delta = report.delta_report || {};
- const partialFailures = (delta.fetch_failures || []).length + (delta.pdf_failures || []).length;
+ const partialFailures = report.partial_failures || 0;
  if (partialFailures > 0 && report.status !== "ERROR") {
  statusBadge += ` <span class="status-badge warning" title="${partialFailures} élément(s) inaccessibles — repris au prochain run"> ${partialFailures}</span>`;
  }
@@ -1857,15 +1882,29 @@ function renderSyncReportsTable(reports) {
  <td>+${report.added_count} / ~${report.modified_count} / −${report.removed_count}</td>
  <td>${report.email_sent ? " Envoyé" : "—"}</td>
  `;
- tr.addEventListener("click", () => showSyncReportDetail(report));
+ tr.addEventListener("click", () => { showSyncReportDetail(report); });
  tbody.appendChild(tr);
  });
 }
 
 // Display the detail (message + truncated delta) of a sync report
-function showSyncReportDetail(report) {
+async function showSyncReportDetail(report) {
  const panel = document.getElementById("sync-report-detail");
  const content = document.getElementById("sync-report-detail-content");
+ // La ligne de liste arrive sans `delta_report` : on le complete ici, une
+ // seule fois par rapport ouvert (`undefined` = jamais charge, `null` = pas
+ // de delta pour ce rapport, ce qui est une reponse legitime).
+ if (report.delta_report === undefined) {
+ content.textContent = "Chargement du détail…";
+ panel.classList.remove("hidden");
+ try {
+ const resp = await apiFetch(`/api/sync/reports/${encodeURIComponent(report.id)}`);
+ if (resp.ok) Object.assign(report, await resp.json());
+ else report.delta_report = null;
+ } catch (e) {
+ report.delta_report = null;
+ }
+ }
  const detail = {
  source: report.source,
  executed_at: report.executed_at,
@@ -2997,6 +3036,9 @@ async function fetchAuditHistory(page = null) {
  const toEl = document.getElementById("audit-date-to");
  if (toEl && toEl.value) params.set("date_to", toEl.value);
 
+ // Liste allegee : `decision_tree` et `config_state` (97 % du poids) ne sont
+ // lus qu'a l'ouverture de la modale d'inspection.
+ params.set("include_details", "false");
  const response = await apiFetch(`/api/history?${params}`);
  const data = await response.json();
  auditHistory = data.items || [];
@@ -3044,9 +3086,22 @@ function renderAuditHistoryTable(logs) {
  });
 }
 
-function viewAuditLogDetail(logId) {
+async function viewAuditLogDetail(logId) {
  const log = auditHistory.find(item => item.id === logId);
  if (!log) return;
+
+ // La ligne de liste arrive sans arbre de decision ni etat de configuration :
+ // on les charge a l'ouverture, une seule fois par decision inspectee.
+ if (log.decision_tree === undefined) {
+ try {
+ const resp = await apiFetch(`/api/history/${encodeURIComponent(logId)}`);
+ if (!resp.ok) return;
+ Object.assign(log, await resp.json());
+ } catch (e) {
+ console.error("Error loading audit detail:", e);
+ return;
+ }
+ }
  
  const modal = document.getElementById("audit-modal");
  const content = document.getElementById("modal-audit-details");
@@ -3209,8 +3264,7 @@ async function purgeFailedSnapshots() {
  
  const data = await response.json();
  showToast(`Purge terminée : ${data.message}`, "success");
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  } catch (e) {
  console.error("Purge failed:", e);
@@ -5447,10 +5501,9 @@ async function approvePendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- fetchSnapshots();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
  onOperationDone(data.job_token, () => {
- fetchSnapshots();
- fetchWatchlist();
+ rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
  refreshSidebarCounters();
  });
@@ -5483,7 +5536,7 @@ async function rejectPendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- fetchSnapshots();
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
  } catch (e) {
  console.error("Error rejecting snapshot:", e);
  showToast("Erreur réseau de communication.", "error");
@@ -6427,7 +6480,7 @@ async function renderQualityWidget(body) {
 
 async function renderHistoryWidget(body) {
  try {
- const response = await apiFetch("/api/history?page_size=8", { silent: true });
+ const response = await apiFetch("/api/history?page_size=8&include_details=false", { silent: true });
  if (!response.ok) { body.innerHTML = '<div class="dash-widget-empty">Historique indisponible.</div>'; return; }
  const items = (await response.json()).items || [];
  body.innerHTML = items.length

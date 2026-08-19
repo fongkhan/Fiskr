@@ -262,13 +262,21 @@ def test_sync_response_carries_rescreen_counts(client, monkeypatch):
             }]
         }
     }
-    monkeypatch.setattr(
-        "fiskr.sync.download_to_file",
-        # Le double doit refleter la vraie signature de download_to_file
-        # (elle accepte `progress` : la source publie sa progression)
-        lambda url, dest, timeout=300.0, retries=None, progress=None:
-            Path(dest).write_text(jsonlib.dumps(sample), encoding="utf-8")
-    )
+    import inspect
+    import fiskr.sync as sync_mod
+    vraie_signature = inspect.signature(sync_mod.download_to_file)
+
+    def faux_telechargement(url, dest, **kwargs):
+        # Le double doit refleter la vraie signature de download_to_file : on
+        # la VERIFIE au lieu de la recopier. Recopiee, elle derivait en silence
+        # des que la vraie gagnait un parametre (`validators`, `headers` — le
+        # telechargement conditionnel HTTP 304), et le test echouait sur une
+        # TypeError sans rapport avec ce qu'il verifie.
+        vraie_signature.bind(url, dest, **kwargs)
+        Path(dest).write_text(jsonlib.dumps(sample), encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr("fiskr.sync.download_to_file", faux_telechargement)
     # La synchronisation repond 202 et travaille en tache de fond : on attend
     # le job, puis on lit le rapport publie sur son jeton.
     response = client.post("/api/sync/run", json={"source": "DGT"})

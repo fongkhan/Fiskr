@@ -43,7 +43,10 @@ from fiskr.ingest import (
     parse_hk_sfc_alert_list, parse_amf_blacklist, parse_worldbank_debarred_json
 )
 from fiskr.names import parse_individual_name, ensure_parsed_name
-from fiskr.database import Snapshot, WatchlistEntity, SyncReport, compute_checksum
+from fiskr.database import (
+    Snapshot, WatchlistEntity, SyncReport, compute_checksum,
+    refresh_source_relationships,
+)
 from fiskr.sources import OPENSANCTIONS_BY_KEY, opensanctions_default_url
 from fiskr.settings import require_approval_enabled
 
@@ -777,10 +780,11 @@ class SyncProgress:
     """
     Publication de la progression d'une synchronisation de source.
 
-    Partage par les QUATRE implementations (OFAC, DGT, EUR-Lex et le cycle
-    generique) : avant, seul le cycle generique publiait ses phases et les
-    autres sources n'apparaissaient qu'en barre indeterminee. Le jeton
-    `sync:<source>` est le meme que celui interroge par le tableau de bord.
+    Partage par le cycle generique de remplacement de liste (OFAC, DGT et les
+    autres sources officielles passent par lui) et par le cycle EUR-Lex :
+    avant, seul le cycle generique publiait ses phases et les autres sources
+    n'apparaissaient qu'en barre indeterminee. Le jeton `sync:<source>` est le
+    meme que celui interroge par le tableau de bord.
     """
 
     def __init__(self, source: str, started_by: str = "système"):
@@ -1093,135 +1097,35 @@ def run_ofac_sync(
     """
     Telecharge le fichier OFAC SDN_ADVANCED.XML, l'ingere en snapshot, calcule
     le delta par rapport a la liste OFAC active et applique le remplacement.
+
+    Specificite OFAC : le parseur remonte aussi les liens de detention entre
+    profils (ProfileRelationships). Le graphe est rafraichi via `after_persist`
+    dans la meme transaction que les fiches, donc jamais desynchronise de la
+    liste qui vient d'etre ingeree.
     """
-    cfg = get_sync_config()["ofac"]
-    url = cfg["url"]
-    fetch = fetcher or download_to_file
+    relations: List[Dict[str, Any]] = []
 
-    temp_dir = PROJECT_ROOT / "temp_ingestion"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file = temp_dir / f"ofac_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.xml"
+    def _parser(file_path: str):
+        return parse_ofac_advanced_xml(file_path, relations_out=relations)
 
-    previous = _latest_ready_snapshot(db, "WATCHLIST_OFAC")
-    # Scalaire capture AVANT la boucle de persistance : le code ne depend plus
-    # de la survie d'un objet ORM a un traitement long (cf. panne detachement)
-    previous_id = previous.snapshot_id if previous else None
-    snap_id = None
-    tracker = SyncProgress("OFAC")
-    try:
-        logger.info(f"Sync OFAC: telechargement de {url}")
-        if fetcher is None:
-            download_to_file(url, temp_file, progress=tracker.downloading())
-        else:
-            fetch(url, temp_file)
-
-        tracker.phase("HASH")
-        hasher = hashlib.sha256()
-        with open(temp_file, "rb") as f:
-            while chunk := f.read(1024 * 1024):
-                hasher.update(chunk)
-        fhash = hasher.hexdigest()
-
-        duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_OFAC", fhash)
-        if duplicate:
-            if duplicate.status == "PENDING_REVIEW":
-                message = "Le fichier OFAC est identique a un snapshot deja en attente d'homologation."
-            else:
-                message = "Le fichier OFAC est identique a la version active (hash inchange)."
-            return _finalize_report(
-                db, source="OFAC", trigger=trigger, status="NO_CHANGE",
-                message=message,
-                previous_snapshot_id=duplicate.snapshot_id
-            )
-
-        # Ingestion du nouveau snapshot
-        snap_id = f"ofac-sync-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
-        snap = Snapshot(
-            snapshot_id=snap_id,
-            file_type="WATCHLIST_OFAC",
-            file_name=f"SDN_ADVANCED_{datetime.utcnow().strftime('%Y-%m-%d')}.xml",
-            file_hash=fhash,
-            record_count=0,
-            status="PROCESSING"
-        )
-        db.add(snap)
-        db.commit()
-
-        ofac_relations: list = []
-        record_count = persist_pivot_items(
-            db, snap_id, parse_ofac_advanced_xml(str(temp_file), relations_out=ofac_relations),
-            progress=tracker.persisting(db, snap_id),
-        )
+    def _refresh_relations(session) -> None:
         # Graphe de relations entre profils (ownership) rafraichi avec la liste
-        if ofac_relations:
-            from fiskr.database import refresh_source_relationships
-            refresh_source_relationships(db, "OFAC", ofac_relations)
-        # Le snapshot a pu etre expire par les commits periodiques : on le
-        # relit avant d'ecrire, sinon statut et compteur ne seraient pas
-        # persistes (liste jamais mise en production, sans erreur visible)
-        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
-        # Mode homologation : le snapshot attend un pointage humain, l'ancienne
-        # liste READY reste en production jusqu'a l'approbation.
-        staging = require_approval_enabled(db)
-        snap.status = "PENDING_REVIEW" if staging else "READY"
-        snap.record_count = record_count
-        db.commit()
+        if relations:
+            refresh_source_relationships(session, "OFAC", relations)
 
-        # Delta par rapport a la liste active (= production, non supersedee)
-        tracker.phase("DELTA", processed=record_count, snapshot_id=snap_id)
-        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
-        new_entities = _snapshot_entity_dicts(db, snap_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
-
-        no_change = _discard_content_identical(
-            db, source="OFAC", trigger=trigger, snap_id=snap_id,
-            previous_id=previous_id, record_count=record_count, delta=delta)
-        if no_change is not None:
-            return no_change
-
-        if not staging:
-            # Application immediate (remplacement de la liste OFAC active)
-            _supersede_previous_snapshots(db, "WATCHLIST_OFAC", snap_id)
-            db.commit()
-            if reload_cache:
-                tracker.phase("RELOAD", processed=record_count, snapshot_id=snap_id)
-                reload_cache()
-
-        summary = delta["summary"]
-        if staging:
-            message = (
-                f"{record_count} fiches importees depuis le fichier OFAC officiel, "
-                "snapshot en attente d'homologation (pointage humain requis)."
-            )
-        else:
-            message = f"{record_count} fiches importees depuis le fichier OFAC officiel."
-        return _finalize_report(
-            db, source="OFAC", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
-            message=message,
-            snapshot_id=snap_id,
-            previous_snapshot_id=previous_id,
-            added_count=summary["added_count"],
-            modified_count=summary["modified_count"],
-            removed_count=summary["removed_count"],
-            delta_report=_truncate_delta_details(delta)
-        )
-    except Exception as e:
-        db.rollback()
-        tracker.failed(e)
-        logger.error(f"Echec de la synchronisation OFAC: {e}")
-        if snap_id:
-            error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
-            if error_snap:
-                error_snap.status = "ERROR"
-                db.commit()
-        return _finalize_report(
-            db, source="OFAC", trigger=trigger, status="ERROR",
-            message=f"Echec: {e}"
-        )
-    finally:
-        tracker.done()
-        if temp_file.exists():
-            os.remove(temp_file)
+    return _run_list_replacement_sync(
+        db,
+        source="OFAC",
+        file_type="WATCHLIST_OFAC",
+        url=get_sync_config()["ofac"]["url"],
+        parser=_parser,
+        file_label="SDN_ADVANCED",
+        temp_suffix=".xml",
+        trigger=trigger,
+        fetcher=fetcher,
+        reload_cache=reload_cache,
+        after_persist=_refresh_relations,
+    )
 
 
 def run_dgt_sync(
@@ -1235,119 +1139,18 @@ def run_dgt_sync(
     l'ingere en snapshot, calcule le delta par rapport a la liste active et
     applique le remplacement (ou attend l'homologation si le mode est actif).
     """
-    cfg = get_sync_config()["dgt"]
-    url = cfg["url"]
-    fetch = fetcher or download_to_file
-
-    temp_dir = PROJECT_ROOT / "temp_ingestion"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file = temp_dir / f"dgt_sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
-
-    previous = _latest_ready_snapshot(db, "WATCHLIST_DGT")
-    previous_id = previous.snapshot_id if previous else None
-    snap_id = None
-    tracker = SyncProgress("DGT")
-    try:
-        logger.info(f"Sync DGT: telechargement de {url}")
-        if fetcher is None:
-            download_to_file(url, temp_file, progress=tracker.downloading())
-        else:
-            fetch(url, temp_file)
-
-        tracker.phase("HASH")
-        hasher = hashlib.sha256()
-        with open(temp_file, "rb") as f:
-            while chunk := f.read(1024 * 1024):
-                hasher.update(chunk)
-        fhash = hasher.hexdigest()
-
-        duplicate = _existing_snapshot_with_hash(db, "WATCHLIST_DGT", fhash)
-        if duplicate:
-            if duplicate.status == "PENDING_REVIEW":
-                message = "Le registre DGT est identique a un snapshot deja en attente d'homologation."
-            else:
-                message = "Le registre DGT est identique a la version active (hash inchange)."
-            return _finalize_report(
-                db, source="DGT", trigger=trigger, status="NO_CHANGE",
-                message=message,
-                previous_snapshot_id=duplicate.snapshot_id
-            )
-
-        snap_id = f"dgt-sync-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
-        snap = Snapshot(
-            snapshot_id=snap_id,
-            file_type="WATCHLIST_DGT",
-            file_name=f"Registre_gels_DGT_{datetime.utcnow().strftime('%Y-%m-%d')}.json",
-            file_hash=fhash,
-            record_count=0,
-            status="PROCESSING"
-        )
-        db.add(snap)
-        db.commit()
-
-        record_count = persist_pivot_items(db, snap_id, parse_dgt_gels_json(str(temp_file)),
-                                           progress=tracker.persisting(db, snap_id))
-        # Relecture avant ecriture (cf. commentaire OFAC)
-        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
-        staging = require_approval_enabled(db)
-        snap.status = "PENDING_REVIEW" if staging else "READY"
-        snap.record_count = record_count
-        db.commit()
-
-        # Delta par rapport a la liste active (= production, non supersedee)
-        tracker.phase("DELTA", processed=record_count, snapshot_id=snap_id)
-        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
-        new_entities = _snapshot_entity_dicts(db, snap_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
-
-        no_change = _discard_content_identical(
-            db, source="DGT", trigger=trigger, snap_id=snap_id,
-            previous_id=previous_id, record_count=record_count, delta=delta)
-        if no_change is not None:
-            return no_change
-
-        if not staging:
-            _supersede_previous_snapshots(db, "WATCHLIST_DGT", snap_id)
-            db.commit()
-            if reload_cache:
-                tracker.phase("RELOAD", processed=record_count, snapshot_id=snap_id)
-                reload_cache()
-
-        summary = delta["summary"]
-        if staging:
-            message = (
-                f"{record_count} fiches importees depuis le registre national des gels (DGT), "
-                "snapshot en attente d'homologation (pointage humain requis)."
-            )
-        else:
-            message = f"{record_count} fiches importees depuis le registre national des gels (DGT)."
-        return _finalize_report(
-            db, source="DGT", trigger=trigger, status="PENDING_REVIEW" if staging else "SUCCESS",
-            message=message,
-            snapshot_id=snap_id,
-            previous_snapshot_id=previous_id,
-            added_count=summary["added_count"],
-            modified_count=summary["modified_count"],
-            removed_count=summary["removed_count"],
-            delta_report=_truncate_delta_details(delta)
-        )
-    except Exception as e:
-        db.rollback()
-        tracker.failed(e)
-        logger.error(f"Echec de la synchronisation DGT: {e}")
-        if snap_id:
-            error_snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
-            if error_snap:
-                error_snap.status = "ERROR"
-                db.commit()
-        return _finalize_report(
-            db, source="DGT", trigger=trigger, status="ERROR",
-            message=f"Echec: {e}"
-        )
-    finally:
-        tracker.done()
-        if temp_file.exists():
-            os.remove(temp_file)
+    return _run_list_replacement_sync(
+        db,
+        source="DGT",
+        file_type="WATCHLIST_DGT",
+        url=get_sync_config()["dgt"]["url"],
+        parser=parse_dgt_gels_json,
+        file_label="Registre_gels_DGT",
+        temp_suffix=".json",
+        trigger=trigger,
+        fetcher=fetcher,
+        reload_cache=reload_cache,
+    )
 
 
 def _run_list_replacement_sync(
@@ -1362,6 +1165,7 @@ def _run_list_replacement_sync(
     fetcher: Optional[Callable[[str, Path], None]] = None,
     reload_cache: Optional[Callable[[], None]] = None,
     auth_headers: Optional[Dict[str, str]] = None,
+    after_persist: Optional[Callable[[Any], None]] = None,
 ) -> SyncReport:
     """
     Cycle generique de synchronisation d'une liste officielle a remplacement
@@ -1372,6 +1176,10 @@ def _run_list_replacement_sync(
 
     `auth_headers` : en-tetes d'authentification d'un flux sous cle
     (sync.<source>.auth_headers) — transmis au telechargement uniquement.
+
+    `after_persist` : crochet appele avec la session juste apres la
+    persistance des fiches, pour les sources qui alimentent des donnees
+    annexes au meme rythme que la liste (ex. le graphe de detentions OFAC).
     """
     tracker = SyncProgress(source)
     fetch = fetcher or download_to_file
@@ -1436,6 +1244,8 @@ def _run_list_replacement_sync(
 
         record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)),
                                            progress=tracker.persisting(db, snap_id))
+        if after_persist:
+            after_persist(db)
         # Le snapshot a pu etre detache par les commits periodiques
         snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
         staging = require_approval_enabled(db)

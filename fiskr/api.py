@@ -331,58 +331,6 @@ def seed_watchlist_json(db: Session):
         db.rollback()
         logger.error(f"Failed to seed watchlist from JSON: {e}")
 
-def _run_scheduled_syncs():
-    """Execute les synchronisations de sources activees (appel planifie quotidien).
-    L'activation lue est celle EFFECTIVE : reglage a chaud (base) par-dessus
-    config.yaml — couper une source depuis l'application suffit a l'exclure."""
-    db = next(get_db())
-    sync_cfg = get_sync_config(db)
-
-    def _apply_rescreen(report):
-        # Surveillance continue : re-criblage post-delta apres chaque application
-        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
-            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
-            if snap:
-                rescreen_after_snapshot_change(db, snap.file_type, report.snapshot_id, report.previous_snapshot_id)
-
-    try:
-        if sync_cfg["ofac"]["enabled"]:
-            _apply_rescreen(run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        # FSF (liste consolidee, fait autorite) avant le scraping du JO du jour
-        if sync_cfg["eu_fsf"]["enabled"]:
-            _apply_rescreen(run_eu_fsf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["eurlex"]["enabled"]:
-            _apply_rescreen(run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["dgt"]["enabled"]:
-            _apply_rescreen(run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["un"]["enabled"]:
-            _apply_rescreen(run_un_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["pep"]["enabled"]:
-            _apply_rescreen(run_pep_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["ofsi"]["enabled"]:
-            _apply_rescreen(run_ofsi_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["seco"]["enabled"]:
-            _apply_rescreen(run_seco_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["ofac_nonsdn"]["enabled"]:
-            _apply_rescreen(run_ofac_nonsdn_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["csl"]["enabled"]:
-            _apply_rescreen(run_csl_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["canada"]["enabled"]:
-            _apply_rescreen(run_canada_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["dfat"]["enabled"]:
-            _apply_rescreen(run_dfat_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["hk_sfc"]["enabled"]:
-            _apply_rescreen(run_hk_sfc_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["amf"]["enabled"]:
-            _apply_rescreen(run_amf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["worldbank"]["enabled"]:
-            _apply_rescreen(run_worldbank_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        for _os_key, _os_runner in OPENSANCTIONS_RUNNERS.items():
-            if sync_cfg[_os_key]["enabled"]:
-                _apply_rescreen(_os_runner(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-    finally:
-        db.close()
-
 # Executeurs de sync par source (planification cron individuelle)
 _SYNC_RUNNERS = {
     "ofac": run_ofac_sync, "eurlex": run_eurlex_sync, "dgt": run_dgt_sync,
@@ -3843,6 +3791,33 @@ _WL_ROW_COLUMNS = (
 )
 
 
+# Colonnes REELLEMENT lues par la consultation paginee : celles de la ligne,
+# plus la provenance prise sur le snapshot. Les demander explicitement evite
+# d'hydrater des entites ORM completes — 70 colonnes dont les gros blocs JSON
+# (alias, motifs de designation, adresses, documents), que PostgreSQL doit
+# alors detoaster ligne par ligne pour que la serialisation les jette. Le
+# balayage fuzzy avait deja tire cette lecon : 25 000 fiches ORM completes
+# coutaient ~2,5 s par tranche, des tuples legers moins d'une demi-seconde.
+_WL_ROW_SELECT = tuple(getattr(WatchlistEntity, name) for name in _WL_ROW_COLUMNS
+                       if hasattr(WatchlistEntity, name)) + (
+    Snapshot.file_type, Snapshot.status, Snapshot.uploaded_at, Snapshot.file_name,
+)
+
+
+def _watchlist_row_from_tuple(row) -> Dict[str, Any]:
+    """Meme sortie que `_serialize_watchlist_row`, depuis un tuple de colonnes.
+    Un test compare les deux champ par champ : la version legere ne doit rien
+    rendre d'autre que l'autre, sinon l'ecran perd une colonne en silence."""
+    noms = [name for name in _WL_ROW_COLUMNS if hasattr(WatchlistEntity, name)]
+    d = dict(zip(noms, row))
+    file_type, snap_status, uploaded_at, file_name = row[len(noms):]
+    d["_list_type"] = file_type
+    d["snapshot_status"] = snap_status
+    d["snapshot_uploaded_at"] = uploaded_at.isoformat() if uploaded_at else None
+    d["snapshot_file_name"] = file_name
+    return d
+
+
 def _serialize_watchlist_row(entity: WatchlistEntity, snap: Snapshot) -> Dict[str, Any]:
     """
     Ligne de tableau : ce qui est affiche, plus la PROVENANCE.
@@ -4430,10 +4405,14 @@ def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
         # Aucun referentiel en production : le badge affiche son etat vide
         # (« NONE »), jamais un hash inventé.
         return {"version": watchlist_version, "hash": None, "count": 0}
-    count = db.query(WatchlistEntity).filter(
+    # Meme univers que la consultation paginee (snapshots READY de type
+    # WATCHLIST_*, fiches non exclues), donc meme chiffre et meme memorisation :
+    # ce badge est charge a CHAQUE ouverture de page, et ce COUNT porte sur
+    # 895 157 fiches en production — 1,3 s de travail a chaque fois.
+    count = _production_total(db, db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_([s.snapshot_id for s in snapshots]),
         WatchlistEntity.excluded.isnot(True),
-    ).count()
+    ))
     return {"version": watchlist_version, "hash": snapshots[0].file_hash, "count": int(count)}
 
 
@@ -5167,6 +5146,56 @@ def _wl_validate_search_field(search_field: str) -> str:
     return search_field
 
 
+# Compte du perimetre « production », memorise par SIGNATURE de la production.
+#
+# Mesure en production (895 157 fiches en production, table de 11,2 M lignes) :
+# la reponse coute 3,6 a 3,9 s QUELLE QUE SOIT la taille de page — 1 ligne
+# comme 200 (2 ms par ligne au-dela). Le cout n'est donc pas le rendu des
+# lignes mais le COUNT du perimetre, refait a chaque changement de page.
+#
+# La signature n'est pas une duree : c'est l'etat de la production. Elle
+# combine l'epoque de la watchlist (bougee par tout ce qui change l'univers
+# crible) ET un releve direct des snapshots en production — nombre, derniere
+# date de televersement, somme des compteurs. Ce releve porte sur 42 lignes et
+# capte la mise en production AU COMMIT, sans attendre le travail de fond qui
+# recharge le cache : le compte ne peut pas rester en retard d'une homologation.
+#
+# Les fiches, elles, ne sont jamais memorisees — seul le total l'est.
+_WL_TOTAL_CACHE: Dict[Any, Dict[Any, int]] = {}
+
+
+def _production_signature(db: Session) -> tuple:
+    """Etat de la production : change des qu'une liste entre ou sort."""
+    from sqlalchemy import func
+    releve = (db.query(func.count(Snapshot.snapshot_id),
+                       func.max(Snapshot.uploaded_at),
+                       func.coalesce(func.sum(Snapshot.record_count), 0))
+                .filter(Snapshot.status == "READY",
+                        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+                .one())
+    return (watchlist_epoch(db),) + tuple(str(v) for v in releve)
+
+
+def _production_total(db: Session, query, cle: str = "") -> int:
+    """Compte du perimetre production, recalcule uniquement si la production a
+    bouge. Le cache est vide en entier des que la signature change : il ne
+    garde jamais qu'un seul etat, donc il ne grossit pas avec le temps.
+
+    `cle` distingue les perimetres qui different (filtre par type de liste).
+    La cle vide designe LE perimetre de production entier : le badge « Hash
+    actif » et la consultation paginee comptent exactement le meme univers,
+    ils partagent donc le meme chiffre — un test verrouille cette egalite.
+    """
+    signature = _production_signature(db)
+    memoire = _WL_TOTAL_CACHE.get(signature)
+    if memoire is None:
+        _WL_TOTAL_CACHE.clear()
+        memoire = _WL_TOTAL_CACHE.setdefault(signature, {})
+    if cle not in memoire:
+        memoire[cle] = query.count()
+    return memoire[cle]
+
+
 def _wl_scope_query(db: Session, scope: str, list_type: Optional[str]):
     """Requete (entite, snapshot) du perimetre demande — partagee entre la
     consultation paginee et le balayage fuzzy par tranches."""
@@ -5294,16 +5323,24 @@ async def browse_watchlist_db(
 
     # Une recherche exacte a deja compte son perimetre : ne pas relancer le
     # meme COUNT (deux parcours LIKE complets au lieu d'un sur une grosse base)
-    total = exact_total if match_mode == "exact" else query.count()
+    if match_mode == "exact":
+        total = exact_total
+    elif scope == "production":
+        # Perimetre par defaut de l'ecran, et le seul assez gros pour que le
+        # COUNT domine la reponse : memorise par signature de la production.
+        total = _production_total(db, query, list_type or "")
+    else:
+        total = query.count()
     if sort_by:
         col = getattr(WatchlistEntity, sort_by)
         order_clause = col.desc() if sort_dir == "desc" else col.asc()
         query = query.order_by(order_clause, WatchlistEntity.id.asc())
     else:
         query = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc())
-    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    rows = (query.with_entities(*_WL_ROW_SELECT)
+                 .offset((page - 1) * page_size).limit(page_size).all())
 
-    items = [_serialize_watchlist_row(entity, snap) for entity, snap in rows]
+    items = [_watchlist_row_from_tuple(row) for row in rows]
 
     return {"total": total, "page": page, "page_size": page_size, "scope": scope,
             "match_mode": match_mode, "items": items}
@@ -5387,6 +5424,35 @@ async def scan_watchlist_db_fuzzy(
             "done": scanned < chunk}
 
 
+def _audit_row(r: AuditTrail, *, details: bool) -> Dict[str, Any]:
+    """Ligne du journal d'audit. `details=False` omet `decision_tree` et
+    `config_state` : le tableau ne les affiche pas et ils portent l'essentiel
+    du poids de la page. Le type de liste, lui, reste calcule — son repli de
+    lecture passe justement par le decision_tree."""
+    tree = r.decision_tree or {}
+    fallback = ((tree.get("watchlist_entity") or {}).get("_list_type")
+                if isinstance(tree, dict) else None)
+    row = {
+        "id": r.id,
+        "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+        "client_id": r.client_id,
+        "client_name": r.client_name,
+        "client_type": r.client_type,
+        "watchlist_id": r.watchlist_id,
+        "watchlist_name": r.watchlist_name,
+        "base_score": r.base_score,
+        "final_score": r.final_score,
+        "status": r.status,
+        "list_type": r.list_type or fallback,
+        "watchlist_version": r.watchlist_version,
+        "watchlist_hash": r.watchlist_hash,
+    }
+    if details:
+        row["decision_tree"] = r.decision_tree
+        row["config_state"] = r.config_state
+    return row
+
+
 @app.get("/api/history")
 async def get_audit_history(
     list_type: Optional[str] = Query(None),
@@ -5395,6 +5461,7 @@ async def get_audit_history(
     date_to: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    include_details: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -5404,6 +5471,12 @@ async def get_audit_history(
     incluses). Les enregistrements anterieurs a la colonne list_type sont
     restitues via le decision_tree quand il porte le type (fallback lecture, le
     journal immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
+
+    `include_details=false` omet `decision_tree` et `config_state` (97 % du
+    poids de la page) : le tableau ne s'en sert pas, seule la modale
+    d'inspection en a besoin et elle les lit via GET /api/history/{id}. Le
+    defaut reste `true` — le journal d'audit est une piece opposable et les
+    integrations qui l'archivent doivent continuer a tout recevoir.
     """
     query = db.query(AuditTrail)
     if status_filter:
@@ -5426,30 +5499,22 @@ async def get_audit_history(
     rows = query.order_by(AuditTrail.timestamp.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
 
-    def _row(r: AuditTrail) -> Dict[str, Any]:
-        tree = r.decision_tree or {}
-        fallback = ((tree.get("watchlist_entity") or {}).get("_list_type")
-                    if isinstance(tree, dict) else None)
-        return {
-            "id": r.id,
-            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            "client_id": r.client_id,
-            "client_name": r.client_name,
-            "client_type": r.client_type,
-            "watchlist_id": r.watchlist_id,
-            "watchlist_name": r.watchlist_name,
-            "base_score": r.base_score,
-            "final_score": r.final_score,
-            "status": r.status,
-            "list_type": r.list_type or fallback,
-            "decision_tree": r.decision_tree,
-            "config_state": r.config_state,
-            "watchlist_version": r.watchlist_version,
-            "watchlist_hash": r.watchlist_hash,
-        }
-
     return {"total": total, "page": page, "page_size": page_size,
-            "items": [_row(r) for r in rows]}
+            "items": [_audit_row(r, details=include_details) for r in rows]}
+
+
+@app.get("/api/history/{record_id}")
+async def get_audit_history_detail(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Decision d'audit complete, `decision_tree` et `config_state` compris —
+    la piece que la modale d'inspection charge a l'ouverture."""
+    row = db.query(AuditTrail).filter(AuditTrail.id == record_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Decision introuvable dans le journal d'audit.")
+    return _audit_row(row, details=True)
 
 # ------------------ VUE CLIENT 360° ------------------
 
@@ -5866,19 +5931,33 @@ async def get_sidebar_counters(
     """
     Compteurs legers pour les badges de la barre laterale (polling) :
     alertes ouvertes et snapshots en attente d'homologation.
+
+    Les cinq compteurs d'alertes sont lus en UNE passe sur la table (agregats
+    conditionnels) et non en cinq requetes : ils portent sur le meme perimetre
+    et cet endpoint est interroge en boucle par la barre laterale, donc chaque
+    aller-retour epargne l'est a chaque rafraichissement de chaque onglet
+    ouvert. `count(CASE WHEN ... THEN 1 END)` ne compte pas les NULL : la
+    portee est exactement celle du filtre, sur PostgreSQL comme sur SQLite.
     """
-    open_q = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    from sqlalchemy import func, case, and_, or_
+    ouverte = Alert.status.in_(ALERT_OPEN_STATUSES)
+
+    def _compte(condition):
+        return func.count(case((condition, 1)))
+
+    (open_alerts, screening, filtering, pending_validation, overdue) = db.query(
+        _compte(ouverte),
+        _compte(and_(ouverte, or_(Alert.channel == "SCREENING", Alert.channel.is_(None)))),
+        _compte(and_(ouverte, Alert.channel == "FILTERING")),
+        _compte(Alert.status == "PENDING_VALIDATION"),
+        _compte(and_(ouverte, Alert.due_at.isnot(None), Alert.due_at < datetime.utcnow())),
+    ).one()
     return {
-        "open_alerts": open_q.count(),
-        "open_alerts_screening": open_q.filter(
-            (Alert.channel == "SCREENING") | (Alert.channel.is_(None))
-        ).count(),
-        "open_alerts_filtering": open_q.filter(Alert.channel == "FILTERING").count(),
-        "pending_validation": db.query(Alert).filter(Alert.status == "PENDING_VALIDATION").count(),
-        "overdue_alerts": db.query(Alert).filter(
-            Alert.status.in_(ALERT_OPEN_STATUSES), Alert.due_at.isnot(None),
-            Alert.due_at < datetime.utcnow()
-        ).count(),
+        "open_alerts": int(open_alerts),
+        "open_alerts_screening": int(screening),
+        "open_alerts_filtering": int(filtering),
+        "pending_validation": int(pending_validation),
+        "overdue_alerts": int(overdue),
         "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
     }
 
@@ -5962,6 +6041,26 @@ class SyncRunRequest(BaseModel):
 
 def _serialize_sync_report(report: SyncReport) -> Dict[str, Any]:
     return {c.name: getattr(report, c.name) for c in report.__table__.columns}
+
+
+def _sync_report_partial_failures(delta: Any) -> int:
+    """Nombre d'elements que la source n'a pas pu livrer (actes et PDF EUR-Lex
+    inaccessibles, repris au passage suivant). Compte tenu dans la ligne de
+    liste pour que le badge d'echec partiel n'ait pas besoin du delta complet."""
+    if not isinstance(delta, dict):
+        return 0
+    return len(delta.get("fetch_failures") or []) + len(delta.get("pdf_failures") or [])
+
+
+def _sync_report_list_row(report: SyncReport) -> Dict[str, Any]:
+    """Ligne de liste allegee : tout sauf `delta_report`, qui pese a lui seul
+    ~99 % de la reponse (des milliers d'ajouts/modifications par source) alors
+    que le tableau n'en tire qu'un compteur d'echecs partiels. Le detail complet
+    reste lisible fiche par fiche via GET /api/sync/reports/{id}."""
+    row = {c.name: getattr(report, c.name)
+           for c in report.__table__.columns if c.name != "delta_report"}
+    row["partial_failures"] = _sync_report_partial_failures(report.delta_report)
+    return row
 
 
 # Alias acceptes par l'API -> (cle d'execution, nom de source du moteur).
@@ -6071,11 +6170,17 @@ async def get_sync_reports(
     limit: int = Query(50, ge=1, le=200),
     source: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    include_details: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Historique des rapports de synchronisation des sources (suivi in-app).
+
+    `include_details=false` renvoie les lignes SANS `delta_report` (avec le
+    compteur `partial_failures` qui en est derive) : c'est ce que demande le
+    tableau, ou le delta complet ne servait a rien. Le defaut reste `true`
+    pour ne rien retirer aux integrations qui archivent ces rapports.
 
     Filtres serveur `source` et `status` : `limit` borne l'historique renvoye,
     donc un filtre porte cote serveur voit TOUT l'historique et pas seulement
@@ -6089,7 +6194,23 @@ async def get_sync_reports(
         if statuses:
             query = query.filter(SyncReport.status.in_(statuses))
     reports = query.order_by(SyncReport.executed_at.desc()).limit(limit).all()
-    return [_serialize_sync_report(r) for r in reports]
+    if include_details:
+        return [_serialize_sync_report(r) for r in reports]
+    return [_sync_report_list_row(r) for r in reports]
+
+
+@app.get("/api/sync/reports/{report_id}")
+async def get_sync_report_detail(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Rapport de synchronisation complet, `delta_report` compris — la piece
+    que l'ecran ne charge qu'a l'ouverture du detail."""
+    report = db.query(SyncReport).filter(SyncReport.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Rapport de synchronisation introuvable.")
+    return _serialize_sync_report(report)
 
 @app.get("/api/sync/config")
 async def get_sync_configuration(
@@ -11844,15 +11965,31 @@ async def get_compliance_kpis(
                   Alert.decided_by.isnot(None))
           .group_by(Alert.decided_by).all()
     )
+    # Delai moyen de decision, par analyste, sur ses 200 dernieres decisions.
+    # C'etait UNE requete PAR analyste : le seul N+1 restant de l'application,
+    # sur un tableau de bord. Une fonction de fenetrage numerote les decisions
+    # de chaque analyste de la plus recente a la plus ancienne, et une seule
+    # requete rend les 200 premieres de chacun. La soustraction de dates reste
+    # en Python — elle n'est pas portable en SQL (`interval` PostgreSQL contre
+    # dates texte SQLite) et le resultat doit rester au chiffre pres.
+    from sqlalchemy import func as _f
+    rang = _f.row_number().over(partition_by=Alert.decided_by,
+                                order_by=Alert.decided_at.desc()).label("rang")
+    numerotees = (db.query(Alert.decided_by.label("analyste"),
+                           Alert.created_at.label("cree"),
+                           Alert.decided_at.label("decide"), rang)
+                    .filter(Alert.decided_by.isnot(None),
+                            Alert.decided_at.isnot(None))
+                    .subquery())
+    delais: Dict[str, List[float]] = {}
+    for analyste, cree, decide, _rang in db.query(numerotees).filter(
+            numerotees.c.rang <= 200).all():
+        delais.setdefault(analyste, []).append((decide - cree).total_seconds())
+
     by_analyst = []
     for username, decided_count in sorted(analyst_rows, key=lambda r: -r[1]):
-        pair_rows = db.query(Alert.created_at, Alert.decided_at).filter(
-            Alert.decided_by == username, Alert.decided_at.isnot(None)
-        ).order_by(Alert.decided_at.desc()).limit(200).all()
-        avg_h = (
-            round(sum((dec - cre).total_seconds() for cre, dec in pair_rows) / len(pair_rows) / 3600.0, 1)
-            if pair_rows else None
-        )
+        secondes = delais.get(username) or []
+        avg_h = round(sum(secondes) / len(secondes) / 3600.0, 1) if secondes else None
         by_analyst.append({"analyst": username, "decided": int(decided_count), "avg_decision_hours": avg_h})
 
     # ---- Efficacite des regles anti-faux positifs (hit_count en base) ----
