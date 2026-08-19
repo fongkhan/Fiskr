@@ -31,6 +31,7 @@ from sqlalchemy.engine import Engine
 
 import fiskr.api as api_module
 from fiskr.api import (app, _WL_TOTAL_CACHE, _production_signature,
+                       _production_watchlist_summary,
                        _WL_ROW_SELECT, _watchlist_row_from_tuple,
                        _serialize_watchlist_row, _wl_scope_query)
 from fiskr.auth import get_current_user
@@ -290,3 +291,43 @@ def test_le_tri_par_defaut_ordonne_toujours_par_date_de_lot(contexte):
     items = client.get("/api/watchlist/db?scope=production&page_size=20").json()["items"]
     dates = [i["snapshot_uploaded_at"] for i in items if i["snapshot_uploaded_at"]]
     assert dates == sorted(dates, reverse=True)
+
+
+# ------------- le badge « Hash actif » compte le meme univers -------------
+
+def test_le_badge_et_la_consultation_comptent_le_meme_univers(contexte):
+    """Les deux partagent la même mémorisation sous la clé vide. S'ils ne
+    comptaient pas exactement le même périmètre, le premier appelé imposerait
+    son chiffre à l'autre — un total faux, selon l'ordre des écrans."""
+    db, client = contexte
+    _WL_TOTAL_CACHE.clear()
+    par_consultation = _total(client)
+    _WL_TOTAL_CACHE.clear()
+    par_badge = _production_watchlist_summary(db)["count"]
+    assert par_badge == par_consultation
+
+    # ... et dans l'autre sens, pour que l'ordre n'y change rien
+    _WL_TOTAL_CACHE.clear()
+    assert _production_watchlist_summary(db)["count"] == _total(client)
+
+
+def test_le_badge_ne_recompte_pas_a_chaque_ouverture_de_page(contexte):
+    """Le badge est chargé à CHAQUE ouverture de page et son COUNT porte sur
+    895 157 fiches en production — 1,3 s de travail à chaque fois."""
+    _, client = contexte
+
+    def _trois_ouvertures(c):
+        for _ in range(3):
+            c.get("/api/watchlist/summary")
+
+    assert _compte_les_count(client, _trois_ouvertures) == 1
+
+
+def test_le_badge_suit_la_production(contexte):
+    db, client = contexte
+    avant = client.get("/api/watchlist/summary").json()["count"]
+    db.add(_fiche(9))
+    db.commit()
+    bump_watchlist_epoch(db)
+    db.commit()
+    assert client.get("/api/watchlist/summary").json()["count"] == avant + 1

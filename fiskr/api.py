@@ -4405,10 +4405,14 @@ def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
         # Aucun referentiel en production : le badge affiche son etat vide
         # (« NONE »), jamais un hash inventé.
         return {"version": watchlist_version, "hash": None, "count": 0}
-    count = db.query(WatchlistEntity).filter(
+    # Meme univers que la consultation paginee (snapshots READY de type
+    # WATCHLIST_*, fiches non exclues), donc meme chiffre et meme memorisation :
+    # ce badge est charge a CHAQUE ouverture de page, et ce COUNT porte sur
+    # 895 157 fiches en production — 1,3 s de travail a chaque fois.
+    count = _production_total(db, db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_([s.snapshot_id for s in snapshots]),
         WatchlistEntity.excluded.isnot(True),
-    ).count()
+    ))
     return {"version": watchlist_version, "hash": snapshots[0].file_hash, "count": int(count)}
 
 
@@ -5172,16 +5176,21 @@ def _production_signature(db: Session) -> tuple:
     return (watchlist_epoch(db),) + tuple(str(v) for v in releve)
 
 
-def _production_total(db: Session, query, list_type: Optional[str]) -> int:
+def _production_total(db: Session, query, cle: str = "") -> int:
     """Compte du perimetre production, recalcule uniquement si la production a
     bouge. Le cache est vide en entier des que la signature change : il ne
-    garde jamais qu'un seul etat, donc il ne grossit pas avec le temps."""
+    garde jamais qu'un seul etat, donc il ne grossit pas avec le temps.
+
+    `cle` distingue les perimetres qui different (filtre par type de liste).
+    La cle vide designe LE perimetre de production entier : le badge « Hash
+    actif » et la consultation paginee comptent exactement le meme univers,
+    ils partagent donc le meme chiffre — un test verrouille cette egalite.
+    """
     signature = _production_signature(db)
     memoire = _WL_TOTAL_CACHE.get(signature)
     if memoire is None:
         _WL_TOTAL_CACHE.clear()
         memoire = _WL_TOTAL_CACHE.setdefault(signature, {})
-    cle = list_type or ""
     if cle not in memoire:
         memoire[cle] = query.count()
     return memoire[cle]
@@ -5319,7 +5328,7 @@ async def browse_watchlist_db(
     elif scope == "production":
         # Perimetre par defaut de l'ecran, et le seul assez gros pour que le
         # COUNT domine la reponse : memorise par signature de la production.
-        total = _production_total(db, query, list_type)
+        total = _production_total(db, query, list_type or "")
     else:
         total = query.count()
     if sort_by:
@@ -5922,19 +5931,33 @@ async def get_sidebar_counters(
     """
     Compteurs legers pour les badges de la barre laterale (polling) :
     alertes ouvertes et snapshots en attente d'homologation.
+
+    Les cinq compteurs d'alertes sont lus en UNE passe sur la table (agregats
+    conditionnels) et non en cinq requetes : ils portent sur le meme perimetre
+    et cet endpoint est interroge en boucle par la barre laterale, donc chaque
+    aller-retour epargne l'est a chaque rafraichissement de chaque onglet
+    ouvert. `count(CASE WHEN ... THEN 1 END)` ne compte pas les NULL : la
+    portee est exactement celle du filtre, sur PostgreSQL comme sur SQLite.
     """
-    open_q = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    from sqlalchemy import func, case, and_, or_
+    ouverte = Alert.status.in_(ALERT_OPEN_STATUSES)
+
+    def _compte(condition):
+        return func.count(case((condition, 1)))
+
+    (open_alerts, screening, filtering, pending_validation, overdue) = db.query(
+        _compte(ouverte),
+        _compte(and_(ouverte, or_(Alert.channel == "SCREENING", Alert.channel.is_(None)))),
+        _compte(and_(ouverte, Alert.channel == "FILTERING")),
+        _compte(Alert.status == "PENDING_VALIDATION"),
+        _compte(and_(ouverte, Alert.due_at.isnot(None), Alert.due_at < datetime.utcnow())),
+    ).one()
     return {
-        "open_alerts": open_q.count(),
-        "open_alerts_screening": open_q.filter(
-            (Alert.channel == "SCREENING") | (Alert.channel.is_(None))
-        ).count(),
-        "open_alerts_filtering": open_q.filter(Alert.channel == "FILTERING").count(),
-        "pending_validation": db.query(Alert).filter(Alert.status == "PENDING_VALIDATION").count(),
-        "overdue_alerts": db.query(Alert).filter(
-            Alert.status.in_(ALERT_OPEN_STATUSES), Alert.due_at.isnot(None),
-            Alert.due_at < datetime.utcnow()
-        ).count(),
+        "open_alerts": int(open_alerts),
+        "open_alerts_screening": int(screening),
+        "open_alerts_filtering": int(filtering),
+        "pending_validation": int(pending_validation),
+        "overdue_alerts": int(overdue),
         "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
     }
 

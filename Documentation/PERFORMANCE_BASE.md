@@ -280,6 +280,23 @@ d'époque : les comptes de `EXCLUDED` et `PENDING_REVIEW` restent donc calculés
 à chaque appel. C'est aussi pourquoi la signature ne compte pas les fiches
 exclues — cette requête est précisément celle qui mettait 21 à 35 s.
 
+### Le badge « Hash actif » et les badges de la barre latérale
+
+`GET /api/watchlist/summary` alimente le badge chargé à **chaque ouverture de
+page**, et son compte de fiches est le même `COUNT` sur les mêmes 895 157
+fiches : ~1,3 s de travail serveur, à chaque fois. Il partage désormais le
+total mémorisé — les deux comptent exactement le même univers.
+
+`GET /api/counters` émettait **six** requêtes, dont cinq `COUNT` sur `alerts`
+au même périmètre. La barre latérale interroge cet endpoint en boucle : les
+cinq sont lus en une passe d'agrégats conditionnels.
+
+**Réserve de méthode sur les chiffres bruts.** Les temps totaux relevés depuis
+l'extérieur incluent ~0,45 s fixes (poignée de main TLS et surcoût Passenger,
+mesurés sur `/api/health` et `/api/version` qui ne font aucun travail). Les
+comparaisons ci-dessus — taille de page, périmètre — restent valables :
+ce surcoût est constant et s'élimine dans la différence.
+
 ### La ligne servie n'hydrate plus l'entité complète
 
 La consultation chargeait des entités ORM à 70 colonnes pour en rendre 16,

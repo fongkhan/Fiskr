@@ -29,6 +29,14 @@ Only the `production` scope is memoised. Exclusions are placed and removed on sn
 
 Records themselves are never memoised, only the total.
 
+### Changed — the "Active hash" badge stopped recounting on every page open
+`GET /api/watchlist/summary` feeds the badge loaded on **every page open**, and its record count is the same `COUNT` over the same 895 157 production records — ~1.3 s of server work, every time. It shares the memoised total now: the badge and the paginated browse count exactly the same universe, so they share one number. A test asserts that equality in both orders, because whichever runs first would otherwise impose its figure on the other.
+
+### Changed — the sidebar badges read the alert table once instead of five times
+`GET /api/counters` issued **six** queries — five `COUNT`s on `alerts`, all over the same scope, plus one on `snapshots`. The sidebar polls this endpoint, so every round trip saved is saved on every refresh of every open tab. The five are now one pass of conditional aggregates.
+
+A regrouping is only worth it if it returns exactly the same thing: the central test recomputes each counter row by row in Python, over a fixture built to cover every branch where the two implementations could diverge — null channel, filtering channel, overdue, no due date, closed alert, pending validation — with a guard test asserting no counter is zero, since an all-zero fixture would pass without comparing anything.
+
 ### Changed — the list row no longer hydrates the whole record
 The browse query loaded 70-column ORM entities to serve 16, forcing PostgreSQL to detoast, row by row, the JSON blocks (aliases, designation reasons, addresses, documents) that serialization then threw away. It now asks only for the columns it renders — the lesson the fuzzy scan had already learned (25 000 full ORM records cost ~2.5 s per chunk; light tuples, under half a second).
 
