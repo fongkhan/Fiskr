@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the "Excluded" scope took 21 to 35 seconds to return nothing
+`ix_wl_entities_production` is a **partial** index on `excluded IS NOT TRUE`. A partial index only serves queries whose clause its own implies, so `WHERE excluded IS TRUE` was covered by nothing and scanned all 11.2 M rows — to return zero rows, since nothing is excluded today. Measured on production: **21 to 35 s**.
+
+The symmetric `ix_wl_entities_excluded` (same columns, `WHERE excluded IS TRUE`) closes the gap. It indexes only the records actually excluded — a handful, where the other one indexes hundreds of thousands. Like the rest, it is deferred on a large table and created by `tools/create_perf_indexes.py` (now 15 statements).
+
+### Changed — the watchlist screen stopped recounting its universe on every page turn
+Measured on production by varying the page size, not by guessing:
+
+| `page_size` | 1 | 10 | 50 | 200 |
+|---|---:|---:|---:|---:|
+| Response | 4.00 s | 3.73 s | 3.84 s | 4.13 s |
+
+**The cost does not depend on the page** — 2 ms per row beyond the first. What remains is the `COUNT` over the scope: 895 157 records in production, recomputed on every page turn.
+
+That count is now memoised under a **signature of production**: the watchlist epoch (moved by everything that changes the screened universe) plus a direct reading of the `READY` snapshots — count, latest upload, sum of record counts. That reading covers 42 rows and earns its place: approval commits the flip to `READY` and then **defers** the cache reload — and therefore the epoch bump — to a background job. On the epoch alone the count would have lagged by one approval until that job ran. The reading catches the flip at commit time. A test asserts exactly that, and another counts the SQL: three page turns now issue **one** `COUNT` instead of three.
+
+Only the `production` scope is memoised. Exclusions are placed and removed on snapshots **awaiting approval**, with no epoch bump, so `EXCLUDED` and `PENDING_REVIEW` keep counting on every call. It is also why the signature does not count excluded records — that is precisely the query that took 21 to 35 s.
+
+Records themselves are never memoised, only the total.
+
+### Changed — the list row no longer hydrates the whole record
+The browse query loaded 70-column ORM entities to serve 16, forcing PostgreSQL to detoast, row by row, the JSON blocks (aliases, designation reasons, addresses, documents) that serialization then threw away. It now asks only for the columns it renders — the lesson the fuzzy scan had already learned (25 000 full ORM records cost ~2.5 s per chunk; light tuples, under half a second).
+
+Three of the sortable columns (`origin`, `country`, `official_reference`) are **not** part of the served row, so sorting on them means ordering by a column that is not selected. A test sweeps all eight sortable columns in both directions.
+
 ### Changed — the two list payloads left over from the previous round
 The last payload pass measured two responses and deliberately left them alone: both fed a detail panel that reuses the **already-loaded row**, so lightening the list would have broken the detail. They now have a detail endpoint, so the lists can drop their heavy field. Measured on production:
 

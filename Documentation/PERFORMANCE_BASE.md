@@ -223,6 +223,72 @@ anodin. L'arbitrage revient à l'exploitation — l'ingestion est une tâche de
 fond, la recherche est interactive. Ces index sont donc **explicitement
 optionnels** (`--search`) et jamais créés automatiquement.
 
+## Deuxième passe (production, 11,2 M lignes)
+
+Les index avaient ramené `/api/watchlist/db` de 18,2 s à ~4 s. Nouvelle mesure,
+en variant la taille de page :
+
+| `page_size` | Réponse |
+|---:|---:|
+| 1 | 4,00 s |
+| 10 | 3,73 s |
+| 50 | 3,84 s |
+| 200 | 4,13 s |
+
+**Le coût ne dépend pas de la page** : 2 ms par ligne au-delà de la première.
+Ce qui reste, c'est le `COUNT` du périmètre — 895 157 fiches en production —
+refait à chaque changement de page.
+
+Et par périmètre :
+
+| `scope` | Lignes | Réponse |
+|---|---:|---:|
+| `production` | 895 157 | 3,6 – 3,9 s |
+| `production` + `list_type=OFAC` | 19 199 | 0,8 – 0,9 s |
+| `production` + `list_type=AMF` | 3 396 | 0,6 – 1,0 s |
+| `PENDING_REVIEW` | 1 588 840 | 5,3 – 6,5 s |
+| **`EXCLUDED`** | **0** | **21 – 35 s** |
+
+### L'index partiel ne servait que la négation
+
+`ix_wl_entities_production` est partiel sur `excluded IS NOT TRUE`. Un index
+partiel ne sert **que** les requêtes dont la clause est impliquée par la
+sienne : `WHERE excluded IS TRUE` n'était couverte par rien et parcourait les
+11,2 M lignes — pour rendre zéro ligne, puisque rien n'est exclu aujourd'hui.
+D'où les 21 à 35 s.
+
+Le symétrique `ix_wl_entities_excluded` (même colonnes, `WHERE excluded IS
+TRUE`) comble le trou. Il n'indexe que les fiches effectivement exclues : une
+poignée, là où l'autre en indexe des centaines de milliers.
+
+### Le compte de production, mémorisé par signature
+
+Le `COUNT` du périmètre `production` n'est plus refait à chaque page. Il est
+mémorisé sous une **signature de la production** : l'époque de la watchlist
+(bougée par tout ce qui change l'univers criblé) plus un relevé direct des
+snapshots `READY` — nombre, dernier téléversement, somme des compteurs.
+
+Ce relevé porte sur 42 lignes et sert un but précis : la mise en production
+commit le passage en `READY` puis **délègue** le rechargement du cache (donc la
+remontée d'époque) à un travail de fond. Sur l'époque seule, le compte serait
+resté en retard d'une homologation le temps que ce travail passe. Le relevé,
+lui, capte la bascule au commit.
+
+Seul le périmètre `production` est mémorisé. Les exclusions se posent et se
+retirent sur des snapshots **en attente d'homologation**, sans remontée
+d'époque : les comptes de `EXCLUDED` et `PENDING_REVIEW` restent donc calculés
+à chaque appel. C'est aussi pourquoi la signature ne compte pas les fiches
+exclues — cette requête est précisément celle qui mettait 21 à 35 s.
+
+### La ligne servie n'hydrate plus l'entité complète
+
+La consultation chargeait des entités ORM à 70 colonnes pour en rendre 16,
+obligeant PostgreSQL à détoaster ligne par ligne les blocs JSON (alias, motifs
+de désignation, adresses, documents) que la sérialisation jetait ensuite. Elle
+ne demande plus que les colonnes rendues — la leçon que le balayage fuzzy avait
+déjà tirée (25 000 fiches ORM complètes : ~2,5 s par tranche ; en tuples
+légers : moins d'une demi-seconde).
+
 ## Ce qui reste à décider (hors correctif)
 
 **Les 9,4 M de fiches en snapshots SUPERSEDED.** C'est la cause première du

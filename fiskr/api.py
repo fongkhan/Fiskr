@@ -3791,6 +3791,33 @@ _WL_ROW_COLUMNS = (
 )
 
 
+# Colonnes REELLEMENT lues par la consultation paginee : celles de la ligne,
+# plus la provenance prise sur le snapshot. Les demander explicitement evite
+# d'hydrater des entites ORM completes — 70 colonnes dont les gros blocs JSON
+# (alias, motifs de designation, adresses, documents), que PostgreSQL doit
+# alors detoaster ligne par ligne pour que la serialisation les jette. Le
+# balayage fuzzy avait deja tire cette lecon : 25 000 fiches ORM completes
+# coutaient ~2,5 s par tranche, des tuples legers moins d'une demi-seconde.
+_WL_ROW_SELECT = tuple(getattr(WatchlistEntity, name) for name in _WL_ROW_COLUMNS
+                       if hasattr(WatchlistEntity, name)) + (
+    Snapshot.file_type, Snapshot.status, Snapshot.uploaded_at, Snapshot.file_name,
+)
+
+
+def _watchlist_row_from_tuple(row) -> Dict[str, Any]:
+    """Meme sortie que `_serialize_watchlist_row`, depuis un tuple de colonnes.
+    Un test compare les deux champ par champ : la version legere ne doit rien
+    rendre d'autre que l'autre, sinon l'ecran perd une colonne en silence."""
+    noms = [name for name in _WL_ROW_COLUMNS if hasattr(WatchlistEntity, name)]
+    d = dict(zip(noms, row))
+    file_type, snap_status, uploaded_at, file_name = row[len(noms):]
+    d["_list_type"] = file_type
+    d["snapshot_status"] = snap_status
+    d["snapshot_uploaded_at"] = uploaded_at.isoformat() if uploaded_at else None
+    d["snapshot_file_name"] = file_name
+    return d
+
+
 def _serialize_watchlist_row(entity: WatchlistEntity, snap: Snapshot) -> Dict[str, Any]:
     """
     Ligne de tableau : ce qui est affiche, plus la PROVENANCE.
@@ -5115,6 +5142,51 @@ def _wl_validate_search_field(search_field: str) -> str:
     return search_field
 
 
+# Compte du perimetre « production », memorise par SIGNATURE de la production.
+#
+# Mesure en production (895 157 fiches en production, table de 11,2 M lignes) :
+# la reponse coute 3,6 a 3,9 s QUELLE QUE SOIT la taille de page — 1 ligne
+# comme 200 (2 ms par ligne au-dela). Le cout n'est donc pas le rendu des
+# lignes mais le COUNT du perimetre, refait a chaque changement de page.
+#
+# La signature n'est pas une duree : c'est l'etat de la production. Elle
+# combine l'epoque de la watchlist (bougee par tout ce qui change l'univers
+# crible) ET un releve direct des snapshots en production — nombre, derniere
+# date de televersement, somme des compteurs. Ce releve porte sur 42 lignes et
+# capte la mise en production AU COMMIT, sans attendre le travail de fond qui
+# recharge le cache : le compte ne peut pas rester en retard d'une homologation.
+#
+# Les fiches, elles, ne sont jamais memorisees — seul le total l'est.
+_WL_TOTAL_CACHE: Dict[Any, Dict[Any, int]] = {}
+
+
+def _production_signature(db: Session) -> tuple:
+    """Etat de la production : change des qu'une liste entre ou sort."""
+    from sqlalchemy import func
+    releve = (db.query(func.count(Snapshot.snapshot_id),
+                       func.max(Snapshot.uploaded_at),
+                       func.coalesce(func.sum(Snapshot.record_count), 0))
+                .filter(Snapshot.status == "READY",
+                        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+                .one())
+    return (watchlist_epoch(db),) + tuple(str(v) for v in releve)
+
+
+def _production_total(db: Session, query, list_type: Optional[str]) -> int:
+    """Compte du perimetre production, recalcule uniquement si la production a
+    bouge. Le cache est vide en entier des que la signature change : il ne
+    garde jamais qu'un seul etat, donc il ne grossit pas avec le temps."""
+    signature = _production_signature(db)
+    memoire = _WL_TOTAL_CACHE.get(signature)
+    if memoire is None:
+        _WL_TOTAL_CACHE.clear()
+        memoire = _WL_TOTAL_CACHE.setdefault(signature, {})
+    cle = list_type or ""
+    if cle not in memoire:
+        memoire[cle] = query.count()
+    return memoire[cle]
+
+
 def _wl_scope_query(db: Session, scope: str, list_type: Optional[str]):
     """Requete (entite, snapshot) du perimetre demande — partagee entre la
     consultation paginee et le balayage fuzzy par tranches."""
@@ -5242,16 +5314,24 @@ async def browse_watchlist_db(
 
     # Une recherche exacte a deja compte son perimetre : ne pas relancer le
     # meme COUNT (deux parcours LIKE complets au lieu d'un sur une grosse base)
-    total = exact_total if match_mode == "exact" else query.count()
+    if match_mode == "exact":
+        total = exact_total
+    elif scope == "production":
+        # Perimetre par defaut de l'ecran, et le seul assez gros pour que le
+        # COUNT domine la reponse : memorise par signature de la production.
+        total = _production_total(db, query, list_type)
+    else:
+        total = query.count()
     if sort_by:
         col = getattr(WatchlistEntity, sort_by)
         order_clause = col.desc() if sort_dir == "desc" else col.asc()
         query = query.order_by(order_clause, WatchlistEntity.id.asc())
     else:
         query = query.order_by(Snapshot.uploaded_at.desc(), WatchlistEntity.id.asc())
-    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    rows = (query.with_entities(*_WL_ROW_SELECT)
+                 .offset((page - 1) * page_size).limit(page_size).all())
 
-    items = [_serialize_watchlist_row(entity, snap) for entity, snap in rows]
+    items = [_watchlist_row_from_tuple(row) for row in rows]
 
     return {"total": total, "page": page, "page_size": page_size, "scope": scope,
             "match_mode": match_mode, "items": items}
