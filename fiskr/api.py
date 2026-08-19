@@ -3430,19 +3430,81 @@ def _snapshot_list_row(snap: Snapshot) -> Dict[str, Any]:
     return row
 
 
+# Colonnes STRICTEMENT necessaires aux listes deroulantes de comparaison :
+# nom, type et date suffisent a designer un lot. Le reste — hash, compteurs,
+# statut, metadonnees d'homologation — n'y est jamais lu.
+_SNAPSHOT_OPTION_COLUMNS = (Snapshot.snapshot_id, Snapshot.file_type,
+                            Snapshot.file_name, Snapshot.uploaded_at)
+
+
+def _apply_snapshot_filters(query, file_type: Optional[str], status_filter: Optional[str]):
+    """Filtres serveur de l'historique des lots. Portes cote serveur et non
+    cote client : la liste etant paginee, un filtre client ne verrait que la
+    page chargee — il manquerait tout le reste de l'historique."""
+    if file_type:
+        valeurs = [v.strip().upper() for v in file_type.split(",") if v.strip()]
+        if valeurs:
+            query = query.filter(Snapshot.file_type.in_(valeurs))
+    if status_filter:
+        valeurs = [v.strip().upper() for v in status_filter.split(",") if v.strip()]
+        if valeurs:
+            query = query.filter(Snapshot.status.in_(valeurs))
+    return query
+
+
 @app.get("/api/snapshots")
 async def get_snapshots(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    file_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Liste des snapshots charges, SANS les rapports de cahier de tests.
+    Historique PAGINE des lots importes, SANS les rapports de cahier de tests.
 
-    Le detail complet d'un rapport se lit par GET /api/review/snapshots/{id}
-    (liste en attente) ou GET /api/review/history/{id} (decision archivee).
+    L'enveloppe `{total, page, page_size, items}` remplace le vidage complet de
+    la table : la production en comptait 547 pour 282 Ko, et il en nait un par
+    source et par jour — 42 sources. Cette reponse etait rechargee apres chaque
+    import, synchronisation, homologation et purge.
+
+    Filtres serveur `file_type` et `status` (listes separees par des virgules) :
+    la liste etant paginee, un filtre client ne verrait que la page chargee.
+
+    Le detail complet d'un rapport de cahier de tests se lit par
+    GET /api/review/snapshots/{id} (liste en attente) ou
+    GET /api/review/history/{id} (decision archivee).
     """
-    snaps = db.query(Snapshot).order_by(Snapshot.uploaded_at.desc()).all()
-    return [_snapshot_list_row(s) for s in snaps]
+    query = _apply_snapshot_filters(db.query(Snapshot), file_type, status_filter)
+    total = query.count()
+    snaps = (query.order_by(Snapshot.uploaded_at.desc())
+                  .offset((page - 1) * page_size).limit(page_size).all())
+    return {"total": total, "page": page, "page_size": page_size,
+            "items": [_snapshot_list_row(s) for s in snaps]}
+
+
+@app.get("/api/snapshots/options")
+async def get_snapshot_options(
+    file_type: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Lots disponibles pour la comparaison, reduits a ce qu'une liste deroulante
+    affiche : identifiant, type, nom, date.
+
+    Non pagine — a dessein : comparer deux lots suppose de pouvoir choisir
+    n'importe quel couple de l'historique, y compris un lot ancien. C'est
+    justement pourquoi cette liste ne transporte que quatre colonnes.
+    """
+    query = _apply_snapshot_filters(db.query(*_SNAPSHOT_OPTION_COLUMNS), file_type, None)
+    return [
+        {"snapshot_id": sid, "file_type": ftype, "file_name": fname,
+         "uploaded_at": uploaded.isoformat() if uploaded else None}
+        for sid, ftype, fname, uploaded
+        in query.order_by(Snapshot.uploaded_at.desc()).all()
+    ]
 
 @app.post("/api/snapshots/compare")
 async def compare_snapshots(

@@ -9,6 +9,9 @@ function uiIcon(name) {
 let currentUser = null;
 let auditHistory = [];
 let activeSnapshots = [];
+// Les listes deroulantes de comparaison couvrent tout l'historique : on ne
+// les recharge qu'apres un changement de lot, pas a chaque retour sur l'onglet.
+let optionsDeComparaisonAJour = false;
 let wlCurrentPage = 1;
 const wlItemsPerPage = 100;
 let wlSearchDebounce = null;
@@ -990,8 +993,27 @@ function rafraichirSiAffichee(sectionId, subTabId, fn) {
  if (vueAffichee(sectionId, subTabId)) fn();
 }
 
+// Historique des lots : page 1 du tableau ET listes deroulantes de
+// comparaison, qui ont leur propre source allegee. La pagination, elle,
+// n'appelle que fetchSnapshots — changer de page ne change pas la liste des
+// lots comparables.
+function rafraichirHistoriqueDesLots() {
+ fetchSnapshots(1);
+ fetchSnapshotOptions();
+}
+
+// Un lot vient d'etre cree, homologue, rejete ou purge : les listes
+// deroulantes de comparaison sont perimees. On les MARQUE perimees au lieu de
+// les retelecharger — elles couvrent tout l'historique (96 Ko en production)
+// et ne changent qu'a ces moments-la, alors que revenir sur l'onglet est
+// frequent.
+function signalerChangementDeLots() {
+ optionsDeComparaisonAJour = false;
+ rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", rafraichirHistoriqueDesLots);
+}
+
 function rafraichirLotsEtWatchlist() {
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  rafraichirSiAffichee("watchlist-mgmt", "watchlist-active", fetchWatchlist);
 }
 
@@ -1049,11 +1071,11 @@ function switchTab(tabId) {
  if (subTabId === "watchlist-active") {
  fetchWatchlist();
  } else if (subTabId === "watchlist-snapshots") {
- fetchSnapshots();
+ rafraichirHistoriqueDesLots();
  }
  } else {
  fetchWatchlist();
- fetchSnapshots();
+ rafraichirHistoriqueDesLots();
  }
  } else if (tabId === "audit") {
  fetchAuditHistory();
@@ -1105,7 +1127,7 @@ function switchSubTab(sectionId, subTabId) {
  if (subTabId === "watchlist-active") {
  fetchWatchlist();
  } else if (subTabId === "watchlist-snapshots") {
- fetchSnapshots();
+ rafraichirHistoriqueDesLots();
  } else if (subTabId === "watchlist-review") {
  // Rupture de flux corrigée : les snapshots en attente d'homologation
  // sont rechargés à chaque ouverture du sous-onglet, plus seulement au load
@@ -1460,27 +1482,67 @@ function toggleAccordion(id) {
  }
 }
 
-// Fetch Snapshots List
-async function fetchSnapshots() {
- try {
- const response = await apiFetch("/api/snapshots");
- activeSnapshots = await response.json();
+// Historique des lots : PAGINE cote serveur.
+//
+// La table en comptait 547 en production pour 282 Ko, et il en nait un par
+// source et par jour — 42 sources. Cette reponse etait rechargee apres chaque
+// import, synchronisation, homologation et purge.
+let snapshotsCurrentPage = 1;
+const SNAPSHOTS_PAR_PAGE = 50;
 
- renderSnapshotsFiltered();
- populateCompareSelects(activeSnapshots);
+async function fetchSnapshots(page = 1) {
+ snapshotsCurrentPage = page;
+ try {
+ const params = new URLSearchParams({
+ page: String(page), page_size: String(SNAPSHOTS_PAR_PAGE) });
+ // Filtre porte cote SERVEUR : la liste etant paginee, un filtre client
+ // ne verrait que la page chargee et manquerait tout le reste.
+ const filterEl = document.getElementById("snapshots-list-filter");
+ if (filterEl && filterEl.value) params.set("file_type", filterEl.value);
+
+ const response = await apiFetch(`/api/snapshots?${params}`);
+ const data = await response.json();
+ activeSnapshots = data.items || [];
+
+ renderSnapshotsTable(activeSnapshots);
+ renderSnapshotsPagination(data.total || 0, data.page || 1,
+ data.page_size || SNAPSHOTS_PAR_PAGE);
  } catch (e) {
  console.error("Error fetching snapshots:", e);
  }
 }
 
-// Filtre client-side de l'historique des snapshots par type de liste
+// Le filtre par type de liste relance la requete, page 1 : il porte sur TOUT
+// l'historique et plus seulement sur les lignes affichees.
 function renderSnapshotsFiltered() {
- const filterEl = document.getElementById("snapshots-list-filter");
- const selected = filterEl ? filterEl.value : "";
- const snaps = selected
- ? activeSnapshots.filter(s => s.file_type === selected)
- : activeSnapshots;
- renderSnapshotsTable(snaps);
+ fetchSnapshots(1);
+}
+
+function renderSnapshotsPagination(total, page, pageSize) {
+ const container = document.getElementById("snapshots-pagination");
+ if (!container) return;
+ const totalPages = Math.max(1, Math.ceil(total / pageSize));
+ container.innerHTML = `
+ <span class="pagination-info">${total} lot(s) — page ${page} / ${totalPages}</span>
+ <button class="pagination-btn" ${page <= 1 ? "disabled" : ""} onclick="fetchSnapshots(${page - 1})">Précédent</button>
+ <button class="pagination-btn" ${page >= totalPages ? "disabled" : ""} onclick="fetchSnapshots(${page + 1})">Suivant</button>
+ `;
+}
+
+// Listes deroulantes de comparaison : elles ont besoin de TOUT l'historique
+// (on compare volontiers un lot ancien), mais seulement de quatre colonnes.
+// Elles ont donc leur propre source, allegee, au lieu de se servir dans la
+// liste complete que le tableau n'affiche plus.
+async function fetchSnapshotOptions() {
+ if (optionsDeComparaisonAJour) return;   // rien n'a bouge depuis le dernier chargement
+ try {
+ const response = await apiFetch("/api/snapshots/options");
+ if (!response.ok) return;
+ populateCompareSelects(await response.json());
+ optionsDeComparaisonAJour = true;
+ } catch (e) {
+ console.error("Error fetching snapshot options:", e);
+ }
 }
 
 // Render Snapshots Table
@@ -1714,7 +1776,7 @@ async function handleIngestion(event) {
  });
  if (!finalState || finalState.status === "ERROR") {
  showToast(`Erreur d'importation : ${(finalState && finalState.error) || "erreur inconnue"}`, "error", 9000);
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  return;
  }
  data = finalState.result || {};
@@ -5501,7 +5563,7 @@ async function approvePendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  onOperationDone(data.job_token, () => {
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
@@ -5536,7 +5598,7 @@ async function rejectPendingSnapshot() {
  document.getElementById("review-detail-card").classList.add("hidden");
  reviewCurrentSnapshotId = null;
  fetchPendingReviews();
- rafraichirSiAffichee("watchlist-mgmt", "watchlist-snapshots", fetchSnapshots);
+ signalerChangementDeLots();
  } catch (e) {
  console.error("Error rejecting snapshot:", e);
  showToast("Erreur réseau de communication.", "error");

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the snapshot history is paginated (breaking: `GET /api/snapshots` now returns an envelope)
+The previous round measured this endpoint and left it alone: the weight was not a field to drop (the row had already lost its backtest report) but the **number of rows**, which grows on its own. Production: **547 snapshots for 282 KB**, one born per source per day across 42 sources, and that response was reloaded after every import, sync, approval and purge.
+
+`GET /api/snapshots` now returns `{total, page, page_size, items}` — 50 rows by default, 500 at most — with server-side `file_type` and `status` filters (comma-separated). This **changes the response shape**, as `/api/history` did before it: a bare list is no longer returned. The screen's list-type filter moved to the server with it, because on a paginated list a client-side filter only ever sees the loaded page.
+
+The comparison drop-downs are the reason this could not be a plain paginate-and-done: comparing two snapshots means picking any pair from the whole history, including an old one. They now have their own source, `GET /api/snapshots/options`, cut to the four columns a drop-down actually displays.
+
+Measured on the production data:
+
+| | |
+|---|---:|
+| Old response | 283 872 B |
+| New — page of 50 | 25 985 B (−90.8 %) |
+| New — comparison options | 96 515 B (−66.0 %) |
+| **Opening the screen** | **122 500 B (−56.8 %)** |
+
+Then the options became the heavier half, so they are cached client-side: reloaded only when a snapshot is created, approved, rejected or purged — not on every return to the tab. Page turns move 26 KB and nothing else.
+
+**Not done, and why**: denormalizing `backtest_verdict` / `backtest_gap_pct` into real columns, so the serializer stops reading `backtest_report` for two scalars. Pagination already divides that read by eleven (50 rows instead of 547), which leaves a schema change, a backfill and two write sites to save the measured ~18 ms of the previous round.
+
+### Fixed — two tests that were passing for the wrong reason
+Widening the front-end call detection to `nom(` instead of `nom()` — needed once pagination gave `fetchSnapshots` an argument — revealed that the previous round's regex matched **nothing** at all after the change, so every test in that file would have passed vacuously. The file now has a guard test asserting the detection finds something, and the allow-list of callers permitted to reload without the visibility guard is explicit: navigation, plus the screen's own controls (sort, filter, pagination, record edit), which the narrow regex had been silently skipping. The guarded code was correct; the test covering it was narrower than it claimed.
+
+The page-load test asserted each loader appears literally in the tab-routing block. Reaching `fetchSnapshots` through a small wrapper is legitimate, so the test now expands one level of `rafraichir*` wrappers instead of matching the bare name — the property checked ("opening the tab loads the screen") is unchanged.
+
+
 ### Fixed — the last N+1 in the application
 `GET /api/kpi` computed the average decision time **one query per analyst**, each pulling that analyst's 200 most recent decisions. The cost grew with the team, on a landing screen (~0.67 s of server work on production).
 

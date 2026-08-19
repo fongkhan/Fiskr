@@ -194,6 +194,8 @@ Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé
 
 `GET /api/sync/reports` sert le rapport **entier** par défaut. `include_details=false` renvoie les lignes sans `delta_report` — ce que demande l'écran de suivi, où le delta complet ne servait qu'à compter les échecs partiels (repris tel quel dans `partial_failures`). Même contrat sur le journal d'audit : `GET /api/history` transporte `decision_tree` et `config_state` par défaut, `include_details=false` les omet et `GET /api/history/{id}` rend la décision complète.
 
+`GET /api/snapshots` est **paginé** et rend une enveloppe `{total, page, page_size, items}` (50 lots par défaut, 500 au plus), avec les filtres serveur `file_type` et `status` (listes séparées par des virgules). `GET /api/snapshots/options` rend l'historique complet réduit aux quatre colonnes qu'une liste déroulante de comparaison affiche.
+
 ---
 
 ## ✅ Mode Homologation — Environnement de Validation avant Production
