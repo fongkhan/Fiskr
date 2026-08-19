@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the two list payloads left over from the previous round
+The last payload pass measured two responses and deliberately left them alone: both fed a detail panel that reuses the **already-loaded row**, so lightening the list would have broken the detail. They now have a detail endpoint, so the lists can drop their heavy field. Measured on production:
+
+| | Before | After | |
+|---|---|---|---|
+| `GET /api/sync/reports?limit=25` | 537 KB | 11.6 KB | **−97.8 %** |
+| `GET /api/history?page_size=25` | 123 KB | 8.4 KB | **−93.2 %** |
+
+The screens request 50 rows, so the real saving is roughly twice that on each.
+
+Both keep serving everything **by default**. `include_details=false` is opt-in and the two screens pass it; the audit journal and the sync report archive are evidence a controller can ask for, and an integration that archives them must keep receiving whole records. Detail is read one record at a time through `GET /api/sync/reports/{id}` and `GET /api/history/{id}`.
+
+Two things the lightening had to carry over, both locked by test:
+
+- The sync table shows a **partial-failure badge** (EUR-Lex acts or PDFs the source could not deliver), counted from inside `delta_report`. Without the delta it would have counted zero in silence, so the row now carries the derived `partial_failures`.
+- The audit journal derives `list_type` from the `decision_tree` for records written before the column existed. On production **24 of the 25 rows on the first page** depend on that fallback — dropping the tree without keeping the server-side derivation would have turned the whole "Liste" column into "Inconnue". The derivation stays server-side; only the tree stops travelling.
+
+### Changed — one list-replacement cycle instead of three
+`run_ofac_sync` (138 lines) and `run_dgt_sync` (124 lines) each re-implemented by hand the cycle already written in `_run_list_replacement_sync` — download, hash dedupe, ingestion, delta against the live list, then supersede or wait for approval. Measured: **98 of 138 lines identical between OFAC and DGT (71 %)**, 90 and 91 lines identical with the generic runner. Three copies of the most safety-critical path in the application, so three places to fix for every correction — and they had already drifted apart.
+
+One difference was real and is why the copies survived: OFAC also refreshes the ownership graph (`ProfileRelationships`) at the same time as the list. It now goes through an optional `after_persist` hook on the generic runner, which runs in the same transaction as the records — so the graph can never be out of step with the list that was just ingested. **−201 lines**, and the ownership refresh gains the test coverage it never had.
+
+What the two sources inherit: the snapshot's persisted progress is now closed properly (`processed_count` finalised, `phase` moving to `DELTA` then `DONE` instead of staying stuck on `PERSIST`), and the conditional-download path.
+
+**Measured before claiming it as a gain, and it is not one today**: neither publisher honours conditional requests. OFAC advertises a `Last-Modified` but ignores `If-Modified-Since` — a conditional request with the exact advertised date returns 200 and transfers 126 MB. DGT sends neither `Last-Modified` nor `ETag` (12 MB). So the path is inert on both; it costs nothing and starts paying the day either publisher fixes their side.
+
+Two user-visible wordings are harmonised with the other 40 sources: `"… fiches importees depuis la source OFAC."` replaces `"… depuis le fichier OFAC officiel."`, and the DGT no-change message says `"Le fichier DGT est identique …"` instead of `"Le registre DGT …"`.
+
+### Removed — the old daily scheduler, dead and dangerous to revive
+`api.py` still carried `_run_scheduled_syncs()`, replaced long ago by `_cron_sync_tick` (per-source cron scheduling). Nothing referenced it — not the code, not the templates, not the front end — but it was not harmless:
+
+- it listed **15 sources by hand** where the `_SYNC_RUNNERS` registry now holds **42**; every source added since was silently outside it;
+- it reloaded the cache with `load_watchlist_cache(db)`, the process-local form corrected everywhere else to `_refresh_production_cache` (the only cross-process invalidation channel). Revived as written, it would have put a list into production that no other process could see — the exact compliance bug fixed two rounds ago, reintroduced.
+
+Deleted (52 lines), with a test locking its absence and the invariant it broke: the registry covers **every** configurable source, and every runner has an API alias — no hand-written list anywhere.
+
+### Added — no pivot key falls into the void
+Each source parser yields a "pivot schema" dict that `build_watchlist_entity` picks up key by key with `item.get(...)`. A misspelt key raises nothing: the field is simply missing from the stored record, and therefore from screening. It has happened — the builder still carries two read fallbacks (`adress`, `additional_info`) that are the scar tissue of past typos on the CSV import side.
+
+The duplication detector flags these three construction blocks as near-identical, but they are **schema declarations**: every value comes from source-local variables, and folding them behind a thirty-argument constructor would remove no line while destroying the one thing that makes them readable — seeing each field next to where it comes from. The real risk is the key that leads nowhere, so that is what the new test locks, statically and across all parsers at once.
+
+### Fixed — a test double that had drifted from the function it doubles
+`test_rescreen.py` stubbed `download_to_file` with a hand-copied signature, and its own comment said the double must mirror the real one. It no longer did: the real function had gained `validators` and `headers`. The stub only survived because DGT never took the code path that passes them. The double now **verifies** the signature (`inspect.signature(...).bind(...)`) instead of copying it, so the next drift fails on the mismatch rather than on an unrelated `TypeError`.
+
+
 ### Fixed — client aliases were screened by the engine, but no door let them in
 The question was whether screening uses aliases. Answer, measured rather than assumed:
 

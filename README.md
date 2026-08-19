@@ -190,7 +190,9 @@ sync:
     url: ""                   # vide = URL par defaut du format choisi
 ```
 
-Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé aux administrateurs), `GET /api/sync/reports` (historique des rapports) et `GET /api/sync/config` (configuration active).
+Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé aux administrateurs), `GET /api/sync/reports` (historique des rapports), `GET /api/sync/reports/{id}` (rapport complet, `delta_report` compris) et `GET /api/sync/config` (configuration active).
+
+`GET /api/sync/reports` sert le rapport **entier** par défaut. `include_details=false` renvoie les lignes sans `delta_report` — ce que demande l'écran de suivi, où le delta complet ne servait qu'à compter les échecs partiels (repris tel quel dans `partial_failures`). Même contrat sur le journal d'audit : `GET /api/history` transporte `decision_tree` et `config_state` par défaut, `include_details=false` les omet et `GET /api/history/{id}` rend la décision complète.
 
 ---
 

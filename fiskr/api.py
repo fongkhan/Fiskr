@@ -331,58 +331,6 @@ def seed_watchlist_json(db: Session):
         db.rollback()
         logger.error(f"Failed to seed watchlist from JSON: {e}")
 
-def _run_scheduled_syncs():
-    """Execute les synchronisations de sources activees (appel planifie quotidien).
-    L'activation lue est celle EFFECTIVE : reglage a chaud (base) par-dessus
-    config.yaml — couper une source depuis l'application suffit a l'exclure."""
-    db = next(get_db())
-    sync_cfg = get_sync_config(db)
-
-    def _apply_rescreen(report):
-        # Surveillance continue : re-criblage post-delta apres chaque application
-        if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(db):
-            snap = db.query(Snapshot).filter(Snapshot.snapshot_id == report.snapshot_id).first()
-            if snap:
-                rescreen_after_snapshot_change(db, snap.file_type, report.snapshot_id, report.previous_snapshot_id)
-
-    try:
-        if sync_cfg["ofac"]["enabled"]:
-            _apply_rescreen(run_ofac_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        # FSF (liste consolidee, fait autorite) avant le scraping du JO du jour
-        if sync_cfg["eu_fsf"]["enabled"]:
-            _apply_rescreen(run_eu_fsf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["eurlex"]["enabled"]:
-            _apply_rescreen(run_eurlex_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["dgt"]["enabled"]:
-            _apply_rescreen(run_dgt_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["un"]["enabled"]:
-            _apply_rescreen(run_un_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["pep"]["enabled"]:
-            _apply_rescreen(run_pep_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["ofsi"]["enabled"]:
-            _apply_rescreen(run_ofsi_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["seco"]["enabled"]:
-            _apply_rescreen(run_seco_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["ofac_nonsdn"]["enabled"]:
-            _apply_rescreen(run_ofac_nonsdn_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["csl"]["enabled"]:
-            _apply_rescreen(run_csl_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["canada"]["enabled"]:
-            _apply_rescreen(run_canada_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["dfat"]["enabled"]:
-            _apply_rescreen(run_dfat_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["hk_sfc"]["enabled"]:
-            _apply_rescreen(run_hk_sfc_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["amf"]["enabled"]:
-            _apply_rescreen(run_amf_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        if sync_cfg["worldbank"]["enabled"]:
-            _apply_rescreen(run_worldbank_sync(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-        for _os_key, _os_runner in OPENSANCTIONS_RUNNERS.items():
-            if sync_cfg[_os_key]["enabled"]:
-                _apply_rescreen(_os_runner(db, trigger="SCHEDULED", reload_cache=lambda: load_watchlist_cache(db)))
-    finally:
-        db.close()
-
 # Executeurs de sync par source (planification cron individuelle)
 _SYNC_RUNNERS = {
     "ofac": run_ofac_sync, "eurlex": run_eurlex_sync, "dgt": run_dgt_sync,
@@ -5387,6 +5335,35 @@ async def scan_watchlist_db_fuzzy(
             "done": scanned < chunk}
 
 
+def _audit_row(r: AuditTrail, *, details: bool) -> Dict[str, Any]:
+    """Ligne du journal d'audit. `details=False` omet `decision_tree` et
+    `config_state` : le tableau ne les affiche pas et ils portent l'essentiel
+    du poids de la page. Le type de liste, lui, reste calcule — son repli de
+    lecture passe justement par le decision_tree."""
+    tree = r.decision_tree or {}
+    fallback = ((tree.get("watchlist_entity") or {}).get("_list_type")
+                if isinstance(tree, dict) else None)
+    row = {
+        "id": r.id,
+        "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+        "client_id": r.client_id,
+        "client_name": r.client_name,
+        "client_type": r.client_type,
+        "watchlist_id": r.watchlist_id,
+        "watchlist_name": r.watchlist_name,
+        "base_score": r.base_score,
+        "final_score": r.final_score,
+        "status": r.status,
+        "list_type": r.list_type or fallback,
+        "watchlist_version": r.watchlist_version,
+        "watchlist_hash": r.watchlist_hash,
+    }
+    if details:
+        row["decision_tree"] = r.decision_tree
+        row["config_state"] = r.config_state
+    return row
+
+
 @app.get("/api/history")
 async def get_audit_history(
     list_type: Optional[str] = Query(None),
@@ -5395,6 +5372,7 @@ async def get_audit_history(
     date_to: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    include_details: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -5404,6 +5382,12 @@ async def get_audit_history(
     incluses). Les enregistrements anterieurs a la colonne list_type sont
     restitues via le decision_tree quand il porte le type (fallback lecture, le
     journal immuable n'est jamais reecrit) ; le filtre SQL UNKNOWN les cible.
+
+    `include_details=false` omet `decision_tree` et `config_state` (97 % du
+    poids de la page) : le tableau ne s'en sert pas, seule la modale
+    d'inspection en a besoin et elle les lit via GET /api/history/{id}. Le
+    defaut reste `true` — le journal d'audit est une piece opposable et les
+    integrations qui l'archivent doivent continuer a tout recevoir.
     """
     query = db.query(AuditTrail)
     if status_filter:
@@ -5426,30 +5410,22 @@ async def get_audit_history(
     rows = query.order_by(AuditTrail.timestamp.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
 
-    def _row(r: AuditTrail) -> Dict[str, Any]:
-        tree = r.decision_tree or {}
-        fallback = ((tree.get("watchlist_entity") or {}).get("_list_type")
-                    if isinstance(tree, dict) else None)
-        return {
-            "id": r.id,
-            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            "client_id": r.client_id,
-            "client_name": r.client_name,
-            "client_type": r.client_type,
-            "watchlist_id": r.watchlist_id,
-            "watchlist_name": r.watchlist_name,
-            "base_score": r.base_score,
-            "final_score": r.final_score,
-            "status": r.status,
-            "list_type": r.list_type or fallback,
-            "decision_tree": r.decision_tree,
-            "config_state": r.config_state,
-            "watchlist_version": r.watchlist_version,
-            "watchlist_hash": r.watchlist_hash,
-        }
-
     return {"total": total, "page": page, "page_size": page_size,
-            "items": [_row(r) for r in rows]}
+            "items": [_audit_row(r, details=include_details) for r in rows]}
+
+
+@app.get("/api/history/{record_id}")
+async def get_audit_history_detail(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Decision d'audit complete, `decision_tree` et `config_state` compris —
+    la piece que la modale d'inspection charge a l'ouverture."""
+    row = db.query(AuditTrail).filter(AuditTrail.id == record_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Decision introuvable dans le journal d'audit.")
+    return _audit_row(row, details=True)
 
 # ------------------ VUE CLIENT 360° ------------------
 
@@ -5964,6 +5940,26 @@ def _serialize_sync_report(report: SyncReport) -> Dict[str, Any]:
     return {c.name: getattr(report, c.name) for c in report.__table__.columns}
 
 
+def _sync_report_partial_failures(delta: Any) -> int:
+    """Nombre d'elements que la source n'a pas pu livrer (actes et PDF EUR-Lex
+    inaccessibles, repris au passage suivant). Compte tenu dans la ligne de
+    liste pour que le badge d'echec partiel n'ait pas besoin du delta complet."""
+    if not isinstance(delta, dict):
+        return 0
+    return len(delta.get("fetch_failures") or []) + len(delta.get("pdf_failures") or [])
+
+
+def _sync_report_list_row(report: SyncReport) -> Dict[str, Any]:
+    """Ligne de liste allegee : tout sauf `delta_report`, qui pese a lui seul
+    ~99 % de la reponse (des milliers d'ajouts/modifications par source) alors
+    que le tableau n'en tire qu'un compteur d'echecs partiels. Le detail complet
+    reste lisible fiche par fiche via GET /api/sync/reports/{id}."""
+    row = {c.name: getattr(report, c.name)
+           for c in report.__table__.columns if c.name != "delta_report"}
+    row["partial_failures"] = _sync_report_partial_failures(report.delta_report)
+    return row
+
+
 # Alias acceptes par l'API -> (cle d'execution, nom de source du moteur).
 # La cle d'execution est celle de `_SYNC_RUNNERS` : c'est elle qui sert de
 # verrou anti-chevauchement, PARTAGE avec le planificateur cron (une source ne
@@ -6071,11 +6067,17 @@ async def get_sync_reports(
     limit: int = Query(50, ge=1, le=200),
     source: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    include_details: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Historique des rapports de synchronisation des sources (suivi in-app).
+
+    `include_details=false` renvoie les lignes SANS `delta_report` (avec le
+    compteur `partial_failures` qui en est derive) : c'est ce que demande le
+    tableau, ou le delta complet ne servait a rien. Le defaut reste `true`
+    pour ne rien retirer aux integrations qui archivent ces rapports.
 
     Filtres serveur `source` et `status` : `limit` borne l'historique renvoye,
     donc un filtre porte cote serveur voit TOUT l'historique et pas seulement
@@ -6089,7 +6091,23 @@ async def get_sync_reports(
         if statuses:
             query = query.filter(SyncReport.status.in_(statuses))
     reports = query.order_by(SyncReport.executed_at.desc()).limit(limit).all()
-    return [_serialize_sync_report(r) for r in reports]
+    if include_details:
+        return [_serialize_sync_report(r) for r in reports]
+    return [_sync_report_list_row(r) for r in reports]
+
+
+@app.get("/api/sync/reports/{report_id}")
+async def get_sync_report_detail(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Rapport de synchronisation complet, `delta_report` compris — la piece
+    que l'ecran ne charge qu'a l'ouverture du detail."""
+    report = db.query(SyncReport).filter(SyncReport.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Rapport de synchronisation introuvable.")
+    return _serialize_sync_report(report)
 
 @app.get("/api/sync/config")
 async def get_sync_configuration(

@@ -1812,7 +1812,9 @@ async function finishSourceSync(state) {
 // Load and render the synchronization reports history
 async function fetchSyncReports() {
  try {
- const response = await apiFetch("/api/sync/reports");
+ // Liste allegee : le delta complet (99 % du poids) n'est lu qu'a l'ouverture
+ // du detail, le tableau se contente du compteur d'echecs partiels.
+ const response = await apiFetch("/api/sync/reports?include_details=false");
  if (!response.ok) return;
  const reports = await response.json();
  renderSyncReportsTable(reports);
@@ -1842,8 +1844,7 @@ function renderSyncReportsTable(reports) {
 
  // Echecs partiels (actes/PDF inaccessibles) : la synchronisation a
  // abouti mais une partie de la source n'a pas pu être récupérée
- const delta = report.delta_report || {};
- const partialFailures = (delta.fetch_failures || []).length + (delta.pdf_failures || []).length;
+ const partialFailures = report.partial_failures || 0;
  if (partialFailures > 0 && report.status !== "ERROR") {
  statusBadge += ` <span class="status-badge warning" title="${partialFailures} élément(s) inaccessibles — repris au prochain run"> ${partialFailures}</span>`;
  }
@@ -1857,15 +1858,29 @@ function renderSyncReportsTable(reports) {
  <td>+${report.added_count} / ~${report.modified_count} / −${report.removed_count}</td>
  <td>${report.email_sent ? " Envoyé" : "—"}</td>
  `;
- tr.addEventListener("click", () => showSyncReportDetail(report));
+ tr.addEventListener("click", () => { showSyncReportDetail(report); });
  tbody.appendChild(tr);
  });
 }
 
 // Display the detail (message + truncated delta) of a sync report
-function showSyncReportDetail(report) {
+async function showSyncReportDetail(report) {
  const panel = document.getElementById("sync-report-detail");
  const content = document.getElementById("sync-report-detail-content");
+ // La ligne de liste arrive sans `delta_report` : on le complete ici, une
+ // seule fois par rapport ouvert (`undefined` = jamais charge, `null` = pas
+ // de delta pour ce rapport, ce qui est une reponse legitime).
+ if (report.delta_report === undefined) {
+ content.textContent = "Chargement du détail…";
+ panel.classList.remove("hidden");
+ try {
+ const resp = await apiFetch(`/api/sync/reports/${encodeURIComponent(report.id)}`);
+ if (resp.ok) Object.assign(report, await resp.json());
+ else report.delta_report = null;
+ } catch (e) {
+ report.delta_report = null;
+ }
+ }
  const detail = {
  source: report.source,
  executed_at: report.executed_at,
@@ -2997,6 +3012,9 @@ async function fetchAuditHistory(page = null) {
  const toEl = document.getElementById("audit-date-to");
  if (toEl && toEl.value) params.set("date_to", toEl.value);
 
+ // Liste allegee : `decision_tree` et `config_state` (97 % du poids) ne sont
+ // lus qu'a l'ouverture de la modale d'inspection.
+ params.set("include_details", "false");
  const response = await apiFetch(`/api/history?${params}`);
  const data = await response.json();
  auditHistory = data.items || [];
@@ -3044,9 +3062,22 @@ function renderAuditHistoryTable(logs) {
  });
 }
 
-function viewAuditLogDetail(logId) {
+async function viewAuditLogDetail(logId) {
  const log = auditHistory.find(item => item.id === logId);
  if (!log) return;
+
+ // La ligne de liste arrive sans arbre de decision ni etat de configuration :
+ // on les charge a l'ouverture, une seule fois par decision inspectee.
+ if (log.decision_tree === undefined) {
+ try {
+ const resp = await apiFetch(`/api/history/${encodeURIComponent(logId)}`);
+ if (!resp.ok) return;
+ Object.assign(log, await resp.json());
+ } catch (e) {
+ console.error("Error loading audit detail:", e);
+ return;
+ }
+ }
  
  const modal = document.getElementById("audit-modal");
  const content = document.getElementById("modal-audit-details");
@@ -6427,7 +6458,7 @@ async function renderQualityWidget(body) {
 
 async function renderHistoryWidget(body) {
  try {
- const response = await apiFetch("/api/history?page_size=8", { silent: true });
+ const response = await apiFetch("/api/history?page_size=8&include_details=false", { silent: true });
  if (!response.ok) { body.innerHTML = '<div class="dash-widget-empty">Historique indisponible.</div>'; return; }
  const items = (await response.json()).items || [];
  body.innerHTML = items.length
