@@ -196,6 +196,8 @@ Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé
 
 `GET /api/snapshots` est **paginé** et rend une enveloppe `{total, page, page_size, items}` (50 lots par défaut, 500 au plus), avec les filtres serveur `file_type` et `status` (listes séparées par des virgules). `GET /api/snapshots/options` rend l'historique complet réduit aux quatre colonnes qu'une liste déroulante de comparaison affiche.
 
+`GET /api/watchlist` est une vue de **contrôle** du cache de criblage chargé en mémoire, et sa réponse est **bornée** (`limit`, 100 par défaut, 1 000 au plus ; `entity_id` cible une fiche précise). `total` reste exact et `truncated` signale la coupe. Pour parcourir le référentiel, c'est `GET /api/watchlist/db` : paginé, filtrable, et lu en base.
+
 ---
 
 ## ✅ Mode Homologation — Environnement de Validation avant Production

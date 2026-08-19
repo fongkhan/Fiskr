@@ -118,8 +118,12 @@ def test_patch_field_journals_and_recomputes_checksum(client):
     assert by_field["designation"]["new_value"] == "Ministre des essais"
     assert by_field["designation"]["changed_by"] == "testeur"
 
-    # Cache de criblage recharge immediatement avec les nouvelles valeurs
-    cache = client.get("/api/watchlist").json()["items"]
+    # Cache de criblage recharge immediatement avec les nouvelles valeurs.
+    # Interroge par entity_id : l'endpoint ne rend qu'un echantillon du cache
+    # (il en rendait plus d'un giga-octet en production), et chercher la fiche
+    # dans cet echantillon dependrait de sa position.
+    cache = client.get(
+        f"/api/watchlist?entity_id={entity['entity_id']}").json()["items"]
     cached = next(e for e in cache if e["id"] == pk)
     assert cached["designation"] == "Ministre des essais"
 

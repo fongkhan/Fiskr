@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — one call to `GET /api/watchlist` would have taken production down
+The endpoint returned `watchlist_store` **whole**. Measured on the real cache: ~1.8 KB per record. With 895 157 records in production, that is **over 1.5 GB** serialized in memory inside the web process, for a single authenticated call — on shared hosting, the application with it. The figure is an estimate derived from a local measurement: calling that endpoint against production would have been triggering the very thing being described.
+
+The front end never used it (`fetchWatchlist` has always gone to `/api/watchlist/db`), which is why it went unnoticed — but it is a documented endpoint and the tests reached for it.
+
+The response is now bounded, and it **says so**: `total` stays exact and `truncated` reports the cut, so the number the check relies on is never wrong — only the sample is. `entity_id` returns one record's cached entry, which is what this check actually asks most of the time, without depending on its position in the cache. Browsing the reference data was never this endpoint's job: `GET /api/watchlist/db` is paginated, filterable, and read from the database rather than from one process's memory.
+
+Two existing tests depended on finding their record inside the full dump. They pass unchanged today only because the dev cache holds fewer than a hundred entries — a silent trap. One now queries by `entity_id`; the other raises `limit` and **asserts `truncated` is false**, since concluding "this name is absent" from a sample would be worth nothing.
+
 ### Changed — three round trips per page load, for nothing
 Pages reference their assets by the **fingerprint of their content** (`app.js?v=<hash>`): the URL changes when the file changes, and never otherwise. But no response carried a cache header, so the browser revalidated all of them on **every** page load. Measured on production:
 

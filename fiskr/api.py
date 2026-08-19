@@ -4498,13 +4498,46 @@ async def get_watchlist_summary(
     """
     return _production_watchlist_summary(db)
 
+# Nombre de fiches du cache rendues par defaut. Cet endpoint est un point de
+# CONTROLE du cache moteur (« la fiche que je viens de modifier est-elle bien
+# rechargee ? »), pas un moyen de parcourir le referentiel : pour cela il y a
+# GET /api/watchlist/db, pagine et filtrable.
+WATCHLIST_CACHE_PREVIEW = 100
+
+
 @app.get("/api/watchlist")
-async def get_watchlist(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Returns the active loaded in-memory watchlist."""
+async def get_watchlist(
+    limit: int = Query(WATCHLIST_CACHE_PREVIEW, ge=1, le=1000),
+    entity_id: Optional[str] = Query(None),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Etat du cache de criblage CHARGE EN MEMOIRE par ce processus.
+
+    La reponse est BORNEE. Elle rendait auparavant `watchlist_store` en entier :
+    en production, 895 157 fiches a ~1,8 Ko chacune, soit plus de 1,5 Go
+    serialises en memoire dans le processus web. Un seul appel suffisait a
+    l'abattre — sur un hebergement mutualise, l'application avec.
+
+    `total` reste EXACT et `truncated` dit franchement que la liste est coupee :
+    le chiffre qui sert au controle n'est jamais faux, seul l'echantillon l'est.
+    `entity_id` rend la fiche cachee d'une entite precise, ce que ce controle
+    demande le plus souvent — sans dependre de sa position dans le cache.
+
+    Pour PARCOURIR le referentiel, c'est GET /api/watchlist/db : pagine,
+    filtrable, et lu en base plutot que dans la memoire d'un processus.
+    """
+    if entity_id:
+        cible = (entity_id or "").strip()
+        items = [e for e in watchlist_store if e.get("entity_id") == cible]
+    else:
+        items = watchlist_store[:limit]
     return {
         "version": watchlist_version,
         "hash": watchlist_hash,
-        "items": watchlist_store
+        "total": len(watchlist_store),
+        "truncated": len(items) < len(watchlist_store),
+        "items": items,
     }
 
 # ------------------ CAMPAGNES DE CRIBLAGE BATCH (upload manuel / inbox CFT) ------------------
