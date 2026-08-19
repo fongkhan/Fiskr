@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a screening returned every candidate it had scored
+`POST /api/screen` returned `all_matches`: **every** scored candidate, each carrying its full listed record. Measured on production through `GET /api/screen/preview` (read-only, same engine), the scope a screening actually covers:
+
+| Profile screened | Candidates | Alerts | Response time |
+|---|---:|---:|---:|
+| Ivan Ivanov + RU | 1 223 | 453 | 1.9 s |
+| **Ivan Ivanov, no country** | **28 940** | 538 | **24.2 s** |
+| Mohammed Ali, no country | 17 649 | 2 976 | — |
+| Li Wei, no country | 15 520 | 268 | — |
+| Zzyxwv Qqrstuv, no country | 2 894 | 0 | 3.3 s |
+| Bank of Example (E) | 385 | 14 | 1.2 s |
+
+Without a country the profile falls into the "unknown country" block, which gathers every listed record whose source publishes no geography. At ~1.8 KB per record, `all_matches` for "Mohammed Ali" carried some **30 MB** — and that many objects retained in memory — on a field **nobody read**: not a screen, not a test.
+
+The response now keeps the 50 best, held in a bounded heap. What matters for compliance is untouched: `best_match`, the audit trail and the alert are still computed over **all** candidates, and `candidates_count` says how many were actually compared. A test rebuilds the expected top 50 candidate by candidate, outside the endpoint, and asserts the heap returns exactly that list in exactly that order — ties included, since strict comparison preserves what the previous stable sort did.
+
+**Measured and reverted — an early exit in the scoring loop.** Once a name pair reaches the maximum attainable score, no other pair can beat it, so the remaining aliases could be skipped. Provably safe, three lines. Measured on a record with eight aliases: 167 µs versus 173 µs per candidate — inside the noise, because `c_names` and `w_names` are built through `set()` and the exact match is not reached first. Not worth three lines in the most safety-critical module of the product, so it is not in this branch.
+
+**Reported, not changed — the 24 seconds themselves.** Profiling puts the cost in the string metrics, not in redundant normalization: Damerau-Levenshtein 37 %, Jaro 24 %, token sort 14 %; normalization is under 2 %. Production works out to ~0.83 ms per candidate, against 174 µs on a synthetic corpus — the difference is the aliases, each one another full set of metrics. There is no way to make this materially faster except to compare fewer candidates, and that is the blocking layout: a decision with a recall trade-off, which the settings screen already exposes (up to three fields). The numbers above are what that decision needs.
+
+
 ### Fixed — one call to `GET /api/watchlist` would have taken production down
 The endpoint returned `watchlist_store` **whole**. Measured on the real cache: ~1.8 KB per record. With 895 157 records in production, that is **over 1.5 GB** serialized in memory inside the web process, for a single authenticated call — on shared hosting, the application with it. The figure is an estimate derived from a local measurement: calling that endpoint against production would have been triggering the very thing being described.
 

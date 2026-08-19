@@ -6,6 +6,7 @@ import json
 import re
 import asyncio
 import hashlib
+import heapq
 import logging
 import shutil
 import threading
@@ -2459,6 +2460,12 @@ def _screen_preview(db, name: str, entity_type: str, dob: Optional[str],
     }
 
 
+# Nombre de rapprochements RENDUS par un criblage. Le verdict, le journal
+# d'audit et l'alerte portent sur `best_match`, calcule sur TOUS les candidats :
+# ce plafond ne borne que la liste de detail de la reponse.
+SCREEN_MAX_MATCHES = 50
+
+
 def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: str,
                           requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
     """
@@ -2509,15 +2516,33 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
 
     # Scoring — seuils de cut-off a chaud (reglage > config.yaml)
     scoring_config = scoring_config_with_thresholds(db)
-    matches = []
+    # Les rapprochements sont retenus par un TAS BORNE des meilleurs, pas par
+    # une liste de tous. Un nom courant sans pays tombe dans le bloc « pays
+    # inconnu » : mesure en production, 24 s de calcul pour ~120 000 candidats.
+    # Les garder tous, chacun portant sa fiche listee complete, faisait
+    # ~240 Mo d'objets en memoire et autant dans la reponse — pour un champ
+    # (`all_matches`) qu'aucun ecran ni aucun appelant ne lit.
+    #
+    # Ce qui compte pour la conformite — `best_match`, le journal d'audit,
+    # l'alerte — est calcule sur TOUS les candidats, exactement comme avant :
+    # seule la liste rendue est coupee, et `candidates_count` dit combien ont
+    # ete reellement compares.
+    meilleurs: List[Any] = []   # tas-min (score, rang, resultat)
+    rang = 0
     best_match = None
     best_score = -1.0
 
     for item_id, candidate in candidates.items():
         score_res = match_entities(cleansed_client, candidate, scoring_config)
         score_res["watchlist_entity"] = candidate
-        
-        matches.append(score_res)
+
+        rang += 1
+        if len(meilleurs) < SCREEN_MAX_MATCHES:
+            heapq.heappush(meilleurs, (score_res["final_score"], rang, score_res))
+        elif score_res["final_score"] > meilleurs[0][0]:
+            # Comparaison STRICTE : a score egal, le candidat rencontre en
+            # premier reste — c'est ce que faisait le tri stable d'avant.
+            heapq.heapreplace(meilleurs, (score_res["final_score"], rang, score_res))
         if score_res["final_score"] > best_score:
             best_score = score_res["final_score"]
             best_match = score_res
@@ -2609,7 +2634,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "blocking_keys_generated": list(client_keys),
         "candidates_count": len(candidates),
         "best_match": best_match,
-        "all_matches": sorted(matches, key=lambda x: x["final_score"], reverse=True),
+        "all_matches": [r for _, _, r in sorted(meilleurs, key=lambda t: (-t[0], t[1]))],
+        "all_matches_truncated": len(candidates) > SCREEN_MAX_MATCHES,
         "audit_trail_id": audit_id,
         "alert_id": alert_id,
         "whitelisted": whitelist_pair_id is not None,
