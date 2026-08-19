@@ -12113,7 +12113,46 @@ async def get_compliance_kpis(
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+class _StaticVersionne(StaticFiles):
+    """
+    Ressources statiques, avec la duree de cache que leur URL autorise.
+
+    Les pages referencent leurs ressources par l'EMPREINTE DE LEUR CONTENU
+    (`app.js?v=<hash>`, voir `_serve_page`) : l'URL change des que le fichier
+    change, et jamais autrement. Une reponse versionnee est donc immuable, et
+    le navigateur n'a aucune raison de la revalider.
+
+    Sans en-tete de cache, il la revalidait a CHAQUE chargement de page :
+    mesure en production, trois allers-retours (app.js, i18n.js, styles.css)
+    de 0,66 a 1,01 s chacun, pour recevoir trois 304 vides. Le corps etait
+    deja epargne (le front comprime en brotli : 476 Ko d'app.js passent a
+    167 Ko), mais pas les allers-retours.
+
+    Une requete SANS version — quelqu'un qui ouvre /static/app.js a la main —
+    garde la revalidation : rien ne garantit alors que l'URL suive le contenu.
+    """
+
+    IMMUABLE = "public, max-age=31536000, immutable"
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if _version_demandee(scope.get("query_string") or b""):
+            response.headers["Cache-Control"] = self.IMMUABLE
+        return response
+
+
+def _version_demandee(query_string: bytes) -> bool:
+    """Vrai si la requete porte un parametre `v` non vide — la marque d'une URL
+    generee par `_serve_page`, donc liee au contenu servi."""
+    from urllib.parse import parse_qs
+    try:
+        valeurs = parse_qs(query_string.decode("latin-1")).get("v") or []
+    except Exception:
+        return False
+    return any(v.strip() for v in valeurs)
+
+
+app.mount("/static", _StaticVersionne(directory=str(static_dir)), name="static")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -12124,6 +12163,29 @@ async def serve_favicon():
     return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
 
 _STATIC_VERSION_RE = re.compile(r'(\.(?:js|css))\?v=[^"\']*')
+
+
+def _reponse_page(path, request: "Request") -> HTMLResponse:
+    """
+    Page HTML avec revalidation EXPLICITE et 304 quand rien n'a change.
+
+    Cette page ne peut pas etre mise en cache longuement : c'est elle qui porte
+    la version des ressources. Servie depuis un cache perime, elle referencerait
+    les ANCIENNES — precisement le defaut que l'empreinte de contenu corrige.
+
+    Elle porte donc `no-cache` (revalider toujours) plus un ETag : le
+    navigateur redemande la page a chaque chargement, mais recoit un 304 vide
+    tant que ni le fichier ni la version des ressources n'ont bouge. Son
+    contenu ne depend pas de l'utilisateur — seul l'acces y depend — donc
+    l'empreinte est la meme pour tous.
+    """
+    html = _serve_page(path)
+    empreinte = hashlib.sha256(html.encode("utf-8")).hexdigest()[:16]
+    etag = f'W/"{empreinte}"'
+    entetes = {"Cache-Control": "no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return HTMLResponse(content="", status_code=304, headers=entetes)
+    return HTMLResponse(content=html, status_code=200, headers=entetes)
 
 
 def _serve_page(path) -> str:
@@ -12147,17 +12209,16 @@ def _serve_page(path) -> str:
 
 @app.get("/login", response_class=HTMLResponse)
 @app.get("/login.html", response_class=HTMLResponse)
-async def serve_login():
+async def serve_login(request: Request):
     login_path = static_dir / "login.html"
     if not login_path.exists():
         raise HTTPException(status_code=404, detail="Login page not found")
-    return HTMLResponse(content=_serve_page(login_path), status_code=200)
+    return _reponse_page(login_path, request)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
     token = request.cookies.get("fiskr_access_token")
     if token and decode_access_token(token):
-        return HTMLResponse(content=_serve_page(static_dir / "index.html"),
-                            status_code=200)
+        return _reponse_page(static_dir / "index.html", request)
     return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
 

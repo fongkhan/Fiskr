@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — three round trips per page load, for nothing
+Pages reference their assets by the **fingerprint of their content** (`app.js?v=<hash>`): the URL changes when the file changes, and never otherwise. But no response carried a cache header, so the browser revalidated all of them on **every** page load. Measured on production:
+
+```
+app.js       304, 0 bytes, 1.01 s
+i18n.js      304, 0 bytes, 0.66 s
+styles.css   304, 0 bytes, 0.70 s
+```
+
+**Correction to a first, too-quick reading of my own measurement**: I nearly reported the assets as uncompressed. They are not — the front end serves brotli, and 476 KB of `app.js` arrive as 167 KB. Only the round trips were being paid.
+
+A versioned URL is now `immutable` for a year, so it is not requested again at all. An URL **without** a version keeps revalidating: nothing guarantees a bare URL follows the content, and freezing it for a year would serve a stale file after a deploy. The parameter detection is parsed, not substring-matched — `version=`, `nv=`, `v=` and `v=%20` all correctly count as unversioned.
+
+The HTML page cannot be cached for long: it is the thing carrying the asset version, and served stale it would reference the old assets — exactly the fault the fingerprint was built to fix. It now carries `no-cache` plus an ETag: still requested on every load, but answered with an empty 304 while nothing has moved. Its body does not depend on the user — only access to it does — so one fingerprint serves everyone.
+
+A test ties the two halves together: the assets can only be declared immutable *because* the page rewrites their version, so it asserts the page really does carry the current fingerprint, and that no asset in the markup is referenced without one.
+
 ### Changed — a hidden tab no longer polls the server
 A Fiskr tab left open questioned the server forever:
 
