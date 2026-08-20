@@ -18,7 +18,9 @@ Sommaire :
 
 ## 1. Cycle de vie des alertes & validation 4-yeux
 
-Chaque décision de criblage temps réel en statut `ALERT` ouvre un **objet de travail** dans la table `alerts`, dédupliqué par paire client×listé : un re-criblage de la même paire ajoute un événement `REDETECTED` au lieu de créer un doublon.
+Chaque décision de criblage en statut `ALERT` ouvre un **objet de travail** dans la table `alerts`, dédupliqué par paire client×listé : un re-criblage de la même paire ajoute un événement `REDETECTED` au lieu de créer un doublon.
+
+**Un criblage produit autant de décisions qu'il trouve de correspondances au-dessus du seuil**, pas une seule. Chacune a sa propre ligne d'audit et sa propre alerte. Mesuré en production sur `GET /api/screen/preview` : un profil « Mohammed Ali » sans pays remonte 17 649 candidats et **2 976 correspondances** au-dessus du seuil, dont plusieurs dizaines à 100,00 — des homonymes réels, pas du bruit de score. Aucune métrique de nom ne sépare deux personnes nommées à l'identique : ce qui manque n'est pas dans le score, c'est l'identification (date de naissance, pays, pièce d'identité). C'est ce que traite le § 9.
 
 **Cycle de vie** :
 
@@ -115,16 +117,35 @@ Tous ces réglages sont modifiables **sans redémarrage** par un admin (carte r�
 
 Réglages fichier uniquement (redémarrage requis) : `scoring.cut_off_overrides` (seuils par liste), `adverse_media.*`, `narrative.*`, sections `sync.*`.
 
-## 9. Périmètre par type de liste (filtres & criblage restreint)
+## 9. Deux périmètres : sanction et hors sanction
 
-Le type de liste d'origine (`WATCHLIST_OFAC`, `WATCHLIST_UN`, `WATCHLIST_DGT`, `WATCHLIST_EU`, `WATCHLIST_PEP`, `WATCHLIST_OFSI`, `WATCHLIST_SECO`, `WATCHLIST_OFAC_NONSDN`, `WATCHLIST_CSL`, `WATCHLIST_CANADA`, `WATCHLIST_DFAT`, `WATCHLIST_HK_SFC`, `WATCHLIST_AMF`, `WATCHLIST_WORLDBANK`, `WATCHLIST_SSIE`) est **dénormalisé** sur les alertes, le journal d'audit et la liste blanche (colonne `list_type`, renseignée à l'écriture).
+Toutes les listes ne portent pas le même risque, donc pas le même traitement des correspondances.
+
+| Périmètre | Ce qu'il couvre | Traitement |
+|---|---|---|
+| `SANCTION` | Désignations avec **obligation de gel** : OFAC, UE, ONU, DGT, OFSI, SECO, listes nationales antiterroristes… | **Tout est généré, rien n'est clôturé par volumétrie.** Une correspondance manquée est constatable lors d'un contrôle et sanctionnable financièrement. |
+| `HORS_SANCTION` | PEP, listes d'alerte de régulateurs, exclusions de bailleurs multilatéraux | Signaux de vigilance : ce périmètre accepte un **seuil plus haut** et des **règles volumétriques**. |
+
+Ce qui rend la séparation utile : les listes hors sanction pèsent **709 511 fiches sur 895 157 en production (79 %)**, presque toutes portées par `WATCHLIST_PEP` — c'est exactement là que l'homonymie de noms courants explose.
+
+* **Classement** : dérivé de la famille déclarée au registre des sources (`fiskr/sources.py`), complété par une table explicite pour les quinze types antérieurs à ce registre. Une **liste inconnue est traitée comme une sanction** — le côté qui ne clôture rien : une liste mal classée hors-sanction se ferait clore ses correspondances en volume, le défaut penche donc vers ce qui ne fait rien perdre. Surchargeable à chaud (`screening.perimeters`) : c'est un arbitrage de conformité.
+* **Seuil par périmètre** (`scoring.cut_off_by_perimeter`), entre la surcharge par liste et le seuil global. La coupe est **naturelle** : sous le seuil, la correspondance n'est jamais créée, il n'y a rien à clôturer. **Table vide par défaut** — activer les périmètres ne déplace aucun score, donc aucun cahier de tests déjà homologué.
+* **Portée des règles anti-faux positifs** (`FpRule.perimeters`, `NULL` = tous, donc les règles existantes ne changent pas de comportement). C'est le **moteur** qui filtre, pas le code de la règle : une règle hors-sanction ne peut pas clôturer une correspondance de gel même si son code l'oublie, et un contrôleur lit la portée **sur** la règle. Une déclaration illisible ne s'applique **nulle part** plutôt que partout.
+* **Modèles prêts à installer** : `GET /api/fprules/templates` sert quatre règles bâties sur ce contexte (volumétrie, corroboration). Les trois volumétriques déclarent `HORS_SANCTION` ; la quatrième, de portée `SANCTION`, est **volontairement inerte** — elle sert de point de départ à une règle visant une famille de faux positifs identifiée, jamais un tri par le nombre. Chacune porte un champ `loss` disant ce qu'elle coûte, et **aucune n'est active par défaut**.
+* **Ce qu'une règle peut lire** : `perimeter`, `hits_count` (volumétrie du criblage), `hit_rank` (rang par score décroissant) et `corroboration` (`has_dob`, `has_country`, `has_identity_document`, `name_only`, `corroborated`).
+* **Volumétrie des notifications** : au-delà de dix alertes ouvertes par un même criblage, une notification `alert_volume` unique remplace les envois individuels. Une alerte déjà close par règle ne reçoit plus d'événement de re-détection à chaque passage — la ligne d'audit du criblage, elle, reste écrite à chaque fois.
+* **Restitution** : `GET /api/screening/perimeters` sert le classement et le seuil effectif ; les réponses de criblage portent `hits.by_perimeter`.
+
+## 10. Restriction du périmètre criblé (filtres & `screening_lists`)
+
+Le type de liste d'origine (`WATCHLIST_*` — la liste vit dans `WATCHLIST_FILE_TYPES`, dérivée du registre des sources, et compte aujourd'hui plus de quarante entrées) est **dénormalisé** sur les alertes, le journal d'audit et la liste blanche (colonne `list_type`, renseignée à l'écriture).
 
 * **Filtres partout** : sélecteur « Liste » sur la watchlist active (avec nouvelle colonne dédiée — la colonne « Type d'entité » reste I/E/V/O), la file d'alertes, le journal d'audit (désormais **paginé** : `GET /api/history?page=&page_size=&list_type=&status=` renvoie `{total, page, page_size, items}`), la liste blanche (`GET /api/whitelist?list_type=`) et l'historique des snapshots. Une seule table de libellés (`LIST_TYPE_LABELS`) est utilisée dans toute l'UI.
 * **Enregistrements antérieurs** : le journal d'audit étant immuable, les lignes créées avant l'ajout de la colonne ne sont **pas réécrites** — `list_type` vaut `NULL`, rendu « Inconnue » dans l'UI et ciblable via la valeur de filtre `UNKNOWN`. En lecture, `/api/history` restitue le type depuis le `decision_tree` quand il y figure (les décisions récentes) ; le filtre SQL `UNKNOWN`, lui, cible strictement les `NULL`.
 * **Criblage restreint** (`screening_lists`) : le criblage temps réel (`POST /api/screen`), le criblage de masse et le filtrage transactionnel (`POST /api/transactions/screen`, paramètre CSV) acceptent un sous-ensemble de listes — certains établissements n'ont pas besoin de toutes les listes (ex. pas d'exposition UK). **Garde-fous conformité** : l'absence du paramètre = toutes les listes (défaut), une valeur inconnue est rejetée (400), et **toute restriction est tracée** — dans le `decision_tree` du journal immuable (`screening_lists_restriction`), dans la réponse (`screening_lists`), et dans le détail de l'événement d'alerte. L'UI (cases à cocher, tout coché par défaut) rappelle l'avertissement et affiche la restriction appliquée sur le résultat.
 * **UE** : la liste consolidée FSF et le scraping EUR-Lex partagent le type `WATCHLIST_EU` — la granularité du filtre est le type de liste, pas la source de téléchargement.
 
-## 10. Ergonomie du flux de travail (dashboard)
+## 11. Ergonomie du flux de travail (dashboard)
 
 * **Continuité criblage → alerte** : un criblage qui ouvre une alerte affiche un bouton « Instruire l'alerte #N » menant directement à la modale d'instruction (idem sur les lignes ALERT du criblage de masse et du filtrage transactionnel).
 * **Badges vivants** : les compteurs de la barre latérale (alertes ouvertes, snapshots en attente d'homologation) se rafraîchissent toutes les 60 s via `GET /api/counters`, et le sous-onglet Homologation recharge sa file à chaque ouverture.

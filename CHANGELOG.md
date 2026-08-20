@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `token_set` was unreachable
+Found while reviewing the documentation, which is what a documentation review is for. `scoring_weights()` rebuilds the weight dictionary from the keys of `DEFAULT_SCORING_WEIGHTS` alone. `token_set` was not among them, so it was **silently dropped**: setting `token_set: 0.4` through the settings screen had no effect whatsoever, and the metric could never be enabled — whatever value was chosen. The engine did read `weights.get("token_set", 0.0)`, but the key could never reach it.
+
+The metric shipped two rounds ago was therefore dead in practice. It is now in the defaults at **weight zero** — same intent as before, activation still a deliberate act — and two tests cover both ends of the chain: the setting survives, and a weight that survives actually moves the score (70.57 → 110.57 on « Vladimir Putin » vs « Vladimir Vladimirovitch Putin »).
+
+### Changed — the guide and the documentation say what the product now does
+The in-app guide described the previous behaviour: a screening opening *one* alert, and a cut-off overridable "per list". Both statements had stopped being true.
+
+- **Guide, Screening chapter**: the decision chain now says that **each** match above the cut-off opens an alert with its own audit line, and a new *Deux périmètres* section explains the sanction / non-sanction split, what each authorises, and that a rule's scope is enforced by the engine rather than by the rule's own code.
+- **Guide, Alerts chapter**: a *Quand un criblage en produit beaucoup* section — why thousands of hits on a common name are genuine homonyms rather than a tuning fault, the two levers available on the non-sanction perimeter, and the volumetry notification.
+- **ALERTES_ET_SURVEILLANCE_CONTINUE**: same additions, plus a name collision resolved — "périmètre" meant two different things (the sanction split, and the `screening_lists` restriction). They are now two distinctly titled sections. The frozen list of fifteen `WATCHLIST_*` types is replaced by a pointer to the registry that derives it, which now holds more than forty.
+- **REGLES_ET_BLOCKING**: the rule context table gains `perimeter`, `hits_count`, `hit_rank` and `corroboration`; the blocking components go from the three documented to the thirteen that exist, with the wildcard mechanism and the cap explained; the screen's location is corrected.
+- **ALGORITHMES_DU_MOTEUR**: the section stating that metric weights "stay in `config.yaml`" and that offering them as switches "would be a trap" was **wrong** — they have been hot-settable with an impact simulation for some time. Rewritten to say what they are: a recalibration, not a switch, because the weights are not normalized. `token_set` is documented there with the reason its default is zero.
+
+### Changed — the documentation folder is navigable
+`Documentation/` held fifteen reference documents, two stale working notes describing an interface that no longer exists, a 46 KB prototype HTTP server, a Faker script, and no index. Nothing said which was which.
+
+- **`Documentation/README.md`**: an index classed **by question** — "je veux comprendre comment Fiskr décide", "je veux exploiter la plateforme" — where each document carries its **nature**: *Référence* (kept current), *Parcours* (read in order), *Relevé* (dated measurement, true at its date), *Étude* (settled question). Knowing that `VERIFICATION_DES_SOURCES` is a dated snapshot rather than a living reference changes how it is read.
+- **`Documentation/archives/`**: the two working notes and the prototype server, with a README saying what each one is and why it is no longer a reference.
+- The Faker script moves to `tools/`, where the other operational tools live, with a real page instead of a seven-line stub.
+- `Document Architecture Technique.md` (spaces in the filename, so `%20` in every link) becomes `ARCHITECTURE_TECHNIQUE.md`; the DAT annex follows.
+- **README**: a summary table with **explicit anchors** — the headings carry emoji, whose rendering as anchors varies between Markdown engines, so a hand-placed anchor works everywhere. The opening paragraph is corrected: it announced Dow Jones and World-Check among the connected sources (they are not, and `SOURCES_PREMIUM` says so) and presented the optional Spark batch as a core feature. The documentation section stops duplicating the index and points to it. One `file:///e:/Program Files/git/Fiskr/...` link is removed.
+
+Eight tests hold it together: every internal link resolves, every document is reachable from the index, the README's anchors exist, the archives declare themselves, and no executable code sits in the documentation folder. A documentation that points at a renamed file is worse than no documentation — it looks reliable.
+
+
 ### Added — two screening perimeters, because the two risks are not the same
 Keeping every hit is a regulatory requirement; the volumetry is its consequence. But the two are not one problem — they are two, and they call for opposite treatment:
 

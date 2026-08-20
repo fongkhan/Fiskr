@@ -122,3 +122,53 @@ def test_activating_the_metric_recovers_the_missed_pairs(client, liste):
 def test_activating_the_metric_does_not_invent_matches(a, b):
     """…et n'invente pas de rapprochement entre noms sans rapport."""
     assert _score(a, b, POIDS_AVEC_TSET) < 75.0
+
+
+# --------------- la métrique doit être ATTEIGNABLE par le réglage ---------------
+
+def test_token_set_survit_au_reglage_a_chaud():
+    """Défaut trouvé en relisant la documentation : `scoring_weights`
+    reconstruit le dictionnaire des poids sur les seules clés de
+    `DEFAULT_SCORING_WEIGHTS`. `token_set` n'y figurant pas, elle était
+    silencieusement supprimée — poser `token_set: 0.4` dans les réglages
+    n'avait AUCUN effet, et la métrique restait injoignable quelle que soit la
+    valeur choisie. Le moteur lisait bien `weights.get("token_set", 0.0)`,
+    mais la clé ne pouvait jamais lui parvenir."""
+    from fiskr.settings import (scoring_weights, DEFAULT_SCORING_WEIGHTS,
+                                SETTING_SCORING_WEIGHTS)
+    from fiskr.database import get_db, AppSetting
+
+    assert "token_set" in DEFAULT_SCORING_WEIGHTS
+    assert DEFAULT_SCORING_WEIGHTS["token_set"] == 0.0, (
+        "poids par défaut NUL : l'activer déplacerait tous les scores d'un coup")
+
+    db = next(get_db())
+    try:
+        db.query(AppSetting).filter(
+            AppSetting.key == SETTING_SCORING_WEIGHTS).delete()
+        db.add(AppSetting(key=SETTING_SCORING_WEIGHTS, value={
+            "jaro_winkler": 0.4, "damerau_levenshtein": 0.4,
+            "token_sort": 0.2, "token_set": 0.4}))
+        db.commit()
+        assert scoring_weights(db)["token_set"] == 0.4
+    finally:
+        db.query(AppSetting).filter(
+            AppSetting.key == SETTING_SCORING_WEIGHTS).delete()
+        db.commit()
+        db.close()
+
+
+def test_le_poids_pose_change_bien_le_score():
+    """Le bout de la chaîne : un poids atteignable qui ne changerait pas le
+    score servi n'aurait pas plus d'effet qu'un poids perdu."""
+    from fiskr.scoring import compute_base_score
+
+    def _cfg(tset):
+        return {"scoring": {"weights": {"jaro_winkler": 0.4,
+                                        "damerau_levenshtein": 0.4,
+                                        "token_sort": 0.2, "token_set": tset}}}
+
+    paire = ("VLADIMIR PUTIN", "VLADIMIR VLADIMIROVICH PUTIN")
+    sans = compute_base_score(*paire, _cfg(0.0))
+    avec = compute_base_score(*paire, _cfg(0.4))
+    assert avec > sans + 30, f"{sans:.2f} -> {avec:.2f}"
