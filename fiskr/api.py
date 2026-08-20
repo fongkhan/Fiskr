@@ -1228,6 +1228,89 @@ class LoginRequest(BaseModel):
 
 # ------------------ AUTHENTICATION ENDPOINTS ------------------
 
+# ------------------ BORNES DE TELEVERSEMENT ------------------
+#
+# Aucun endpoint de televersement n'etait borne. Un fichier lu en entier en
+# memoire (`await file.read()` du filtrage transactionnel) ou recopie sur le
+# disque sans plafond suffit a epuiser l'un ou l'autre — et la boite CFT
+# surveillee est alimentee par un systeme amont, donc l'entree n'est pas
+# toujours celle d'un operateur attentif.
+#
+# Les plafonds different par nature de fichier : une liste officielle est
+# volumineuse par construction (SDN_ADVANCED.XML de l'OFAC pese 126 Mo,
+# mesure), une piece jointe d'alerte ne l'est pas.
+TAILLE_MAX_TELEVERSEMENT = {
+    "liste": 512 * 1024 * 1024,      # import de liste officielle
+    "clients": 64 * 1024 * 1024,     # referentiel clients / campagne batch
+    "message": 8 * 1024 * 1024,      # message de paiement ISO 20022
+    "piece": 32 * 1024 * 1024,       # piece jointe, justificatif
+}
+
+
+def _refus_taille(nature: str, plafond: int):
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=(f"Fichier trop volumineux : la limite est de "
+                f"{plafond // (1024 * 1024)} Mo pour ce type de dépôt ({nature})."))
+
+
+async def lire_televersement(file, nature: str) -> bytes:
+    """Lit un fichier televerse EN MEMOIRE, borne. Leve 413 au-dela."""
+    plafond = TAILLE_MAX_TELEVERSEMENT[nature]
+    morceaux, recu = [], 0
+    while morceau := await file.read(1024 * 1024):
+        recu += len(morceau)
+        if recu > plafond:
+            raise _refus_taille(nature, plafond)
+        morceaux.append(morceau)
+    return b"".join(morceaux)
+
+
+def copier_televersement(file, destination, nature: str, hasher=None,
+                         progres=None) -> int:
+    """
+    Recopie un fichier televerse VERS LE DISQUE, borne. Leve 413 au-dela, apres
+    avoir efface ce qui avait deja ete ecrit : un refus ne laisse pas la moitie
+    d'un fichier occuper la place qu'on refusait de lui donner.
+    """
+    plafond = TAILLE_MAX_TELEVERSEMENT[nature]
+    recu = 0
+    try:
+        while morceau := file.file.read(1024 * 1024):
+            recu += len(morceau)
+            if recu > plafond:
+                raise _refus_taille(nature, plafond)
+            destination.write(morceau)
+            if hasher is not None:
+                hasher.update(morceau)
+            if progres is not None:
+                progres(recu)
+    except HTTPException:
+        try:
+            destination.flush()
+            destination.truncate(0)
+        except Exception:
+            pass
+        raise
+    return recu
+
+
+def copier_televersement_vers(chemin, file, nature: str) -> int:
+    """
+    Variante qui gere elle-meme le fichier de destination : en cas de refus, le
+    fichier partiel est supprime plutot que laisse vide sur le disque.
+    """
+    try:
+        with open(chemin, "wb") as destination:
+            return copier_televersement(file, destination, nature)
+    except HTTPException:
+        try:
+            Path(chemin).unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 # Empreinte d'un mot de passe aleatoire, calculee une fois au demarrage. Elle
 # ne correspond a aucun compte : elle sert uniquement a faire payer au chemin
 # « compte inexistant » le meme temps de calcul qu'au chemin normal.
@@ -2840,7 +2923,7 @@ async def screen_transaction_message(
         if set(requested_lists) == set(WATCHLIST_FILE_TYPES):
             requested_lists = None
 
-    content = await file.read()
+    content = await lire_televersement(file, "message")
     try:
         parsed = parse_iso20022_payment(content)
     except ValueError as e:
@@ -3010,13 +3093,11 @@ def ingest_snapshot(
                                  label=f"Import {file_type} — {file.filename}",
                                  started_by=current_user.get("username") or "?")
         hasher = hashlib.sha256()
-        bytes_received = 0
         with open(temp_file_path, "wb") as buffer:
-            while chunk := file.file.read(1024 * 1024):
-                buffer.write(chunk)
-                hasher.update(chunk)
-                bytes_received += len(chunk)
-                progress_registry.update(progress_id, phase="UPLOAD", processed=bytes_received)
+            bytes_received = copier_televersement(
+                file, buffer, "liste", hasher=hasher,
+                progres=lambda recu: progress_registry.update(
+                    progress_id, phase="UPLOAD", processed=recu))
         fhash = hasher.hexdigest()
             
         # Clean up any existing failed snapshots with the same hash
@@ -4921,8 +5002,7 @@ async def create_batch_campaign(
     safe_upload_name = safe_upload_filename(file.filename, "clients.csv")
     temp_path = PROJECT_ROOT / "temp_ingestion" / f"batch_{uuid.uuid4().hex[:8]}_{safe_upload_name}"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(temp_path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
+    copier_televersement_vers(temp_path, file, "clients")
     try:
         profiles = _parse_batch_csv(temp_path)
     finally:
@@ -9474,8 +9554,7 @@ async def set_review_exclusions(
         target_dir = EXCLUSION_EVIDENCE_DIR / snap.snapshot_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-        with open(target_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        copier_televersement_vers(target_path, file, "piece")
         evidence_name = safe_name
         evidence_path = str(target_path)
 
@@ -11734,8 +11813,7 @@ async def add_alert_attachment(
     safe_name = re.sub(r"[^\w.\-]", "_", file.filename or "piece_jointe")
     ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     target_path = ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
-    with open(target_path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
+    copier_televersement_vers(target_path, file, "piece")
     attachment = AlertAttachment(
         alert_id=alert_id, file_name=safe_name, file_path=str(target_path),
         comment=(comment or "").strip() or None, uploaded_by=current_user["username"],
@@ -11974,8 +12052,7 @@ async def create_whitelist_pair(
         safe_name = os.path.basename(file.filename).replace("..", "_")
         WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
         target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-        with open(target_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        copier_televersement_vers(target_path, file, "piece")
         evidence_name = safe_name
         evidence_path = str(target_path)
 
