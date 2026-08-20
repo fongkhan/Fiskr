@@ -26,13 +26,27 @@ préfixé `TXN:` ; elles sont rétro-classées automatiquement).
 La **blocking key** sélectionne les candidats à scorer (réduit la combinatoire).
 Elle est composée de composantes ordonnées :
 
+**Trois composantes de base** :
+
 | Composante | Rôle |
 |---|---|
 | `COUNTRY_ISO` | pays rattachés (nationalité, résidence, naissance, juridiction) |
 | `ENTITY_TYPE` | type PP (personne physique) / PM (personne morale) |
 | `PHONETIC_FIRST` | code phonétique (Double Metaphone) du nom |
 
-Accès : **onglet Alertes → 🔑 Blocking Keys** (rôle `blocking` ou `admin`).
+**Dix composantes de champ**, ajoutables à la clé : `DOB_YEAR` (année de
+naissance), `GENDER`, `PLACE_OF_BIRTH`, `CITY`, `TAX_ID`, `LEI`, `BIC`,
+`IBAN`, `IMO`, `NATIONAL_REGISTRY`. Une fiche listée qui ne renseigne pas le
+champ porte un **joker** sur cette composante, et l'interrogation teste toutes
+les combinaisons de jokers : ajouter « Année de naissance » ne fait donc pas
+perdre les fiches sans date — c'est-à-dire l'essentiel des listes officielles.
+
+Le nombre de composantes de champ est **plafonné** (`MAX_BLOCKING_FIELDS`,
+3 aujourd'hui) : chaque champ ajouté double le nombre de variantes jokerisées
+à interroger.
+
+Accès : **Criblage → Moteur** (rôle `blocking` ou `admin`), avec simulation
+d'impact avant application.
 
 - **Criblage** (défaut `COUNTRY_ISO, ENTITY_TYPE, PHONETIC_FIRST`) : toute
   modification **recharge immédiatement le cache de production** — l'index en
@@ -63,13 +77,26 @@ def rule(ctx):
     return ctx["final_score"] < 80 and not ctx["hard_match"]
 ```
 
-Le dictionnaire `ctx` contient : `channel`, `client_id`, `client_name`,
-`entity_id`, `entity_name`, `list_type`, `final_score`, `base_score`,
-`hard_match`, `adjustments` (dob/genre/géographie), `client` (profil complet,
-criblage), `entity` (fiche listée complète), et en filtrage `party`
-(name/roles/country/bic/is_agent) + `message` (type/msg_id). Modules
-disponibles dans la règle : `re`, `math`, `datetime`, `date`, `timedelta`,
-`unicodedata`.
+Le dictionnaire `ctx` contient :
+
+| Clé | Contenu |
+|---|---|
+| `channel` | `SCREENING` ou `FILTERING` |
+| `client_id`, `client_name`, `entity_id`, `entity_name`, `list_type` | identité des deux côtés du rapprochement |
+| `final_score`, `base_score`, `hard_match`, `adjustments` | le score et sa décomposition (dob / genre / géographie) |
+| `client`, `entity` | le profil criblé et la fiche listée, complets |
+| `party`, `message` | en filtrage : la partie du paiement et l'en-tête du message |
+| **`perimeter`** | `SANCTION` ou `HORS_SANCTION` (cf. § 3.7) |
+| **`hits_count`** | nombre de correspondances au-dessus du seuil produites par **ce** criblage |
+| **`hit_rank`** | rang de celle-ci par score décroissant (1 = la meilleure) |
+| **`corroboration`** | `has_dob`, `has_country`, `has_identity_document`, `name_only`, `corroborated`, plus les trois scores d'ajustement |
+
+Les quatre dernières existent parce qu'un criblage rend **toutes** ses
+correspondances au-dessus du seuil : une règle doit pouvoir raisonner sur le
+lot, et distinguer « une correspondance isolée » de « 2 976 homonymes ».
+
+Modules disponibles dans la règle : `re`, `math`, `datetime`, `date`,
+`timedelta`, `unicodedata`.
 
 ### Pourquoi du Python et pas un DSL
 
@@ -137,6 +164,28 @@ Elles ne disparaissent **jamais** (exigence ACPR/FED) :
 Pour maîtriser les volumes, une alerte déjà `CLOSED_BY_RULE` pour la même paire
 client × listé est re-détectée (événement) plutôt que recréée à chaque
 re-criblage.
+
+### 3.7 Portée par périmètre
+
+Une règle **déclare le périmètre où elle s'applique** (`FpRule.perimeters` :
+`SANCTION`, `HORS_SANCTION`, ou les deux). `NULL` = tous les périmètres : les
+règles écrites avant cette colonne se comportent exactement comme avant.
+
+C'est le **moteur** qui filtre, pas le code de la règle. Une règle limitée au
+hors-sanction ne peut pas clôturer une correspondance de gel d'avoirs, même si
+son code oublie de tester `ctx["perimeter"]`. Deux conséquences voulues :
+
+* un contrôleur lit la portée **sur** la règle, sans avoir à en relire le code ;
+* une déclaration illisible ne s'applique **nulle part** plutôt que partout —
+  élargir la portée en silence serait le pire des deux comportements.
+
+**Modèles prêts à installer** (`GET /api/fprules/templates`) : quatre règles
+bâties sur `perimeter`, `hits_count`, `hit_rank` et `corroboration`. Les trois
+volumétriques déclarent `HORS_SANCTION` ; la quatrième, de portée `SANCTION`,
+est volontairement **inerte** — elle ne clôture rien, et sert de point de
+départ à une règle visant une famille de faux positifs identifiée, jamais un
+tri par le nombre. Chacune porte un champ `loss` qui dit ce qu'elle coûte, et
+**aucune n'est active par défaut** : ce sont des arbitrages de conformité.
 
 ### Points d'application en production
 

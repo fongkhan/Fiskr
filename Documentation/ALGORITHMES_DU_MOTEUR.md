@@ -18,12 +18,27 @@ sont dérivés. Ajouter un mécanisme pilotable = ajouter une entrée.
 Trente-quatre capacités, réparties en cinq familles, réglables **par canal**
 (criblage clients / filtrage transactionnel) et **à chaud**.
 
-### Volontairement non pilotable : les poids des métriques
-`scoring.weights.*` reste dans `config.yaml`. Les poids **ne sont pas
-normalisés** : `compute_base_score` en fait une somme simple. Mettre un poids
-à zéro ne neutralise donc pas la métrique — cela **change l'échelle du score**
-et invalide tous les seuils de coupure. Les offrir en interrupteurs serait un
-piège.
+### Les poids des métriques : réglables, mais pas des interrupteurs
+`scoring.weights.*` se règle **à chaud** (Paramètres → Criblage), avec une
+simulation d'impact avant application (`POST /api/settings/scoring/simulate`).
+
+Ce qu'il faut savoir avant d'y toucher : les poids **ne sont pas normalisés**
+— `compute_base_score` en fait une somme simple. Mettre un poids à zéro ne
+neutralise donc pas la métrique, cela **change l'échelle du score** et invalide
+tous les seuils de coupure calibrés. Ce n'est pas un interrupteur, c'est un
+recalibrage : il se mesure au cahier de tests avant d'être appliqué.
+
+| Métrique | Poids par défaut | Ce qu'elle apporte |
+|---|---:|---|
+| `jaro_winkler` | 0,4 | Proximité de chaînes, sensible au préfixe commun |
+| `damerau_levenshtein` | 0,4 | Distance d'édition, transpositions comprises |
+| `token_sort` | 0,2 | Corrige l'**ordre** des tokens (« Ivanov Ivan » ↔ « Ivan Ivanov ») |
+| `token_set` | **0** | Corrige l'**inclusion** : un nom entièrement contenu dans l'autre marque 100 (« Vladimir Putin » ↔ « Vladimir Vladimirovitch Poutine ») |
+
+`token_set` est livrée à **poids nul** délibérément : l'activer déplacerait
+tous les scores d'un coup, donc les seuils, les règles anti-faux positifs et
+les cahiers de tests déjà homologués. L'exploitant l'active quand il veut,
+mesure l'écart au cahier de tests, puis décide.
 
 ### Déjà piloté ailleurs : les équivalences linguistiques
 `resources.enabled_fields` a son propre écran et sa propre mesure d'impact.

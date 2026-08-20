@@ -542,7 +542,14 @@ def batch_inbox_settings(db=None) -> Dict[str, Any]:
     }
 
 
-DEFAULT_SCORING_WEIGHTS = {"jaro_winkler": 0.4, "damerau_levenshtein": 0.4, "token_sort": 0.2}
+# `token_set` est livree a poids NUL : l'activer deplacerait tous les scores
+# d'un coup, donc les seuils calibres, les regles anti-faux positifs et les
+# cahiers de tests deja homologues. Elle doit malgre tout figurer ici — sans
+# quoi `scoring_weights` la laisse tomber en reconstruisant le dictionnaire sur
+# ces seules cles, et le reglage a chaud reste sans effet : la metrique etait
+# alors injoignable, quelle que soit la valeur posee.
+DEFAULT_SCORING_WEIGHTS = {"jaro_winkler": 0.4, "damerau_levenshtein": 0.4,
+                           "token_sort": 0.2, "token_set": 0.0}
 DEFAULT_CONTEXT_RULES = {
     "dob_tolerance_window": 2, "dob_exact_bonus": 15, "dob_tolerance_bonus": 5,
     "dob_out_of_window_malus": -15, "gender_conflict_malus": -20,

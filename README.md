@@ -4,11 +4,36 @@
 [![Licence: Sustainable Use](https://img.shields.io/badge/licence-Sustainable%20Use%20(fair--code)-blue)](LICENSE.md)
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsoriser-ff69b4)](https://github.com/sponsors/fongkhan)
 
-Fiskr est un moteur de criblage (Screening Engine) de nouvelle génération destiné aux institutions financières. Il permet de confronter le référentiel tiers (clients, mandataires, bénéficiaires effectifs) aux listes de sanctions et de Personnes Politiquement Exposées (PEP) fournies par les éditeurs officiels (OFAC, UE, ONU, Dow Jones, World-Check) conformément aux exigences réglementaires ACPR/AMF.
+Fiskr est un moteur de criblage (*screening engine*) destiné aux institutions financières. Il confronte le référentiel tiers (clients, mandataires, bénéficiaires effectifs) aux listes de sanctions et de Personnes Politiquement Exposées (PEP), conformément aux exigences ACPR/AMF, et conserve la preuve de chaque décision.
 
-Le projet propose une API temps réel asynchrone, un script de traitement de masse (Batch) sous Apache Spark, un comparateur de snapshots historiques (Delta Engine), et un tableau de bord interactif pour les agents de conformité.
+**Plus de quarante sources officielles** sont branchées et synchronisées automatiquement : OFAC, liste consolidée UE, ONU, DGT, OFSI, SECO, listes nationales antiterroristes, exclusions de bailleurs multilatéraux, PEP. Les sources payantes (Dow Jones, World-Check, LexisNexis, Moody's GRID…) ne sont pas incluses : ce qu'elles apportent et comment les brancher est décrit dans [SOURCES_PREMIUM](Documentation/SOURCES_PREMIUM.md).
+
+Le produit couvre : la **production opposable du référentiel** (synchronisation, delta, cahier de tests, homologation à quatre yeux), le **criblage** de la base clients (temps réel, batch, re-criblage automatique après chaque mise en production), le **filtrage transactionnel** ISO 20022, le **traitement des alertes** à quatre yeux avec piste d'audit immuable, et le **pilotage** réglementaire.
+
+> **Par où commencer.** L'application embarque un **guide en 7 chapitres** (onglet *Guide*) : c'est le point d'entrée pour s'en servir. Ce README couvre l'installation, la configuration et l'exploitation. La [documentation de référence](Documentation/README.md) explique pourquoi le moteur décide comme il décide.
 
 ---
+
+## Sommaire
+
+| Section | Contenu |
+|---|---|
+| [Architecture et modules](#architecture) | Cartographie du code, module par module |
+| [Ingestion & connecteurs](#ingestion) | Formats d'entrée, détection de noms, moteur SSIE |
+| [Synchronisation des sources](#sources) | Les sources officielles branchées et leur planification |
+| [Mode homologation](#homologation) | Validation d'une liste avant production |
+| [Alertes & surveillance](#alertes) | Cycle de vie, quatre yeux, intégration SI amont |
+| [Notifications](#notifications) | Événements notifiables et configuration SMTP |
+| [Les 26 champs réglementaires](#champs) | Schéma pivot et champs étendus |
+| [Sécurité & `.env`](#securite) | Variables d'environnement et secrets |
+| [Architecture d'exécution](#execution) | Processus API, démon travailleur, supervision, déploiement |
+| [Installation & lancement](#installation) | Prérequis, déploiement local, suite de tests |
+| [Licence](#licence) | Sustainable Use (fair-code) |
+| [Documentation](#documentation) | Index des documents de référence |
+
+---
+
+<a id="architecture"></a>
 
 ## 🛠️ Architecture et Modules
 
@@ -63,6 +88,8 @@ Le système est structuré autour des modules définis dans le Document d'Archit
 
 ---
 
+<a id="ingestion"></a>
+
 ## 🏃 Ingestion & Connecteurs d'Entrée (`fiskr/ingest.py`, `fiskr/ssie.py`)
 
 L'outil intègre quatre familles de connecteurs génériques pour charger les listes sources :
@@ -106,6 +133,8 @@ ssie:
 Ainsi, un changement de nomenclature de l'émetteur (ex: `<DistinctParty>` devenant `<EntitiesList>`) se gère par simple reconfiguration des sélecteurs, sans modification de code. Les snapshots SSIE bénéficient des mêmes services que les autres listes : Data Quality Gate, checksums d'entités, Delta Engine et criblage temps réel.
 
 ---
+
+<a id="sources"></a>
 
 ## 🛰️ Synchronisation Automatique des Sources (`fiskr/sync.py`)
 
@@ -200,6 +229,8 @@ Les endpoints associés : `POST /api/sync/run` (déclenchement manuel, réservé
 
 ---
 
+<a id="homologation"></a>
+
 ## ✅ Mode Homologation — Environnement de Validation avant Production
 
 Certaines banques exigent un **pointage humain** avant qu'une nouvelle liste ne serve au criblage. Le **mode homologation** répond à ce besoin : lorsqu'il est actif, **tout snapshot watchlist entrant** — upload manuel ou synchronisation (manuelle comme planifiée) de n'importe quelle source : OFAC (SDN et Non-SDN), EUR-Lex, DGT, ONU, UE FSF, PEP, OFSI, SECO, US CSL, Canada, Australie, HK SFC, AMF, Banque mondiale — prend le statut `PENDING_REVIEW` au lieu d'entrer directement en production. Il est alors **invisible du moteur de criblage** — la liste `READY` précédente reste active — jusqu'à la décision d'un réviseur.
@@ -224,6 +255,8 @@ L'homologation est présentée comme un **parcours en 4 étapes numérotées** (
 4. **Décision** : approbation/rejet avec rappel du verdict. Si un écart élevé révèle des homonymes (« **Good Guys** »), la sélection multiple des nouvelles alertes alimente `POST /api/whitelist/bulk` (justification commune) avant de relancer le test. Deux réglages à chaud : `review.backtest_max_gap_pct` (seuil d'écart) et `review.backtest_required` (blocage dur : aucun passage en production sans cahier de tests au verdict `OK`).
 
 ---
+
+<a id="alertes"></a>
 
 ## 🚨 Traitement des Alertes & Surveillance Continue
 
@@ -319,6 +352,8 @@ curl -X POST https://fiskr.example/api/hooks/client-upsert \
 
 ---
 
+<a id="notifications"></a>
+
 ## 📬 Notifications par étape (email)
 
 Fiskr envoie un mail à **chaque étape** de la production des listes, du criblage et du filtrage — **31 étapes notifiables** déclarées dans un catalogue unique (`fiskr/events.py`) dont dérivent les réglages, les libellés des mails et l'écran d'administration : ajouter une étape se fait à un seul endroit.
@@ -354,6 +389,8 @@ FISKR_PUBLIC_URL=https://fiskr.banque.fr  # active le bouton « Ouvrir dans Fisk
 > Garantie de conception : **une notification ne bloque jamais et ne fait jamais échouer une opération métier**. Un envoi en erreur est journalisé (`FAILED`) et l'import, l'approbation ou la décision d'alerte se termine normalement.
 
 ---
+
+<a id="champs"></a>
 
 ## 📋 Référentiel des 26 Champs Réglementaires de Criblage
 
@@ -403,9 +440,11 @@ Tous ces champs sont **cherchables** (recherche par champ de l'onglet Watchlist 
 
 Côté **clients**, 14 colonnes KYC miroirs sont acceptées à l'ingestion `CLIENT_BASE` : `client_iban`, `client_bic`, `client_tax_id`, `client_phone`, `client_email`, `client_website`, `client_crypto_wallets` (`;`), `client_risk_rating`, `client_pep_flag`, `client_segment`, `client_activity_sector`, `client_activity_countries` (`,`), `client_relationship_start`, `client_status`. Les miroirs de matching (`client_bic`, `client_tax_id`, `client_crypto_wallets`, `transaction_vessel_mmsi`, `transaction_vessel_call_sign`) sont aussi acceptés par `POST /api/screen`, et le **filtrage ISO 20022** croise désormais le BIC des agents bancaires (`DbtrAgt`/`CdtrAgt`) avec le `bic_swift` des institutions sanctionnées.
 
+<a id="securite"></a>
+
 ### Configuration de Sécurité & Fichier `.env`
 
-Les secrets de l'application et la chaîne de connexion à la base de données ne sont plus stockés en clair dans `config.yaml`. Ils sont configurables via les variables d'environnement ou le fichier `.env` à la racine du projet (un modèle est fourni dans [`.env.example`](file:///e:/Program%20Files/git/Fiskr/.env.example)) :
+Les secrets de l'application et la chaîne de connexion à la base de données ne sont plus stockés en clair dans `config.yaml`. Ils sont configurables via les variables d'environnement ou le fichier `.env` à la racine du projet (un modèle est fourni dans [`.env.example`](.env.example)) :
 
 ```env
 # Connexion PostgreSQL / Base de données
@@ -422,6 +461,8 @@ ADMIN_PASSWORD=adminpassword
 ```
 
 ---
+
+<a id="execution"></a>
 
 ## ⚙️ Architecture d'exécution : processus API + démon travailleur
 
@@ -583,6 +624,8 @@ Clés d'API) passée en `X-API-Key` — lecture seule par construction (toute
 curl -sS -H "X-API-Key: fsk_..." https://votre-instance/api/diagnostic/jobs | python -m json.tool
 ```
 
+<a id="installation"></a>
+
 ## 🚀 Installation & Lancement
 
 ### Prérequis
@@ -641,6 +684,8 @@ python -m pytest
 
 ---
 
+<a id="licence"></a>
+
 ## 📜 Licence & Offre Commerciale
 
 Fiskr est distribué sous la **[Sustainable Use License](LICENSE.md)** (modèle **[fair-code](https://faircode.io)**), copyright © 2026 **Alexis Vuadelle** :
@@ -653,14 +698,24 @@ Fiskr est distribué sous la **[Sustainable Use License](LICENSE.md)** (modèle 
 
 ---
 
-## 📚 Documentation Complémentaire
+<a id="documentation"></a>
 
-* **[Document d'Architecture Technique](Documentation/Document%20Architecture%20Technique.md)** — conception détaillée des modules.
-* **[Production des Listes — Parcours Guidé](Documentation/PRODUCTION_DES_LISTES.md)** — processus métier de mise en production d'une liste : import, delta détaillé, cahier de tests sur pseudo-clients (taux d'interception), Good Guys en masse, promotion, réglages de gouvernance et bonnes pratiques.
-* **[Criblage, Filtrage, Blocking Keys & Règles Anti-Faux Positifs](Documentation/REGLES_ET_BLOCKING.md)** — séparation des deux canaux d'alertes, paramétrage des blocking keys par canal, et moteur de règles Python avec mode DEV (contrat `rule(ctx)`, cycle branche/tests/4-yeux/production, banc d'essai, gouvernance des droits).
-* **[Algorithmes du Moteur — Inventaire Opposable](Documentation/ALGORITHMES_DU_MOTEUR.md)** — les trente-quatre mécanismes de rapprochement du moteur, ce que chacun apporte et ce que sa désactivation coûte : écritures et normalisation (dont dix bascules **par écriture** — cyrillique, han, arabe, hangul, kana, hébreu, grec, thaï, devanagari, autres), sélection des candidats, variantes de noms, ajustements contextuels, rapprochement sur identifiants. Réglable **par canal** et à chaud, **tracé** dans le `decision_tree` et au journal d'administration, et **chiffrable avant décision**. Y figurent aussi ce qui n'est volontairement pas pilotable (les poids, non normalisés), la limite mesurée du blocking sur les écritures syllabiques et l'arabe, et le périmètre du chemin batch Spark.
-* **[Ressources Linguistiques — Fichiers d'Équivalences](Documentation/RESSOURCES_LINGUISTIQUES.md)** — format des tables d'équivalences (homonymes, translittérations concurrentes, équivalents entre langues, exonymes de villes et de pays), application au blocking et au scoring, détection des collisions, activation par type de champ et **mesure d'impact avant activation** ; puis la **fouille quotidienne d'homonymes** : sources probantes (alias déclarés par les listes officielles, alertes confirmées par un analyste), garde-fou d'alignement à une seule divergence, score de confiance, auto-application gouvernée et révocable.
-* **[Injecter des clients par l'API](Documentation/INJECTION_CLIENTS.md)** — les trois voies d'alimentation du référentiel clients : import de masse `POST /api/ingest` (format CSV colonne par colonne, fichiers d'exemple, règles de rejet, idempotence par empreinte, suivi de progression), fiche unitaire temps réel `POST /api/hooks/client-upsert` (idempotence, signature HMAC) et criblage sans persistance `POST /api/screen`.
-* **[Traitement des Alertes & Surveillance Continue](Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md)** — guide fonctionnel du flux post-criblage : cycle de vie des alertes et 4-yeux, liste blanche, re-criblage automatique et lookback, narratifs, adverse media, filtrage transactionnel ISO 20022, KPI et récapitulatif des réglages à chaud.
-* **[Sources de Données Payantes](Documentation/SOURCES_PREMIUM.md)** — ce que Factiva (Dow Jones), World-Check (LSEG), LexisNexis, Moody's GRID, ComplyAdvantage et la licence commerciale OpenSanctions apportent au-delà des 26 listes publiques, ce qu'il faut acheter et à qui s'adresser, et l'état du câblage côté Fiskr (en-têtes d'authentification par source déjà livrés : `sync.<source>.auth_headers` + secrets `${VAR}` dans `.env`).
-* **[Benchmark Concurrentiel & Feuille de Route](Documentation/BENCHMARK_CONCURRENTS.md)** — analyse du marché du criblage sanctions/PEP (World-Check, ComplyAdvantage, yente, Watchman...), cadre réglementaire (Wolfsberg, ACPR/DGT) et feuille de route d'amélioration priorisée — **intégralement livrée (P0 → P3)**.
+## 📚 Documentation
+
+Le point d'entrée pour **se servir** de Fiskr est le guide en 7 chapitres embarqué dans l'application (onglet *Guide*). Les documents ci-dessous expliquent **pourquoi** le moteur décide comme il décide, et fournissent la matière opposable à un contrôleur.
+
+**➜ [Index complet de la documentation](Documentation/README.md)** — classé par question, avec la nature de chaque document (référence, parcours, relevé daté, étude tranchée).
+
+Les plus consultés :
+
+| Document | Pour répondre à |
+|---|---|
+| [Algorithmes du moteur](Documentation/ALGORITHMES_DU_MOTEUR.md) | « Comment ce score est-il né ? » — inventaire opposable de chaque mécanisme de rapprochement, ce que chacun apporte et ce que sa désactivation coûte. |
+| [Production des listes](Documentation/PRODUCTION_DES_LISTES.md) | « Comment une liste arrive-t-elle en production ? » — delta, exclusions, cahier de tests, homologation à quatre yeux. |
+| [Règles & blocking](Documentation/REGLES_ET_BLOCKING.md) | « Comment limiter les faux positifs sans rien perdre ? » — clés de blocage par canal, règles Python et leur gouvernance. |
+| [Alertes & surveillance continue](Documentation/ALERTES_ET_SURVEILLANCE_CONTINUE.md) | « Que devient une alerte ? » — cycle de vie, quatre yeux, re-criblage, preuve à trois niveaux. |
+| [Injecter des clients par l'API](Documentation/INJECTION_CLIENTS.md) | « Comment alimenter le référentiel clients ? » — import de masse, webhook unitaire, criblage sans persistance. |
+| [Performance de la base](Documentation/PERFORMANCE_BASE.md) | « Pourquoi cet écran est-il lent ? » — diagnostic mené sur la production, mesuré et corrigé. |
+| [Architecture technique](Documentation/ARCHITECTURE_TECHNIQUE.md) | « Comment c'est fait ? » — composants, schéma de données, flux, déploiement. |
+
+L'[historique daté](CHANGELOG.md) de tous les changements, avec les mesures qui les ont motivés, vit dans le CHANGELOG.

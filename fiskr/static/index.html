@@ -2126,11 +2126,31 @@
  <li><strong>Ressources linguistiques</strong> — équivalences de prénoms (Bill ↔ William), variantes de translittération, homonymies apprises : enrichissent le rapprochement. Tables livrées + équivalences minées quotidiennement puis revues humainement.</li>
  <li><strong>Score pondéré</strong> — identité, dates de naissance, pays, identifiants ; chaque composant est tracé dans l'<strong>arbre de décision</strong>.</li>
  <li><strong>Correspondances fortes</strong> — identifiants pivots (BIC, identifiant fiscal, DUNS, MMSI, adresses crypto…) : match direct quel que soit le score de nom.</li>
- <li><strong>Seuil</strong> — cut-off global réglable à chaud, surchargeable <strong>par liste</strong> (une liste d'alertes régulateur peut exiger plus qu'une liste de gel).</li>
+ <li><strong>Seuil</strong> — cut-off global réglable à chaud, surchargeable <strong>par périmètre</strong> puis <strong>par liste</strong> (du plus général au plus précis : le réglage posé sur une liste l'emporte).</li>
  <li><strong>Liste blanche</strong> — une paire client × listé validée comme homonyme ne rouvre pas d'alerte.</li>
  <li><strong>Règles anti-faux positifs</strong> — règles métier (éditeur assisté, test sur alerte réelle, mesure d'impact) qui closent automatiquement les cas connus : l'alerte est créée puis close « par règle », jamais silencieuse.</li>
- <li><strong>Alerte</strong> — tout ce qui franchit ces étapes ouvre une alerte SCREENING.</li>
+ <li><strong>Alerte</strong> — <strong>chaque</strong> correspondance qui franchit ces étapes ouvre une alerte SCREENING, avec sa propre ligne d'audit. Un criblage n'en produit donc pas forcément une seule : un homonyme d'un nom très courant sans date de naissance ni pays peut en produire des milliers, et elles existent toutes.</li>
  </ol>
+
+ <h3>Deux périmètres, deux traitements</h3>
+ <p class="guide-p">Toutes les listes ne portent pas le même risque, et Fiskr ne les traite donc pas de la même façon. Le périmètre d'une liste est visible dans <strong>Paramètres → Criblage</strong> et se surcharge si votre analyse diffère.</p>
+ <table class="guide-table">
+ <thead><tr><th>Périmètre</th><th>Ce qu'il couvre</th><th>Ce que fait le moteur</th></tr></thead>
+ <tbody>
+ <tr>
+ <td><strong>Sanctions</strong></td>
+ <td>Désignations avec <strong>obligation de gel</strong> : OFAC, UE, ONU, DGT, OFSI, listes nationales antiterroristes…</td>
+ <td>Tout est généré, <strong>rien n'est clôturé par volumétrie</strong>. Manquer une correspondance ici, c'est manquer un sanctionné : le manquement est constatable lors d'un contrôle et sanctionnable financièrement.</td>
+ </tr>
+ <tr>
+ <td><strong>Hors sanctions</strong></td>
+ <td>PEP, listes d'alerte de régulateurs, exclusions de bailleurs multilatéraux.</td>
+ <td>Signaux de vigilance, pas obligations de gel : ce périmètre accepte un <strong>seuil plus haut</strong> et des <strong>règles volumétriques</strong>.</td>
+ </tr>
+ </tbody>
+ </table>
+ <p class="guide-p">Une liste dont le périmètre n'est pas connu est traitée comme une <strong>sanction</strong> — le côté qui ne clôture rien. Le défaut penche vers ce qui ne fait rien perdre.</p>
+ <p class="guide-p">Une règle anti-faux positifs <strong>déclare le périmètre où elle s'applique</strong>, et c'est le moteur qui le fait respecter : une règle « hors sanctions » ne peut pas clôturer une correspondance de gel d'avoirs, même si son code l'oublie. Un contrôleur lit cette portée sur la règle, sans avoir à en relire le code.</p>
 
  <h3>Les trois modes de criblage</h3>
  <ul class="guide-list">
@@ -2183,8 +2203,17 @@
  </p>
  <ul class="guide-list">
  <li><span class="g-pill g-pill-warn">Escaladée</span> : à tout moment, l'alerte peut monter au responsable conformité avec motif.</li>
- <li><span class="g-pill">Close par règle</span> : clôture automatique par une règle anti-FP — visible et motivée, jamais supprimée.</li>
+ <li><span class="g-pill">Close par règle</span> : clôture automatique par une règle anti-FP. L'alerte est bien <strong>créée</strong>, puis close avec le nom et la version de la règle en clair — jamais supprimée, jamais silencieuse : c'est ce qu'un contrôleur doit pouvoir relire.</li>
  <li>La <strong>déduplication</strong> évite d'ouvrir deux alertes pour le même couple client × listé encore ouvert.</li>
+ </ul>
+
+ <h3>Quand un criblage en produit beaucoup</h3>
+ <p class="guide-p">Un criblage ouvre une alerte <strong>par correspondance</strong> au-dessus du seuil, chacune avec sa propre ligne d'audit. Un nom très courant sans élément d'identification — ni date de naissance, ni pays, ni pièce d'identité — peut donc en produire des milliers d'un coup. Ce n'est pas un défaut de réglage : ce sont de véritables homonymes listés. Aucun calcul de ressemblance ne distingue deux personnes réellement nommées à l'identique ; ce qui manque n'est pas dans le score, c'est l'identification.</p>
+ <ul class="guide-list">
+ <li>Sur le périmètre <strong>hors sanctions</strong>, deux leviers : <strong>monter le seuil</strong> (la correspondance n'est alors jamais créée, il n'y a rien à clôturer) ou <strong>poser une règle volumétrique</strong> (elle est créée puis close, motivée). Des modèles prêts à installer sont proposés dans l'écran <em>Règles FP</em>, chacun accompagné de ce qu'il fait perdre.</li>
+ <li>Sur le périmètre <strong>sanctions</strong>, aucun des deux ne s'applique : les correspondances restent à traiter, une par une.</li>
+ <li>Les notifications ne suivent pas la rafale : au-delà de dix alertes ouvertes par un même criblage, une <strong>notification de volumétrie</strong> unique remplace les envois individuels.</li>
+ <li>Le résultat d'un criblage donne la <strong>répartition par périmètre</strong> — un écart entre ce qui est trouvé et ce qui reste ouvert se voit du côté où il compte.</li>
  </ul>
 
  <h3>Instruire efficacement</h3>
