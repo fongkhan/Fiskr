@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the test book stopped predicting production, and one of the two gaps was mine
+Keeping every match above the cut-off opened two gaps between what the test book announces and what production does. Both were consequences of the previous change, found by asking whether the backtest still measures the thing it claims to.
+
+**The rules were inert during the test book.** `screen_one` called `build_screening_ctx` with its defaults, so `hits_count` was always **1** there. A volumetric rule — "beyond N matches…" — therefore never fired during a test book, while it fires in production. The book announced an interception-rate gap computed with rules that were not applying. It now receives the same volumetry as production, and the best match sits at rank 1 exactly as it does there. A test asserts a volumetric rule fires on twelve homonyms and does not on three.
+
+**The announced volume was a different quantity.** The report counted `(client, listed)` pairs — one per client, the best match. That is the right measure for an *interception rate*, and the verdict rightly rests on it. It is not the number of alerts production will open: production opens one **per match**. The report now carries both, named apart, and the screen shows both:
+
+| | Answers |
+|---|---|
+| **Clients interceptés** | "What share of the panel is caught?" — the interception rate, unchanged |
+| **Alertes ouvertes** | "How much work will this list create?" — one alert per match above the cut-off |
+
+Confusing the two understates the workload by the number of homonyms — a factor of hundreds on a list like PEP. A whitelisted pair still counts its client's other matches: they exist regardless.
+
+
 ### Fixed — `token_set` was unreachable
 Found while reviewing the documentation, which is what a documentation review is for. `scoring_weights()` rebuilds the weight dictionary from the keys of `DEFAULT_SCORING_WEIGHTS` alone. `token_set` was not among them, so it was **silently dropped**: setting `token_set: 0.4` through the settings screen had no effect whatsoever, and the metric could never be enabled — whatever value was chosen. The engine did read `weights.get("token_set", 0.0)`, but the key could never reach it.
 

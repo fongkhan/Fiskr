@@ -101,8 +101,17 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
 
     best = None
     best_ent = None
+    # Nombre de correspondances au-dessus du seuil, pas seulement la meilleure.
+    # La production en ouvre UNE ALERTE CHACUNE : sans ce compte, le cahier de
+    # tests annoncerait un volume qui n'est pas celui qui sera produit — et
+    # surtout, une regle volumetrique ne se declencherait jamais ici (elle
+    # verrait toujours hits_count = 1) alors qu'elle se declenchera en
+    # production. Le cahier doit predire la production, pas une autre chose.
+    hits = 0
     for ent in candidates.values():
         score = match_entities(client, ent, config)
+        if score.get("status") == "ALERT":
+            hits += 1
         if best is None or score["final_score"] > best["final_score"]:
             best = score
             best_ent = ent
@@ -111,7 +120,7 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
         return None
 
     if (client.get("client_id"), best_ent.get("entity_id")) in whitelist_keys:
-        return ("whitelisted", None)
+        return ("whitelisted", {"hits": hits})
 
     pair = {
         "client_id": client.get("client_id"),
@@ -120,11 +129,15 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
         "entity_name": best_ent.get("primary_name"),
         "list_type": best_ent.get("_list_type"),
         "score": round(float(best.get("final_score", 0)), 2),
+        "hits": hits,
     }
 
     matched_rule = None
     if rules:
-        ctx = build_screening_ctx(client, best_ent, best)
+        # Meme contexte qu'en production : la meilleure correspondance est de
+        # rang 1, et la volumetrie du criblage voyage avec elle.
+        ctx = build_screening_ctx(client, best_ent, best,
+                                  hits_count=hits, hit_rank=1)
         for rule in rules:
             result, error = run_rule(rule.code, ctx)
             if error:
@@ -147,14 +160,20 @@ def _client_label(client: Dict[str, Any]) -> str:
 # ------------------ AGREGATION ------------------
 
 def new_partial() -> Dict[str, Any]:
+    # `pairs` compte les CLIENTS interceptes (une paire par client, la
+    # meilleure correspondance) ; `hits` compte les CORRESPONDANCES, dont la
+    # production ouvre une alerte chacune. Les deux chiffres repondent a deux
+    # questions differentes : « quelle proportion du panel est interceptee ? »
+    # et « combien d'alertes cette liste va-t-elle ouvrir ? ».
     return {"pairs": {}, "whitelisted_suppressed": 0, "alerts_before_rules": 0,
-            "rule_suppressed": 0, "rule_suppressed_pairs": []}
+            "rule_suppressed": 0, "rule_suppressed_pairs": [], "hits": 0}
 
 
 def apply_outcome(agg: Dict[str, Any], outcome) -> None:
     if outcome is None:
         return
     category, detail = outcome
+    agg["hits"] += int((detail or {}).get("hits", 0))
     if category == "whitelisted":
         agg["whitelisted_suppressed"] += 1
         return
@@ -178,6 +197,7 @@ def merge_partials(partials: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         merged["whitelisted_suppressed"] += part["whitelisted_suppressed"]
         merged["alerts_before_rules"] += part["alerts_before_rules"]
         merged["rule_suppressed"] += part["rule_suppressed"]
+        merged["hits"] += part.get("hits", 0)
         merged["rule_suppressed_pairs"].extend(part["rule_suppressed_pairs"])
     merged["rule_suppressed_pairs"] = merged["rule_suppressed_pairs"][:MAX_PAIR_DETAILS]
     merged["alerts"] = len(merged["pairs"])
