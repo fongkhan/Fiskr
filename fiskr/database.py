@@ -724,7 +724,13 @@ class BatchCampaign(Base):
     screening_lists = Column(JSON, nullable=True)    # restriction eventuelle
     total_clients = Column(Integer, default=0)
     processed_clients = Column(Integer, default=0)
+    # `alert_count` compte les CLIENTS qui declenchent au moins une
+    # correspondance ; `hits_count` compte les CORRESPONDANCES, dont le
+    # criblage ouvre une alerte chacune. Un client homonyme d'un nom courant
+    # en porte des centaines : sans le second chiffre, une campagne annonce
+    # « 12 alertes » quand elle vient d'en ouvrir trois mille.
     alert_count = Column(Integer, default=0)
+    hits_count = Column(Integer, nullable=True, default=0)
     no_match_count = Column(Integer, default=0)
     rejected_count = Column(Integer, default=0)      # lignes refusees par le quality gate
     created_by = Column(String(100), nullable=True)

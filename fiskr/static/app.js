@@ -6601,7 +6601,7 @@ async function renderBatchWidget(body) {
  ? '<ul class="home-list">' + items.map(c => `
  <li onclick="switchTab('screening'); switchSubTab('screening', 'screening-batch')">
  <span class="item-main">${escapeHtml(c.name || c.file_name || "?")} — ${escapeHtml(statusLabel(c.status))}</span>
- <span class="item-meta">${c.alert_count ?? 0} alerte(s) / ${c.total_clients ?? 0} · ${formatDateTime(c.created_at)}</span>
+ <span class="item-meta">${c.alert_count ?? 0} client(s) en alerte / ${c.total_clients ?? 0} · ${formatDateTime(c.created_at)}</span>
  </li>`).join("") + '</ul>'
  : '<div class="dash-widget-empty">Aucune campagne lancée.</div>';
  } catch (e) {
@@ -7170,7 +7170,9 @@ function renderImpactReport(containerId, report) {
  <div style="border-left: 3px solid ${color}; padding: 0.75rem 1rem; background: var(--surface-2);">
  <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center;">
  <div><strong style="font-size: 1.25rem;">${report.alerts_before} → ${report.alerts_after}</strong>
- <small style="color: var(--text-muted);">alertes</small></div>
+ <small style="color: var(--text-muted);" title="Nombre de clients du panel qui déclenchent au moins une correspondance.">clients interceptés</small></div>
+ ${report.hits_before !== undefined ? `<div><strong style="font-size: 1.25rem;">${report.hits_before} → ${report.hits_after}</strong>
+ <small style="color: var(--text-muted);" title="Une alerte est ouverte par correspondance au-dessus du seuil : c'est le volume de travail, pas le nombre de clients.">alertes ouvertes</small></div>` : ""}
  <div><strong style="font-size: 1.25rem; color: ${color};">${sign}${report.delta}</strong>
  ${report.delta_pct !== null && report.delta_pct !== undefined ? `<small style="color: var(--text-muted);">(${sign}${report.delta_pct} %)</small>` : ""}</div>
  <div><small style="color: var(--text-muted);">Interception :</small> ${report.interception_before_pct} % → ${report.interception_after_pct} %</div>
@@ -8571,7 +8573,8 @@ async function fetchBatchCampaigns() {
  <td>${c.trigger === "inbox" ? '<span class="badge-secondary"> CFT</span>' : '<span class="badge-secondary">Manuel</span>'}</td>
  <td>${campaignStatusBadge(c.status)}${c.error_message ? `<br><small style="color: var(--color-alert);">${escapeHtml(c.error_message)}</small>` : ""}</td>
  <td>${c.processed_clients} / ${c.total_clients}</td>
- <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};">${c.alert_count}</strong></td>
+ <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong></td>
+ <td title="Une alerte par correspondance au-dessus du seuil : le volume de travail, pas le nombre de clients.">${c.hits_count ?? "—"}</td>
  <td>${c.rejected_count || 0}</td>
  <td>${formatDateTime(c.created_at)}</td>
  <td>
@@ -8638,7 +8641,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Campagne #${c.id} — ${escapeHtml(c.name)} ${campaignStatusBadge(c.status)}</h3>
  <p class="section-desc" style="margin-bottom: 0.75rem;">
  ${c.processed_clients}/${c.total_clients} client(s) criblé(s) ·
- <strong style="color: var(--color-alert);">${c.alert_count} alerte(s)</strong> ·
+ <strong style="color: var(--color-alert);">${c.alert_count} client(s) en alerte</strong>${c.hits_count ? ` · <strong>${c.hits_count} alerte(s) ouverte(s)</strong>` : ""} ·
  ${c.no_match_count} sans match · ${c.rejected_count} rejet(s) quality gate
  </p>
  <div class="filter-bar" style="margin-bottom: 0.5rem;">
