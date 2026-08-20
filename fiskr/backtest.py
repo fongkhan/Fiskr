@@ -542,6 +542,7 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             "rule_suppressed": shared_part["rule_suppressed"] + delta_part["rule_suppressed"],
             "rule_suppressed_pairs": (shared_part["rule_suppressed_pairs"]
                                       + delta_part["rule_suppressed_pairs"])[:MAX_PAIR_DETAILS],
+            "hits": shared_part.get("hits", 0) + delta_part.get("hits", 0),
         }
         merged["pairs"].update(delta_part["pairs"])
         merged["alerts"] = len(merged["pairs"])
@@ -725,15 +726,29 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
                          "removed": len(delta["removed"]), "unchanged": len(delta["unchanged"])}
                         if delta is not None else None),
         "current": {
+            # CLIENTS interceptes : une paire par client, la meilleure
+            # correspondance. C'est ce que mesure le taux d'interception.
             "alerts": current["alerts"],
             "interception_rate_pct": _rate(current["alerts"]),
+            # CORRESPONDANCES au-dessus du seuil : la production en ouvre une
+            # alerte chacune. Un client homonyme d'un nom courant en porte des
+            # centaines — c'est le volume de travail que cette liste va creer,
+            # et il n'a rien a voir avec le nombre de clients intercepte.
+            "hits": current.get("hits", 0),
             "whitelisted_suppressed": current["whitelisted_suppressed"],
             "alerts_before_rules": current["alerts_before_rules"],
             "rule_suppressed": current["rule_suppressed"],
         },
         "candidate": {
+            # CLIENTS interceptes : une paire par client, la meilleure
+            # correspondance. C'est ce que mesure le taux d'interception.
             "alerts": candidate["alerts"],
             "interception_rate_pct": _rate(candidate["alerts"]),
+            # CORRESPONDANCES au-dessus du seuil : la production en ouvre une
+            # alerte chacune. Un client homonyme d'un nom courant en porte des
+            # centaines — c'est le volume de travail que cette liste va creer,
+            # et il n'a rien a voir avec le nombre de clients intercepte.
+            "hits": candidate.get("hits", 0),
             "whitelisted_suppressed": candidate["whitelisted_suppressed"],
             "alerts_before_rules": candidate["alerts_before_rules"],
             "rule_suppressed": candidate["rule_suppressed"],

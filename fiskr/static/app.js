@@ -4962,8 +4962,8 @@ async function openReviewHistoryDetail(recordId) {
   const approuve = d.decision === "APPROVED";
   const report = d.backtest_report;
 
-  const ligne = (label, valeur) => `
-   <tr><td style="color:var(--text-muted); white-space:nowrap;">${escapeHtml(label)}</td>
+  const ligne = (label, valeur, aide) => `
+   <tr><td style="color:var(--text-muted); white-space:nowrap;"${aide ? ` title="${escapeHtml(aide)}"` : ""}>${escapeHtml(label)}</td>
    <td>${valeur}</td></tr>`;
 
   const details = (d.delta_details && d.delta_details.details) || d.delta_details || {};
@@ -4983,8 +4983,12 @@ async function openReviewHistoryDetail(recordId) {
    <table style="width:100%; margin-bottom:0.8rem;"><tbody>
     ${ligne("Verdict", `<span class="status-badge ${report.verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(report.verdict || "-")}</span>`)}
     ${ligne("Écart", `${report.gap_pct} % (seuil ${report.threshold_pct} %)`)}
-    ${ligne("Alertes production", (report.current || {}).alerts)}
-    ${ligne("Alertes candidate", (report.candidate || {}).alerts)}
+    ${ligne("Clients interceptés — production", (report.current || {}).alerts)}
+    ${ligne("Clients interceptés — candidate", (report.candidate || {}).alerts)}
+    ${ligne("Alertes ouvertes — production", (report.current || {}).hits,
+            "Une alerte par correspondance au-dessus du seuil. Un client homonyme d'un nom courant en porte plusieurs : c'est le volume de travail, pas le nombre de clients.")}
+    ${ligne("Alertes ouvertes — candidate", (report.candidate || {}).hits,
+            "Une alerte par correspondance au-dessus du seuil.")}
     ${ligne("Panel", `${escapeHtml(report.panel_snapshot_id || "-")} — ${report.panel_size} client(s)`)}
     ${ligne("Mode", escapeHtml(report.mode || "-"))}
     ${report.snapshots && report.snapshots.length > 1
