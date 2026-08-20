@@ -6,6 +6,7 @@ import json
 import re
 import asyncio
 import hashlib
+import heapq
 import logging
 import shutil
 import threading
@@ -38,7 +39,8 @@ from fiskr.ingest import (
 )
 from fiskr.ssie import parse_ssie_xml, merge_ssie_selectors, DEFAULT_SOURCE_FORMAT
 from fiskr.database import (
-    get_db, init_db, log_compliance_decision, AuditTrail, Snapshot,
+    get_db, init_db, log_compliance_decision, log_compliance_decisions,
+    AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     safe_upload_filename,
     SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
@@ -48,7 +50,8 @@ from fiskr.database import (
     BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
     NotificationDelivery, LearnedEquivalence
 )
-from fiskr.alerts import open_or_redetect_alert, is_whitelisted, compute_due_at
+from fiskr.alerts import (open_or_redetect_alert, open_or_redetect_alerts,
+                          is_whitelisted, whitelisted_pairs, compute_due_at)
 from fiskr.notify import (
     notify_event,
     smtp_configured as notify_smtp_configured,
@@ -60,7 +63,7 @@ from fiskr.notify import (
 from fiskr.notifier import emit, flush_digest, purge_deliveries
 from fiskr.fprules import (
     evaluate_fp_rules, build_screening_ctx, annotate_suppression, compile_rule,
-    run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE, validate_rule_code,
+    run_rule, FP_RULE_CHANNELS, RULE_TEMPLATE, rule_templates, validate_rule_code,
     generate_rule_code, get_fprules_llm_config,
     RuleGenerationUnavailable, RuleGenerationFailed
 )
@@ -2459,6 +2462,12 @@ def _screen_preview(db, name: str, entity_type: str, dob: Optional[str],
     }
 
 
+# Nombre de rapprochements RENDUS par un criblage. Le verdict, le journal
+# d'audit et l'alerte portent sur `best_match`, calcule sur TOUS les candidats :
+# ce plafond ne borne que la liste de detail de la reponse.
+SCREEN_MAX_MATCHES = 50
+
+
 def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: str,
                           requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
     """
@@ -2509,73 +2518,158 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
 
     # Scoring — seuils de cut-off a chaud (reglage > config.yaml)
     scoring_config = scoring_config_with_thresholds(db)
-    matches = []
+    # Les rapprochements sont retenus par un TAS BORNE des meilleurs, pas par
+    # une liste de tous. Un nom courant sans pays tombe dans le bloc « pays
+    # inconnu » : mesure en production, 24 s de calcul pour ~120 000 candidats.
+    # Les garder tous, chacun portant sa fiche listee complete, faisait
+    # ~240 Mo d'objets en memoire et autant dans la reponse — pour un champ
+    # (`all_matches`) qu'aucun ecran ni aucun appelant ne lit.
+    #
+    # TOUTES les correspondances au-dessus du seuil sont conservees, pas
+    # seulement la meilleure. Un client homonyme de 2 976 fiches listees
+    # (mesure en production : « Mohammed Ali » sans pays) ne laissait
+    # qu'UNE trace : 2 975 correspondances reglementaires disparaissaient
+    # sans laisser d'ecrit. Aucune n'est ecartee — celles qu'une regle
+    # anti-faux positifs tranche sont creees PUIS cloturees CLOSED_BY_RULE,
+    # avec le nom et la version de la regle en clair.
+    #
+    # `all_matches` (la liste rendue dans la reponse) reste borne : les
+    # correspondances vivent en base, la reponse n'a pas a les retransporter.
+    meilleurs: List[Any] = []   # tas-min (score, rang, resultat) pour la reponse
+    hits: List[Dict[str, Any]] = []   # correspondances >= seuil, toutes
+    rang = 0
     best_match = None
     best_score = -1.0
 
     for item_id, candidate in candidates.items():
         score_res = match_entities(cleansed_client, candidate, scoring_config)
         score_res["watchlist_entity"] = candidate
-        
-        matches.append(score_res)
+
+        rang += 1
+        if score_res.get("status") == "ALERT":
+            hits.append(score_res)
+        if len(meilleurs) < SCREEN_MAX_MATCHES:
+            heapq.heappush(meilleurs, (score_res["final_score"], rang, score_res))
+        elif score_res["final_score"] > meilleurs[0][0]:
+            # Comparaison STRICTE : a score egal, le candidat rencontre en
+            # premier reste — c'est ce que faisait le tri stable d'avant.
+            heapq.heapreplace(meilleurs, (score_res["final_score"], rang, score_res))
         if score_res["final_score"] > best_score:
             best_score = score_res["final_score"]
             best_match = score_res
-            
+
     # Audit trail persistence
     audit_id = None
     alert_id = None
     whitelist_pair_id = None
+    hits_summary = {"hits": 0, "opened": 0, "closed_by_rule": 0,
+                    "redetected": 0, "whitelisted": 0,
+                    # Ventilation par perimetre : sur SANCTION, un ecart entre
+                    # ce qui est trouve et ce qui reste ouvert doit sauter aux
+                    # yeux — c'est le perimetre ou un manquement est
+                    # constatable a l'audit.
+                    "by_perimeter": {}}
     if best_match:
-        # Liste blanche client x liste : la suppression n'est JAMAIS silencieuse,
-        # le journal d'audit trace la decision avec le statut WHITELISTED
-        if best_match.get("status") == "ALERT":
-            wl_pair = is_whitelisted(
-                db, client_dict.get("client_id"),
-                (best_match.get("watchlist_entity") or {}).get("entity_id")
-            )
-            if wl_pair:
-                best_match["status"] = "WHITELISTED"
-                best_match["whitelist_pair_id"] = wl_pair.id
-                whitelist_pair_id = wl_pair.id
-        # Tracabilite : toute restriction du perimetre de criblage est
-        # persistee dans le decision_tree du journal immuable
-        best_match["screening_lists_restriction"] = requested_lists or "ALL"
-        # Regle des 50 % : risque herite par detention majoritaire du liste
-        # matche (informatif, trace dans le decision_tree)
-        matched_entity_id = (best_match.get("watchlist_entity") or {}).get("entity_id")
-        if matched_entity_id:
-            inherited = compute_inherited_risk(db, matched_entity_id, max_depth=2)
-            if inherited:
-                best_match["ownership_inherited_risk"] = inherited
-        # Regles anti-faux positifs du canal SCREENING : appliquees avant de
-        # tracer, pour marquer la decision dans le journal immuable
-        suppressed_by_rule = None
-        if best_match.get("status") == "ALERT":
-            ctx = build_screening_ctx(client_dict, best_match["watchlist_entity"], best_match)
-            suppressed_by_rule = evaluate_fp_rules(db, "SCREENING", ctx)
-            if suppressed_by_rule is not None:
-                annotate_suppression(best_match, suppressed_by_rule)
-        audit_record = log_compliance_decision(
-            db,
-            client_dict,
-            best_match["watchlist_entity"],
-            best_match,
-            watchlist_version,
-            watchlist_hash
-        )
-        audit_id = audit_record.id
-        # Une decision ALERT ouvre (ou re-detecte) une alerte de travail
-        if best_match.get("status") == "ALERT":
-            alert_id = open_or_redetect_alert(
-                db, audit_record, client_dict.get("client_id"), best_match, username,
+        client_ref = client_dict.get("client_id")
+        # Rang par score decroissant : une regle peut raisonner sur la place
+        # d'une correspondance dans le lot, pas seulement sur son score.
+        hits.sort(key=lambda m: -m["final_score"])
+        hits_summary["hits"] = len(hits)
+
+        # Liste blanche client x liste : la suppression n'est JAMAIS
+        # silencieuse, le journal porte la decision avec le statut WHITELISTED.
+        # Lue en UNE requete pour tout le lot.
+        paires = whitelisted_pairs(
+            db, client_ref,
+            [(m.get("watchlist_entity") or {}).get("entity_id") for m in hits])
+
+        # Regles anti-faux positifs chargees UNE fois pour tout le lot
+        from fiskr.fprules import active_rules
+        from fiskr.settings import perimeter_overrides
+        regles_actives = active_rules(db, "SCREENING") if hits else []
+        classement = perimeter_overrides(db) if hits else {}
+
+        a_journaliser: List[Any] = []
+        for position, hit in enumerate(hits, start=1):
+            fiche = hit.get("watchlist_entity") or {}
+            paire = paires.get(fiche.get("entity_id"))
+            if paire is not None:
+                hit["status"] = "WHITELISTED"
+                hit["whitelist_pair_id"] = paire.id
+                hits_summary["whitelisted"] += 1
+                if hit is best_match:
+                    whitelist_pair_id = paire.id
+                a_journaliser.append((hit, None))
+                continue
+            # Regle des 50 % : risque herite par detention majoritaire du
+            # liste matche (informatif, trace dans le decision_tree). Calcule
+            # pour la meilleure correspondance — c'est celle qui porte le
+            # dossier — le lot entier couterait une descente de graphe par hit.
+            if hit is best_match and fiche.get("entity_id"):
+                inherited = compute_inherited_risk(db, fiche["entity_id"], max_depth=2)
+                if inherited:
+                    hit["ownership_inherited_risk"] = inherited
+            hit["screening_lists_restriction"] = requested_lists or "ALL"
+            ctx = build_screening_ctx(client_dict, fiche, hit,
+                                      hits_count=len(hits), hit_rank=position,
+                                      perimeter_overrides=classement)
+            hit["screening_perimeter"] = ctx["perimeter"]
+            regle = evaluate_fp_rules(db, "SCREENING", ctx, rules=regles_actives)
+            if regle is not None:
+                annotate_suppression(hit, regle)
+            a_journaliser.append((hit, regle))
+
+        # Le journal doit aussi porter la trace d'un criblage SANS
+        # correspondance : la meilleure decision est journalisee meme sous le
+        # seuil (« ce client a bien ete crible, meilleur score X »).
+        if not hits:
+            best_match["screening_lists_restriction"] = requested_lists or "ALL"
+            fiche = best_match.get("watchlist_entity") or {}
+            if fiche.get("entity_id"):
+                inherited = compute_inherited_risk(db, fiche["entity_id"], max_depth=2)
+                if inherited:
+                    best_match["ownership_inherited_risk"] = inherited
+            a_journaliser.append((best_match, None))
+
+        for hit, _regle in a_journaliser:
+            cle = hit.get("screening_perimeter") or "SANCTION"
+            hits_summary["by_perimeter"][cle] = hits_summary["by_perimeter"].get(cle, 0) + 1
+
+        lignes = log_compliance_decisions(
+            db, client_dict,
+            [(m.get("watchlist_entity") or {}, m) for m, _ in a_journaliser],
+            watchlist_version, watchlist_hash, commit=False)
+        for (hit, _regle), ligne in zip(a_journaliser, lignes):
+            if hit is best_match:
+                audit_id = ligne.id
+
+        # Une decision ALERT ouvre (ou re-detecte) une alerte de travail —
+        # pour CHAQUE correspondance retenue, pas seulement la meilleure.
+        a_alerter = [{"audit": ligne, "match": hit, "rule": regle}
+                     for (hit, regle), ligne in zip(a_journaliser, lignes)
+                     if hit.get("status") == "ALERT"]
+        if not a_alerter:
+            # Rien a alerter (tout en liste blanche, ou aucun hit) : le journal
+            # doit tout de meme etre valide — `open_or_redetect_alerts` est le
+            # seul autre point de commit de ce chemin.
+            db.commit()
+        if a_alerter:
+            resultat_alertes = open_or_redetect_alerts(
+                db, a_alerter, client_id=client_ref, username=username,
                 channel="SCREENING",
-                suppressed_by_rule=suppressed_by_rule,
                 detail_suffix=(
                     f" [Criblage restreint aux listes : {', '.join(requested_lists)}]"
                     if requested_lists else ""
-                )
-            )
+                ))
+            hits_summary["opened"] = resultat_alertes["opened"]
+            hits_summary["closed_by_rule"] = resultat_alertes["closed_by_rule"]
+            hits_summary["redetected"] = resultat_alertes["redetected"]
+            # `alert_id` reste celui de la MEILLEURE correspondance : c'est le
+            # contrat historique de cette reponse.
+            for entree, identifiant in zip(a_alerter, resultat_alertes["alert_ids"]):
+                if entree["match"] is best_match:
+                    alert_id = identifiant
+                    break
     else:
         # Log dummy NO_MATCH result
         no_match_result = {
@@ -2609,7 +2703,12 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "blocking_keys_generated": list(client_keys),
         "candidates_count": len(candidates),
         "best_match": best_match,
-        "all_matches": sorted(matches, key=lambda x: x["final_score"], reverse=True),
+        "all_matches": [r for _, _, r in sorted(meilleurs, key=lambda t: (-t[0], t[1]))],
+        "all_matches_truncated": len(candidates) > SCREEN_MAX_MATCHES,
+        # Toutes les correspondances >= seuil sont persistees (journal + alerte).
+        # Ce resume dit ce qui a ete ecrit ; `all_matches` n'en montre que le
+        # sommet, la base fait foi.
+        "hits": hits_summary,
         "audit_trail_id": audit_id,
         "alert_id": alert_id,
         "whitelisted": whitelist_pair_id is not None,
@@ -8099,6 +8198,73 @@ def _ctx_from_alert(db: Session, alert: Alert) -> Dict[str, Any]:
         "client": None, "entity": (tree.get("watchlist_entity") or {}),
         "party": None, "message": None,
     }
+
+
+@app.get("/api/screening/perimeters")
+async def get_screening_perimeters(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Classement des listes en deux perimetres, et ce que chacun autorise.
+
+    SANCTION — designations avec obligation de gel. Manquer une correspondance
+    est constatable a l'audit et sanctionnable financierement : tout est
+    genere, rien n'est cloture par volumetrie.
+
+    HORS_SANCTION — PEP, alertes de regulateurs, exclusions de bailleurs. Ce
+    sont des signaux de vigilance : le seuil de coupure peut y monter (la
+    correspondance n'est alors jamais creee) et les regles volumetriques s'y
+    appliquent.
+
+    Le classement par defaut derive de la famille declaree au registre des
+    sources ; `overrides` porte les decisions prises a chaud.
+    """
+    from fiskr.perimeters import (perimetres_par_defaut, perimetre_de,
+                                  PERIMETRES, PERIMETRE_LABELS)
+    from fiskr.settings import perimeter_overrides
+    surcharges = perimeter_overrides(db)
+    seuils = score_thresholds(db)
+    effectif = {t: perimetre_de(t, surcharges) for t in sorted(perimetres_par_defaut())}
+    repartition = {p: sorted(t for t, v in effectif.items() if v == p) for p in PERIMETRES}
+    return {
+        "perimeters": [
+            {"key": p, "label": PERIMETRE_LABELS[p],
+             "list_types": repartition[p],
+             "cut_off": (seuils.get("cut_off_by_perimeter") or {}).get(
+                 p, seuils["cut_off_threshold"]),
+             "cut_off_source": ("perimetre"
+                                if p in (seuils.get("cut_off_by_perimeter") or {})
+                                else "seuil global")}
+            for p in PERIMETRES
+        ],
+        "by_list_type": effectif,
+        "overrides": surcharges,
+        "cut_off_threshold": seuils["cut_off_threshold"],
+        "cut_off_overrides": seuils["cut_off_overrides"],
+    }
+
+
+@app.get("/api/fprules/templates")
+async def list_fp_rule_templates(
+    channel: Optional[str] = Query(None),
+    param_user: Dict[str, Any] = Depends(require_fprules)
+):
+    """
+    Modeles de regles proposes, avec ce que chacun FAIT PERDRE.
+
+    Le criblage conserve toutes les correspondances au-dessus du seuil : c'est
+    l'exigence d'audit, et sa consequence est qu'un homonyme d'un nom tres
+    courant en produit des milliers (mesure en production : 2 976 pour
+    « Mohammed Ali » sans pays, dont plusieurs dizaines a 100,00 — des
+    homonymes reels). Aucune metrique de chaine ne separe des noms identiques ;
+    ce qui manque est l'identification, pas la precision du score.
+
+    Ces modeles ecrivent cette distinction. Aucun n'est actif par defaut : ce
+    sont des arbitrages de conformite, et le champ `loss` dit ce que chacun
+    coute — a lire avant d'installer.
+    """
+    return {"items": rule_templates(channel)}
 
 
 @app.get("/api/fprules")

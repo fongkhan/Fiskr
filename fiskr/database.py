@@ -802,6 +802,12 @@ class FpRule(Base):
     status = Column(String(30), default="DRAFT", index=True)
     enabled = Column(Boolean, default=True)   # interrupteur des regles ACTIVE
     run_order = Column(Integer, default=100)
+    # Perimetres ou la regle s'applique (liste JSON : SANCTION, HORS_SANCTION).
+    # NULL = tous, ce qui est le comportement des regles ecrites avant cette
+    # colonne. Le moteur FILTRE dessus : une regle limitee au hors-sanction ne
+    # peut pas cloturer une correspondance de gel d'avoirs, meme si son code
+    # l'oublie. Un controleur lit la portee sur la regle, pas dans son code.
+    perimeters = Column(JSON, nullable=True)
     hit_count = Column(Integer, default=0)
     version = Column(Integer, default=1)
     replaces_rule_id = Column(Integer, nullable=True)  # version ACTIVE remplacee
@@ -1404,6 +1410,60 @@ def log_compliance_decision(
     db.commit()
     db.refresh(db_entry)
     return db_entry
+
+
+def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
+                             wl_hash: str, commit: bool = True):
+    """
+    Journalise PLUSIEURS decisions d'un meme criblage, en un seul commit.
+
+    Un criblage produit autant de decisions qu'il trouve de correspondances
+    au-dessus du seuil — jusqu'a plusieurs milliers pour un homonyme d'un nom
+    tres courant. Un commit par ligne aurait rendu ce chemin inutilisable.
+    Chaque ligne reste COMPLETE et autonome : le journal est immuable et une
+    decision doit rester relisible sans dependre des autres.
+
+    `decisions` : sequence de (fiche_listee, resultat_de_score).
+    """
+    from fiskr.config import config as active_config
+    config_audit = {k: v for k, v in active_config.items() if k != "database"}
+
+    cname = client.get("primary_name", "")
+    if not cname:
+        fname = client.get("client_first_name", "")
+        lname = client.get("client_last_name", "")
+        cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
+    ctype = client.get("entity_type") or client.get("client_type") or "PP"
+    client_ref = client.get("entity_id") or client.get("client_id")
+
+    lignes = []
+    for watchlist_entry, scoring_result in decisions:
+        lignes.append(AuditTrail(
+            client_id=client_ref,
+            client_name=cname or "Inconnu",
+            client_type=ctype,
+            watchlist_id=watchlist_entry.get("entity_id", "NONE"),
+            watchlist_name=watchlist_entry.get("primary_name", "Aucun match"),
+            base_score=scoring_result.get("base_score", 0.0),
+            final_score=scoring_result.get("final_score", 0.0),
+            status=scoring_result.get("status", "NO_MATCH"),
+            decision_tree=scoring_result,
+            config_state=config_audit,
+            watchlist_version=wl_version,
+            watchlist_hash=wl_hash,
+            list_type=watchlist_entry.get("_list_type"),
+        ))
+    db.add_all(lignes)
+    if commit:
+        db.commit()
+    else:
+        # `flush` attribue les identifiants sans clore la transaction. Apres un
+        # commit, la session expire les objets et relire `ligne.id` declenche
+        # un SELECT PAR LIGNE — le N+1 que ce regroupement vient d'eviter.
+        # L'appelant qui enchaine sur les alertes commit une seule fois, et
+        # journal et alertes deviennent atomiques.
+        db.flush()
+    return lignes
 
 # Helper function to compute entity checksums
 def compute_checksum(data: dict) -> str:

@@ -674,6 +674,17 @@ def score_thresholds(db) -> Dict[str, Any]:
             str(k): float(v) for k, v in (scoring_cfg.get("cut_off_overrides") or {}).items()
             if isinstance(v, (int, float))
         },
+        # Seuil par PERIMETRE, entre la surcharge par liste et le seuil global.
+        # Vide par defaut : aucun score ne bouge tant que personne n'a tranche.
+        # Le releve le disant : les listes hors sanction pesent 709 511 fiches
+        # sur 895 157 en production (79 %), et c'est la que l'homonymie de noms
+        # courants explose — monter LEUR seuil evite de creer la correspondance
+        # plutot que d'avoir a la cloturer ensuite.
+        "cut_off_by_perimeter": {
+            str(k).upper(): float(v)
+            for k, v in (scoring_cfg.get("cut_off_by_perimeter") or {}).items()
+            if isinstance(v, (int, float))
+        },
         "source": "config",
     }
     value = get_setting(db, SETTING_SCORE_THRESHOLDS, None)
@@ -692,7 +703,44 @@ def score_thresholds(db) -> Dict[str, Any]:
                 except (TypeError, ValueError):
                     continue
             out["cut_off_overrides"] = cleaned
+        par_perimetre = value.get("cut_off_by_perimeter")
+        if isinstance(par_perimetre, dict):
+            from fiskr.perimeters import PERIMETRES
+            propre = {}
+            for perimetre, seuil in par_perimetre.items():
+                cle = str(perimetre).strip().upper()
+                if cle not in PERIMETRES:
+                    continue
+                try:
+                    propre[cle] = float(seuil)
+                except (TypeError, ValueError):
+                    continue
+            out["cut_off_by_perimeter"] = propre
     return out
+
+
+SETTING_PERIMETERS = "screening.perimeters"
+
+
+def perimeter_overrides(db) -> Dict[str, str]:
+    """
+    Classement SANCTION / HORS_SANCTION surcharge a chaud, par type de liste.
+
+    La classification par defaut derive de la famille declaree au registre des
+    sources (fiskr/perimeters.py). La surcharger est un arbitrage de
+    conformite : une liste rangee du cote hors-sanction accepte une cloture
+    plus agressive, il faut donc pouvoir le decider et le tracer.
+    """
+    from fiskr.perimeters import PERIMETRES
+    value = get_setting(db, SETTING_PERIMETERS, None)
+    if not isinstance(value, dict):
+        return {}
+    propre = {}
+    for list_type, perimetre in value.items():
+        cle = str(perimetre).strip().upper()
+        if cle in PERIMETRES:
+            propre[str(list_type).strip().upper()] = cle
+    return propre
 
 
 def scoring_config_with_thresholds(db, channel: str = "SCREENING") -> Dict[str, Any]:
@@ -709,6 +757,10 @@ def scoring_config_with_thresholds(db, channel: str = "SCREENING") -> Dict[str, 
     scoring_cfg = dict(config.get("scoring", {}) or {})
     scoring_cfg["cut_off_threshold"] = thresholds["cut_off_threshold"]
     scoring_cfg["cut_off_overrides"] = dict(thresholds["cut_off_overrides"])
+    scoring_cfg["cut_off_by_perimeter"] = dict(thresholds.get("cut_off_by_perimeter") or {})
+    # Classement des listes, transporte avec la config : `resolve_cut_off` en a
+    # besoin pour savoir de quel cote tombe la fiche comparee.
+    scoring_cfg["perimeter_overrides"] = perimeter_overrides(db)
     # Ponderations des metriques et bonus/malus contextuels : eux aussi a
     # chaud — le moteur lit ce dict, pas le fichier, donc l'effet est immediat
     scoring_cfg["weights"] = scoring_weights(db)

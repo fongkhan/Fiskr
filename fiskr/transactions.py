@@ -21,10 +21,10 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 
 from fiskr.config import config
-from fiskr.database import log_compliance_decision
+from fiskr.database import log_compliance_decision, log_compliance_decisions
 from fiskr.names import parse_individual_name
 from fiskr.scoring import match_entities, resolve_cut_off
-from fiskr.alerts import open_or_redetect_alert
+from fiskr.alerts import open_or_redetect_alert, open_or_redetect_alerts
 
 logger = logging.getLogger("fiskr.transactions")
 
@@ -376,6 +376,11 @@ def screen_payment_message(db, parsed: Dict[str, Any],
 
         best: Optional[Dict[str, Any]] = None
         best_client: Optional[Dict[str, Any]] = None
+        # TOUTES les correspondances au-dessus du seuil, pas seulement la
+        # meilleure : une partie de paiement porte rarement une date de
+        # naissance ou un pays, donc l'homonymie y est la norme — et un hit
+        # perdu reste un hit perdu, quel que soit le canal qui l'a produit.
+        hits: List[Dict[str, Any]] = []
         for candidate in candidates.values():
             # Variante de profil alignee sur le type du candidat : les parties
             # d'un paiement ne portent pas leur nature PP/PM.
@@ -383,6 +388,8 @@ def screen_payment_message(db, parsed: Dict[str, Any],
             client = _party_client_dict(party, as_individual, client_id)
             score = match_entities(client, candidate, scoring_config)
             score["watchlist_entity"] = candidate
+            if score.get("status") == "ALERT":
+                hits.append((score, client))
             if best is None or score["final_score"] > best["final_score"]:
                 best = score
                 best_client = client
@@ -390,22 +397,48 @@ def screen_payment_message(db, parsed: Dict[str, Any],
         alert_id = None
         suppressed_by_rule = None
         if best is not None:
-            best["screening_lists_restriction"] = restriction
-            # Regles anti-faux positifs du canal FILTERING : appliquees avant
-            # de tracer, pour marquer la decision dans le journal immuable
-            if best.get("status") == "ALERT":
-                ctx = build_filtering_ctx(party, best["watchlist_entity"], best, parsed, client_id)
-                suppressed_by_rule = evaluate_fp_rules(db, "FILTERING", ctx)
-                if suppressed_by_rule is not None:
-                    annotate_suppression(best, suppressed_by_rule)
-            audit = log_compliance_decision(db, best_client, best["watchlist_entity"],
-                                            best, watchlist_version, watchlist_hash)
-            if best.get("status") == "ALERT":
+            hits.sort(key=lambda t: -t[0]["final_score"])
+            from fiskr.fprules import active_rules
+            from fiskr.settings import perimeter_overrides
+            regles_actives = active_rules(db, "FILTERING") if hits else []
+            classement = perimeter_overrides(db) if hits else {}
+
+            a_journaliser = []
+            for position, (hit, hit_client) in enumerate(hits, start=1):
+                hit["screening_lists_restriction"] = restriction
+                # Regles anti-faux positifs du canal FILTERING : appliquees
+                # avant de tracer, pour marquer la decision dans le journal
+                ctx = build_filtering_ctx(party, hit["watchlist_entity"], hit, parsed,
+                                          client_id, hits_count=len(hits), hit_rank=position,
+                                          perimeter_overrides=classement)
+                hit["screening_perimeter"] = ctx["perimeter"]
+                regle = evaluate_fp_rules(db, "FILTERING", ctx, rules=regles_actives)
+                if regle is not None:
+                    annotate_suppression(hit, regle)
+                    if hit is best:
+                        suppressed_by_rule = regle
+                a_journaliser.append((hit, hit_client, regle))
+            if not hits:
+                best["screening_lists_restriction"] = restriction
+                a_journaliser.append((best, best_client, None))
+
+            lignes = log_compliance_decisions(
+                db, best_client,
+                [(m.get("watchlist_entity") or {}, m) for m, _c, _r in a_journaliser],
+                watchlist_version, watchlist_hash, commit=False)
+            audit = next((l for (m, _c, _r), l in zip(a_journaliser, lignes) if m is best),
+                         lignes[0] if lignes else None)
+
+            a_alerter = [{"audit": ligne, "match": m, "rule": r}
+                         for (m, _c, r), ligne in zip(a_journaliser, lignes)
+                         if m.get("status") == "ALERT"]
+            if not a_alerter:
+                db.commit()
+            if a_alerter:
                 verdict = "HIT"
-                alert_id = open_or_redetect_alert(
-                    db, audit, client_id, best, username,
+                resultat_alertes = open_or_redetect_alerts(
+                    db, a_alerter, client_id=client_id, username=username,
                     channel="FILTERING",
-                    suppressed_by_rule=suppressed_by_rule,
                     detail_suffix=(
                         f" [Filtrage transactionnel {parsed['message_type']} {msg_id} — "
                         f"rôle(s) : {', '.join(party['roles'])}]"
@@ -413,6 +446,10 @@ def screen_payment_message(db, parsed: Dict[str, Any],
                            if screening_lists else "")
                     ),
                 )
+                for entree, identifiant in zip(a_alerter, resultat_alertes["alert_ids"]):
+                    if entree["match"] is best:
+                        alert_id = identifiant
+                        break
         else:
             # Aucune partie n'echappe a la piste d'audit : prouver qu'une
             # partie A ETE criblee importe autant que le resultat (meme motif

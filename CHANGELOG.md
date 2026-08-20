@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — two screening perimeters, because the two risks are not the same
+Keeping every hit is a regulatory requirement; the volumetry is its consequence. But the two are not one problem — they are two, and they call for opposite treatment:
+
+**SANCTION** — designations carrying a freezing obligation (OFAC, EU, UN, DGT, OFSI, national counter-terrorism lists). A missed match is a missed terrorist or sanctioned party: observable at audit, financially sanctionable. Everything is generated, nothing is closed by volumetry.
+
+**HORS_SANCTION** — PEPs, regulator alert lists, multilateral debarment. Vigilance signals, not freezing obligations. This perimeter takes a more aggressive closure.
+
+What makes the split worth having, measured on production: **709 511 records out of 895 157 (79 %)** sit on the non-sanction side, almost all of them `WATCHLIST_PEP`. That is exactly where common-name homonymy explodes — and therefore exactly where the cut-off can rise, so the match is never created rather than having to be closed afterwards.
+
+The classification derives from the `family` already declared in the source registry, so a source added there is classified without touching anything. The fifteen list types predating that registry are classified one by one, with the reason. **An unknown type falls on the SANCTION side** — the side that closes nothing: a list wrongly placed on the non-sanction side would have its matches closed in volume, so the default leans toward what loses nothing. Being a compliance call, the whole map is overridable through `screening.perimeters`.
+
+Two levers per perimeter:
+
+- **A cut-off per perimeter**, between the per-list override and the global threshold (`scoring.cut_off_by_perimeter`). The cut is *natural*: below it the match is never created, so there is nothing to close. **Empty by default** — introducing perimeters moves no score, and therefore no already-approved test book.
+- **A declared scope on each rule** (`FpRule.perimeters`, nullable, `NULL` = every perimeter, so existing rules behave exactly as before). The **engine** filters on it, not the rule's code: a non-sanction rule cannot close a freezing-obligation match even if its code forgets to check — and a controller reads the scope on the rule instead of hunting through its code. A broken declaration applies **nowhere** rather than everywhere.
+
+The three volumetric templates now declare `HORS_SANCTION`. A fourth, `SANCTION`-scoped, ships deliberately inert: it closes nothing, and exists as the starting point for a rule targeting one identified family of false positives on that perimeter, never a sort by count.
+
+`GET /api/screening/perimeters` serves the classification, the effective cut-off per perimeter and where it comes from. Screening responses carry `hits.by_perimeter`, so a gap between what was found and what stays open is visible on the side where a shortfall is observable at audit.
+
+
+### Fixed — a screening kept one hit out of 2 976
+The engine persisted only the **best** match. Measured on production through `GET /api/screen/preview` (read-only, same engine):
+
+| Profile screened | Candidates | Hits ≥ cut-off | Traces written |
+|---|---:|---:|---:|
+| Mohammed Ali, no country | 17 649 | 2 976 | **1** |
+| Ivan Ivanov, no country | 28 940 | 538 | **1** |
+| Ivan Ivanov + RU | 1 223 | 453 | **1** |
+
+And the twelve best for "Mohammed Ali" all sit at **100.00** — "ALI MUHAMMED", "MOHAMMAD ALI", real homonyms, not scoring noise. 2 975 regulatory hits vanished without a written trace, on all four channels: single screening, batch, post-delta re-screening and transaction filtering.
+
+Every match at or above the cut-off is now written: one audit line, one alert, each alert pointing at **its own** audit line. Those a false-positive rule decides are **created and then closed** `CLOSED_BY_RULE`, with the rule's name and version in the alert's decision comment and in its event — never suppressed silently. The whitelist keeps its own path: logged `WHITELISTED`, no alert.
+
+`best_match`, `audit_trail_id` and `alert_id` still designate the top match — the response contract is unchanged, and `hits` now reports what was written (`hits`, `opened`, `closed_by_rule`, `redetected`, `whitelisted`).
+
+### Fixed — writing N hits must not mean reading N times
+Turning one hit into thousands exposed four read amplifications, all now measured by a test that compares the **read** count between 11 and 12 hits (writes obviously scale — that is the feature):
+
+- the whitelist was queried per hit → one batched `whitelisted_pairs`;
+- the active rules were reloaded per hit → loaded once per screening;
+- the SLA setting was read per alert → read once per batch;
+- **and the subtle one**: `commit()` expires the session's objects, so re-reading `ligne.id` afterwards fired one `SELECT` per row. The N+1 came back through the back door, after the writes had been grouped. The audit lines are now flushed, ids read, and a single commit covers audit and alerts together — atomically.
+
+Rule code was also being recompiled on every evaluation; it is now memoised on the rule text.
+
+**A bug this branch introduced and its own test caught**: the commit went through alert creation, so a screening with nothing to alert — everything whitelisted, or no hit at all — left its audit lines written but never committed, and therefore lost. Two tests now read the journal back **from a separate session**, which is what a controller does.
+
+### Added — what a rule can now see, and three templates that use it
+No string metric separates "MOHAMMED ALI" from "MOHAMMED ALI". What is missing is not precision, it is **identification** — date of birth, country, identity document. The rule context now carries that distinction explicitly:
+
+- `hits_count` and `hit_rank`: the volumetry of the screening that produced this hit, and its rank by descending score;
+- `corroboration`: `has_dob`, `has_country`, `has_identity_document`, `name_only`, `corroborated`, plus the three adjustment scores.
+
+`GET /api/fprules/templates` serves three ready-to-install rules built on it — name-only in volume, no corroboration beyond the top hits, and the filtering equivalent where a payment party rarely carries a date of birth. **None is active by default**: these are compliance trade-offs, not comfort settings, so each carries a `loss` field saying plainly what it costs, and a test asserts none of them ever closes a hard match — an identical official identifier is an identification, not a homonymy.
+
+### Changed — a burst of alerts no longer means a burst of notifications
+One screening can now open thousands of alerts at once. Individual `alert_created` notifications stop at ten and give way to a single `alert_volume` event carrying the count and the top score. Alerts already closed by a rule no longer get a re-detection event on every pass either: post-delta re-screening replays the whole client base after each list goes live, and one event row per rule-closed alert per pass would grow the journal without teaching anything — the audit line for each screening is still written every time.
+
+
+### Fixed — a screening returned every candidate it had scored
+`POST /api/screen` returned `all_matches`: **every** scored candidate, each carrying its full listed record. Measured on production through `GET /api/screen/preview` (read-only, same engine), the scope a screening actually covers:
+
+| Profile screened | Candidates | Alerts | Response time |
+|---|---:|---:|---:|
+| Ivan Ivanov + RU | 1 223 | 453 | 1.9 s |
+| **Ivan Ivanov, no country** | **28 940** | 538 | **24.2 s** |
+| Mohammed Ali, no country | 17 649 | 2 976 | — |
+| Li Wei, no country | 15 520 | 268 | — |
+| Zzyxwv Qqrstuv, no country | 2 894 | 0 | 3.3 s |
+| Bank of Example (E) | 385 | 14 | 1.2 s |
+
+Without a country the profile falls into the "unknown country" block, which gathers every listed record whose source publishes no geography. At ~1.8 KB per record, `all_matches` for "Mohammed Ali" carried some **30 MB** — and that many objects retained in memory — on a field **nobody read**: not a screen, not a test.
+
+The response now keeps the 50 best, held in a bounded heap. What matters for compliance is untouched: `best_match`, the audit trail and the alert are still computed over **all** candidates, and `candidates_count` says how many were actually compared. A test rebuilds the expected top 50 candidate by candidate, outside the endpoint, and asserts the heap returns exactly that list in exactly that order — ties included, since strict comparison preserves what the previous stable sort did.
+
+**Measured and reverted — an early exit in the scoring loop.** Once a name pair reaches the maximum attainable score, no other pair can beat it, so the remaining aliases could be skipped. Provably safe, three lines. Measured on a record with eight aliases: 167 µs versus 173 µs per candidate — inside the noise, because `c_names` and `w_names` are built through `set()` and the exact match is not reached first. Not worth three lines in the most safety-critical module of the product, so it is not in this branch.
+
+**Reported, not changed — the 24 seconds themselves.** Profiling puts the cost in the string metrics, not in redundant normalization: Damerau-Levenshtein 37 %, Jaro 24 %, token sort 14 %; normalization is under 2 %. Production works out to ~0.83 ms per candidate, against 174 µs on a synthetic corpus — the difference is the aliases, each one another full set of metrics. There is no way to make this materially faster except to compare fewer candidates, and that is the blocking layout: a decision with a recall trade-off, which the settings screen already exposes (up to three fields). The numbers above are what that decision needs.
+
+
 ### Fixed — one call to `GET /api/watchlist` would have taken production down
 The endpoint returned `watchlist_store` **whole**. Measured on the real cache: ~1.8 KB per record. With 895 157 records in production, that is **over 1.5 GB** serialized in memory inside the web process, for a single authenticated call — on shared hosting, the application with it. The figure is an estimate derived from a local measurement: calling that endpoint against production would have been triggering the very thing being described.
 

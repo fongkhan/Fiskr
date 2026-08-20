@@ -423,7 +423,9 @@ def _drain_count(queue) -> int:
 def _match_chunk(bounds: Tuple[int, int, int]) -> Dict[str, Any]:
     """Calcule les correspondances d'une tranche de clients deja en memoire
     (heritee par fork). Ne touche JAMAIS la base. Retourne les seuls clients
-    en ALERT, reperes par leur indice dans la liste du parent."""
+    en ALERT, reperes par leur indice dans la liste du parent. Toutes leurs
+    correspondances au-dessus du seuil sont remontees, pas seulement la
+    meilleure."""
     start, end, chunk_index = bounds
     clients = _G.clients
     cfg = _G.cfg
@@ -441,14 +443,19 @@ def _match_chunk(bounds: Tuple[int, int, int]) -> Dict[str, Any]:
                 candidates[ent["entity_id"]] = ent
         if not candidates:
             continue
-        best = None
+        # TOUTES les correspondances au-dessus du seuil remontent au parent,
+        # pas seulement la meilleure : le re-criblage doit laisser autant de
+        # traces que le criblage unitaire, sinon une mise en production de
+        # liste effacerait des correspondances que le criblage aurait gardees.
+        trouvees = []
         for ent in candidates.values():
             score = match_entities(client, ent, config)
             score["watchlist_entity"] = ent
-            if best is None or score["final_score"] > best["final_score"]:
-                best = score
-        if best is not None and best.get("status") == "ALERT":
-            hits.append((i, best))
+            if score.get("status") == "ALERT":
+                trouvees.append(score)
+        if trouvees:
+            trouvees.sort(key=lambda s: -s["final_score"])
+            hits.append((i, trouvees))
     if seen % _PROGRESS_EVERY:
         _G.queue.put(seen % _PROGRESS_EVERY)
     return {"_chunk_index": chunk_index, "hits": hits}
@@ -463,7 +470,7 @@ def parallel_match(clients: Sequence[Dict[str, Any]], index, screening_cfg,
 
     `clients` et `index` sont deja en memoire : les enfants les heritent par
     fork (copy-on-write), rien n'est ni pickle ni recharge. Retourne la liste
-    `(indice du client, meilleure correspondance)` des clients en ALERT,
+    `(indice du client, correspondances en ALERT triees par score)`,
     **triee par indice** — l'appelant ecrit ensuite en base dans cet ordre,
     exactement comme le ferait la boucle sequentielle.
 
