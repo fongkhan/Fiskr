@@ -25,13 +25,27 @@ _TTL_SECONDS = 15 * 60
 # la transition et peut annoncer la fin, meme s'il etait sur un autre ecran.
 _FINISHED_WINDOW_SECONDS = 120
 
-# Phases connues (libellees en francais cote front)
-PHASES = ("UPLOAD", "DOWNLOAD", "HASH", "PARSE", "PERSIST", "DELTA", "RELOAD",
-          "INDEX", "SCREEN_CURRENT", "SCREEN_CANDIDATE", "RESCREEN", "QUALITY",
-          "DONE")
+# Phases connues. Le frontal en tire le libelle francais affiche a l'operateur
+# (PROGRESS_PHASE_LABELS dans app.js) : une phase emise mais absente d'ici, ou
+# absente de la table du frontal, s'affiche telle quelle — un code brut en
+# majuscules, au milieu d'une interface en francais.
+#
+# C'etait le cas de QUATRE phases, dont QUEUED : la phase que porte TOUT job en
+# attente, donc celle que l'operateur voyait le plus souvent. Un test derive la
+# liste des phases REELLEMENT emises depuis le code et verifie l'accord des
+# trois declarations.
+PHASES = ("QUEUED", "UPLOAD", "DOWNLOAD", "HASH", "PARSE", "PERSIST", "DELTA",
+          "RELOAD", "LOAD_UNIVERSE", "SCREEN_CURRENT", "SCREEN_CANDIDATE",
+          "SCREEN_SHARED", "SCREEN_REMOVED", "SCREEN_ADDED", "RESCREEN",
+          "QUALITY", "BENCH", "GENERATE", "CANCELLED", "DONE")
 
-# Natures d'operation (pilotent l'icone et le lien profond cote front)
-KINDS = ("import", "sync", "backtest", "approve", "batch", "quality")
+# Natures d'operation (pilotent l'icone et le lien profond cote front). Meme
+# regle : neuf des quatorze natures reellement soumises n'y figuraient pas, et
+# s'affichaient donc sans icone dans le panneau des travaux.
+KINDS = ("import", "ingest", "sync", "backtest", "approve", "batch",
+         "batch_campaign", "quality", "quality_check", "lookback", "mining",
+         "engine_simulation", "resource_simulation", "fprules_bench",
+         "testpanel_generate")
 
 
 def _purge_expired_locked() -> None:

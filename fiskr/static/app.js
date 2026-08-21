@@ -1658,6 +1658,7 @@ function toggleSsieOptions() {
 // ------------------ PROGRESSION DES OPERATIONS LONGUES ------------------
 // Libellés français des phases renvoyées par GET /api/progress
 const PROGRESS_PHASE_LABELS = {
+ QUEUED: "En file d'attente…",
  UPLOAD: "Téléversement du fichier…",
  DOWNLOAD: "Téléchargement depuis la source…",
  HASH: "Calcul de l'empreinte SHA-256…",
@@ -1674,13 +1675,22 @@ const PROGRESS_PHASE_LABELS = {
  SCREEN_ADDED: "Criblage à blanc (passe 3/3) — fiches ajoutées…",
  RESCREEN: "Re-criblage du référentiel clients…",
  QUALITY: "Contrôle de qualité du référentiel…",
+ BENCH: "Banc d'essai des règles…",
+ GENERATE: "Génération des pseudo-clients…",
+ CANCELLED: "Annulé",
  DONE: "Terminé",
 };
 
 // Icône par nature d'opération (GET /api/progress/active)
 const OPERATION_KIND_ICONS = {
- import: uiIcon("inbox"), sync: uiIcon("refresh"), backtest: uiIcon("flask"),
- approve: uiIcon("check-circle"), batch: uiIcon("package"), quality: uiIcon("activity"),
+ import: uiIcon("inbox"), ingest: uiIcon("inbox"),
+ sync: uiIcon("refresh"), backtest: uiIcon("flask"),
+ approve: uiIcon("check-circle"),
+ batch: uiIcon("package"), batch_campaign: uiIcon("package"),
+ quality: uiIcon("activity"), quality_check: uiIcon("activity"),
+ lookback: uiIcon("clock"), mining: uiIcon("search"),
+ engine_simulation: uiIcon("sliders"), resource_simulation: uiIcon("sliders"),
+ fprules_bench: uiIcon("target"), testpanel_generate: uiIcon("users"),
 };
 
 // Démarre l'interrogation périodique de GET /api/progress?id=<token> et

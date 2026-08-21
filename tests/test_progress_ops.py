@@ -166,7 +166,10 @@ def test_active_endpoint_merges_running_batch_campaigns(client):
     assert batch["kind"] == "batch"
     assert batch["pct"] == 25.0
     assert batch["started_by"] == "bob"
-    assert batch["link"] == "#batch"
+    # `#batch` ne resolvait AUCUN ecran : `applyHashRoute` cherche
+    # `sec-<onglet>`, et il n'existe pas de `sec-batch`. Le lien de la ligne
+    # « campagne batch » du panneau des travaux ne menait donc nulle part.
+    assert batch["link"] == "#screening/screening-batch"
 
 
 def test_active_endpoint_exposes_no_business_data(client):

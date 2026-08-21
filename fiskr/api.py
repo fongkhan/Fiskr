@@ -6725,14 +6725,27 @@ async def get_operation_progress(
     raise HTTPException(status_code=404, detail="Operation inconnue ou expiree")
 
 
-# Lien profond du dashboard par nature d'operation (cf. applyHashRoute)
+# Lien profond du dashboard par nature d'operation (cf. applyHashRoute).
+#
+# Neuf des quatorze natures soumises n'y figuraient pas : leur ligne du panneau
+# des travaux n'emmenait nulle part. Le test tests/test_vocabulaire_progression
+# verifie que la table couvre TOUTES les natures declarees.
 _OPERATION_LINKS = {
     "import": "#watchlist-mgmt/watchlist-snapshots",
-    "sync": "#watchlist-mgmt/watchlist-sources",
+    "ingest": "#watchlist-mgmt/watchlist-snapshots",
+    "sync": "#watchlist-mgmt/watchlist-sync",
     "backtest": "#watchlist-mgmt/watchlist-review",
     "approve": "#watchlist-mgmt/watchlist-review",
-    "batch": "#batch",
-    "quality": "#kpi",
+    "batch": "#screening/screening-batch",
+    "batch_campaign": "#screening/screening-batch",
+    "quality": "#kpi/kpi-quality",
+    "quality_check": "#kpi/kpi-quality",
+    "lookback": "#screening/alerts-screening",
+    "mining": "#alerts/alerts-resources",
+    "engine_simulation": "#alerts/alerts-blocking",
+    "resource_simulation": "#alerts/alerts-resources",
+    "fprules_bench": "#alerts/alerts-rules",
+    "testpanel_generate": "#watchlist-mgmt/watchlist-review",
 }
 
 
