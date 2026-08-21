@@ -306,6 +306,29 @@ ne demande plus que les colonnes rendues — la leçon que le balayage fuzzy ava
 déjà tirée (25 000 fiches ORM complètes : ~2,5 s par tranche ; en tuples
 légers : moins d'une demi-seconde).
 
+## Troisième passe : les index de la table `alerts`
+
+Depuis qu'un criblage ouvre une alerte **par correspondance**, cette table
+grossit du nombre d'homonymes : un seul « Mohammed Ali » sans pays en ajoute
+2 976. Trois index qui ne coûtaient rien sur quelques milliers de lignes en
+valent la peine sur une table qui se compte en millions.
+
+| Index | Ce qu'il sert |
+|---|---|
+| `ix_alerts_created_at` | l'accueil (« alertes créées 24 h »), les exports, la courbe journalière, `ORDER BY created_at DESC LIMIT 50` |
+| `ix_alerts_decided_at` | l'accueil (« décidées 24 h »), les indicateurs par analyste, la sélection de rétention |
+| `ix_alerts_audit_id` | l'intégrité référentielle vers le journal d'audit |
+
+Le dernier mérite une explication. PostgreSQL n'indexe **pas** automatiquement
+le côté *référençant* d'une clé étrangère. Sans index sur `alerts.audit_id`,
+chaque ligne de `compliance_audit_trail` supprimée par la rétention déclenche
+un **parcours séquentiel** de `alerts` pour la vérification d'intégrité :
+purger 100 000 lignes d'audit valait 100 000 parcours d'une table qui se compte
+désormais en millions.
+
+Ces index sont déclarés dans le modèle, donc `tools/create_perf_indexes.py` les
+crée `CONCURRENTLY`, sans interruption de service, comme les autres.
+
 ## Ce qui reste à décider (hors correctif)
 
 **Les 9,4 M de fiches en snapshots SUPERSEDED.** C'est la cause première du

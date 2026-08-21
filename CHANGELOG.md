@@ -9,6 +9,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — what a name is worth: the rarity of its words
+Keeping every match above the cut-off is the audit requirement; "Mohammed Ali" without a country produces **2 976** of them in production, dozens of them at 100,00. No string metric separates those records — the names *are* identical, and no metric should. What separates them is elsewhere: in the listed corpus, "MOHAMMED" and "ALI" are borne by thousands of records; "TYURIN" by one. Matching two names on omnipresent words identifies nobody.
+
+`fiskr/rarete.py` counts the **document frequency** of name words over the universe actually screened — primary name *and* high-priority aliases, a record counted once per word — and attaches the count to the alert:
+
+- **Written into the decision tree** of matches in ALERT, not merely displayed: a rarity is re-read months later, at audit, alongside the corpus that produced it.
+- **Readable by the false-positive rules**, `ctx["rarity"]`.
+- **Shown to the analyst** in all three decision-tree views.
+- **Exposed for calibration** — Engine screen and `GET /api/screening/name-rarity`: you see what the corpus holds *before* writing a threshold into a rule.
+
+A shipped rule template uses it, scoped to the **HORS_SANCTION** perimeter: it closes the banal name without corroboration, and **a single rare shared word keeps the alert open**. With no table (a process that has not loaded the cache) every flag is at rest: the rule closes nothing, and it does not crash.
+
+**Rarity moves no score.** Adding a term to the calculation would shift, in one stroke, every calibrated threshold, every rule written against them and every homologated test book. The signal goes to whoever decides — the rule, the analyst — it is not imposed on the engine.
+
+Measured on a real sample of **12 500 production records** (25 pages spread across the 832 470 in production):
+
+| Word | Share of corpus | | Word | Share of corpus |
+|---|---:|---|---|---:|
+| DE | 3,95 % | | AL | 1,18 % |
+| JOSE | 2,25 % | | ALI | 0,88 % |
+| MARIA | 1,98 % | | MOHAMMAD | 0,52 % |
+| SILVA | 1,82 % | | IBRAHIM | 0,51 % |
+
+| Pair | Verdict |
+|---|---|
+| « Mohammed Ali » vs MOHAMMED ALI | common — closable |
+| « Jose Silva » vs JOSE DA SILVA | common — closable |
+| « Vladimir Putin » vs VLADIMIR … PUTIN | PUTIN is rare — **alert kept** |
+| « Igor Sechin » vs SECHIN IGOR IVANOVICH | SECHIN is rare — **alert kept** |
+
+By extrapolation (Heaps' law fitted on that sample) the full corpus carries ~584 000 distinct words. The table keeps only the **20 000 most frequent**: the words that decide anything number in the hundreds, and any absent word is *rarer than the last one kept* — an **upper** bound, never zero, so an unknown word never closes anything.
+
+The table is built where the universe is in memory (the API cache) and otherwise **from the database**: re-screening and test books run in the worker daemon, which cannot see the API process's cache. Without that path, a rarity-based rule would close in one process and not in the other.
+
+The screening response **does not grow with the perimeter** — a contract established after the ~240 MB measured in production. Putting rarity on every `all_matches` row broke it (45 366 B for 60 candidates against 50 835 B for 200, where the contract tolerates 10 %). It is returned in full on `best_match` and written to the journal: the database is what counts.
+
+### Fixed — the filtering index was rebuilt on every payment message
+`screen_payment_message` flattened the screening index, deduplicated by `entity_id`, then regenerated the blocking keys of **the whole universe** — for every message. Measured on a corpus at production proportions (832 470 records): **17,0 s** of key generation and **1,7 s** of flattening. Nineteen seconds paid inside the HTTP request, on the channel whose first requirement is response time.
+
+The index is now memoised per process under a signature covering everything that changes the keys: production list fingerprint, channel layout, engine capabilities, active linguistic equivalences. A stale index would miss records — a silent false negative — so invalidation is tested change by change.
+
+The list restriction is **not** in the signature: it now applies to **candidate selection**, on the handful of records in a bucket, rather than to index construction. Restricting no longer costs nineteen seconds, and a test verifies the excluded set is exactly what it was.
+
+### Fixed — one payment message could cost more than an hour of computation
+The number of parties screened in an ISO 20022 message was unbounded. A message accepted up to the upload cap (8 MB) carries **56 678 transactions** — measured on a real minimal pain.001, 148 bytes per transaction — hence as many distinct parties. Each queries the filtering index and compares its candidates: in production a phonetic bucket holds **415 records on average** (25 906 for the largest) at ~180 µs per comparison, so ~75 ms per party. Over an hour of computation for a single message, inside a synchronous HTTP request, with as many rows written to the immutable audit trail.
+
+That request **already** failed on the server's timeout — but after burning that time and writing those rows. The refusal is now immediate, *before* any setting is read and any computation done, and it says how many parties the message carries and what to do: split it. The bound is 500 parties (~37 s at the measured average cost, already the maximum reasonable for a synchronous response). If real files exceed it, the natural follow-up is to route large messages through the job queue as batch campaigns are — but that changes the endpoint's response contract, so it is a product decision, not a fix.
+
+### Fixed — every file upload was unbounded
+None of the six upload endpoints had a size cap. Transaction filtering read the whole message into memory (`await file.read()`); the other five copied to disk with `shutil.copyfileobj` without a limit. A single file was therefore enough to exhaust the worker's memory or the instance's disk — and the monitored CFT inbox is fed by an upstream system, so the input is not always an attentive operator's.
+
+Three bounded helpers replace the raw copies, with caps differentiated by nature of deposit — an official list is bulky by construction (OFAC's `SDN_ADVANCED.XML` weighs 126 MB, measured), an alert attachment is not: **list 512 MB, clients 64 MB, attachment 32 MB, message 8 MB**. Past the cap a 413 is raised and nothing partial is left on disk. An AST test checks that every endpoint function taking an `UploadFile` goes through one of the helpers, so the next endpoint written cannot reintroduce the hole.
+
+### Fixed — a single malformed record made every screening that saw it fail
+The multi-valued fields — `countries.citizenship`, `aliases.high_priority`, `dates_of_birth`, `genders` — are JSON columns whose shape no schema guarantees. Two documented doors let a string through where the engine expects a list: `PATCH /api/entities/{id}` declares `countries: Dict[str, Any]` (so `{"citizenship": "FR"}` is **valid** to Pydantic), and the client upsert webhook declares `client_countries: Dict[str, Any]`, fed system-to-system by an upstream nobody controls.
+
+`[] + "FR"` raises. On the client side the request returned 500 — annoying. On the **listed record** side it was far worse: one malformed record made **every** screening whose blocking selects it fail, and a screening that does not complete leaves **no audit line at all**. An invisible false negative. Losing one context field beats losing the screening.
+
+One case was worse than a crash because it was **silent**. An alias written `{"high_priority": "IVAN IVANOV"}` was extended **character by character** — "I", "V", "A", "N"… — so the alias was never compared, and a record listed under its alias went through with nothing to show for it. It is now screened like a list.
+
+### Fixed — no bound on the length of an incoming name
+Damerau-Levenshtein is **linear** in the length of the screened name (the other side, the listed record, is short):
+
+| Name length | Damerau-Levenshtein | Full base score |
+|---:|---:|---:|
+| 100 | 0,33 ms | 1,19 ms |
+| 1 000 | 2,67 ms | 4,30 ms |
+| 5 000 | 13,85 ms | 20,31 ms |
+| 20 000 | 56,02 ms | 82,55 ms |
+
+Multiplied by a bucket's candidates — 415 on average in production — a single 20 000-character name is worth **34 seconds** of computation for one request. And the computation is lost in advance: the database stores `String(1000)`.
+
+The bound is therefore **exactly the database's**, 1 000 characters. The longest *real* name in the production corpus is **310** (a Russian penitentiary institution, measured on the 12 500-record sample), and ISO 20022 caps `<Nm>` at 140. Screening and the client webhook refuse with a 422 before any computation; in a payment message the name is **truncated**, the party is not rejected — refusing the whole message would leave it unscreened, which is worse.
+
+### Fixed — the blocking-component cap existed only on read
+`MAX_BLOCKING_FIELDS = 3` exists for a measurable reason: index lookup tries **every combination of wildcards** over the field components — otherwise a listed record that leaves such a field empty becomes structurally unreachable — which is 2^N probes per screening. The cap was applied only when **reading** the setting. On **write**, a layout with four field components was accepted (`200 "Blocking keys mises à jour. Cache de criblage rechargé."`), written to the database, recorded in the administration log — then **silently ignored** by the engine, which fell back to the default layout.
+
+The operator believed they had changed how screening selects candidates; nothing had changed, and nothing said so. Same class as the unreachable `token_set` weight fixed earlier: a setting you can save that never acts. Both sides now count the same set of components, named once.
+
+### Fixed — three missing indexes on `alerts`, and a NULL trap in retention
+Since a screening opens an alert **per match**, this table grows by the number of homonyms: one "Mohammed Ali" without a country adds 2 976. Three indexes that cost nothing on a table of a few thousand rows are worth having on one counted in millions.
+
+- `ix_alerts_created_at` / `ix_alerts_decided_at` — the home screen, exports, per-analyst indicators and the daily curve all filter and sort on these two dates. Neither was indexed: every home-screen load scanned the whole table twice ("alerts created 24 h", "decided 24 h"), and `ORDER BY created_at DESC LIMIT 50` read everything to return fifty.
+- `ix_alerts_audit_id` — PostgreSQL does **not** automatically index the *referencing* side of a foreign key. Without it, each `compliance_audit_trail` row deleted by retention triggers a **sequential scan** of `alerts` for the referential-integrity check: purging 100 000 audit rows was worth 100 000 scans.
+
+Separately, `_purgeable_audit_query` selects expired audit rows "no longer referenced by any alert" with `~AuditTrail.id.in_(query(Alert.audit_id))`. In SQL, `x NOT IN (…, NULL)` is **never** true. If `alerts.audit_id` became nullable and a single alert carried NULL, the purge would **silently** stop purging — no error, no log, a zero counter that looks normal, and GDPR retention no longer applying. The column is NOT NULL today; a test now holds that, with the rewrite (NOT EXISTS) named in the failure message so that changing the schema is deliberate rather than fatal.
+
+### Fixed — "alert" did not mean "alert" on three screens
+Since screening opens an alert **per match**, three places counted *clients* while writing *alerts*: the test book, the engine impact report and batch campaigns. Confusing the two understates the workload by the number of homonyms — a factor of hundreds on a list like PEP. All three now carry both figures, named apart: **clients intercepted** on one side (the rate, unchanged, which makes the verdict), **alerts opened** on the other (the volume of work). `BatchCampaign` gains a nullable `hits_count`, so older campaigns display honestly rather than showing a fabricated zero.
+
+### Fixed — the screening pool returned the whole record for every hit
+`_match_chunk` attached the complete listed record to each score before shipping it back to the parent. On a common name, a chunk's hits are counted in thousands, and every one of them travelled through the pickle channel carrying ~1,8 KB of record the parent **already had in memory** (it transmitted it by fork). Children now return the `entity_id` alone and the parent re-attaches the record by identity. An orphaned identifier — impossible unless the index changes mid-run — is logged as an ERROR and dropped rather than silently producing an alert without a record.
+
+### Fixed — CSV formula injection in every export
+Every CSV export wrote cell values verbatim. A cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return is interpreted as a **formula** by Excel and LibreOffice: a client name or a decision comment reading `=cmd|'/c calc'!A1` executes on the auditor's machine when they open the export. The content comes from ingested lists, imported client files, payment messages and analyst comments — none of which the product controls. All cells are now neutralised by a leading apostrophe, headers included, on every export.
+
+### Fixed — login timed differently for a known and an unknown account
+`POST /api/auth/login` only computed the password hash when the account existed. The two paths were therefore separated by the cost of a key derivation — measurable from outside, and enough to enumerate valid usernames without ever authenticating. The unknown-account path now verifies against a dummy fingerprint computed once at startup, so both paths pay the same computation.
+
+### Changed — ASCII fast path in comparison normalisation
+A purely ASCII text passes through `strip_accents_for_matching` **unchanged**, whatever the capabilities: `detect_scripts` finds no non-Latin script in it, and the NFKD decomposition of ASCII is ASCII with no combining character. The demonstration is exhaustive over the 128 code points, and held by a test.
+
+This is the engine's hottest path — taken twice per comparison, over a whole universe of candidates — and **98,3 %** of production listed names are pure ASCII. Measured: 1,01 µs per call with a warm cache against 0,23 µs on the fast path (×4,5); with no cache, 5,39 against 0,34 (×16). End to end: ×1,07 on a full match (the string metrics dominate), ×1,13 on generating a universe's blocking keys, and building the rarity table drops from 12,79 s to 4,43 s over 832 000 distinct names.
+
+### Fixed — the list type of a record was resolved by scanning the cache
+`next(e["_list_type"] for e in watchlist_store if e["entity_id"] == …)` — 832 470 comparisons per identifier in production. In bulk whitelisting from a test-book report that scan was **inside the loop**: 500 proposed pairs were worth 416 million comparisons for one call. The database already indexes `entity_id`; `_list_types_map(db, ids)` resolves the whole batch in one query (chunks of 800), production winning over a pending or superseded record — the same rule as `_entity_names_map`, of which it is the counterpart.
+
 ### Fixed — the test book stopped predicting production, and one of the two gaps was mine
 Keeping every match above the cut-off opened two gaps between what the test book announces and what production does. Both were consequences of the previous change, found by asking whether the backtest still measures the thing it claims to.
 

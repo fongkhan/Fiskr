@@ -43,7 +43,11 @@ perdre les fiches sans date — c'est-à-dire l'essentiel des listes officielles
 
 Le nombre de composantes de champ est **plafonné** (`MAX_BLOCKING_FIELDS`,
 3 aujourd'hui) : chaque champ ajouté double le nombre de variantes jokerisées
-à interroger.
+à interroger, soit 2^N sondes par criblage. Un layout qui dépasse le plafond est
+**refusé à l'enregistrement** (400, avec le compte et les composantes en
+cause) — il était auparavant accepté puis silencieusement ignoré, l'exploitant
+croyant avoir changé le criblage alors que le moteur retombait sur le layout
+par défaut.
 
 Accès : **Criblage → Moteur** (rôle `blocking` ou `admin`), avec simulation
 d'impact avant application.
@@ -90,10 +94,50 @@ Le dictionnaire `ctx` contient :
 | **`hits_count`** | nombre de correspondances au-dessus du seuil produites par **ce** criblage |
 | **`hit_rank`** | rang de celle-ci par score décroissant (1 = la meilleure) |
 | **`corroboration`** | `has_dob`, `has_country`, `has_identity_document`, `name_only`, `corroborated`, plus les trois scores d'ajustement |
+| **`rarity`** | fréquence des mots du nom dans le corpus listé (cf. plus bas) |
 
-Les quatre dernières existent parce qu'un criblage rend **toutes** ses
+Les cinq dernières existent parce qu'un criblage rend **toutes** ses
 correspondances au-dessus du seuil : une règle doit pouvoir raisonner sur le
 lot, et distinguer « une correspondance isolée » de « 2 976 homonymes ».
+
+#### `ctx["rarity"]` — ce que vaut le nom rapproché
+
+Rapprocher deux noms sur « MOHAMMED » et « ALI » n'identifie personne : des
+milliers de fiches les portent. Le faire sur « TYURIN » identifie presque
+sûrement. Le moteur compte, sur l'univers **réellement criblé**, dans combien
+de fiches apparaît chaque mot de nom (fréquence *documentaire* : une fiche
+comptée une fois par mot, nom principal **et** alias haute priorité).
+
+| Clé | Contenu |
+|---|---|
+| `disponible` | `False` quand aucune table n'est construite dans ce processus — **tous les autres drapeaux sont alors au repos** |
+| `corpus` | nombre de fiches mesurées |
+| `tokens` | `[{token, df, part, repandu}]` pour chaque mot **partagé** par les deux noms, du plus répandu au moins |
+| `df_min`, `df_max` | fréquence du mot partagé le plus, et le moins, discriminant |
+| `seuil_repandu` | au-delà de ce nombre de fiches, un mot est dit « répandu » |
+| `plancher` | en dessous de ce nombre, la table ne compte plus : un `df` égal à `plancher - 1` signifie « au plus autant », pas « exactement autant » |
+| `information`, `information_nom_liste` | information portée par les mots partagés, et par le nom listé entier (en nats) |
+| `couverture` | part de l'identité du nom listé effectivement rapprochée, 0 à 1 |
+| `rarete` | rareté du mot partagé le plus discriminant, ramenée sur 0-100 |
+| `nom_repandu` | **vrai seulement si TOUS les mots partagés sont répandus** — un seul mot rare le met à faux |
+| `sans_token_commun` | rapprochement purement flou, aucun mot exactement commun : la rareté ne dit rien de ce cas |
+
+Deux garde-fous à connaître avant d'écrire une règle dessus :
+
+- un **mot inconnu de la table** compte comme rare (`df = plancher - 1`), jamais
+  comme absent : une borne *supérieure*, pour qu'un mot inconnu ne fasse jamais
+  clôturer ;
+- **sans table**, `disponible` vaut `False` et `nom_repandu` vaut `False` : une
+  règle fondée sur la rareté ne clôture rien, elle ne plante pas.
+
+La rareté **ne déplace aucun score**. Elle est jointe à l'alerte, écrite dans
+l'arbre de décision (donc relisible en contrôle avec le corpus qui l'a
+produite) et lisible ici. Pour la calibrer avant d'écrire un seuil :
+`GET /api/screening/name-rarity` (sans paramètre : les mots les plus répandus
+de *votre* univers ; avec `name=` : le profil d'un nom), ou l'écran **Moteur**.
+
+Le modèle de règle livré « le nom ne partage que des mots très répandus » s'en
+sert, limité au périmètre `HORS_SANCTION`.
 
 Modules disponibles dans la règle : `re`, `math`, `datetime`, `date`,
 `timedelta`, `unicodedata`.

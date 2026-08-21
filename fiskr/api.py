@@ -1055,6 +1055,28 @@ async def lifespan(app: FastAPI):
         if (config.get("jobs") or {}).get("autostart", True):
             background_tasks.append(asyncio.create_task(_worker_watchdog()))
         background_tasks.append(asyncio.create_task(_watchlist_epoch_watcher()))
+    elif mode == "eager":
+        # Execution INLINE : un job termine avant que l'endpoint reponde. Aucun
+        # planificateur, et aucune reprise de file.
+        #
+        # Ils y etaient, et ils faisaient tomber la suite de tests au hasard.
+        # Chaque `TestClient(app)` entre dans le lifespan : six boucles se
+        # reveillaient a la minute pleine suivante et, sur une suite de quatre
+        # minutes, quatre tics tombaient sur le test qui passait par la — purge
+        # de retention, planificateur de sources, fouille d'homonymes — tous
+        # sur la MEME base que les tests. D'ou un echec par passe, sur un test
+        # different a chaque fois, avec des lignes disparues sous les pieds du
+        # test en cours (ObjectDeletedError).
+        #
+        # `requeue_stale` est exclu pour la meme raison : il bascule en ERROR
+        # les jobs QUEUED orphelins, ce qui n'a aucun sens quand rien n'est
+        # jamais mis en file — mais suffit a casser un test qui pose une ligne
+        # QUEUED a la main.
+        #
+        # Les tics eux-memes restent des fonctions synchrones testables une par
+        # une (_cron_sync_tick, _retention_tick, _digest_tick...) : ce qui est
+        # retire ici, c'est la boucle, pas la logique.
+        logger.info("Mode inline : planificateurs periodiques non demarres.")
     else:
         # Sans demon : reprise de la file ici (les orphelins passent en ERROR
         # relancable — personne ne prendrait un QUEUED), puis planificateurs
