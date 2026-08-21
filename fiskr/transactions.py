@@ -218,6 +218,38 @@ def parse_iso20022_payment(content: bytes) -> Dict[str, Any]:
     return result
 
 
+# Nombre maximal de parties DISTINCTES criblees dans un seul message.
+#
+# Sans borne, un message accepte jusqu'au plafond de televersement (8 Mo)
+# contient 56 678 transactions — mesure sur un pain.001 minimal reel, 148 o par
+# transaction — donc autant de parties distinctes. Chacune interroge l'index de
+# filtrage et compare ses candidats : sur la production, un seau phonetique
+# porte 415 fiches en moyenne (25 906 pour le plus gros), a ~180 us la
+# comparaison. Soit environ 75 ms par partie, et plus d'une heure de calcul
+# pour un seul message — dans une requete HTTP synchrone, avec autant de lignes
+# ecrites au journal d'audit.
+#
+# Cette requete echoue DEJA aujourd'hui, sur le delai d'attente du serveur,
+# mais apres avoir brule ce temps et ecrit ces lignes. Un refus immediat et
+# explicite vaut mieux. La borne est posee a 500 parties : au cout moyen
+# mesure, c'est ~37 s de criblage, deja le maximum raisonnable pour une
+# reponse synchrone.
+MAX_PARTIES_PAR_MESSAGE = 500
+
+
+class MessageTropVolumineux(ValueError):
+    """Le message porte plus de parties que le criblage synchrone n'en prend."""
+
+    def __init__(self, parties: int, plafond: int):
+        self.parties = parties
+        self.plafond = plafond
+        super().__init__(
+            f"Ce message porte {parties} parties distinctes à cribler, au-delà "
+            f"de la limite de {plafond} d'un filtrage synchrone. Découpez-le en "
+            f"plusieurs messages : chacun sera criblé et tracé normalement."
+        )
+
+
 def _distinct_parties(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Deduplique les parties du message par (nom, pays, BIC), roles agreges."""
     seen: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
@@ -437,7 +469,15 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     tracee dans chaque ligne d'audit). Chaque partie criblee laisse une ligne
     d'audit ; chaque hit ALERT ouvre une alerte de travail. Verdict global :
     HIT des qu'une partie est en alerte, PASS sinon.
+
+    Leve `MessageTropVolumineux` AVANT toute lecture de reglage et tout calcul
+    quand le message porte plus de `MAX_PARTIES_PAR_MESSAGE` parties : rien de
+    ce qui suit ne doit etre paye pour un message qui ne sera pas crible.
     """
+    parties = _distinct_parties(parsed)
+    if len(parties) > MAX_PARTIES_PAR_MESSAGE:
+        raise MessageTropVolumineux(len(parties), MAX_PARTIES_PAR_MESSAGE)
+
     msg_id = parsed.get("msg_id") or "SANS-ID"
     party_results: List[Dict[str, Any]] = []
     verdict = "PASS"
@@ -451,7 +491,7 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     scoring_config = scoring_config_with_thresholds(db, channel="FILTERING")
     index = index_de_filtrage(watchlist_index, filtering_cfg, watchlist_hash)
 
-    for idx, party in enumerate(_distinct_parties(parsed)):
+    for idx, party in enumerate(parties):
         client_id = f"TXN:{msg_id}:{idx}"
         candidates = _party_candidates(party, index, filtering_cfg, screening_lists)
 

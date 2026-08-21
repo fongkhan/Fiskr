@@ -86,7 +86,8 @@ from fiskr.sync import (
 )
 from fiskr.names import ensure_parsed_name
 from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
-from fiskr.transactions import parse_iso20022_payment, screen_payment_message
+from fiskr.transactions import (parse_iso20022_payment, screen_payment_message,
+                                MessageTropVolumineux, MAX_PARTIES_PAR_MESSAGE)
 from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
@@ -2961,10 +2962,16 @@ async def screen_transaction_message(
     # « N/A » comme hash de liste. Place apres le parsing : un message invalide
     # est rejete sans payer le chargement.
     _ensure_watchlist_cache(db)
-    result = screen_payment_message(
-        db, parsed, watchlist_index, watchlist_version, watchlist_hash,
-        current_user["username"], screening_lists=requested_lists
-    )
+    try:
+        result = screen_payment_message(
+            db, parsed, watchlist_index, watchlist_version, watchlist_hash,
+            current_user["username"], screening_lists=requested_lists
+        )
+    except MessageTropVolumineux as e:
+        # Refus IMMEDIAT plutot qu'une heure de calcul suivie d'un delai
+        # d'attente : le message dit combien de parties il porte et quoi faire.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
     if result.get("verdict") == "HIT":
         hits = [p for p in (result.get("parties") or []) if p.get("status") == "ALERT"]
         emit(db, "filtering_hit", {
@@ -4373,6 +4380,37 @@ def _entity_names_map(db: Session, entity_ids) -> Dict[str, str]:
         if entity_id not in names or snap_status == "READY":
             names[entity_id] = name
     return names
+
+def _list_types_map(db: Session, entity_ids) -> Dict[str, str]:
+    """
+    Resout entity_id -> type de liste d'origine (fiches en production d'abord).
+
+    Cette resolution se faisait par BALAYAGE LINEAIRE du cache memoire —
+    `next(e["_list_type"] for e in watchlist_store if e["entity_id"] == ...)` —
+    soit 832 470 comparaisons par identifiant sur la production. Dans la mise
+    en liste blanche en masse depuis un rapport de cahier de tests, ce
+    balayage etait DANS la boucle : 500 paires proposees valaient 416 millions
+    de comparaisons. La base a un index sur `entity_id` ; une requete unique
+    resout tout le lot.
+    """
+    ids = [i for i in {str(i).strip() for i in entity_ids if i} if i]
+    if not ids:
+        return {}
+    types: Dict[str, str] = {}
+    for tranche in (ids[i:i + 800] for i in range(0, len(ids), 800)):
+        rows = (
+            db.query(WatchlistEntity.entity_id, Snapshot.file_type, Snapshot.status)
+              .join(Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id)
+              .filter(WatchlistEntity.entity_id.in_(tranche),
+                      Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+              .all()
+        )
+        for entity_id, file_type, snap_status in rows:
+            # La production l'emporte sur une fiche en attente ou remplacee
+            if entity_id not in types or snap_status == "READY":
+                types[entity_id] = file_type
+    return types
+
 
 def _relation_view(rel: EntityRelationship, names: Dict[str, str]) -> Dict[str, Any]:
     return {
@@ -12125,10 +12163,7 @@ async def create_whitelist_pair(
 
     # Type de liste derive cote serveur (jamais fourni par le client) :
     # cache de production d'abord, sinon la derniere alerte de la paire
-    list_type = next(
-        (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == watchlist_entity_id),
-        None
-    )
+    list_type = _list_types_map(db, [watchlist_entity_id]).get(watchlist_entity_id)
     if list_type is None:
         last_alert = db.query(Alert).filter(
             Alert.client_id == client_id,
@@ -12197,6 +12232,13 @@ async def create_whitelist_pairs_bulk(
             detail="Une justification commune est obligatoire pour une mise en liste blanche (réglage actif)."
         )
 
+    # Types de liste resolus EN UNE requete pour tout le lot : cette resolution
+    # etait un balayage lineaire du cache DANS la boucle — jusqu'a 500 paires
+    # x 832 470 fiches, soit 416 millions de comparaisons pour un appel.
+    types_par_id = _list_types_map(
+        db, [p.watchlist_entity_id for p in payload.pairs
+             if not (p.list_type or "").strip()])
+
     created, skipped = [], []
     for p in payload.pairs:
         client_id = p.client_id.strip()
@@ -12208,9 +12250,7 @@ async def create_whitelist_pairs_bulk(
             skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "paire déjà active"})
             continue
         # Type de liste : fourni par le rapport de backtest, sinon derive du cache
-        list_type = (p.list_type or "").strip() or next(
-            (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == entity_id), None
-        )
+        list_type = (p.list_type or "").strip() or types_par_id.get(entity_id)
         pair = WhitelistPair(
             client_id=client_id,
             watchlist_entity_id=entity_id,
