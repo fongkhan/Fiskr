@@ -107,7 +107,7 @@ from fiskr.settings import (
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
     SETTING_AUTO_BACKTEST_ENABLED, SETTING_AUTO_BACKTEST_PANEL,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
-    BLOCKING_COMPONENTS, MAX_BLOCKING_FIELDS,
+    BLOCKING_COMPONENTS, BLOCKING_FIELD_COMPONENTS, MAX_BLOCKING_FIELDS,
     blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
@@ -1172,16 +1172,33 @@ class ScreenCountries(BaseModel):
     birth_country: List[str] = []
     registration_country: List[str] = []
 
+# Longueur maximale d'un nom entrant dans le moteur. C'est EXACTEMENT ce que la
+# base sait stocker (`String(1000)` sur client_name, watchlist_name,
+# primary_name) : au-dela, le nom ne peut de toute facon pas etre persiste, donc
+# le comparer est du calcul perdu — et ce calcul n'est pas gratuit.
+#
+# La distance de Damerau-Levenshtein est LINEAIRE en la longueur du nom crible
+# (l'autre cote, la fiche listee, est court). Mesure : 82,55 ms pour un score de
+# base sur un nom de 20 000 caracteres, contre 1,19 ms a 100. Multiplie par le
+# nombre de candidats d'un seau — 415 en moyenne sur la production — un seul nom
+# de 20 000 caracteres vaut 34 s de calcul pour une requete.
+#
+# Le plus long nom REEL du corpus de production mesure 310 caracteres
+# (etablissement penitentiaire russe, mesure sur un echantillon de 12 500
+# fiches). La borne en laisse plus de trois fois autant.
+LONGUEUR_MAX_NOM = 1000
+
+
 class ScreenClientRequest(BaseModel):
     client_id: Optional[str] = Field(None, json_schema_extra={"example": "CUST-0091"})
     client_type: str = Field(..., description="PP (Individu) ou PM (Entreprise)", json_schema_extra={"example": "PP"})
-    client_first_name: Optional[str] = Field(None, json_schema_extra={"example": "Vladimir"})
-    client_last_name: Optional[str] = Field(None, json_schema_extra={"example": "Putin"})
-    client_maiden_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+    client_first_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": "Vladimir"})
+    client_last_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": "Putin"})
+    client_maiden_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": ""})
     # Denominations alternatives : criblees comme le nom principal
     client_aliases: Optional[List[str]] = Field(
-        None, json_schema_extra={"example": ["Vladimir Poutine"]})
-    client_company_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+        None, max_length=200, json_schema_extra={"example": ["Vladimir Poutine"]})
+    client_company_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": ""})
     client_dob: Optional[str] = Field(None, json_schema_extra={"example": "1952-10-07"})
     client_gender: Optional[str] = Field("U", json_schema_extra={"example": "M"})
     client_is_deceased: Optional[bool] = Field(False)
@@ -7780,6 +7797,22 @@ async def update_blocking_settings(
             )
         if len(set(layout)) != len(layout):
             raise HTTPException(status_code=400, detail=f"{label} : composantes en double.")
+        # Plafond des composantes de CHAMP. Il etait verifie a la LECTURE
+        # seulement : un layout qui le depassait etait accepte (200 « cache
+        # rechargé »), ecrit en base, trace au journal d'administration — puis
+        # SILENCIEUSEMENT ignore par le moteur, qui retombait sur le layout par
+        # defaut. L'exploitant croyait avoir change le criblage ; rien n'avait
+        # change. Le plafond existe parce que l'interrogation essaie toutes les
+        # combinaisons de jokers de ces composantes : 2^N sondes par criblage.
+        champs = [c for c in layout if c in BLOCKING_FIELD_COMPONENTS]
+        if len(champs) > MAX_BLOCKING_FIELDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{label} : {len(champs)} composantes de champ "
+                        f"({', '.join(champs)}) alors que le maximum est "
+                        f"{MAX_BLOCKING_FIELDS}. L'interrogation essaie toutes "
+                        f"les combinaisons de jokers de ces composantes, soit "
+                        f"2^{len(champs)} sondes par criblage."))
 
     reloaded = False
     if payload.screening_layout is not None:
@@ -11142,10 +11175,10 @@ class HookClientUpsert(BaseModel):
     # Fiche client unitaire : memes champs que l'import CLIENT_BASE
     client_id: str
     client_type: str = "PP"
-    client_first_name: Optional[str] = None
-    client_last_name: Optional[str] = None
-    client_maiden_name: Optional[str] = None
-    client_company_name: Optional[str] = None
+    client_first_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
+    client_last_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
+    client_maiden_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
+    client_company_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
     client_dob: Optional[str] = None
     client_gender: Optional[str] = "U"
     client_countries: Optional[Dict[str, Any]] = None

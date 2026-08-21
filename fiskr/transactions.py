@@ -71,6 +71,25 @@ def _child_text(elem, *path: str) -> str:
     return (node.text or "").strip() if node is not None else ""
 
 
+# Longueur maximale d'un nom de partie retenu pour le criblage.
+#
+# ISO 20022 plafonne <Nm> a 140 caracteres (Max140Text) ; la base de Fiskr
+# stocke 1 000. Un message peut malgre tout en porter davantage — rien ne
+# valide le XML entrant — et la distance de Damerau-Levenshtein est LINEAIRE en
+# cette longueur : 82,55 ms pour un score de base a 20 000 caracteres contre
+# 1,19 ms a 100, multiplie par les 415 candidats d'un seau moyen de la
+# production. Un seul nom de 20 000 caracteres vaut 34 s de calcul.
+#
+# La partie n'est pas REJETEE — refuser le message entier le laisserait non
+# crible, ce qui est pire — mais son nom est ramene a ce que la base sait
+# stocker, sept fois le plafond de la norme.
+LONGUEUR_MAX_NOM_PARTIE = 1000
+
+
+def _nom_borne(nom: str) -> str:
+    return nom[:LONGUEUR_MAX_NOM_PARTIE] if nom and len(nom) > LONGUEUR_MAX_NOM_PARTIE else nom
+
+
 def _extract_party(elem, role_tag: str) -> Optional[Dict[str, Any]]:
     """Extrait une partie (Nm, adresse, pays, date/pays de naissance)."""
     if elem is None:
@@ -88,7 +107,7 @@ def _extract_party(elem, role_tag: str) -> Optional[Dict[str, Any]]:
     return {
         "role_tag": role_tag,
         "role": PARTY_ROLES.get(role_tag, role_tag),
-        "name": name,
+        "name": _nom_borne(name),
         "country": country.upper(),
         "address": address,
         "bic": "",
@@ -113,7 +132,7 @@ def _extract_agent(elem, role_tag: str) -> Optional[Dict[str, Any]]:
     return {
         "role_tag": role_tag,
         "role": AGENT_ROLES.get(role_tag, role_tag),
-        "name": name or bic,
+        "name": _nom_borne(name or bic),
         "country": country.upper(),
         "address": "",
         "bic": bic,
