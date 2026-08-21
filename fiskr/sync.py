@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 from fiskr.config import config, PROJECT_ROOT
+from fiskr.limites import TAILLE_MAX_TELECHARGEMENT, TAILLE_MAX_PAGE
 from fiskr.quality import evaluate_and_clean
 from fiskr.delta import calculate_delta, calculate_delta_db
 from fiskr.ingest import (
@@ -406,6 +407,24 @@ def _get_shared_client():
     return _shared_http_client
 
 
+class ReponseTropVolumineuse(RuntimeError):
+    """
+    L'hote a servi plus d'octets que le plafond de cette voie d'entree.
+
+    Volontairement NON retentable : `_with_retries` ne rejoue que
+    `_RetryableHTTP` et les erreurs de transport. Rejouer n'aurait aucun sens
+    — la reponse ne retrecira pas — et couterait un second telechargement
+    complet de ce qu'on vient justement de refuser.
+    """
+
+    def __init__(self, url: str, recu: int, plafond: int, quoi: str):
+        self.url, self.recu, self.plafond = url, recu, plafond
+        super().__init__(
+            f"{quoi} de {url} : plus de {plafond // (1024 * 1024)} Mo recus, "
+            f"lecture interrompue. Si cette source est legitimement plus "
+            f"volumineuse, relevez le plafond dans fiskr/limites.py.")
+
+
 class _RetryableHTTP(RuntimeError):
     """
     Reponse HTTP recue mais a retenter (statut transitoire ou corps vide).
@@ -560,8 +579,21 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
             # Nouveau fichier a chaque tentative : jamais de contenu partiel concatene
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_bytes(chunk_size=1024 * 256):
-                    f.write(chunk)
                     received += len(chunk)
+                    if received > TAILLE_MAX_TELECHARGEMENT:
+                        # Coupe le flux AVANT d'ecrire le bloc de trop, puis
+                        # efface ce qui etait deja sur le disque : un refus ne
+                        # laisse pas la moitie d'un fichier occuper la place
+                        # qu'on refusait de lui donner. Meme regle que le
+                        # televersement (copier_televersement), meme plafond.
+                        f.close()
+                        try:
+                            dest_path.unlink()
+                        except OSError:
+                            pass
+                        raise ReponseTropVolumineuse(
+                            url, received, TAILLE_MAX_TELECHARGEMENT, "Telechargement")
+                    f.write(chunk)
                     if progress and received - last_reported >= 1024 * 1024:
                         last_reported = received
                         try:
@@ -615,6 +647,14 @@ def http_get_text(url: str, timeout: Optional[float] = None,
     Le budget de reprises est deduit de l'hote : EUR-Lex est plus patient que
     les autres sources (cf. network_for_url / source_network_config), sans que
     l'appelant ait a le savoir.
+
+    La lecture est BORNEE a TAILLE_MAX_PAGE. C'est la raison du streaming ici :
+    `client.get()` met tout le corps en memoire avant de rendre la main, donc
+    aucun controle pose apres coup ne protege de quoi que ce soit — quand on
+    peut mesurer, le mal est fait. En lisant par blocs, le refus tombe au
+    premier bloc de trop et rien de plus n'est alloue. Ce que cette voie
+    recupere, ce sont des pages et des flux RSS ; le plafond est hors de
+    portee d'une source saine, et arrete net une source qui ne l'est pas.
     """
     network = network_for_url(url)
     page_timeout = timeout if timeout is not None else network["timeout_seconds"]
@@ -627,14 +667,27 @@ def http_get_text(url: str, timeout: Optional[float] = None,
         kwargs = {"timeout": page_timeout}
         if headers:
             kwargs["headers"] = headers
-        response = _get_shared_client().get(url, **kwargs)
-        if response.status_code in _RETRYABLE_STATUS:
-            raise _retryable_from_response(response)
-        if response.status_code == 200 and not response.text.strip():
+        with _get_shared_client().stream("GET", url, **kwargs) as response:
+            # Les en-tetes sont la avant le corps : un statut transitoire ou
+            # une erreur franche se tranche sans lire un seul octet de contenu.
+            if response.status_code in _RETRYABLE_STATUS:
+                raise _retryable_from_response(response)
+            if response.status_code != 200:
+                raise RuntimeError(f"Reponse invalide de {url} (HTTP {response.status_code})")
+            morceaux, recu = [], 0
+            for morceau in response.iter_bytes(chunk_size=256 * 1024):
+                recu += len(morceau)
+                if recu > TAILLE_MAX_PAGE:
+                    raise ReponseTropVolumineuse(url, recu, TAILLE_MAX_PAGE, "Page")
+                morceaux.append(morceau)
+            corps = b"".join(morceaux)
+        # Meme decodage que `response.text` : jeu de caracteres declare par
+        # l'hote, repli UTF-8, caracteres invalides remplaces plutot que
+        # fatals — un accent casse ne doit pas couter une synchronisation.
+        texte = corps.decode(response.charset_encoding or "utf-8", errors="replace")
+        if not texte.strip():
             raise _RetryableHTTP(f"HTTP {response.status_code} (corps vide)")
-        if response.status_code != 200:
-            raise RuntimeError(f"Reponse invalide de {url} (HTTP {response.status_code})")
-        return response.text
+        return texte
 
     return _with_retries(_attempt, url, max_retries, network["backoff_seconds"])
 

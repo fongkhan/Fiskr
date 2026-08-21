@@ -455,6 +455,19 @@ function tableEmpty(target, cols, message, icon = "") {
  tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
 }
 
+// État d'ERREUR homogène — volontairement distinct de l'état vide.
+//
+// Sur un produit de conformité, « aucune alerte pour ce filtre » et « le
+// serveur n'a pas répondu » ne doivent jamais se ressembler : la seconde
+// lecture ferait conclure à un analyste qu'il n'y a rien à instruire. Plusieurs
+// écrans laissaient pire encore — les lignes squelette du chargement, donc un
+// tableau qui semble charger indéfiniment, ou un tableau vidé sans un mot.
+function tableError(target, cols, message = "Chargement impossible.") {
+ const tbody = _tbodyOf(target);
+ if (!tbody) return;
+ tbody.innerHTML = `<tr><td colspan="${cols}" class="error-state"><span class="error-icon">⚠</span>${escapeHtml(message)}<br><small>Réessayez ; si cela persiste, prévenez l'exploitation.</small></td></tr>`;
+}
+
 // ------------------ FILTRES GÉNÉRIQUES DE TABLEAU (côté client) ------------------
 // Une barre de filtres au-dessus d'un tableau rendu en mémoire : une
 // recherche plein texte + des menus déroulants dont les valeurs sont DÉDUITES
@@ -1533,6 +1546,10 @@ async function fetchSnapshots(page = 1) {
  if (filterEl && filterEl.value) params.set("file_type", filterEl.value);
 
  const response = await apiFetch(`/api/snapshots?${params}`);
+ if (!response.ok) {
+ tableError("#snapshots-table", 5, "Liste des instantanés indisponible.");
+ return;
+ }
  const data = await response.json();
  activeSnapshots = data.items || [];
 
@@ -1541,6 +1558,7 @@ async function fetchSnapshots(page = 1) {
  data.page_size || SNAPSHOTS_PAR_PAGE);
  } catch (e) {
  console.error("Error fetching snapshots:", e);
+ tableError("#snapshots-table", 5, "Liste des instantanés indisponible.");
  }
 }
 
@@ -1658,6 +1676,7 @@ function toggleSsieOptions() {
 // ------------------ PROGRESSION DES OPERATIONS LONGUES ------------------
 // Libellés français des phases renvoyées par GET /api/progress
 const PROGRESS_PHASE_LABELS = {
+ QUEUED: "En file d'attente…",
  UPLOAD: "Téléversement du fichier…",
  DOWNLOAD: "Téléchargement depuis la source…",
  HASH: "Calcul de l'empreinte SHA-256…",
@@ -1674,13 +1693,22 @@ const PROGRESS_PHASE_LABELS = {
  SCREEN_ADDED: "Criblage à blanc (passe 3/3) — fiches ajoutées…",
  RESCREEN: "Re-criblage du référentiel clients…",
  QUALITY: "Contrôle de qualité du référentiel…",
+ BENCH: "Banc d'essai des règles…",
+ GENERATE: "Génération des pseudo-clients…",
+ CANCELLED: "Annulé",
  DONE: "Terminé",
 };
 
 // Icône par nature d'opération (GET /api/progress/active)
 const OPERATION_KIND_ICONS = {
- import: uiIcon("inbox"), sync: uiIcon("refresh"), backtest: uiIcon("flask"),
- approve: uiIcon("check-circle"), batch: uiIcon("package"), quality: uiIcon("activity"),
+ import: uiIcon("inbox"), ingest: uiIcon("inbox"),
+ sync: uiIcon("refresh"), backtest: uiIcon("flask"),
+ approve: uiIcon("check-circle"),
+ batch: uiIcon("package"), batch_campaign: uiIcon("package"),
+ quality: uiIcon("activity"), quality_check: uiIcon("activity"),
+ lookback: uiIcon("clock"), mining: uiIcon("search"),
+ engine_simulation: uiIcon("sliders"), resource_simulation: uiIcon("sliders"),
+ fprules_bench: uiIcon("target"), testpanel_generate: uiIcon("users"),
 };
 
 // Démarre l'interrogation périodique de GET /api/progress?id=<token> et
@@ -2534,6 +2562,7 @@ async function fetchWatchlist(page = 1) {
  const data = await response.json();
  if (!response.ok) {
  showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
+ tableError("#watchlist-table", 7, "Base des listés indisponible.");
  return;
  }
  // Grand périmètre : le repli approché n'est pas calculé dans la requête —
@@ -3155,12 +3184,17 @@ async function fetchAuditHistory(page = null) {
  // lus qu'a l'ouverture de la modale d'inspection.
  params.set("include_details", "false");
  const response = await apiFetch(`/api/history?${params}`);
+ if (!response.ok) {
+ tableError("#audit-table", 7, "Journal de criblage indisponible.");
+ return;
+ }
  const data = await response.json();
  auditHistory = data.items || [];
  renderAuditHistoryTable(auditHistory);
  renderAuditPagination(data.total || 0, data.page || 1, data.page_size || 50);
  } catch (e) {
  console.error("Error loading history:", e);
+ tableError("#audit-table", 7, "Journal de criblage indisponible.");
  }
 }
 
@@ -5258,28 +5292,43 @@ async function cancelReviewBacktest(jobId, snapshotId) {
 // porte le type de liste de l'entité qui l'a déclenchée.
 function attributionParListe(report) {
  const listes = report.snapshots || [];
- if (listes.length < 2) return "";  // une seule liste : l'écart lui revient en entier
+ if (!listes.length) return "";
  const horsPerimetre = report.unattributed_pairs || {};
+ // Deux colonnes, deux questions. « Clients gagnés » : combien de clients de
+ // plus cette liste fait entrer dans le champ. « Alertes ouvertes » : combien
+ // de dossiers elle crée réellement — un client homonyme d'un nom courant en
+ // porte des dizaines à lui seul. Les compteurs globaux, eux, portent sur
+ // TOUT l'univers criblé, listes non testées comprises : ils ne répondent pas
+ // à la question « qu'est-ce que CETTE homologation ajoute ? ».
+ const signe = (n) => (n > 0 ? `<strong>+${n}</strong>` : (n < 0 ? `−${-n}` : "—"));
  const lignes = listes.map(s => {
   const d = s.delta_sizes || {};
+  const avant = s.hits_current, apres = s.hits_candidate;
+  const chiffre = (typeof avant === "number" && typeof apres === "number")
+   ? `${avant} → ${apres} &nbsp;${signe(s.hits_delta || 0)}` : "—";
   return `<tr>
    <td>${listTypeBadge(s.file_type)}</td>
    <td>${(d.added || 0)} / ${(d.modified || 0)} / ${(d.removed || 0)}</td>
    <td>${s.new_pairs_count ? `<strong>+${s.new_pairs_count}</strong>` : "—"}</td>
    <td>${s.resolved_pairs_count ? `−${s.resolved_pairs_count}` : "—"}</td>
+   <td>${chiffre}</td>
   </tr>`;
  }).join("");
  const reste = (horsPerimetre.new_pairs_count || horsPerimetre.resolved_pairs_count)
   ? `<tr><td><em>Hors listes testées</em></td><td>—</td>
      <td>${horsPerimetre.new_pairs_count ? `+${horsPerimetre.new_pairs_count}` : "—"}</td>
-     <td>${horsPerimetre.resolved_pairs_count ? `−${horsPerimetre.resolved_pairs_count}` : "—"}</td></tr>`
+     <td>${horsPerimetre.resolved_pairs_count ? `−${horsPerimetre.resolved_pairs_count}` : "—"}</td>
+     <td>—</td></tr>`
   : "";
+ const titre = listes.length > 1
+  ? `Écart par liste (${listes.length} listes couvertes)`
+  : "Écart imputable à cette liste";
  return `
-  <h4 style="margin: 0.75rem 0 0.4rem;">Écart par liste (${listes.length} listes couvertes)</h4>
-  <p class="section-desc">Ce cahier couvre plusieurs listes en une passe. Chaque paire est attribuée à la liste de l'entité qui l'a déclenchée : la colonne « Alertes gagnées » dit laquelle pèse dans l'écart global.</p>
+  <h4 style="margin: 0.75rem 0 0.4rem;">${titre}</h4>
+  <p class="section-desc">Chaque correspondance est attribuée à la liste de l'entité qui l'a déclenchée : le compte est exact, jamais une estimation. « Clients gagnés » dit combien de clients de plus entrent dans le champ ; « Alertes ouvertes » dit combien de dossiers cette liste va réellement créer — un seul client homonyme d'un nom très courant en porte des dizaines.</p>
   <div class="table-container" style="max-height: 260px; overflow-y: auto;">
    <table>
-    <thead><tr><th>Liste</th><th>Delta (+ / ~ / −)</th><th>Alertes gagnées</th><th>Alertes perdues</th></tr></thead>
+    <thead><tr><th>Liste</th><th>Delta (+ / ~ / −)</th><th>Clients gagnés</th><th>Clients perdus</th><th>Alertes ouvertes (avant → après)</th></tr></thead>
     <tbody>${lignes}${reste}</tbody>
    </table>
   </div>`;
@@ -5297,11 +5346,16 @@ function renderBacktestReport(report) {
  return;
  }
 
+ // Deux chiffres, jamais un seul. `alerts` compte des CLIENTS interceptés,
+ // `hits` compte les correspondances — la production ouvre une alerte
+ // chacune. Les appeler tous les deux « alertes » a déjà trompé un réviseur :
+ // un client homonyme d'un nom courant pèse un client et des dizaines de
+ // dossiers.
  const rateCard = (title, side, accent) => `
  <div class="metric" style="flex: 1; background: var(--surface-hover); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
  <span class="metric-label" style="font-weight: 600; color: ${accent};">${title}</span>
- <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} alerte(s)</span>
- <small style="color: var(--text-muted);">taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
+ <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} client(s) intercepté(s)</span>
+ <small style="color: var(--text-muted);">${typeof side.hits === "number" ? `${side.hits} alerte(s) ouverte(s) · ` : ""}taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
  </div>`;
 
  const pairRow = (p, withCheckbox) => `
@@ -5754,7 +5808,10 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  if (assigneeFilterEl && assigneeFilterEl.value) params.set("assigned_to", assigneeFilterEl.value);
  tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
  const response = await apiFetch(`/api/alerts?${params}`);
- if (!response.ok) return;
+ if (!response.ok) {
+ tableError(`#${conf.table}`, 10, "File d'alertes indisponible.");
+ return;
+ }
  const data = await response.json();
  renderAlertsTable(channel, data.items || []);
  renderQueuePagination(
@@ -7746,8 +7803,14 @@ const FP_RULE_TEMPLATE = `def rule(ctx):
 
 // Clés du contexte rule(ctx), typées pour la palette, l'autocomplétion et le
 // formulaire structuré (miroir du contrat de fiskr/fprules.py)
+// Palette du contexte passé à `rule(ctx)`. Elle est DÉRIVÉE de ce que le moteur
+// construit réellement (fiskr/fprules.build_screening_ctx et build_filtering_ctx),
+// et un test le vérifie : une clé offerte au clic mais absente du contexte
+// produit une règle silencieusement inerte — le pire défaut possible ici, car
+// rien ne le signale à l'auteur ni au valideur.
 const FP_CTX_KEYS = [
  { key: "channel", type: "str", desc: "SCREENING ou FILTERING" },
+ { key: "perimeter", type: "str", desc: "SANCTION ou HORS_SANCTION" },
  { key: "client_id", type: "str", desc: "identifiant client" },
  { key: "client_name", type: "str", desc: "nom complet du client" },
  { key: "entity_id", type: "str", desc: "identifiant de l'entité listée" },
@@ -7756,17 +7819,31 @@ const FP_CTX_KEYS = [
  { key: "final_score", type: "num", desc: "score final 0-100" },
  { key: "base_score", type: "num", desc: "score avant ajustements" },
  { key: "hard_match", type: "bool", desc: "correspondance exacte (identifiant)" },
+ { key: "hits_count", type: "num", desc: "correspondances ≥ seuil de CE criblage" },
+ { key: "hit_rank", type: "num", desc: "rang de celle-ci par score (1 = la meilleure)" },
+ { key: "corroboration", type: "dict", desc: "ce que le profil apporte au-delà du nom" },
+ { key: "rarity", type: "dict", desc: "fréquence des mots du nom dans le corpus listé" },
  { key: "adjustments", type: "dict", desc: "détail des ajustements de score" },
  { key: "client", type: "dict", desc: "profil client complet (criblage)" },
  { key: "entity", type: "dict", desc: "fiche listée complète" },
  { key: "party", type: "dict", desc: "partie du message (filtrage)" },
  { key: "message", type: "dict", desc: "message ISO 20022 (filtrage)" },
 ];
-// Sous-clés les plus utiles pour l'autocomplétion imbriquée et le formulaire
+// Sous-clés les plus utiles pour l'autocomplétion imbriquée et le formulaire.
+// `entity` et `client` portent les COLONNES de la base : `programs` et
+// `designation_date` y figuraient et n'existent pas — les vrais noms sont
+// `sanction_programs` et `listed_on`. Une règle écrite depuis ces chips lisait
+// donc toujours `None`.
 const FP_CTX_SUBKEYS = {
  party: ["name", "roles", "country", "bic", "is_agent", "address", "birth_date"],
  message: ["type", "msg_id"],
- entity: ["entity_type", "primary_name", "countries", "dates_of_birth", "programs", "designation_date"],
+ corroboration: ["name_only", "corroborated", "has_dob", "has_country",
+                 "has_identity_document", "dob_score", "geography_score"],
+ rarity: ["disponible", "nom_repandu", "sans_token_commun", "rarete", "df_min",
+          "df_max", "seuil_repandu", "couverture", "tokens"],
+ adjustments: ["dob", "gender", "geography"],
+ entity: ["entity_type", "primary_name", "countries", "dates_of_birth",
+          "sanction_programs", "listed_on"],
  client: ["client_type", "client_first_name", "client_last_name", "client_company_name", "client_dob", "client_countries", "client_segment"],
 };
 
@@ -7791,8 +7868,20 @@ const FP_RULE_SNIPPETS = [
  party = ctx.get("party") or {}
  return bool(party.get("is_agent")) and ctx["final_score"] < 92 and not ctx["hard_match"]`],
  ["Écart d'ajustement pays", ` # Supprimer quand le malus pays a déjà fortement réduit le score
- adj = ctx.get("adjustments") or {}
- return adj.get("country_penalty", 0) <= -10 and ctx["final_score"] < 85`],
+ geo = (ctx.get("adjustments") or {}).get("geography") or {}
+ return geo.get("score", 0) <= -10 and ctx["final_score"] < 85`],
+ ["Nom seul, sans élément identifiant", ` # Aucune date de naissance, aucun pays, aucune pièce : le nom ne suffit pas.
+ # Jamais sur le périmètre sanctions, où un manquement est constatable à l'audit.
+ if ctx["hard_match"] or ctx["perimeter"] == "SANCTION":
+  return False
+ return ctx["corroboration"]["name_only"] and ctx["hits_count"] >= 25`],
+ ["Nom composé de mots très répandus", ` # « MOHAMMED », « ALI »… : des milliers de fiches listées les portent, donc
+ # le rapprochement n'identifie personne. Un seul mot rare partagé le suffit
+ # à conserver l'alerte.
+ r = ctx.get("rarity") or {}
+ if ctx["hard_match"] or not r.get("disponible") or r.get("sans_token_commun"):
+  return False
+ return bool(r.get("nom_repandu")) and not ctx["corroboration"]["corroborated"]`],
  ["Combinaison ET/OU", ` # Combinaison de critères : score bas ET (pas de pays commun OU type différent)
  faible = ctx["final_score"] < 84 and not ctx["hard_match"]
  entity = ctx.get("entity") or {}
@@ -8433,10 +8522,39 @@ function exportHistoryCsv() {
 
 // ------------------ JOURNAL DES ACTIONS D'ADMINISTRATION ------------------
 
+// Libellé français de chaque action tracée au journal d'administration —
+// l'écran qu'un contrôleur lit en premier. Vingt-huit des trente-cinq actions
+// journalisées n'en avaient pas et s'affichaient en code brut : RETENTION_PURGE,
+// ACCOUNT_LOCKED, APIKEY_REVOKED… Un test dérive du code la liste des actions
+// réellement journalisées et vérifie qu'aucune n'est muette.
 const ADMIN_ACTION_LABELS = {
+ // Comptes et sessions
  USER_CREATED: "Compte créé", USER_UPDATED: "Compte modifié", USER_DELETED: "Compte supprimé",
- SETTINGS_UPDATED: "Réglages modifiés", BLOCKING_UPDATED: "Blocking keys modifiées",
- SNAPSHOTS_PURGED: "Snapshots purgés", WHITELIST_REVOKED: "Liste blanche révoquée",
+ LOGIN: "Connexion", LOGOUT: "Déconnexion", LOGIN_FAILED: "Échec de connexion",
+ ACCOUNT_LOCKED: "Compte verrouillé",
+ MFA_ENABLED: "Double facteur activé", MFA_DISABLED: "Double facteur désactivé",
+ MFA_RESET: "Double facteur réinitialisé",
+ ABSENCE_SET: "Absence déclarée", ABSENCE_CLEARED: "Absence levée",
+ // Clés d'API et intégrations
+ APIKEY_CREATED: "Clé d'API créée", APIKEY_REVOKED: "Clé d'API révoquée",
+ CLIENT_UPSERT_HOOK: "Fiche client reçue par webhook",
+ // Réglages et moteur
+ SETTINGS_UPDATED: "Réglages modifiés", SETTINGS_IMPORTED: "Réglages importés",
+ BLOCKING_UPDATED: "Blocking keys modifiées", ENGINE_UPDATED: "Capacités du moteur modifiées",
+ RESOURCES_RELOADED: "Ressources linguistiques rechargées",
+ RESOURCE_MINING_RUN: "Fouille d'homonymes exécutée",
+ LEARNED_EQUIVALENCE_DECIDED: "Équivalence minée tranchée",
+ // Listes
+ SNAPSHOTS_PURGED: "Snapshots purgés", SNAPSHOTS_BULK_APPROVED: "Homologations en masse",
+ SNAPSHOT_REPAIRED: "Snapshot réparé",
+ RELATION_CREATED: "Relation créée", RELATION_DELETED: "Relation supprimée",
+ // Alertes et rétention
+ WHITELIST_REVOKED: "Liste blanche révoquée", RETENTION_PURGE: "Purge de rétention",
+ NOTIFICATION_RESENT: "Notification renvoyée", NOTIFICATION_DELETED: "Notification supprimée",
+ NOTIFICATIONS_PURGED: "Notifications purgées",
+ // Exploitation
+ JOB_RETRIED: "Travail relancé", JOB_CANCELLED: "Travail annulé",
+ WORKER_RESTARTED: "Démon travailleur redémarré",
 };
 
 function _adminLogDelta(row) {
@@ -8649,7 +8767,7 @@ async function fetchBatchCampaigns() {
  const data = await response.json();
  const items = data.items || [];
  if (!items.length) {
- tableEmpty(tbody, 9, "Aucune campagne : lancez-en une avec un fichier CSV, ou déposez un fichier dans l'inbox CFT.", "");
+ tableEmpty(tbody, 10, "Aucune campagne : lancez-en une avec un fichier CSV, ou déposez un fichier dans l'inbox CFT.", "");
  } else {
  tbody.innerHTML = items.map(c => `
  <tr>
@@ -10167,7 +10285,7 @@ async function fetchActivityReport() {
  const report = await response.json();
  if (!response.ok) {
  showToast("Erreur : " + (report.detail || "Rapport indisponible."), "error");
- tableEmpty(tbody, 3, "Rapport indisponible.", "");
+ tableError(tbody, 3, "Rapport d'activité indisponible.");
  return;
  }
  const rows = [];
@@ -10222,7 +10340,7 @@ async function fetchWorkload() {
  const channel = document.getElementById("workload-channel")?.value || "";
  const params = channel ? `?channel=${channel}` : "";
  const response = await apiFetch(`/api/alerts/workload${params}`);
- if (!response.ok) { tableEmpty(tbody, 9, "Charge indisponible.", ""); return; }
+ if (!response.ok) { tableError(tbody, 9, "Charge de travail indisponible."); return; }
  const data = await response.json();
  const totalsEl = document.getElementById("workload-totals");
  if (totalsEl) {

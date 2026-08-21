@@ -9,6 +9,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the backtest counted the same client twice, and never split the volume per list
+Two defects on the screen that gates a list's approval, both found from the same question: *do alerts and hits actually break down per list delta?*
+
+**A panel of one client could report a 200 % interception rate.** The backtest screens two ways. In **full** mode, one pass over the production universe and one over the candidate. In **delta** mode — the default, and the one that runs in production — one pass over the *shared* universe (everything that does not move), then two tiny passes over the removed and added records. A client matched **both** by an unchanged record and by a record in the delta received an outcome in each pass, and the passes were added together: that client was counted twice. Reproduced with the most ordinary case there is — an official list carrying the same individual twice, under two programmes and two ids, of which the candidate version adds the second:
+
+| | delta mode | single pass |
+|---|---:|---:|
+| clients intercepted | **2** | 1 |
+| interception rate | **200 %** | 100 % |
+| matches (hits) | 2 | 2 |
+
+`hits` was right — two passes cover disjoint record sets, so a match cannot appear in both. `alerts` was not, and `gap_pct`, the number that decides the approval, is computed from it.
+
+The fix is one sentence: **one client, one outcome** — the one a single pass would have kept, the best match. The aggregation is rebuilt around a `par_client` map from which every published counter derives, so they cannot contradict each other; combining the delta passes now goes through the very same merge that combines the slices of a parallel screening. Whitelisted outcomes had to start carrying their client id and score, without which two passes could not tell they were talking about the same client. A test pins delta mode to a single pass, number by number, and fails against the previous behaviour.
+
+**The alert volume was never split per list.** A consolidated backtest covers a wave of deltas, and its per-list table gave "alerts gained / lost" — which are *clients newly intercepted*, not alerts. Matches now carry the list of the record that triggered them, all the way to the report: each list shows its own alert volume, before and after. The difference is exactly the point — in the duplicate case above the list intercepts **no new client** and yet opens **one more alert**, and the reviewer could see neither number before. The global counters, meanwhile, cover the *whole* screened universe, untested lists included; they never answered "what does approving this list add?".
+
+Which surfaced a third one: the report's own cards announced `alerts` as "N alerte(s)" while it counts clients, and never showed the volume at all. The vocabulary discipline already applied on the approval file — *clients intercepted* against *alerts opened* — now holds on the report too, and the guard test was widened to catch it.
+
+### Fixed — the README announced 153 tests while the suite held 1 370
+A number written once in a document ages exactly like a hand-copied table, and this one was off by a factor of ten. It is corrected, and now derived from `tests/` by a test rather than trusted. `FISKR_JOBS_MODE` is documented too — it **overrides** `config.yaml`'s `jobs.mode`, which is worth knowing before wondering why a freshly edited `jobs.mode` has no effect. Three variables the code reads were missing from `.env.example` altogether, `ANTHROPIC_API_KEY` among them: an operator starts from that file, so a variable absent from it is invisible — the two AI functions declined cleanly without anything ever saying what to fill in. A test now holds every read variable against the template.
+
+Swept in the same pass, with nothing found: every repository file path and internal link cited in the documentation (58 and 0 broken respectively), the 676 element ids of the interface (no duplicates), every `getElementById` target, all 239 front-end API calls against the live route table, the endpoints quoted inside the in-app guide, the client list-type labels against the 42 types the server produces, and the environment variables the code reads against those the documentation names.
+
+The architecture document's §6.4 — *shared vocabularies: derived, never copied* — is extended to say what this batch showed: the rule does not stop at code. Documentation, translation keys and CSS rules are hand-copied tables too, and two of them fail in an instructive way. A **graceful fallback hides the defect**: i18n leaves French in place when a key is missing, which is the right product decision and is precisely why seventy-one labels went untranslated for months without one error message — so a graceful fallback must always come with a test that you are not permanently falling into it. And a **priority that cancels its source**: a CSS rule fully redeclared inline is unreachable, and the symptom is `!important` flags appearing one by one to win the fight; the cure is not another one, it is bringing the values back to a single place.
+
+### Fixed — seventy-one labels showed in French to every non-French user
+The i18n engine matches a text node against a French key. Its header states the fallback plainly: *"strings absent from the dictionary stay in French (never a hole)"*. That is the right call — and it is exactly what makes this defect invisible. A key that no longer matches anything raises nothing, logs nothing, and simply leaves French in front of a reader who asked for another language.
+
+When the interface moved from emoji labels to inline SVG icons, the dictionary kept its emoji-prefixed keys. `"🚪 Déconnexion"` no longer matches a page that renders `<svg …/> Déconnexion`. **Seventy-one labels** were affected, and they are not marginal ones: Instruire, Éditer, Supprimer, Commenter, Escalader, M'assigner, Proposer : Faux positif, Proposer : Vrai positif, Valider (4-yeux), Refuser & renvoyer, Rejeter, Approuver & Mettre en Production, Lancer la campagne, Purger le journal — plus every settings section heading (Sécurité des Accès, Rétention des Données, Seuils de Score du Criblage, Clés d'API Techniques…). The whole vocabulary an analyst clicks all day.
+
+Six more keys were stale for a different reason — the wording moved on (`Criblage à blanc — listes en production…` became `Criblage à blanc (passe 1/2) — listes en production…`), and one link's key still carried an emoji the markup had dropped, leaving "Créer une règle" untranslated as well. Every key is re-pointed at the text the interface really renders, and the emoji is stripped from the translations too, since the rendered text no longer has one.
+
+The existing tests could not see any of it: they sample the dictionary, and they check that the dictionary is *complete* — never that a key still corresponds to something on screen. The new guard derives the answer from the interface itself: it collects the text nodes and translatable attributes of both pages, the string literals of `app.js` (re-joining literals split across lines), and the server messages, then asserts that **every** dictionary key can be reached by at least one of them.
+
+### Fixed — a link on the backtest screen did nothing
+`onclick="showTab('alerts')"` — a function that exists nowhere, and a tab named `alerts` that exists nowhere either. Clicking "Créer une règle" threw a `ReferenceError` and left the user where they were. The real call is `switchSubTab('screening', 'alerts-rules')`, and the label now names the destination as the interface names it: Criblage → Règles FP. The same sweep checked all 676 element ids (no duplicates), every `getElementById` target, and every `switchTab`/`switchSubTab` destination against the 14 sections and 102 sub-tabs actually declared — this link was the only one broken.
+
+### Fixed — dead CSS was hiding a lost affordance, and a rule nothing could change
+Two defects hide behind one another in a stylesheet that has lived.
+
+**A rule nobody names any more.** The markup moves on, the rule stays. Harmless — until it was carrying something the new markup never took back. That is what happened to the notification centre: `.notif-item` held the padding, the pointer cursor and the hover of clickable rows; the rendering moved to bare `<li>`s, the rule was orphaned, and the rows lost every sign that they can be clicked. Nothing broke, so nothing reported it. The proof that the cursor was expected is in the rendering itself: the rows that are *not* clickable ("Nothing to handle.") still give themselves `style="cursor: default;"` — which only means something against a `cursor: pointer` baseline. The sibling list built by the same code, `.home-list li`, kept all of it. Eight orphaned rules are removed and the affordance is restored.
+
+**A rule an inline style had already overruled.** `#notif-panel` was styled twice: a stylesheet rule, and an inline `style` attribute redeclaring every one of its properties with *different* values. The rule was unreachable — you could edit the width, the radius, the z-index and see strictly nothing. The evidence that someone hit this: the mobile rule for the same panel carries four `!important` flags added to win against that inline style, and the one declaration that was **not** flagged, `right: 0.5rem`, loses to the inline `right: 0` — so on a phone the panel sits flush against the right edge instead of keeping its gutter. The inline values are moved into the stylesheet (identical rendering, one place to change it), the `!important` flags are gone, and the gutters are symmetric again.
+
+Both are now held by derived tests, including one that accounts for `!important` — `.hidden { display: none !important }` legitimately beats an inline `display`, and a naive check would have called it a bug.
+
+### Fixed — five translation keys written twice, and the better wording lost
+In a JavaScript object literal a repeated key raises nothing: **the second silently overwrites the first**. Five keys appeared twice in the dictionary, and two carried *different* translations — so the wording someone chose deliberately was never displayed, and nobody could learn it. "Campagnes batch" rendered in Chinese as 批量任务 ("batch task") instead of 批量筛查活动 ("batch screening campaign"), the precise term, and the one its own sibling entry `📦 Campagnes batch` still uses on the very same screen.
+
+The existing i18n tests could not see this: they sample ("one key entry", "a probe on one entry"), and a sample cannot find a hole somewhere else. The dictionaries are now parsed and checked in full — 640 label entries, 97 paragraphs, 10 composed rules, each carrying its five target languages, no key written twice, and no `$3` referring to a group its pattern never captures.
+
+### Fixed — two documented endpoints did not exist
+`GET /api/clients/quality`, in the client-integration guide, is really `GET /api/quality/clients` — the two segments are the wrong way round, so an integrator following the guide gets a 404. The other was in an entry of this changelog. Documentation is a hand-copied table like any other, and it drifts the same way: every endpoint, repository file path and internal link cited in `README.md` and `Documentation/` is now checked against the live route table and the repository itself. That sweep also found fifteen links pointing at `file:///e:/Program Files/git/Fiskr/...` — the drafting machine of whoever wrote those pages, useless to every other reader, one of them broken even there. They are repository-relative now.
+
+### Fixed — the upload cap closed one door and left the other open
+The previous batch capped every upload. But a list enters Fiskr through **two** doors: an operator drops a file on the import screen, or a configured source serves it over https. It is the same artefact, read by the same parser, written to the same working directory — and the second door had no cap at all.
+
+- `download_to_file` wrote to disk for as long as the host kept sending. On shared hosting a full disk is an outage, and a refusal that leaves half a file behind occupies exactly the space it was refusing to grant — so the partial file is now removed.
+- `http_get_text` returned `response.text` with **no bound whatsoever**. It serves the negative-press RSS feeds and the EUR-Lex scraping, so the size of what it reads is decided entirely by the far end.
+
+Bounding `http_get_text` meant changing *how* it reads, not adding a check: `client.get()` buffers the entire body before returning, so any measurement taken afterwards protects nothing — by the time you can measure, the memory is already spent. It now streams and refuses at the first chunk past the ceiling; a test asserts the flow really stops there rather than after the fact, because a cap that only reports is not a cap.
+
+The ceilings live in one place, `fiskr/limites.py`, and the download ceiling is **derived** from the list-upload ceiling rather than copied next to it — the same anti-divergence rule the front-end tables above are now held to. A page or an RSS feed is not a data file and gets its own, much lower ceiling: 32 MB, against 12 KB measured for a real Google News feed on a name query. An overflow is deliberately **not** retried — the response will not shrink, and replaying it would pay twice for the download just refused.
+
+### Fixed — a second, dead copy of the alert-opening path
+`open_or_redetect_alert` (singular) was imported by three modules and called by none, while duplicating ninety-five lines of the most sensitive compliance path there is: deduplication, priority, SLA due date, closure by rule, event journal, notification. Two implementations of the same regulatory obligation, one of them never exercised by a single test, is a trap with a fuse: the next person to fix a bug in alert opening had one chance in two of fixing the copy nobody runs. It is removed; `open_or_redetect_alerts` (plural, batched) is the only path, and a test now holds that it stays the only one.
+
+### Fixed — the upload cap did not bound what a connector holds in memory
+Three official connectors are JSON — the French national freeze registry, the American Consolidated Screening List, World Bank debarment — and the standard library offers no streaming reader: `json.load` builds the whole tree. That tree weighs **more** than the file, and by how much depends on the content. Measured with `tracemalloc`:
+
+| Content | Factor | 512 MB would give |
+|---|---:|---:|
+| realistic CSL entries | ×4,0 | 2,0 GB |
+| distinct short strings | ×6,0 | 3,0 GB |
+| tiny objects `{"a":1}` | ×15,1 | 7,5 GB |
+| empty lists `[]` | ×16,1 | 8,0 GB |
+
+The upload cap set in the previous batch (512 MB for a list) was therefore not enough: on shared hosting the process dies, and under Passenger the whole web worker goes with it.
+
+`TAILLE_MAX_LECTURE_BLOC` (64 MB) now bounds what a connector **without** a streaming reader accepts. That is more than three times the largest real file — trade.gov's CSL weighs about twenty megabytes — and it bounds the adversarial worst case to roughly one gigabyte. The refusal is explicit and says what to do: a bigger file must come through a streaming connector.
+
+Two readers needed no cap, only to be written as streams: the British ConList did `f.read().splitlines()` — half a gigabyte of text plus the header of several million `str` objects before reading a single useful line — and the regulator alert pages materialised the whole page, where `HTMLParser.feed` accepts chunks.
+
+### Fixed — three front-end tables had drifted from what the server produces
+Same class of defect each time: a table copied by hand, a source that moves on, and a screen that shows a raw code or — worse — offers a key that does not exist. All three are now **derived** by a test from what the code actually produces.
+
+**The rule editor's palette offered keys that do not exist.** The false-positive rules screen offers `ctx` keys at a click, their sub-keys, and code templates.
+
+- **Five keys were missing**: `perimeter`, `hits_count`, `hit_rank`, `corroboration`, `rarity` — precisely those that exist *so that* a rule can reason about volumetry, corroboration and how banal a name is. A rule author could not discover them.
+- Two `entity` sub-keys **did not exist**: `programs` and `designation_date` (the real columns are `sanction_programs` and `listed_on`). A rule written from those chips always read `None`.
+- A shipped template read `adjustments["country_penalty"]`, which does not exist: the comparison was `0 <= -10`, so **the rule never fired**.
+
+That last one is the worst defect possible on this screen: a silently inert rule tells nobody — not its author, not its validator, not the auditor. Two templates are added, one on name-only matches and one on rarity, both written to respect the sanctions perimeter. `RULE_TEMPLATE`, the first thing a rule author reads, enumerated the context without `perimeter` or `rarity` either.
+
+**The administration journal spoke in English capitals.** It is the screen a controller opens first. **Twenty-eight of the thirty-five logged actions** had no French label and showed as raw codes: `RETENTION_PURGE`, `ACCOUNT_LOCKED`, `APIKEY_REVOKED`, `MFA_RESET`, `LOGIN_FAILED`… All thirty-five are now named, grouped by family.
+
+**The progress vocabulary had drifted three ways.** A long operation announces a *phase* and a *kind*. Four emitted phases were declared nowhere, including `QUEUED` — the phase every queued job carries, so the one an operator saw most often, shown as a raw code in the middle of a French interface. `INDEX` was declared on both sides and emitted by nothing. Nine of the fourteen kinds submitted had neither icon nor deep link — and `#batch`, the link on the batch-campaign row, resolved to no screen at all (`applyHashRoute` looks for `sec-<tab>`, and `sec-batch` does not exist), so the click did nothing.
+
+### Fixed — a table in error must not look like an empty table
+On a compliance product this is a distinction of substance. An analyst who sees an empty table concludes there is nothing to investigate; if the call actually failed, they have just concluded wrong, and nothing tells them.
+
+Three shapes existed on the list screens, all bad: **no check of the status code** (the error payload was read as data, `data.items` was `undefined`, and the table showed "no snapshot" / "no decision"); **a bare `return`** (the loading skeleton stayed on screen, so a table that seems to load forever); and **the empty state reused to say an error** (right text, wrong colour, indistinguishable at a glance).
+
+`tableError()` now paints a distinct state — red frame, warning icon, and what to do — that `tableEmpty()` cannot imitate. Along the way, one colspan gap: the batch-campaign empty state announced nine columns since a tenth — "alerts opened" — had been added to the table. A test now checks that **every** empty, error or loading state spans the full width of its table.
+
+### Fixed — ten form fields were mute to a screen reader
+A `<select>` or `<input>` with no accessible name is announced as "combo box" or "edit", nothing more: the user hears that a control is there, not what it does. On a product analysts use all day that is a real obstacle, and WCAG 2.1 criterion 4.1.2.
+
+The screen already uses all three valid forms (`<label for>`, wrapping `<label>`, `aria-label`); ten fields had none — mostly filter lists standing alone in a toolbar, and file pickers. Twelve accessible names were also missing from the translation dictionary, which the i18n engine explicitly translates: a name left in French is read as-is by a screen reader set to English, German or Arabic.
+
 ### Added — what a name is worth: the rarity of its words
 Keeping every match above the cut-off is the audit requirement; "Mohammed Ali" without a country produces **2 976** of them in production, dozens of them at 100,00. No string metric separates those records — the names *are* identical, and no metric should. What separates them is elsewhere: in the listed corpus, "MOHAMMED" and "ALI" are borne by thousands of records; "TYURIN" by one. Matching two names on omnipresent words identifies nobody.
 
@@ -63,7 +174,7 @@ None of the six upload endpoints had a size cap. Transaction filtering read the 
 Three bounded helpers replace the raw copies, with caps differentiated by nature of deposit — an official list is bulky by construction (OFAC's `SDN_ADVANCED.XML` weighs 126 MB, measured), an alert attachment is not: **list 512 MB, clients 64 MB, attachment 32 MB, message 8 MB**. Past the cap a 413 is raised and nothing partial is left on disk. An AST test checks that every endpoint function taking an `UploadFile` goes through one of the helpers, so the next endpoint written cannot reintroduce the hole.
 
 ### Fixed — a single malformed record made every screening that saw it fail
-The multi-valued fields — `countries.citizenship`, `aliases.high_priority`, `dates_of_birth`, `genders` — are JSON columns whose shape no schema guarantees. Two documented doors let a string through where the engine expects a list: `PATCH /api/entities/{id}` declares `countries: Dict[str, Any]` (so `{"citizenship": "FR"}` is **valid** to Pydantic), and the client upsert webhook declares `client_countries: Dict[str, Any]`, fed system-to-system by an upstream nobody controls.
+The multi-valued fields — `countries.citizenship`, `aliases.high_priority`, `dates_of_birth`, `genders` — are JSON columns whose shape no schema guarantees. Two documented doors let a string through where the engine expects a list: `PATCH /api/watchlist/entity/{entity_pk}` declares `countries: Dict[str, Any]` (so `{"citizenship": "FR"}` is **valid** to Pydantic), and the client upsert webhook declares `client_countries: Dict[str, Any]`, fed system-to-system by an upstream nobody controls.
 
 `[] + "FR"` raises. On the client side the request returned 500 — annoying. On the **listed record** side it was far worse: one malformed record made **every** screening whose blocking selects it fail, and a screening that does not complete leaves **no audit line at all**. An invisible false negative. Losing one context field beats losing the screening.
 

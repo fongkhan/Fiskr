@@ -52,7 +52,7 @@ from fiskr.database import (
     BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
     NotificationDelivery, LearnedEquivalence
 )
-from fiskr.alerts import (open_or_redetect_alert, open_or_redetect_alerts,
+from fiskr.alerts import (open_or_redetect_alerts,
                           is_whitelisted, whitelisted_pairs, compute_due_at)
 from fiskr.notify import (
     notify_event,
@@ -1291,12 +1291,11 @@ class LoginRequest(BaseModel):
 # Les plafonds different par nature de fichier : une liste officielle est
 # volumineuse par construction (SDN_ADVANCED.XML de l'OFAC pese 126 Mo,
 # mesure), une piece jointe d'alerte ne l'est pas.
-TAILLE_MAX_TELEVERSEMENT = {
-    "liste": 512 * 1024 * 1024,      # import de liste officielle
-    "clients": 64 * 1024 * 1024,     # referentiel clients / campagne batch
-    "message": 8 * 1024 * 1024,      # message de paiement ISO 20022
-    "piece": 32 * 1024 * 1024,       # piece jointe, justificatif
-}
+#
+# La table vit dans fiskr/limites.py, pas ici : le meme artefact entre aussi
+# par telechargement (fiskr/sync.py), et deux plafonds tenus a la main de part
+# et d'autre finissent par diverger. Reexporte pour les appelants existants.
+from fiskr.limites import TAILLE_MAX_TELEVERSEMENT  # noqa: E402
 
 
 def _refus_taille(nature: str, plafond: int):
@@ -6725,14 +6724,27 @@ async def get_operation_progress(
     raise HTTPException(status_code=404, detail="Operation inconnue ou expiree")
 
 
-# Lien profond du dashboard par nature d'operation (cf. applyHashRoute)
+# Lien profond du dashboard par nature d'operation (cf. applyHashRoute).
+#
+# Neuf des quatorze natures soumises n'y figuraient pas : leur ligne du panneau
+# des travaux n'emmenait nulle part. Le test tests/test_vocabulaire_progression
+# verifie que la table couvre TOUTES les natures declarees.
 _OPERATION_LINKS = {
     "import": "#watchlist-mgmt/watchlist-snapshots",
-    "sync": "#watchlist-mgmt/watchlist-sources",
+    "ingest": "#watchlist-mgmt/watchlist-snapshots",
+    "sync": "#watchlist-mgmt/watchlist-sync",
     "backtest": "#watchlist-mgmt/watchlist-review",
     "approve": "#watchlist-mgmt/watchlist-review",
-    "batch": "#batch",
-    "quality": "#kpi",
+    "batch": "#screening/screening-batch",
+    "batch_campaign": "#screening/screening-batch",
+    "quality": "#kpi/kpi-quality",
+    "quality_check": "#kpi/kpi-quality",
+    "lookback": "#screening/alerts-screening",
+    "mining": "#alerts/alerts-resources",
+    "engine_simulation": "#alerts/alerts-blocking",
+    "resource_simulation": "#alerts/alerts-resources",
+    "fprules_bench": "#alerts/alerts-rules",
+    "testpanel_generate": "#watchlist-mgmt/watchlist-review",
 }
 
 

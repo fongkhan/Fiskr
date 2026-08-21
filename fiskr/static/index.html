@@ -127,7 +127,7 @@
  <button id="ops-pill" class="ops-pill hidden" onclick="toggleNotifCenter(true)" title="Opérations en cours — cliquez pour le détail" aria-live="polite"></button>
  <div style="position: relative;">
  <button id="bell-btn" class="icon-btn" onclick="toggleNotifCenter()" aria-label="Centre de notifications" title="Notifications"><svg class="ui-icon" aria-hidden="true"><use href="#i-bell"></use></svg><span id="bell-badge" class="status-badge warning hidden" style="position: absolute; top: -6px; right: -6px; padding: 0.05rem 0.35rem; font-size: 0.65rem;">0</span></button>
- <div id="notif-panel" class="hidden" style="position: absolute; right: 0; top: 48px; width: 400px; max-width: 92vw; max-height: 74vh; overflow-y: auto; background: var(--modal-bg); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: var(--shadow-modal); z-index: 1100; padding: 0.75rem;">
+ <div id="notif-panel" class="hidden">
  <div class="notif-panel-toolbar">
  <strong style="font-size: 0.8rem; text-transform: uppercase; color: var(--text-secondary);">Notifications</strong>
  <button class="notif-clear-btn" onclick="clearAllNotifications()">Tout effacer</button>
@@ -898,7 +898,7 @@
  <label for="backtest-candidate-rule">Règle anti-FP candidate à évaluer (facultatif)</label>
  <select id="backtest-candidate-rule"><option value="">Aucune — règles actives uniquement</option></select>
  </div>
- <a href="#" onclick="showTab('alerts'); return false;" style="font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="#i-edit"></use></svg> Créer une règle (onglet Alertes → Paramétrage &amp; Règles)</a>
+ <a href="#" onclick="switchSubTab('screening', 'alerts-rules'); return false;" style="font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="#i-edit"></use></svg> Créer une règle (Criblage → Règles FP)</a>
  </div>
  </div>
  </div>
@@ -930,12 +930,12 @@
  <h2>Historique des Homologations</h2>
  <p class="section-desc">Chaque décision d'homologation — approbation comme rejet — constitue un dossier figé au moment où elle est prise : le delta par rapport à la liste alors en production, le cahier de tests avec son verdict, les exclusions posées, le réviseur et son commentaire. Ces dossiers ne sont jamais réécrits : rouvrir une homologation des mois plus tard montre exactement ce que le réviseur avait sous les yeux, même si la liste a été remplacée dix fois depuis.</p>
  <div class="filter-bar" style="margin-bottom: 1rem;">
- <select id="history-decision-filter" onchange="fetchReviewHistory(1)">
+ <select id="history-decision-filter" aria-label="Filtrer par décision d'homologation" onchange="fetchReviewHistory(1)">
  <option value="">Toutes les décisions</option>
  <option value="APPROVED">Approuvées</option>
  <option value="REJECTED">Rejetées</option>
  </select>
- <select id="history-type-filter" onchange="fetchReviewHistory(1)">
+ <select id="history-type-filter" aria-label="Filtrer par type de liste" onchange="fetchReviewHistory(1)">
  <option value="">Toutes les listes</option>
  </select>
  <button class="btn btn-sm btn-secondary" onclick="fetchReviewHistory(1)"><svg class="ui-icon" aria-hidden="true"><use href="#i-refresh"></use></svg> Actualiser</button>
@@ -1325,7 +1325,7 @@
  <h2>Campagnes de Criblage Batch (serveur)</h2>
  <p class="section-desc">Un fichier CSV de clients (colonnes <code>CLIENT_BASE</code>) est criblé côté serveur en tâche de fond, avec les <strong>mêmes garanties que le temps réel</strong> : quality gate, liste blanche, règles anti-faux positifs, journal d'audit immuable et alertes. Les fichiers déposés par un moniteur de transfert (CFT/SFTP) dans l'inbox surveillée (<code>batch.inbox_dir</code>) apparaissent ici automatiquement.</p>
  <div class="filter-bar">
- <input type="file" id="batch-file-input" accept=".csv" style="flex: 1 1 240px; padding: 0.5rem;">
+ <input type="file" id="batch-file-input" aria-label="Fichier CSV de clients à cribler" accept=".csv" style="flex: 1 1 240px; padding: 0.5rem;">
  <input type="text" id="batch-campaign-name" placeholder="Nom de la campagne (optionnel)">
  <button class="btn btn-sm btn-primary" onclick="launchBatchCampaign()"> Lancer la campagne</button>
  </div>
@@ -1418,7 +1418,7 @@
  <div id="screening-bulk-bar" class="bulk-bar hidden">
  <span id="screening-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
  <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('SCREENING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
- <select id="screening-bulk-priority" style="min-width: 140px;">
+ <select id="screening-bulk-priority" aria-label="Priorité à appliquer à la sélection" style="min-width: 140px;">
  <option value="">Priorité…</option>
  <option value="CRITICAL">Critique</option>
  <option value="HIGH">Haute</option>
@@ -1720,7 +1720,7 @@
  <div id="filtering-bulk-bar" class="bulk-bar hidden">
  <span id="filtering-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
  <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('FILTERING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
- <select id="filtering-bulk-priority" style="min-width: 140px;">
+ <select id="filtering-bulk-priority" aria-label="Priorité à appliquer à la sélection" style="min-width: 140px;">
  <option value="">Priorité…</option>
  <option value="CRITICAL">Critique</option>
  <option value="HIGH">Haute</option>
@@ -1819,7 +1819,7 @@
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-users"></use></svg> Charge de Travail des Analystes</h2>
  <p class="section-desc">Alertes ouvertes par analyste assigné, ventilées par priorité, avec les retards SLA et la prochaine échéance — pour répartir le travail. Les alertes non assignées apparaissent en tête.</p>
  <div class="filter-bar" style="margin-bottom: 1rem;">
- <select id="workload-channel" onchange="fetchWorkload()">
+ <select id="workload-channel" aria-label="Canal de la charge de travail" onchange="fetchWorkload()">
  <option value="">Tous canaux</option>
  <option value="SCREENING">Criblage clients</option>
  <option value="FILTERING">Filtrage transactionnel</option>
@@ -2565,7 +2565,7 @@
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-list"></use></svg> Checklist d'Instruction (Admin)</h2>
  <p class="section-desc">Points de contrôle affichés dans le dossier d'investigation de chaque alerte (un par ligne, 20 maximum). Chaque coche est tracée dans l'historique append-only de l'alerte. Vider le champ = retour à la checklist par défaut.</p>
  <div class="form-group">
- <textarea id="checklist-items" rows="7" style="width: 100%; font-family: var(--font-body);"></textarea>
+ <textarea id="checklist-items" aria-label="Étapes de la checklist d'instruction, une par ligne" rows="7" style="width: 100%; font-family: var(--font-body);"></textarea>
  </div>
  <button class="btn btn-primary" onclick="saveChecklistSettings()">Enregistrer la checklist</button>
  </div>
@@ -2581,7 +2581,7 @@
  <p class="section-desc">Comptes de service pour les intégrations systèmes (CFT, ordonnanceur, SI amont) : authentification par en-tête <code>X-API-Key</code>, rôles restreints (jamais admin), révocation immédiate, usage tracé. <strong>La clé complète n'est affichée qu'à la création.</strong></p>
  <div class="filter-bar" style="margin-bottom: 1rem;">
  <input type="text" id="apikey-name" placeholder="Nom de la clé (ex. CFT production)">
- <select id="apikey-role" style="min-width: 160px;">
+ <select id="apikey-role" aria-label="Rôle de la clé d'API" style="min-width: 160px;">
  <option value="user">user (criblage)</option>
  <option value="user,reviewer">user + reviewer</option>
  <option value="auditor">auditor (lecture seule + diagnostic)</option>
@@ -2611,7 +2611,7 @@
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
  <button class="btn btn-primary" onclick="exportAppConfig()">⬇ Exporter la configuration</button>
  <button class="btn btn-secondary" onclick="document.getElementById('config-import-file').click()">⬆ Importer…</button>
- <input type="file" id="config-import-file" accept=".json,application/json" style="display: none;" onchange="importAppConfig(this)">
+ <input type="file" id="config-import-file" aria-label="Fichier de réglages à importer" accept=".json,application/json" style="display: none;" onchange="importAppConfig(this)">
  </div>
  <p id="config-import-result" class="section-desc" style="margin-top: 0.75rem;"></p>
  </div>
@@ -2684,7 +2684,7 @@
  <div class="profile-avatar-row">
  <div id="profile-avatar-preview" class="profile-avatar"><svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg></div>
  <div class="profile-avatar-actions">
- <input type="file" id="profile-avatar-input" accept="image/png,image/jpeg,image/webp" class="hidden" onchange="handleAvatarFile(this)">
+ <input type="file" id="profile-avatar-input" aria-label="Image d'avatar" accept="image/png,image/jpeg,image/webp" class="hidden" onchange="handleAvatarFile(this)">
  <button class="btn btn-sm btn-secondary" onclick="document.getElementById('profile-avatar-input').click()">Changer la photo</button>
  <button id="profile-avatar-remove" class="btn btn-sm btn-secondary hidden" onclick="removeAvatar()">Retirer</button>
  <small style="color: var(--text-muted); display: block; margin-top: 0.35rem;">PNG/JPEG/WebP — recadrée en 256 px, 300 Ko max.</small>

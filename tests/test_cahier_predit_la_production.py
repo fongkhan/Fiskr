@@ -133,8 +133,12 @@ def test_un_client_en_liste_blanche_compte_quand_meme_ses_correspondances():
     assert categorie == "whitelisted"
     agg = screenpool.new_partial()
     screenpool.apply_outcome(agg, resultat)
-    assert agg["hits"] == 12
-    assert agg["whitelisted_suppressed"] == 1
+    # Les compteurs publiés dérivent des sorts retenus (un par client) :
+    # c'est `finalize` qui les rend, jamais l'accumulateur brut.
+    compte = screenpool.finalize(agg)
+    assert compte["hits"] == 12
+    assert compte["whitelisted_suppressed"] == 1
+    assert compte["alerts"] == 0, "un client blanchi n'est pas intercepté"
 
 
 def test_le_contexte_de_regle_du_cahier_est_celui_de_la_production():

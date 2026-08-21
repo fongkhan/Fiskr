@@ -95,6 +95,53 @@ sécurité déjà en place. Chaque correctif est couvert par un test
   stocker, sept fois le plafond `Max140Text` d'ISO 20022, et trois fois le plus
   long nom réel du corpus de production (310 caractères, mesuré).
 
+### 7. Le plafond de dépôt ne bornait pas la mémoire des connecteurs — **corrigé**
+- **Où** : `fiskr/ingest.py` — trois connecteurs officiels au format JSON (DGT,
+  Consolidated Screening List, Banque mondiale) lisaient le fichier d'un seul
+  bloc (`json.load`), et deux lecteurs matérialisaient tout le contenu
+  (`f.read().splitlines()` pour le ConList britannique, `parser.feed(f.read())`
+  pour les pages HTML d'alerte).
+- **Pourquoi c'est exploitable** : le plafond de téléversement (512 Mo pour une
+  liste) borne le FICHIER, pas l'arbre d'objets Python qu'il produit — et
+  celui-ci pèse plus, d'un facteur qui dépend du contenu. Mesuré avec
+  `tracemalloc` : ×4,0 sur des entrées CSL réalistes, ×6,0 sur des chaînes
+  courtes distinctes, ×15,1 sur des objets minuscules `{"a":1}`, ×16,1 sur des
+  listes vides. Soit **2 à 8 Go** pour un seul import. Sur un hébergement
+  mutualisé le processus meurt ; sous Passenger, le worker web entier tombe.
+- **Correctif** : `TAILLE_MAX_LECTURE_BLOC` (64 Mo) borne ce qu'un connecteur
+  **sans lecture en flux** accepte — trois fois la marge du plus gros fichier
+  réel (la CSL pèse une vingtaine de mégaoctets), et le pire cas adverse tombe
+  à environ un gigaoctet. Le refus dit quoi faire. Les deux autres lecteurs
+  sont passés en flux plutôt que bornés.
+
+### 8. Aucune borne sur ce qu'une source distante peut faire lire — **corrigé**
+- **Où** : `fiskr/sync.py` — `http_get_text` rendait `response.text` sans
+  aucune borne (flux RSS de presse négative, scraping EUR-Lex), et
+  `download_to_file` écrivait sur le disque tant que l'hôte envoyait.
+- **Pourquoi c'est exploitable** : les points 5 et 7 ont plafonné tout ce qui
+  entre par **téléversement**. Or une liste entre par deux portes — l'écran
+  d'import, ou l'URL d'une source configurée — et c'est le même artefact, lu
+  par le même analyseur, écrit dans le même répertoire de travail. La seconde
+  porte n'avait rien. La taille de ce qui est lu était décidée **entièrement
+  par le bout d'en face** : un portail officiel détourné, un flux RSS servi par
+  un tiers, ou simplement un hôte qui déraille, suffisait à épuiser la mémoire
+  du processus de synchronisation ou à remplir le disque. Sur un hébergement
+  mutualisé, un disque plein est une interruption de service.
+- **Correctif** : `fiskr/limites.py` tient les plafonds en **un seul endroit**,
+  et celui du téléchargement est *dérivé* de celui du téléversement des listes
+  — pas recopié à côté : deux nombres qui devraient être égaux et qu'on
+  maintient à la main finissent toujours par diverger. Une page de texte a son
+  propre plafond, bien plus bas (32 Mo, contre 12 Ko mesurés pour un vrai flux
+  Google News sur un nom).
+- **Ce que le correctif a demandé de plus qu'un test de taille** : `client.get()`
+  met **tout le corps en mémoire avant de rendre la main**. Un contrôle posé
+  après coup ne protège de rien — quand on peut mesurer, la mémoire est déjà
+  dépensée. `http_get_text` lit désormais par blocs et refuse au premier bloc de
+  trop ; un test vérifie que le flux s'arrête bien là, et pas après. Un refus de
+  téléchargement efface ce qui était déjà sur le disque (même règle que
+  `copier_televersement`) et n'est **jamais** retenté : la réponse ne
+  rétrécira pas, et la rejouer paierait deux fois ce qu'on vient de refuser.
+
 ## Durcissement
 
 - **Secrets par défaut** : `SECRET_KEY` et `ADMIN_PASSWORD` ont une valeur par

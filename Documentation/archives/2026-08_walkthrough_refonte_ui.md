@@ -7,27 +7,27 @@ Ce document résume l'ensemble des travaux de restructuration de l'interface uti
 ## 🛠️ Synthèse des Changements Apportés
 
 ### 1. Restructuration de l'Interface Utilisateur (Consolidée en 3 Onglets)
-L'affichage a été regroupé en **3 onglets principaux** dans la barre latérale ([index.html](file:///e:/Program%20Files/git/Fiskr/fiskr/static/index.html)) pour simplifier l'organisation :
+L'affichage a été regroupé en **3 onglets principaux** dans la barre latérale ([index.html](../../fiskr/static/index.html)) pour simplifier l'organisation :
 * **Gestion des Watchlists** : Regroupe la gestion de la liste des sanctions active, l'importation de snapshots de fichiers sources (XML, CSV, PDF), le comparateur différentiel de versions (**Delta Engine**), et le nouveau module d'**Ajout Manuel** d'entités.
 * **Criblage** : Regroupe le crible temps réel unitaire (Sandbox) et le crible de masse (simulateur batch).
 * **Audit** : Historique réglementaire immuable de toutes les décisions de conformité (Piste d'Audit) conforme aux exigences AMF/ACPR.
 
-Les changements de sous-onglets sont gérés dynamiquement dans [app.js](file:///e:/Program%20Files/git/Fiskr/fiskr/static/app.js) avec la fonction `switchSubTab` qui bascule les classes `.active` et `.hidden`.
+Les changements de sous-onglets sont gérés dynamiquement dans [app.js](../../fiskr/static/app.js) avec la fonction `switchSubTab` qui bascule les classes `.active` et `.hidden`.
 
 ---
 
 ### 2. Optimisation des Performances de Rendu de la Watchlist (Pagination & DOM)
 Pour éviter le gel de l'interface graphique (lag de plusieurs secondes) lors du chargement de watchlists massives comme la liste OFAC :
 * **Pagination côté client** : Découpage de l'affichage de la Watchlist Active en pages de **100 éléments** via les variables `wlCurrentPage` et `wlFilteredItems`.
-* **Rendu par `DocumentFragment`** : Dans `renderWatchlistTable` ([app.js](file:///e:/Program%20Files/git/Fiskr/fiskr/static/app.js)), les lignes du tableau (`<tr>`) sont créées en mémoire vive et injectées dans le DOM en une seule transaction. Cela supprime les blocages de thread du navigateur.
+* **Rendu par `DocumentFragment`** : Dans `renderWatchlistTable` ([app.js](../../fiskr/static/app.js)), les lignes du tableau (`<tr>`) sont créées en mémoire vive et injectées dans le DOM en une seule transaction. Cela supprime les blocages de thread du navigateur.
 * **Pagination des filtres** : Le champ de recherche filtre d'abord le tableau en mémoire, puis pagine les résultats de manière transparente.
 
 ---
 
 ### 3. Ajout Manuel d'Entités à la Volée
 Permet d'ajouter un individu (PP), une personne morale (PM) ou un navire directement dans la watchlist active :
-* **Nouvel Onglet "Ajout Manuel"** : Formulaire interactif adapté au type d'entité sélectionné ([index.html](file:///e:/Program%20Files/git/Fiskr/fiskr/static/index.html)).
-* **Route API Dédiée** : `POST /api/watchlist/entity` ([api.py](file:///e:/Program%20Files/git/Fiskr/fiskr/api.py)) :
+* **Nouvel Onglet "Ajout Manuel"** : Formulaire interactif adapté au type d'entité sélectionné ([index.html](../../fiskr/static/index.html)).
+* **Route API Dédiée** : `POST /api/watchlist/entity` ([api.py](../../fiskr/api.py)) :
   1. Assure la présence d'un snapshot persistant nommé `manual-watchlist` (type `WATCHLIST_EU`, état `READY`).
   2. Valide l'entité via le **Quality Gate** (`evaluate_and_clean()`). Les fiches non conformes sont rejetées avec un code HTTP 400.
   3. Calcule la signature unique (`entity_checksum`) et persiste l'entité en base.
@@ -37,20 +37,20 @@ Permet d'ajouter un individu (PP), une personne morale (PM) ou un navire directe
 
 ### 4. Prise en Charge Complète des 25 Champs Réglementaires
 Toutes les propriétés réglementaires obligatoires sont dorénavant configurées et comparées :
-* **Mise à jour des modèles SQLAlchemy ([database.py](file:///e:/Program%20Files/git/Fiskr/fiskr/database.py))** :
+* **Mise à jour des modèles SQLAlchemy ([database.py](../../fiskr/database.py))** :
   - `WatchlistEntity` et `ClientEntity` intègrent désormais : Lieu de naissance (`place_of_birth`), Adresse, Ville (`city`), État (`state`), Pays (`country`), Origine (`origin`), Fonction/Désignation (`designation`), Remarques/Informations additionnelles (`additional_informations`), et Adresses alternatives (`alternative_addresses` en format JSON).
 * **Migration automatique de schéma** : Lors de l'initialisation de l'application via `init_db()`, SQLAlchemy inspecte les colonnes de la table SQLite. Si le schéma est obsolète, les tables sont recréées à chaud automatiquement sans crash.
-* **Mise à jour des modèles Pydantic et Connecteurs ([api.py](file:///e:/Program%20Files/git/Fiskr/fiskr/api.py))** :
+* **Mise à jour des modèles Pydantic et Connecteurs ([api.py](../../fiskr/api.py))** :
   - Les structures `ScreenClientRequest` et `WatchlistEntityCreate` exposent ces champs.
   - Les modules d'ingestion (XML, CSV de Watchlist et CSV de base client) lisent et insèrent ces propriétés.
-* **Moteur de Scoring ([scoring.py](file:///e:/Program%20Files/git/Fiskr/fiskr/scoring.py))** :
+* **Moteur de Scoring ([scoring.py](../../fiskr/scoring.py))** :
   - Intégration des propriétés pays directes (`client_country` et `country`) dans les calculs de ciblage géographique.
 
 ---
 
 ### 5. Résolution de Bugs de Compatibilité (Firefox & Menus Déroulants)
-* **Firefox Stylesheet / Script caching** : Ajout d'un paramètre de cache-busting `?v=2.4` sur les fichiers CSS et JS dans [index.html](file:///e:/Program%20Files/git/Fiskr/fiskr/static/index.html) pour forcer le chargement de la dernière version.
-* **Contrastes blancs sur blancs** : Dans [styles.css](file:///e:/Program%20Files/git/Fiskr/fiskr/styles.css), forçage d'une couleur de fond sombre et de texte clair pour les éléments `select option` afin de corriger les listes déroulantes illisibles sur Firefox.
+* **Firefox Stylesheet / Script caching** : Ajout d'un paramètre de cache-busting `?v=2.4` sur les fichiers CSS et JS dans [index.html](../../fiskr/static/index.html) pour forcer le chargement de la dernière version.
+* **Contrastes blancs sur blancs** : Dans [styles.css](../../fiskr/static/styles.css), forçage d'une couleur de fond sombre et de texte clair pour les éléments `select option` afin de corriger les listes déroulantes illisibles sur Firefox.
 
 ---
 

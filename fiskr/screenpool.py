@@ -108,10 +108,17 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
     # verrait toujours hits_count = 1) alors qu'elle se declenchera en
     # production. Le cahier doit predire la production, pas une autre chose.
     hits = 0
+    # Les correspondances sont VENTILEES PAR LISTE. Un cahier consolide couvre
+    # plusieurs deltas ; sans cette ventilation il annonce un volume global que
+    # personne ne sait attribuer, alors que chaque correspondance sait
+    # parfaitement de quelle liste elle vient.
+    hits_by_list: Dict[str, int] = {}
     for ent in candidates.values():
         score = match_entities(client, ent, config)
         if score.get("status") == "ALERT":
             hits += 1
+            liste = ent.get("_list_type")
+            hits_by_list[liste] = hits_by_list.get(liste, 0) + 1
         if best is None or score["final_score"] > best["final_score"]:
             best = score
             best_ent = ent
@@ -119,8 +126,14 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
     if not best or best.get("status") != "ALERT":
         return None
 
+    meilleur_score = round(float(best.get("final_score", 0)), 2)
     if (client.get("client_id"), best_ent.get("entity_id")) in whitelist_keys:
-        return ("whitelisted", {"hits": hits})
+        # `client_id` et `score` voyagent AUSSI sur ce sort-la : sans eux,
+        # deux passes ne peuvent pas savoir qu'elles parlent du meme client, ni
+        # laquelle a vu la meilleure correspondance.
+        return ("whitelisted", {"client_id": client.get("client_id"),
+                                "score": meilleur_score, "hits": hits,
+                                "hits_by_list": hits_by_list})
 
     pair = {
         "client_id": client.get("client_id"),
@@ -128,8 +141,9 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
         "entity_id": best_ent.get("entity_id"),
         "entity_name": best_ent.get("primary_name"),
         "list_type": best_ent.get("_list_type"),
-        "score": round(float(best.get("final_score", 0)), 2),
+        "score": meilleur_score,
         "hits": hits,
+        "hits_by_list": hits_by_list,
     }
 
     matched_rule = None
@@ -160,48 +174,102 @@ def _client_label(client: Dict[str, Any]) -> str:
 # ------------------ AGREGATION ------------------
 
 def new_partial() -> Dict[str, Any]:
-    # `pairs` compte les CLIENTS interceptes (une paire par client, la
-    # meilleure correspondance) ; `hits` compte les CORRESPONDANCES, dont la
-    # production ouvre une alerte chacune. Les deux chiffres repondent a deux
-    # questions differentes : « quelle proportion du panel est interceptee ? »
-    # et « combien d'alertes cette liste va-t-elle ouvrir ? ».
-    return {"pairs": {}, "whitelisted_suppressed": 0, "alerts_before_rules": 0,
-            "rule_suppressed": 0, "rule_suppressed_pairs": [], "hits": 0}
+    """
+    Accumulateur d'un criblage a blanc.
+
+    `par_client` est LA source : un client y a AU PLUS UN sort — intercepte,
+    mis en liste blanche, ou clos par une regle. Tous les compteurs publies
+    en decoulent (`finalize`), ils ne peuvent donc pas se contredire.
+
+    C'est ce qui manquait. Les compteurs vivaient cote a cote et s'additionnaient
+    ; tant qu'un criblage etait UNE passe sur UN univers, cela suffisait, chaque
+    client n'etant vu qu'une fois. Le mode delta du cahier de tests crible en
+    DEUX passes (univers partage, puis fiches du delta) : un client touche des
+    deux cotes etait compte deux fois. Un panel d'un seul client pouvait ainsi
+    afficher « 200 % de taux d'interception », et l'ecart qui decide de
+    l'homologation se calculait sur ce compte-la.
+
+    `hits` compte les CORRESPONDANCES (la production ouvre une alerte chacune),
+    ventilees par liste dans `hits_by_list`. Elles se somment sans precaution :
+    deux passes portent sur des ensembles de fiches disjoints, une meme
+    correspondance ne peut pas y figurer deux fois.
+    """
+    return {"par_client": {}, "hits": 0, "hits_by_list": {}}
+
+
+def _retenir(par_client: Dict[Any, Any], category: str, detail: Dict[str, Any]) -> None:
+    """
+    Conserve, pour ce client, le sort qu'une passe UNIQUE aurait retenu : celui
+    de la meilleure correspondance. Une passe evalue tous les candidats d'un
+    coup et ne garde que le meilleur ; deux passes doivent aboutir au meme
+    resultat, sinon le mode delta et le mode complet ne mesurent pas la meme
+    chose et leurs chiffres ne sont pas comparables.
+    """
+    identifiant = detail.get("client_id")
+    ancien = par_client.get(identifiant)
+    if ancien is None or float(detail.get("score") or 0) > float(ancien[1].get("score") or 0):
+        par_client[identifiant] = (category, detail)
 
 
 def apply_outcome(agg: Dict[str, Any], outcome) -> None:
     if outcome is None:
         return
     category, detail = outcome
-    agg["hits"] += int((detail or {}).get("hits", 0))
-    if category == "whitelisted":
-        agg["whitelisted_suppressed"] += 1
-        return
-    agg["alerts_before_rules"] += 1
-    if category == "rule":
-        agg["rule_suppressed"] += 1
-        if len(agg["rule_suppressed_pairs"]) < MAX_PAIR_DETAILS:
-            agg["rule_suppressed_pairs"].append(detail)
-        return
-    agg["pairs"][(detail["client_id"], detail["entity_id"])] = detail
+    detail = detail or {}
+    agg["hits"] += int(detail.get("hits", 0))
+    for liste, nombre in (detail.get("hits_by_list") or {}).items():
+        agg["hits_by_list"][liste] = agg["hits_by_list"].get(liste, 0) + nombre
+    _retenir(agg["par_client"], category, detail)
+
+
+def finalize(agg: Dict[str, Any]) -> Dict[str, Any]:
+    """Compte public derive des sorts retenus, et de rien d'autre."""
+    pairs: Dict[Any, Dict[str, Any]] = {}
+    liste_blanche = avant_regles = clos_par_regle = 0
+    exemples: List[Dict[str, Any]] = []
+    for category, detail in agg["par_client"].values():
+        if category == "whitelisted":
+            liste_blanche += 1
+            continue
+        avant_regles += 1
+        if category == "rule":
+            clos_par_regle += 1
+            if len(exemples) < MAX_PAIR_DETAILS:
+                exemples.append(detail)
+            continue
+        pairs[(detail["client_id"], detail["entity_id"])] = detail
+    return {
+        "par_client": agg["par_client"],
+        "pairs": pairs,
+        "alerts": len(pairs),
+        "whitelisted_suppressed": liste_blanche,
+        "alerts_before_rules": avant_regles,
+        "rule_suppressed": clos_par_regle,
+        "rule_suppressed_pairs": exemples,
+        "hits": agg["hits"],
+        "hits_by_list": dict(agg["hits_by_list"]),
+    }
 
 
 def merge_partials(partials: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Fusionne les tranches : les cles de `pairs` sont disjointes (un client
-    vit dans une seule tranche), les compteurs s'additionnent, les listes se
-    concatenent DANS L'ORDRE des tranches puis se tronquent — meme resultat
-    que la passe sequentielle sur les memes clients dans le meme ordre."""
+    """
+    Fusionne des accumulateurs — les tranches d'un criblage parallele, ou les
+    passes d'un cahier en mode delta. Les sorts se resolvent PAR CLIENT (le
+    meilleur score l'emporte) et les correspondances s'additionnent ; l'ordre
+    des tranches est conserve, donc le resultat est celui de la passe
+    sequentielle sur les memes clients dans le meme ordre.
+
+    Ne modifie AUCUN de ses arguments : la passe partagee memorisee d'un cahier
+    a l'autre doit survivre intacte a tous les cahiers qui la reemploient.
+    """
     merged = new_partial()
     for part in partials:
-        merged["pairs"].update(part["pairs"])
-        merged["whitelisted_suppressed"] += part["whitelisted_suppressed"]
-        merged["alerts_before_rules"] += part["alerts_before_rules"]
-        merged["rule_suppressed"] += part["rule_suppressed"]
         merged["hits"] += part.get("hits", 0)
-        merged["rule_suppressed_pairs"].extend(part["rule_suppressed_pairs"])
-    merged["rule_suppressed_pairs"] = merged["rule_suppressed_pairs"][:MAX_PAIR_DETAILS]
-    merged["alerts"] = len(merged["pairs"])
-    return merged
+        for liste, nombre in (part.get("hits_by_list") or {}).items():
+            merged["hits_by_list"][liste] = merged["hits_by_list"].get(liste, 0) + nombre
+        for category, detail in part["par_client"].values():
+            _retenir(merged["par_client"], category, detail)
+    return finalize(merged)
 
 
 # ------------------ DIMENSIONNEMENT ------------------

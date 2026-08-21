@@ -16,7 +16,7 @@ from fiskr.database import (
 )
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities
-from fiskr.alerts import open_or_redetect_alert, is_whitelisted
+from fiskr.alerts import is_whitelisted
 from fiskr import screenpool
 
 logger = logging.getLogger("fiskr.rescreen")

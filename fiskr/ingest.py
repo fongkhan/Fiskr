@@ -1,8 +1,10 @@
 import re
 import csv
+import itertools
 import json
 import hashlib
 import logging
+import os
 from typing import List, Dict, Any, Generator, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
@@ -25,6 +27,62 @@ except ImportError:
     XLSX_AVAILABLE = False
 
 logger = logging.getLogger("fiskr.ingest")
+
+
+# Plafond des fichiers lus D'UN SEUL BLOC en memoire.
+#
+# Trois connecteurs officiels sont au format JSON (registre national des gels,
+# Consolidated Screening List americaine, exclusions de la Banque mondiale) et
+# la bibliotheque standard n'offre pas de lecture en flux : `json.load` construit
+# l'arbre entier. Or l'arbre pese PLUS que le fichier, et le facteur depend du
+# contenu — mesure avec `tracemalloc` :
+#
+#     entrees CSL realistes         x 4,0
+#     chaines courtes distinctes    x 6,0
+#     objets minuscules {"a":1}     x15,1
+#     listes vides []               x16,1
+#
+# Au plafond de televersement (512 Mo), cela fait 2 a 8 Go d'objets Python pour
+# un seul import — sur un hebergement mutualise, le processus meurt, et sous
+# Passenger c'est le worker web entier qui tombe.
+#
+# Le plafond de DEPOT ne suffit donc pas : il faut un plafond de LECTURE, propre
+# aux connecteurs qui ne savent pas defiler. 64 Mo laisse plus de trois fois la
+# marge du plus gros fichier reel (la CSL de trade.gov pese une vingtaine de
+# megaoctets) et borne le pire cas adverse a environ un gigaoctet.
+TAILLE_MAX_LECTURE_BLOC = 64 * 1024 * 1024
+
+
+class FichierTropVolumineux(ValueError):
+    """Le fichier depasse ce qu'un connecteur sans lecture en flux peut tenir."""
+
+    def __init__(self, chemin: str, taille: int, plafond: int):
+        self.taille = taille
+        self.plafond = plafond
+        super().__init__(
+            f"Fichier de {taille // (1024 * 1024)} Mo : ce format est lu d'un "
+            f"seul bloc en mémoire et la limite est de "
+            f"{plafond // (1024 * 1024)} Mo. Un fichier plus volumineux doit "
+            f"passer par un connecteur en flux (XML, CSV)."
+        )
+
+
+def _verifie_taille_bloc(file_path: str, plafond: int = TAILLE_MAX_LECTURE_BLOC) -> None:
+    """Refuse AVANT lecture un fichier qu'on ne saurait tenir en memoire."""
+    try:
+        taille = os.path.getsize(file_path)
+    except OSError:
+        return  # le lecteur qui suit signalera l'erreur reelle
+    if taille > plafond:
+        raise FichierTropVolumineux(file_path, taille, plafond)
+
+
+def charger_json_borne(file_path: str, encoding: str = "utf-8",
+                       plafond: int = TAILLE_MAX_LECTURE_BLOC) -> Any:
+    """`json.load` precede du controle de taille (cf. TAILLE_MAX_LECTURE_BLOC)."""
+    _verifie_taille_bloc(file_path, plafond)
+    with open(file_path, "r", encoding=encoding) as f:
+        return json.load(f)
 
 
 def parse_multi_value(item: Dict[str, Any], *column_names: str,
@@ -1348,8 +1406,7 @@ def parse_dgt_gels_json(file_path: str) -> Generator[Dict[str, Any], None, None]
     Parse le fichier JSON du registre national des gels (DGT) et produit des
     enregistrements au schema pivot Fiskr.
     """
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = charger_json_borne(file_path)
 
     publications = dict_get_insensitive(data, "Publications") or {}
     if isinstance(publications, list):
@@ -2081,16 +2138,15 @@ def _ofsi_date(raw: str) -> Optional[str]:
     return _normalize_partial_date(raw)
 
 
-def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
-    """Parse la liste consolidee UK OFSI (ConList.csv) vers le schema pivot."""
-    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
-        lines = f.read().splitlines()
-    # Saute le preambule jusqu'a la ligne d'en-tetes (contient "Group Type")
-    header_idx = next(
-        (i for i, line in enumerate(lines[:10]) if "group type" in line.lower()), 0
-    )
-    reader = csv.DictReader(lines[header_idx:])
+def _ofsi_grouper(reader) -> Dict[str, Dict[str, Any]]:
+    """
+    Regroupe les lignes du ConList par identifiant de groupe.
 
+    Le format OFSI ecrit UNE ligne par nom : la ligne « primaire » porte les
+    donnees de la fiche, les suivantes n'apportent qu'un alias. Le regroupement
+    est donc inherent au format, et il garde en memoire une entree par FICHE —
+    quelques dizaines de milliers — pas le fichier.
+    """
     groups: Dict[str, Dict[str, Any]] = {}
     for row in reader:
         group_id = _ofsi_get(row, "Group ID", "GroupID")
@@ -2118,6 +2174,28 @@ def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, No
             group["row"] = row
         else:
             group["aliases"].append({"name": full_name, "type": "Strong"})
+    return groups
+
+
+def parse_ofsi_conlist_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """Parse la liste consolidee UK OFSI (ConList.csv) vers le schema pivot."""
+    # Lecture EN FLUX. `f.read().splitlines()` materialisait le fichier entier
+    # en une liste de chaines : sur un depot au plafond de televersement
+    # (512 Mo), c'est un demi-gigaoctet de texte PLUS l'en-tete de plusieurs
+    # millions d'objets `str`, avant meme d'avoir lu une ligne utile. Seules les
+    # dix premieres lignes sont retenues, le temps de trouver l'en-tete.
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+        preambule = []
+        for _ in range(10):
+            ligne = f.readline()
+            if not ligne:
+                break
+            preambule.append(ligne)
+        header_idx = next(
+            (i for i, line in enumerate(preambule) if "group type" in line.lower()), 0
+        )
+        groups = _ofsi_grouper(
+            csv.DictReader(itertools.chain(preambule[header_idx:], f)))
 
     for group_id, group in groups.items():
         row = group["row"]
@@ -2728,8 +2806,7 @@ def parse_csl_json(
         ) if s
     )
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+    payload = charger_json_borne(file_path)
     results = payload.get("results") if isinstance(payload, dict) else payload
     for row in results or []:
         if not isinstance(row, dict):
@@ -3295,9 +3372,15 @@ class _HTMLTableExtractor(HTMLParser):
 
 def _read_html_table_rows(file_path: str) -> Generator[Dict[str, str], None, None]:
     """Lignes du tableau principal d'une page HTML, en-tete = 1re ligne."""
+    # `HTMLParser.feed` accepte des morceaux : la page est alimentee par blocs
+    # plutot que materialisee en une seule chaine. Le controle de taille reste,
+    # parce que l'arbre de tableaux construit, lui, tient bien en memoire.
+    _verifie_taille_bloc(file_path)
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         parser = _HTMLTableExtractor()
-        parser.feed(f.read())
+        while morceau := f.read(1024 * 1024):
+            parser.feed(morceau)
+        parser.close()
     if not parser.tables:
         return
     table = max(parser.tables, key=len)
@@ -3332,8 +3415,7 @@ def _read_alert_rows(file_path: str) -> Generator[Dict[str, Any], None, None]:
     """Lignes d'une liste d'alerte : JSON, CSV/XLSX ou tableau HTML."""
     detected = _sniff_table_format(file_path)
     if detected == "json":
-        with open(file_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
+        payload = charger_json_borne(file_path)
         if isinstance(payload, dict):
             for key in ("results", "data", "items", "records", "rows"):
                 if isinstance(payload.get(key), list):
@@ -3584,8 +3666,7 @@ def _worldbank_records(payload: Any) -> List[Dict[str, Any]]:
 
 def parse_worldbank_debarred_json(file_path: str) -> Generator[Dict[str, Any], None, None]:
     """Parse la liste des fournisseurs exclus par la Banque mondiale."""
-    with open(file_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+    payload = charger_json_borne(file_path)
 
     for row in _worldbank_records(payload):
         row = {(k or "").strip().upper(): v for k, v in row.items()}

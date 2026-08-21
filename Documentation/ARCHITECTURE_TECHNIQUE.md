@@ -436,6 +436,67 @@ graph
 
 ---
 
+### 6.4 Vocabulaires partagés : dérivés, jamais recopiés
+
+Un même vocabulaire vit à plusieurs endroits : le code qui l'**émet**, la
+constante serveur qui le **déclare**, et la table du frontal qui lui donne un
+**libellé**, une **icône** ou un **lien**. Trois recopies, trois occasions de
+diverger — et la divergence est silencieuse : l'écran affiche un code brut, une
+ligne ne mène nulle part, ou pire, une clé proposée à l'auteur d'une règle
+n'existe pas et sa règle reste inerte sans que rien ne le signale.
+
+C'est arrivé quatre fois, sur quatre vocabulaires différents. La règle est donc
+posée : **toute table partagée est vérifiée par un test qui DÉRIVE la vérité de
+la source**, au lieu de la recopier.
+
+| Vocabulaire | Source de vérité | Test |
+|---|---|---|
+| Phases et natures d'opération | ce que le code émet (`phase=`, `_submit_job`) | `test_vocabulaire_progression` |
+| Actions d'administration | les appels à `log_admin_action` | `test_journal_admin_lisible` |
+| Contexte des règles anti-FP | `build_screening_ctx` / `build_filtering_ctx` | `test_palette_regles` |
+| Sources de synchronisation | `_SYNC_SOURCE_ALIASES` | `test_registre_runners_sync` |
+| Index de performance | `_PERFORMANCE_INDEXES` | `test_perf_indexes` |
+| Périmètres, capacités, seuils | leurs catalogues respectifs | `test_perimetres`, `test_capability_wiring` |
+
+La règle ne s'arrête pas au code. **Tout ce qui décrit le produit est une table
+recopiée à la main**, et dérive de la même façon — en silence, parce que rien ne
+plante :
+
+| Recopie | Source de vérité | Test |
+|---|---|---|
+| Endpoints cités dans la documentation | la table des routes de FastAPI | `test_documentation_exacte` |
+| Chemins de fichiers et renvois internes | le dépôt lui-même | `test_documentation_exacte` |
+| Clés de traduction | les nœuds texte et attributs que l'interface rend | `test_i18n_derive` |
+| Règles CSS | les classes que le balisage nomme | `test_feuille_de_style` |
+| Plafond de téléchargement | le plafond de téléversement des listes | `test_bornes_reseau` |
+
+Deux de ces cas méritent d'être nommés, parce que le mécanisme du silence y est
+différent et instructif.
+
+**Le repli qui masque le défaut.** Le moteur d'i18n laisse le français en place
+quand une clé manque — « jamais de trou ». C'est la bonne décision produit, et
+c'est précisément ce qui a permis à soixante-et-onze étiquettes de ne plus être
+traduites du tout, pendant des mois, sans un message d'erreur. Un repli
+gracieux doit donc toujours s'accompagner d'un test qui vérifie qu'on n'y tombe
+pas en permanence.
+
+**La priorité qui annule la source.** Une règle CSS entièrement redéclarée dans
+l'attribut `style` du même élément est inatteignable : on peut la modifier sans
+que rien ne change. Le symptôme se lit dans le code — des `!important` apparaissent
+un à un pour reprendre la main. Le remède n'est pas d'en ajouter, c'est de
+ramener les valeurs à un seul endroit.
+
+Chacun de ces tests vérifie les **deux sens** :
+
+* rien d'émis n'est absent de la déclaration — sinon l'écran montre un code
+  brut, ou l'action n'a ni icône ni destination ;
+* rien de déclaré n'est inerte — un libellé sans émetteur fait croire qu'une
+  chose est tracée alors que plus rien ne l'écrit.
+
+Et chacun porte une garde contre lui-même : une assertion sur le **nombre**
+d'éléments détectés, pour qu'une expression régulière cassée échoue au lieu de
+rendre le test vert à vide.
+
 ## 7. Piste d'Audit et Explicabilité (Compliance Audit Trail)
 
 Chaque décision logicielle doit pouvoir être reconstruite à des fins de contrôle réglementaire (ACPR/AMF). Le système persiste de manière immuable en base de données relationnelle (PostgreSQL cible) :
