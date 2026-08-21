@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the README announced 153 tests while the suite held 1 370
+A number written once in a document ages exactly like a hand-copied table, and this one was off by a factor of ten. It is corrected, and now derived from `tests/` by a test rather than trusted. `FISKR_JOBS_MODE` is documented too — it **overrides** `config.yaml`'s `jobs.mode`, which is worth knowing before wondering why a freshly edited `jobs.mode` has no effect.
+
+Swept in the same pass, with nothing found: every repository file path and internal link cited in the documentation (58 and 0 broken respectively), the 676 element ids of the interface (no duplicates), every `getElementById` target, all 239 front-end API calls against the live route table, the endpoints quoted inside the in-app guide, the client list-type labels against the 42 types the server produces, and the environment variables the code reads against those the documentation names.
+
+The architecture document's §6.4 — *shared vocabularies: derived, never copied* — is extended to say what this batch showed: the rule does not stop at code. Documentation, translation keys and CSS rules are hand-copied tables too, and two of them fail in an instructive way. A **graceful fallback hides the defect**: i18n leaves French in place when a key is missing, which is the right product decision and is precisely why seventy-one labels went untranslated for months without one error message — so a graceful fallback must always come with a test that you are not permanently falling into it. And a **priority that cancels its source**: a CSS rule fully redeclared inline is unreachable, and the symptom is `!important` flags appearing one by one to win the fight; the cure is not another one, it is bringing the values back to a single place.
+
 ### Fixed — seventy-one labels showed in French to every non-French user
 The i18n engine matches a text node against a French key. Its header states the fallback plainly: *"strings absent from the dictionary stay in French (never a hole)"*. That is the right call — and it is exactly what makes this defect invisible. A key that no longer matches anything raises nothing, logs nothing, and simply leaves French in front of a reader who asked for another language.
 

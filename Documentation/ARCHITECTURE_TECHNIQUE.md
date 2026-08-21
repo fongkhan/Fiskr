@@ -458,6 +458,34 @@ la source**, au lieu de la recopier.
 | Index de performance | `_PERFORMANCE_INDEXES` | `test_perf_indexes` |
 | Périmètres, capacités, seuils | leurs catalogues respectifs | `test_perimetres`, `test_capability_wiring` |
 
+La règle ne s'arrête pas au code. **Tout ce qui décrit le produit est une table
+recopiée à la main**, et dérive de la même façon — en silence, parce que rien ne
+plante :
+
+| Recopie | Source de vérité | Test |
+|---|---|---|
+| Endpoints cités dans la documentation | la table des routes de FastAPI | `test_documentation_exacte` |
+| Chemins de fichiers et renvois internes | le dépôt lui-même | `test_documentation_exacte` |
+| Clés de traduction | les nœuds texte et attributs que l'interface rend | `test_i18n_derive` |
+| Règles CSS | les classes que le balisage nomme | `test_feuille_de_style` |
+| Plafond de téléchargement | le plafond de téléversement des listes | `test_bornes_reseau` |
+
+Deux de ces cas méritent d'être nommés, parce que le mécanisme du silence y est
+différent et instructif.
+
+**Le repli qui masque le défaut.** Le moteur d'i18n laisse le français en place
+quand une clé manque — « jamais de trou ». C'est la bonne décision produit, et
+c'est précisément ce qui a permis à soixante-et-onze étiquettes de ne plus être
+traduites du tout, pendant des mois, sans un message d'erreur. Un repli
+gracieux doit donc toujours s'accompagner d'un test qui vérifie qu'on n'y tombe
+pas en permanence.
+
+**La priorité qui annule la source.** Une règle CSS entièrement redéclarée dans
+l'attribut `style` du même élément est inatteignable : on peut la modifier sans
+que rien ne change. Le symptôme se lit dans le code — des `!important` apparaissent
+un à un pour reprendre la main. Le remède n'est pas d'en ajouter, c'est de
+ramener les valeurs à un seul endroit.
+
 Chacun de ces tests vérifie les **deux sens** :
 
 * rien d'émis n'est absent de la déclaration — sinon l'écran montre un code

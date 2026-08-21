@@ -530,6 +530,13 @@ Réglages (`config.yaml`, section `jobs:` — lus au démarrage du processus) :
 | `jobs.screen_processes` | `0` | Processus du pool de criblage : `0` = auto (budget CPU/mémoire), `1` = séquentiel forcé, `N` = imposé |
 | `jobs.autostart` | `true` | L'API relance le démon absent (watchdog 60 s) |
 
+> **`FISKR_JOBS_MODE` prime sur `jobs.mode`.** La variable d'environnement,
+> quand elle est définie, l'emporte sur `config.yaml` — c'est ainsi que le
+> démon se marque lui-même en `worker` et que la suite de tests bascule en
+> `eager`. À savoir avant de chercher pourquoi un `jobs.mode` fraîchement
+> modifié dans `config.yaml` reste sans effet : regardez d'abord
+> l'environnement du processus.
+
 > **Passenger (mutualisé)** : réglez `passenger_min_instances 1` — c'est le
 > réglage le plus rentable de tout le déploiement, et il est mesuré. Sans lui,
 > Passenger recycle le processus dès qu'il est inactif : chaque visiteur tombe
@@ -675,10 +682,16 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète de 153 tests automatisés avec pytest :
+Exécutez la suite complète — **1 370 fonctions de test** réparties sur 136
+fichiers — avec pytest :
 ```bash
 python -m pytest
 ```
+
+> Ce chiffre est tenu par un test (`test_documentation_exacte`) : il se dérive
+> du contenu de `tests/`, il ne se recopie pas. Il annonçait 153 pendant que la
+> suite en comptait dix fois plus — un nombre écrit une fois dans un document
+> vieillit exactement comme une table recopiée à la main.
 
 
 

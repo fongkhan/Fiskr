@@ -136,3 +136,39 @@ def test_aucun_renvoi_vers_le_disque_de_son_auteur():
                 fautes.append(f"{os.path.relpath(doc, DEPOT)}:{i}")
     assert not fautes, (
         "Renvois vers un chemin absolu de machine locale :\n  " + "\n  ".join(fautes))
+
+def test_le_compte_de_tests_annonce_par_le_readme_est_juste():
+    """
+    Le README annonce la taille de la suite. Ce nombre est une table recopiee a
+    la main comme une autre : il annoncait 153 pendant que la suite en comptait
+    dix fois plus. Il se derive donc de `tests/`.
+    """
+    import ast
+
+    dossier = os.path.join(DEPOT, "tests")
+    fonctions, fichiers = 0, 0
+    for nom in sorted(os.listdir(dossier)):
+        if not (nom.startswith("test_") and nom.endswith(".py")):
+            continue
+        fichiers += 1
+        with open(os.path.join(dossier, nom), encoding="utf-8") as f:
+            arbre = ast.parse(f.read())
+        fonctions += sum(
+            1 for n in ast.walk(arbre)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("test_"))
+
+    assert fonctions > 500, f"comptage suspect : {fonctions} fonction(s)"
+    with open(os.path.join(DEPOT, "README.md"), encoding="utf-8") as f:
+        # Blancs normalises : la phrase peut etre coupee sur deux lignes par
+        # l'habillage du document sans cesser d'etre la meme phrase.
+        readme = re.sub(r"\s+", " ", f.read())
+
+    # Ecrit avec une espace fine ou insecable selon la typographie du document
+    attendu = [f"{fonctions:,}".replace(",", sep) for sep in (" ", "\u202f", "\u00a0", "")]
+    assert any(f"**{a} fonctions de test**" in readme for a in attendu), (
+        f"Le README doit annoncer **{fonctions:,} fonctions de test** "
+        f"(reparties sur {fichiers} fichiers) — mettez la phrase a jour.".replace(",", " "))
+    assert f"{fichiers} fichiers" in readme, (
+        f"Le README doit annoncer {fichiers} fichiers de test.")
+
