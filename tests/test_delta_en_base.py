@@ -168,6 +168,60 @@ def test_un_lot_vide_face_a_un_lot_plein(deux_lots):
         db.commit()
 
 
+# ------------------ RÉFÉRENTIEL CLIENTS ------------------
+
+def test_le_referentiel_clients_suit_les_memes_regles():
+    """La comparaison de deux bases clients passe par le même chemin — avec
+    ses propres noms de colonnes — et doit rendre exactement ce que rendait
+    `calculate_delta`."""
+    from fiskr.database import ClientEntity
+    from fiskr.delta import _descripteur
+
+    db = next(get_db())
+    ancien, nouveau = f"dlc-old-{TAG}", f"dlc-new-{TAG}"
+    for sid in (ancien, nouveau):
+        db.add(Snapshot(snapshot_id=sid, file_name="x", file_hash=uuid.uuid4().hex,
+                        file_type="CLIENT_BASE", status="READY", record_count=0))
+
+    def _client(sid, cid, nom, ville=None):
+        donnees = {"client_id": cid, "client_type": "PP",
+                   "client_last_name": nom, "client_city": ville}
+        db.add(ClientEntity(snapshot_id=sid,
+                            entity_checksum=compute_checksum(donnees), **donnees))
+
+    try:
+        for i in range(3):
+            _client(ancien, f"C{i}", f"NOM{i}")
+            _client(nouveau, f"C{i}", f"NOM{i}")
+        _client(ancien, "C3", "MODIF", "PARIS")
+        _client(nouveau, "C3", "MODIF", "LYON")
+        _client(ancien, "C4", "RETIRE")
+        _client(nouveau, "C5", "AJOUTE")
+        db.commit()
+
+        def _dicts(sid):
+            return [{c.name: getattr(e, c.name) for c in ClientEntity.__table__.columns}
+                    for e in db.query(ClientEntity).filter(ClientEntity.snapshot_id == sid)]
+
+        attendu = calculate_delta(_dicts(ancien), _dicts(nouveau), "client_id")
+        obtenu = calculate_delta_db(db, ancien, nouveau, cle="client_id")
+        assert obtenu["summary"] == attendu["summary"]
+        assert obtenu["summary"] == {"added_count": 1, "removed_count": 1,
+                                     "modified_count": 1}
+        assert obtenu["details"]["modified"] == attendu["details"]["modified"]
+        assert obtenu["details"]["modified"][0]["changes_detected"] == ["client_city"]
+        # Le nom affiché vient des colonnes du référentiel CLIENTS
+        assert obtenu["details"]["added"][0]["primary_name"] == "AJOUTE"
+        assert _descripteur("client_id")[0] is ClientEntity
+    finally:
+        db.query(ClientEntity).filter(
+            ClientEntity.snapshot_id.in_([ancien, nouveau])).delete(synchronize_session=False)
+        db.query(Snapshot).filter(
+            Snapshot.snapshot_id.in_([ancien, nouveau])).delete(synchronize_session=False)
+        db.commit()
+        db.close()
+
+
 # ------------------ L'INDEX QUI REND LA JOINTURE UTILISABLE ------------------
 
 def test_le_couple_lot_identifiant_est_indexe():

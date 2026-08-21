@@ -762,8 +762,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     if caps.is_active(caps.CAP_NAMES_ALIASES_CLIENT, channel):
         # `client_aliases` est le champ du referentiel ; « aliases » reste lu
         # pour les profils venus d'un webhook ou d'un appel direct.
-        for a in _valeurs(client.get("client_aliases") or client.get("aliases")):
-            c_names.append(a)
+        c_names.extend(_valeurs(client.get("client_aliases") or client.get("aliases")))
             
     c_names = list(set([n.strip() for n in c_names if n and str(n).strip()]))
     
