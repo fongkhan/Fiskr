@@ -21,9 +21,13 @@ STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 LANGUES_CIBLES = ("en", "de", "es", "zh", "ar")
 
 
-def _source():
-    with open(os.path.join(STATIC, "i18n.js"), encoding="utf-8") as f:
+def _lire(nom):
+    with open(os.path.join(STATIC, nom), encoding="utf-8") as f:
         return f.read()
+
+
+def _source():
+    return _lire("i18n.js")
 
 
 def _bloc(src, nom, ouvre="{", ferme="}"):
@@ -134,3 +138,85 @@ def test_aucune_reference_de_groupe_hors_du_motif():
                 if ref > groupes:
                     fautes.append(f"[{lang}] ${ref} pour {groupes} groupe(s) : /{motif[:50]}/")
     assert not fautes, "References de groupe hors motif :\n  " + "\n  ".join(fautes)
+
+# ------------------------------------- une traduction qui ne s'affiche jamais
+
+_ATTRS_TRADUITS = ("placeholder", "title", "aria-label")
+
+
+def _textes_rendus():
+    """
+    Tout ce que le moteur d'i18n peut rencontrer : les nœuds texte et les
+    attributs traduits des pages, plus le texte litteral que le JS injecte et
+    les messages que le serveur renvoie. Les blancs sont normalises comme le
+    fait `lookup()`, et les litteraux JS concatenes (`"..." + "..."`) sont
+    recolles — sinon une phrase coupee sur deux lignes passerait pour absente.
+    """
+    from html.parser import HTMLParser
+
+    rendus = set()
+
+    class Pages(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.ignore = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style"):
+                self.ignore.append(tag)
+            for nom, valeur in attrs:
+                if nom in _ATTRS_TRADUITS and valeur:
+                    rendus.add(re.sub(r"\s+", " ", valeur).strip())
+
+        def handle_startendtag(self, tag, attrs):
+            self.handle_starttag(tag, attrs)
+
+        def handle_endtag(self, tag):
+            if self.ignore and self.ignore[-1] == tag:
+                self.ignore.pop()
+
+        def handle_data(self, donnees):
+            if self.ignore:
+                return
+            texte = re.sub(r"\s+", " ", donnees).strip()
+            if texte:
+                rendus.add(texte)
+
+    for page in ("index.html", "login.html"):
+        analyseur = Pages()
+        analyseur.feed(_lire(page))
+        analyseur.close()
+
+    brut = _lire("app.js") + _lire("login.html")
+    brut = re.sub(r'"\s*\+\s*"', "", brut)      # litteraux concatenes recolles
+    brut = re.sub(r"\s+", " ", brut)
+    fiskr = os.path.join(os.path.dirname(STATIC), "")
+    serveur = ""
+    for nom in sorted(os.listdir(fiskr)):
+        if nom.endswith(".py"):
+            with open(os.path.join(fiskr, nom), encoding="utf-8") as f:
+                serveur += f.read()
+    return rendus, brut + re.sub(r"\s+", " ", serveur)
+
+
+def test_aucune_traduction_qui_ne_s_affichera_jamais():
+    """
+    Le moteur retombe sur le francais quand une chaine manque — « jamais de
+    trou », dit son en-tete. C'est la bonne decision, et c'est aussi ce qui
+    rend le defaut invisible : une cle qui ne correspond plus a rien ne
+    provoque aucune erreur, elle laisse simplement le francais en place devant
+    un lecteur qui a demande une autre langue.
+
+    C'est arrive en masse quand l'interface est passee des libelles a emoji aux
+    icones SVG : le dictionnaire a garde les cles « 🚪 Deconnexion » tandis que
+    la page rendait « Deconnexion ». Soixante-et-onze etiquettes — dont
+    Instruire, Editer, Supprimer, Escalader, Valider (4-yeux) — s'affichaient
+    en francais dans les cinq langues.
+    """
+    _, dico = _dictionnaire("T")
+    rendus, litteraux = _textes_rendus()
+    fantomes = [cle for cle in dico if cle not in rendus and cle not in litteraux]
+    assert not fantomes, (
+        "Cles de traduction qu'aucun texte affiche ne peut atteindre. Si le "
+        "libelle a change, reportez la cle sur le nouveau ; s'il a disparu, "
+        "retirez l'entree :\n  " + "\n  ".join(repr(c[:90]) for c in sorted(fantomes)))

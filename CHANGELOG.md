@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — seventy-one labels showed in French to every non-French user
+The i18n engine matches a text node against a French key. Its header states the fallback plainly: *"strings absent from the dictionary stay in French (never a hole)"*. That is the right call — and it is exactly what makes this defect invisible. A key that no longer matches anything raises nothing, logs nothing, and simply leaves French in front of a reader who asked for another language.
+
+When the interface moved from emoji labels to inline SVG icons, the dictionary kept its emoji-prefixed keys. `"🚪 Déconnexion"` no longer matches a page that renders `<svg …/> Déconnexion`. **Seventy-one labels** were affected, and they are not marginal ones: Instruire, Éditer, Supprimer, Commenter, Escalader, M'assigner, Proposer : Faux positif, Proposer : Vrai positif, Valider (4-yeux), Refuser & renvoyer, Rejeter, Approuver & Mettre en Production, Lancer la campagne, Purger le journal — plus every settings section heading (Sécurité des Accès, Rétention des Données, Seuils de Score du Criblage, Clés d'API Techniques…). The whole vocabulary an analyst clicks all day.
+
+Six more keys were stale for a different reason — the wording moved on (`Criblage à blanc — listes en production…` became `Criblage à blanc (passe 1/2) — listes en production…`), and one link's key still carried an emoji the markup had dropped, leaving "Créer une règle" untranslated as well. Every key is re-pointed at the text the interface really renders, and the emoji is stripped from the translations too, since the rendered text no longer has one.
+
+The existing tests could not see any of it: they sample the dictionary, and they check that the dictionary is *complete* — never that a key still corresponds to something on screen. The new guard derives the answer from the interface itself: it collects the text nodes and translatable attributes of both pages, the string literals of `app.js` (re-joining literals split across lines), and the server messages, then asserts that **every** dictionary key can be reached by at least one of them.
+
+### Fixed — a link on the backtest screen did nothing
+`onclick="showTab('alerts')"` — a function that exists nowhere, and a tab named `alerts` that exists nowhere either. Clicking "Créer une règle" threw a `ReferenceError` and left the user where they were. The real call is `switchSubTab('screening', 'alerts-rules')`, and the label now names the destination as the interface names it: Criblage → Règles FP. The same sweep checked all 676 element ids (no duplicates), every `getElementById` target, and every `switchTab`/`switchSubTab` destination against the 14 sections and 102 sub-tabs actually declared — this link was the only one broken.
+
 ### Fixed — dead CSS was hiding a lost affordance, and a rule nothing could change
 Two defects hide behind one another in a stylesheet that has lived.
 
