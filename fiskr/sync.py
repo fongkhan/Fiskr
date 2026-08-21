@@ -33,7 +33,7 @@ from urllib.parse import urljoin
 
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.quality import evaluate_and_clean
-from fiskr.delta import calculate_delta
+from fiskr.delta import calculate_delta, calculate_delta_db
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
     parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
@@ -944,14 +944,25 @@ def _supersede_previous_snapshots(db, file_type: str, keep_snapshot_id: str) -> 
 
 
 def _truncate_delta_details(delta: Dict[str, Any]) -> Dict[str, Any]:
-    """Limite la taille des details stockes dans le rapport (les compteurs restent exacts)."""
+    """
+    Limite la taille des details stockes dans le rapport (les compteurs restent
+    exacts).
+
+    IDEMPOTENT : `calculate_delta_db` rend deja une structure tronquee, avec
+    ses compteurs `*_truncated`. Les reconstruire de zero les effacerait, et le
+    rapport dirait « cent modifications » la ou il y en a dix mille.
+    """
     details = delta.get("details", {})
     truncated = {}
     for key in ("added", "removed", "modified"):
         rows = details.get(key, [])
         truncated[key] = rows[:MAX_REPORT_DETAILS]
+        reste = details.get(f"{key}_truncated")
         if len(rows) > MAX_REPORT_DETAILS:
-            truncated[f"{key}_truncated"] = len(rows) - MAX_REPORT_DETAILS
+            truncated[f"{key}_truncated"] = (
+                len(rows) - MAX_REPORT_DETAILS + int(reste or 0))
+        elif reste:
+            truncated[f"{key}_truncated"] = int(reste)
     return {"summary": delta.get("summary", {}), "details": truncated}
 
 
@@ -1256,9 +1267,10 @@ def _run_list_replacement_sync(
         db.commit()
 
         tracker.phase("DELTA", processed=record_count, snapshot_id=snap_id)
-        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
-        new_entities = _snapshot_entity_dicts(db, snap_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
+        # Calcule EN BASE : charger les deux instantanes entiers en memoire
+        # pour n'en publier que cent lignes par categorie coutait plusieurs
+        # gigaoctets sur les grandes listes (cf. fiskr/delta.py).
+        delta = calculate_delta_db(db, previous_id, snap_id)
 
         no_change = _discard_content_identical(
             db, source=source, trigger=trigger, snap_id=snap_id,
@@ -2322,9 +2334,7 @@ def run_eurlex_sync(
         snap.record_count = record_count + carried
         db.commit()
 
-        old_entities = _snapshot_entity_dicts(db, previous_id) if previous_id else []
-        new_entities = _snapshot_entity_dicts(db, snap_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
+        delta = calculate_delta_db(db, previous_id, snap_id)
 
         if not staging:
             _supersede_previous_snapshots(db, "WATCHLIST_EU", snap_id)

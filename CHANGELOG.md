@@ -113,6 +113,22 @@ A purely ASCII text passes through `strip_accents_for_matching` **unchanged**, w
 
 This is the engine's hottest path — taken twice per comparison, over a whole universe of candidates — and **98,3 %** of production listed names are pure ASCII. Measured: 1,01 µs per call with a warm cache against 0,23 µs on the fast path (×4,5); with no cache, 5,39 against 0,34 (×16). End to end: ×1,07 on a full match (the string metrics dominate), ×1,13 on generating a universe's blocking keys, and building the rarity table drops from 12,79 s to 4,43 s over 832 000 distinct names.
 
+### Fixed — comparing two snapshots loaded both of them entirely into memory
+The delta engine received two **complete lists of entity dictionaries** — seventy columns each — to publish at most **a hundred rows per category** (`MAX_REPORT_DETAILS`). Measured on 40 000 records against 40 000, half of them modified:
+
+| | Time | Peak memory |
+|---|---:|---:|
+| loading both snapshots + `calculate_delta` | 5,90 s | +94 MB |
+| `calculate_delta_db` | **0,22 s** | **+0 MB** |
+
+Extrapolated to production's largest list — WATCHLIST_PEP, **709 511 records** — the old path asks for **~1,66 GB and ~105 s**, inside a synchronous HTTP request, on shared hosting. The review screen for a manual import of that list simply could not open.
+
+The new path does the work in SQL: an anti-join for additions and removals, a join on **checksums** for modifications, a `COUNT` and a `LIMIT` for each. Only the records actually published in detail are then loaded in full, to derive the field-by-field comparison. The checksum equivalence is not an approximation: `compute_checksum` and `find_differences` exclude **exactly** the same three keys (`id`, `snapshot_id`, `entity_checksum`), so "different checksums" and "at least one compared field differs" are the same statement — and a test asserts the two implementations agree row for row on a mixed dataset.
+
+A new index `ix_wl_entities_snapshot_entity` carries the pair `(snapshot_id, entity_id)`, which is the join key: the two separate indexes each served only half of the condition.
+
+**One behaviour change**: `POST /api/snapshots/compare` used to return the delta in full. It now takes a `limit` (default 1 000, max 5 000) and reports `added_truncated` / `removed_truncated` / `modified_truncated`. The **counts stay exact** — only the sample is cut, and the screen now says so rather than letting a reviewer believe they have seen everything they are approving.
+
 ### Fixed — the periodic schedulers ran during the test suite
 Every `TestClient(app)` enters the application lifespan. In `eager` mode — the tests' mode — six loops were started there: source scheduler, retention purge, notification digest, KPI digest, homonym mining, CFT inbox polling. All of them wake **on the next full minute**, and all of them work on the **same database** as the tests.
 

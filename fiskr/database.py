@@ -536,6 +536,13 @@ _PERFORMANCE_INDEXES = (
     Index("ix_audit_trail_list_type", AuditTrail.list_type),
     Index("ix_wl_entities_snapshot_id", WatchlistEntity.snapshot_id),
     Index("ix_wl_entities_entity_id", WatchlistEntity.entity_id),
+    # Couple (lot, identifiant) : c'est la cle de rapprochement du calcul de
+    # delta, qui compare deux instantanes fiche par fiche. Les deux index
+    # separes ne servent chacun qu'une moitie de la condition ; celui-ci sert
+    # l'anti-jointure « present dans l'un, absent de l'autre » et la jointure
+    # sur empreintes en une seule lecture.
+    Index("ix_wl_entities_snapshot_entity", WatchlistEntity.snapshot_id,
+          WatchlistEntity.entity_id),
     Index("ix_client_entities_snapshot_id", ClientEntity.snapshot_id),
     Index("ix_client_entities_client_id", ClientEntity.client_id),
     # File de travaux : le claim parcourt QUEUED par priorite puis anciennete

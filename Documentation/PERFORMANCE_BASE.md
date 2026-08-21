@@ -329,6 +329,39 @@ désormais en millions.
 Ces index sont déclarés dans le modèle, donc `tools/create_perf_indexes.py` les
 crée `CONCURRENTLY`, sans interruption de service, comme les autres.
 
+## Le calcul de delta : deux instantanés entiers en mémoire
+
+Le moteur de comparaison recevait deux **listes complètes de dictionnaires
+d'entités** — soixante-dix colonnes chacune — pour ne publier au plus que
+**cent lignes par catégorie** (`MAX_REPORT_DETAILS`). Mesuré sur 40 000 fiches
+contre 40 000, dont la moitié modifiées :
+
+| | Temps | Pic mémoire |
+|---|---:|---:|
+| chargement des deux instantanés + `calculate_delta` | 5,90 s | +94 Mo |
+| `calculate_delta_db` | **0,22 s** | **+0 Mo** |
+
+Extrapolé à la plus grosse liste de la production — WATCHLIST_PEP,
+**709 511 fiches** — l'ancien chemin demande **~1,66 Go et ~105 s**, dans une
+requête HTTP synchrone, sur un hébergement mutualisé. L'écran d'examen d'un
+import manuel de cette liste ne pouvait pas s'ouvrir.
+
+Le nouveau chemin fait le travail en SQL : anti-jointure pour les ajouts et les
+retraits, jointure sur les **empreintes** pour les modifications, un `COUNT` et
+un `LIMIT` pour chacun. Seules les fiches effectivement publiées en détail sont
+ensuite chargées en entier, pour en tirer le champ-à-champ.
+
+L'équivalence des empreintes n'est pas une approximation : `compute_checksum`
+et `find_differences` excluent **exactement** les mêmes trois clés (`id`,
+`snapshot_id`, `entity_checksum`), donc « empreintes différentes » et « au
+moins un champ comparé diffère » sont la même affirmation — et un test vérifie
+que les deux implémentations rendent les mêmes lignes sur un jeu mêlant ajouts,
+retraits, modifications et fiches inchangées.
+
+L'index `ix_wl_entities_snapshot_entity` porte le couple
+`(snapshot_id, entity_id)`, qui est la clé de rapprochement : les deux index
+séparés ne servaient chacun qu'une moitié de la condition.
+
 ## Ce qui reste à décider (hors correctif)
 
 **Les 9,4 M de fiches en snapshots SUPERSEDED.** C'est la cause première du

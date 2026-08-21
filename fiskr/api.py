@@ -29,7 +29,7 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
                             BLOCKING_FIELDS as _BLOCKING_FIELDS)
 from fiskr.scoring import match_entities, jaro_wink_similarity
-from fiskr.delta import calculate_delta
+from fiskr.delta import calculate_delta, calculate_delta_db
 from fiskr.tasks import _refresh_production_cache
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
@@ -81,7 +81,7 @@ from fiskr.sync import (
     OPENSANCTIONS_RUNNERS,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
-    _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
+    _supersede_previous_snapshots, _latest_ready_snapshot,
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
@@ -1265,6 +1265,12 @@ class ScreenClientRequest(BaseModel):
 class DeltaRequest(BaseModel):
     snapshot_old_id: str
     snapshot_new_id: str
+    # Nombre de lignes de DETAIL rendues par categorie. Les COMPTEURS restent
+    # exacts quoi qu'il arrive ; seul l'echantillon est coupe, et il le dit.
+    # Sans cette borne, comparer deux instantanes de la plus grosse liste
+    # (WATCHLIST_PEP, 709 511 fiches) chargeait les deux en entier — ~1,66 Go
+    # mesures par extrapolation — pour une reponse de la meme taille.
+    limit: int = Field(1000, ge=1, le=5000)
 
 class LoginRequest(BaseModel):
     username: str
@@ -3810,22 +3816,13 @@ async def compare_snapshots(
             detail="Cannot compare snapshots of different file types."
         )
         
-    # Query all entities for both snapshots
-    if snap_old.file_type in WATCHLIST_FILE_TYPES:
-        old_ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == request.snapshot_old_id).all()
-        new_ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == request.snapshot_new_id).all()
-        key_column = "entity_id"
-    else:
-        old_ents = db.query(ClientEntity).filter(ClientEntity.snapshot_id == request.snapshot_old_id).all()
-        new_ents = db.query(ClientEntity).filter(ClientEntity.snapshot_id == request.snapshot_new_id).all()
-        key_column = "client_id"
-        
-    # Serialize to dictionary for Delta Engine
-    old_list = [{c.name: getattr(ent, c.name) for c in ent.__table__.columns} for ent in old_ents]
-    new_list = [{c.name: getattr(ent, c.name) for c in ent.__table__.columns} for ent in new_ents]
-    
-    # Calculate delta
-    report = calculate_delta(old_list, new_list, key_column)
+    # Calcule EN BASE : charger les deux instantanes entiers en memoire pour
+    # les comparer coutait ~1,66 Go sur la plus grosse liste de la production
+    # (mesure par extrapolation, cf. fiskr/delta.py).
+    key_column = ("entity_id" if snap_old.file_type in WATCHLIST_FILE_TYPES
+                  else "client_id")
+    report = calculate_delta_db(db, request.snapshot_old_id, request.snapshot_new_id,
+                                limite=request.limit, cle=key_column)
     
     # Add metadata to report matching Section 8.4 spec
     report["comparison_metadata"] = {
@@ -9193,10 +9190,11 @@ def _capture_review_record(db: Session, snap: Snapshot, decision: str,
     else:
         # Import manuel, ou production changee depuis la synchronisation : on
         # recalcule pour que le dossier porte le vrai ecart, pas un trou.
-        old_entities = _snapshot_entity_dicts(db, production_id) if production_id else []
-        new_entities = _snapshot_entity_dicts(db, snap.snapshot_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
-        delta_summary, delta_details = delta["summary"], _truncate_delta_details(delta)
+        # Calcule EN BASE : charger les deux instantanes entiers pour n'en
+        # publier que cent lignes par categorie coutait plusieurs gigaoctets sur
+        # les grandes listes, dans une requete HTTP (cf. fiskr/delta.py).
+        delta_details = calculate_delta_db(db, production_id, snap.snapshot_id)
+        delta_summary = delta_details["summary"]
 
     excluded_count = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id == snap.snapshot_id,
@@ -9440,11 +9438,8 @@ async def get_review_detail(
     if stored is not None:
         delta_summary, delta_details, delta_source = stored["summary"], stored, "stored"
     else:
-        old_entities = _snapshot_entity_dicts(db, production_id) if production_id else []
-        new_entities = _snapshot_entity_dicts(db, snapshot_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
-        delta_summary, delta_details, delta_source = \
-            delta["summary"], _truncate_delta_details(delta), "computed"
+        delta_details = calculate_delta_db(db, production_id, snapshot_id)
+        delta_summary, delta_source = delta_details["summary"], "computed"
     # Etat du DERNIER job de cahier de tests de ce snapshot : un plantage ou
     # une mise en file doit se voir DANS l'ecran d'homologation (avec relance
     # ou annulation), pas seulement au fond du panneau des travaux.

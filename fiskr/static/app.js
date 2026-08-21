@@ -2348,6 +2348,7 @@ async function handleCompareSnapshots(event) {
  li.innerHTML = ` ID: <code>${escapeHtml(item.id)}</code> | Nom: <strong>${escapeHtml(item.primary_name)}</strong> | Type: <span class="status-badge no_match">${item.type}</span>`;
  addedItems.appendChild(li);
  });
+ appendDeltaTruncation(addedItems, report.details.added_truncated, "li");
  }
  
  // Populate REMOVED details
@@ -2361,6 +2362,7 @@ async function handleCompareSnapshots(event) {
  li.innerHTML = ` ID: <code>${escapeHtml(item.id)}</code> | Nom: <strong>${escapeHtml(item.primary_name)}</strong> | Type: <span class="status-badge alert">${item.type}</span>`;
  removedItems.appendChild(li);
  });
+ appendDeltaTruncation(removedItems, report.details.removed_truncated, "li");
  }
  
  // Populate MODIFIED details
@@ -2380,6 +2382,7 @@ async function handleCompareSnapshots(event) {
  `;
  modifiedTbody.appendChild(tr);
  });
+ appendDeltaTruncation(modifiedTbody, report.details.modified_truncated, "tr", 5);
  }
  
  // Expand Accordions automatically to show data
@@ -2394,6 +2397,24 @@ async function handleCompareSnapshots(event) {
  btn.disabled = false;
  btn.textContent = "Comparer les versions";
  }
+}
+
+// Le détail d'une comparaison est BORNÉ (les compteurs, eux, restent exacts) :
+// deux instantanés de la plus grosse liste font 709 511 fiches de chaque côté.
+// L'échantillon doit dire qu'il en est un, sinon un réviseur croit avoir vu la
+// totalité de ce qu'il approuve.
+function appendDeltaTruncation(conteneur, restant, balise, colonnes) {
+ if (!restant) return;
+ const noeud = document.createElement(balise);
+ const texte = `… et ${Number(restant).toLocaleString(uiLocale())} autre(s) non affiché(s) — les compteurs ci-dessus restent exacts.`;
+ if (balise === "tr") {
+ noeud.innerHTML = `<td colspan="${colonnes || 1}" style="color: var(--text-muted); font-style: italic;">${escapeHtml(texte)}</td>`;
+ } else {
+ noeud.style.color = "var(--text-muted)";
+ noeud.style.fontStyle = "italic";
+ noeud.textContent = texte;
+ }
+ conteneur.appendChild(noeud);
 }
 
 // Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
