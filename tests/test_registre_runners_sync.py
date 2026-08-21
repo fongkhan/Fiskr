@@ -44,3 +44,37 @@ def test_chaque_executeur_a_un_alias_d_api():
     cles_alias = {run_key for (run_key, _engine) in api_module._SYNC_SOURCE_ALIASES.values()}
     manquantes = set(api_module._SYNC_RUNNERS) - cles_alias
     assert not manquantes, f"sources sans alias d'API : {sorted(manquantes)}"
+
+
+def test_le_catalogue_du_frontal_couvre_toutes_les_sources():
+    """
+    L'écran de synchronisation affiche `SOURCE_CATALOG` (app.js) : une source
+    ajoutée au registre serveur mais absente du catalogue est **invisible** —
+    aucun bouton, aucune planification lisible, alors qu'elle est bel et bien
+    configurable et synchronisable par l'API.
+
+    Le sens inverse est pire encore : un bouton du catalogue sans source
+    serveur rend un 400 au clic.
+    """
+    import re
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parent.parent / "fiskr" / "static"
+              / "app.js").read_text(encoding="utf-8")
+    bloc = re.search(r"const SOURCE_CATALOG = \[(.*?)\n\];", app_js, re.S)
+    assert bloc, "SOURCE_CATALOG introuvable dans app.js"
+    front = {a.upper() for a in re.findall(r'alias:\s*"([^"]+)"', bloc.group(1))}
+    assert len(front) >= 40, "détection du catalogue cassée"
+
+    serveur = set(api_module._SYNC_SOURCE_ALIASES)
+    # Les synonymes (EU_FSF/FSF, ONU) pointent une cible déjà couverte : on
+    # compare donc les CIBLES, pas les orthographes.
+    cibles_serveur = {c for c in api_module._SYNC_SOURCE_ALIASES.values()}
+    cibles_front = {api_module._SYNC_SOURCE_ALIASES[a] for a in front & serveur}
+
+    fantomes = front - serveur
+    assert not fantomes, (
+        f"boutons du catalogue sans source serveur — 400 au clic : {sorted(fantomes)}")
+    invisibles = cibles_serveur - cibles_front
+    assert not invisibles, (
+        f"sources synchronisables absentes de l'écran : {sorted(invisibles)}")
