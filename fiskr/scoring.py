@@ -639,6 +639,54 @@ def _traced(result: Dict[str, Any], capabilities_applied: Optional[dict]) -> Dic
     return result
 
 
+def _valeurs(brut: Any) -> List[str]:
+    """
+    Liste de chaines a partir de ce qu'une fiche porte REELLEMENT.
+
+    Les champs multivalues (`countries.citizenship`, `aliases.high_priority`,
+    `dates_of_birth`, `genders`) sont des colonnes JSON : leur forme n'est
+    garantie par aucun schema. Un connecteur, un correctif de fiche
+    (`PATCH /api/entities/{id}`, dont le modele declare `Dict[str, Any]`) ou un
+    profil envoye par webhook peut y deposer une chaine la ou le moteur attend
+    une liste.
+
+    Le moteur PLANTAIT sur ce cas : `[] + "FR"` leve, la comparaison echoue, et
+    l'appel rend 500. Cote fiche listee, la consequence est bien pire qu'une
+    requete ratee — une seule fiche malformee fait echouer TOUS les criblages
+    dont le blocking la selectionne, et un criblage qui n'aboutit pas ne laisse
+    aucune ligne d'audit. Perdre un champ de contexte vaut mieux que perdre le
+    criblage : on normalise ici, une fois, pour les deux cotes.
+    """
+    if brut is None:
+        return []
+    if isinstance(brut, str):
+        return [brut] if brut.strip() else []
+    if isinstance(brut, (list, tuple, set, frozenset)):
+        # Cas courant traite SANS recursion : une liste de chaines. Le moteur
+        # traverse ceci pour chaque candidat d'un univers, et un appel de
+        # fonction par element s'y voit au profil.
+        sortie = []
+        for valeur in brut:
+            if isinstance(valeur, str):
+                if valeur.strip():
+                    sortie.append(valeur)
+            elif valeur is not None:
+                sortie.extend(_valeurs(valeur))
+        return sortie
+    if isinstance(brut, dict):
+        # Un dictionnaire n'est pas une liste de valeurs : le champ est
+        # malforme au point de ne rien vouloir dire, on n'en devine rien.
+        return []
+    if isinstance(brut, bool):
+        return []
+    return [str(brut)]
+
+
+def _mapping(brut: Any) -> Dict[str, Any]:
+    """Conteneur de champs multivalues, ou vide s'il n'en est pas un."""
+    return brut if isinstance(brut, dict) else {}
+
+
 def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[str, Any]:
     """
     Matches client profile and watchlist entry.
@@ -714,9 +762,7 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     if caps.is_active(caps.CAP_NAMES_ALIASES_CLIENT, channel):
         # `client_aliases` est le champ du referentiel ; « aliases » reste lu
         # pour les profils venus d'un webhook ou d'un appel direct.
-        for a in (client.get("client_aliases") or client.get("aliases") or []):
-            if a:
-                c_names.append(a)
+        c_names.extend(_valeurs(client.get("client_aliases") or client.get("aliases")))
             
     c_names = list(set([n.strip() for n in c_names if n and str(n).strip()]))
     
@@ -733,8 +779,11 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     wl_aliases = (watchlist_entry.get("aliases", []) or []
                   if caps.is_active(caps.CAP_NAMES_ALIASES_LISTED, channel) else [])
     if isinstance(wl_aliases, dict):
-        wl_high_aliases = wl_aliases.get("high_priority", []) or []
+        # `high_priority` porte parfois une chaine seule : l'etendre telle
+        # quelle ajoutait ses CARACTERES comme autant de noms a comparer.
+        wl_high_aliases = _valeurs(wl_aliases.get("high_priority"))
     else:
+        wl_aliases = _valeurs(wl_aliases)
         # Fallback Dynamic qualification
         wl_high_aliases = []
         for a in wl_aliases:
@@ -780,49 +829,43 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
                 
     # 3. Contextual Rules
     # DOBs
-    client_dobs = [client.get("client_dob")] if client.get("client_dob") else []
-    if client.get("dates_of_birth"):
-        client_dobs.extend(client.get("dates_of_birth"))
-    wl_dobs = watchlist_entry.get("dates_of_birth") or []
+    client_dobs = _valeurs(client.get("client_dob")) + _valeurs(client.get("dates_of_birth"))
+    wl_dobs = _valeurs(watchlist_entry.get("dates_of_birth"))
     if caps.is_active(caps.CAP_ADJUST_DOB, channel):
         dob_adj, dob_desc = calculate_dob_adjustment(client_dobs, wl_dobs, config)
     else:
         dob_adj, dob_desc = 0.0, "Ajustement par date de naissance désactivé"
     
     # Genders
-    client_gender = client.get("client_gender") or (client.get("genders", ["U"])[0] if client.get("genders") else "U")
-    wl_genders = [watchlist_entry.get("gender")] if watchlist_entry.get("gender") else []
-    if watchlist_entry.get("genders"):
-        wl_genders.extend(watchlist_entry.get("genders"))
+    genres_client = _valeurs(client.get("genders"))
+    client_gender = client.get("client_gender") or (genres_client[0] if genres_client else "U")
+    wl_genders = _valeurs(watchlist_entry.get("gender")) + _valeurs(watchlist_entry.get("genders"))
     if caps.is_active(caps.CAP_ADJUST_GENDER, channel):
         gender_adj, gender_desc = calculate_gender_adjustment(client_gender, wl_genders, config)
     else:
         gender_adj, gender_desc = 0.0, "Ajustement par genre désactivé"
     
     # Geography (Countries)
-    cc_dict = client.get("client_countries") or {}
+    cc_dict = _mapping(client.get("client_countries"))
     c_countries = list(set(
-        (cc_dict.get("nationality") or []) +
-        (cc_dict.get("residence") or []) +
-        (cc_dict.get("birth_country") or []) +
-        (cc_dict.get("registration_country") or [])
+        _valeurs(cc_dict.get("nationality")) +
+        _valeurs(cc_dict.get("residence")) +
+        _valeurs(cc_dict.get("birth_country")) +
+        _valeurs(cc_dict.get("registration_country"))
     ))
-    if client.get("countries"):
-        c_countries.extend(client.get("countries").get("citizenship", []) + client.get("countries").get("residence", []))
-    if client.get("client_country"):
-        c_countries.append(client.get("client_country"))
+    legacy = _mapping(client.get("countries"))
+    c_countries.extend(_valeurs(legacy.get("citizenship")) + _valeurs(legacy.get("residence")))
+    c_countries.extend(_valeurs(client.get("client_country")))
         
-    wc_dict = watchlist_entry.get("countries") or {}
+    wc_dict = _mapping(watchlist_entry.get("countries"))
     w_countries = list(set(
-        (wc_dict.get("citizenship") or []) +
-        (wc_dict.get("residence") or []) +
-        (wc_dict.get("birth_country") or []) +
-        (wc_dict.get("jurisdiction_country") or [])
+        _valeurs(wc_dict.get("citizenship")) +
+        _valeurs(wc_dict.get("residence")) +
+        _valeurs(wc_dict.get("birth_country")) +
+        _valeurs(wc_dict.get("jurisdiction_country"))
     ))
-    if watchlist_entry.get("country"):
-        w_countries.append(watchlist_entry.get("country"))
-    if watchlist_entry.get("jurisdiction_country"):
-        w_countries.append(watchlist_entry.get("jurisdiction_country"))
+    w_countries.extend(_valeurs(watchlist_entry.get("country")))
+    w_countries.extend(_valeurs(watchlist_entry.get("jurisdiction_country")))
     
     if caps.is_active(caps.CAP_ADJUST_GEOGRAPHY, channel):
         geo_adj, geo_desc = calculate_geography_adjustment(c_countries, w_countries, config, channel)
@@ -838,6 +881,19 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     status = "ALERT" if final_score >= cut_off else "NO_MATCH"
 
     equivalences = collect_name_equivalences(best_c_name, best_w_name)
+
+    # Rarete des mots du nom rapproche, calculee UNIQUEMENT sur les alertes :
+    # elle ne sert qu'a expliquer et a trier ce qui est retenu, et la calculer
+    # sur les rapprochements ecartes coûterait sur le chemin le plus chaud du
+    # criblage (un univers entier de candidats). Elle est ECRITE dans l'arbre
+    # de decision, pas seulement affichee : une rarete se relit avec le corpus
+    # qui l'a produite, des mois plus tard, en controle.
+    profil_rarete = None
+    if status == "ALERT":
+        from fiskr import rarete
+        profil_rarete = rarete.profil(best_c_name, best_w_name, channel)
+        if not profil_rarete.get("disponible"):
+            profil_rarete = None
 
     result = {
         "status": status,
@@ -866,4 +922,6 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     # criblages existants garde exactement sa forme actuelle
     if equivalences:
         result["resource_equivalences"] = equivalences
+    if profil_rarete:
+        result["name_rarity"] = profil_rarete
     return _traced(result, capabilities_applied)

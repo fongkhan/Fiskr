@@ -164,7 +164,11 @@ def _field_components() -> tuple:
     return tuple(BLOCKING_FIELDS)
 
 
-BLOCKING_COMPONENTS = _BLOCKING_CORE_COMPONENTS + _field_components()
+# Les composantes de CHAMP, nommees a part : ce sont elles que plafonne
+# MAX_BLOCKING_FIELDS, et la validation en ECRITURE comme celle en LECTURE
+# doivent compter exactement le meme ensemble.
+BLOCKING_FIELD_COMPONENTS = _field_components()
+BLOCKING_COMPONENTS = _BLOCKING_CORE_COMPONENTS + BLOCKING_FIELD_COMPONENTS
 
 # Chaque composante de champ AJOUTEE double le nombre de sondes (il faut
 # interroger la variante ou elle est jokerisee, sans quoi une fiche listee qui
@@ -293,7 +297,7 @@ def _valid_layout(value) -> bool:
             and all(isinstance(c, str) and c in BLOCKING_COMPONENTS for c in value)
             and len(set(value)) == len(value)):
         return False
-    return len([c for c in value if c in _field_components()]) <= MAX_BLOCKING_FIELDS
+    return len([c for c in value if c in BLOCKING_FIELD_COMPONENTS]) <= MAX_BLOCKING_FIELDS
 
 
 def blocking_layout_with_source(db, channel: str) -> Dict[str, Any]:

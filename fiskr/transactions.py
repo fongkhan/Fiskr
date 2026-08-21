@@ -17,6 +17,8 @@ de travail adjudicables dans l'onglet Alertes.
 """
 import logging
 import re
+import threading
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -69,6 +71,25 @@ def _child_text(elem, *path: str) -> str:
     return (node.text or "").strip() if node is not None else ""
 
 
+# Longueur maximale d'un nom de partie retenu pour le criblage.
+#
+# ISO 20022 plafonne <Nm> a 140 caracteres (Max140Text) ; la base de Fiskr
+# stocke 1 000. Un message peut malgre tout en porter davantage — rien ne
+# valide le XML entrant — et la distance de Damerau-Levenshtein est LINEAIRE en
+# cette longueur : 82,55 ms pour un score de base a 20 000 caracteres contre
+# 1,19 ms a 100, multiplie par les 415 candidats d'un seau moyen de la
+# production. Un seul nom de 20 000 caracteres vaut 34 s de calcul.
+#
+# La partie n'est pas REJETEE — refuser le message entier le laisserait non
+# crible, ce qui est pire — mais son nom est ramene a ce que la base sait
+# stocker, sept fois le plafond de la norme.
+LONGUEUR_MAX_NOM_PARTIE = 1000
+
+
+def _nom_borne(nom: str) -> str:
+    return nom[:LONGUEUR_MAX_NOM_PARTIE] if nom and len(nom) > LONGUEUR_MAX_NOM_PARTIE else nom
+
+
 def _extract_party(elem, role_tag: str) -> Optional[Dict[str, Any]]:
     """Extrait une partie (Nm, adresse, pays, date/pays de naissance)."""
     if elem is None:
@@ -86,7 +107,7 @@ def _extract_party(elem, role_tag: str) -> Optional[Dict[str, Any]]:
     return {
         "role_tag": role_tag,
         "role": PARTY_ROLES.get(role_tag, role_tag),
-        "name": name,
+        "name": _nom_borne(name),
         "country": country.upper(),
         "address": address,
         "bic": "",
@@ -111,7 +132,7 @@ def _extract_agent(elem, role_tag: str) -> Optional[Dict[str, Any]]:
     return {
         "role_tag": role_tag,
         "role": AGENT_ROLES.get(role_tag, role_tag),
-        "name": name or bic,
+        "name": _nom_borne(name or bic),
         "country": country.upper(),
         "address": "",
         "bic": bic,
@@ -216,6 +237,38 @@ def parse_iso20022_payment(content: bytes) -> Dict[str, Any]:
     return result
 
 
+# Nombre maximal de parties DISTINCTES criblees dans un seul message.
+#
+# Sans borne, un message accepte jusqu'au plafond de televersement (8 Mo)
+# contient 56 678 transactions — mesure sur un pain.001 minimal reel, 148 o par
+# transaction — donc autant de parties distinctes. Chacune interroge l'index de
+# filtrage et compare ses candidats : sur la production, un seau phonetique
+# porte 415 fiches en moyenne (25 906 pour le plus gros), a ~180 us la
+# comparaison. Soit environ 75 ms par partie, et plus d'une heure de calcul
+# pour un seul message — dans une requete HTTP synchrone, avec autant de lignes
+# ecrites au journal d'audit.
+#
+# Cette requete echoue DEJA aujourd'hui, sur le delai d'attente du serveur,
+# mais apres avoir brule ce temps et ecrit ces lignes. Un refus immediat et
+# explicite vaut mieux. La borne est posee a 500 parties : au cout moyen
+# mesure, c'est ~37 s de criblage, deja le maximum raisonnable pour une
+# reponse synchrone.
+MAX_PARTIES_PAR_MESSAGE = 500
+
+
+class MessageTropVolumineux(ValueError):
+    """Le message porte plus de parties que le criblage synchrone n'en prend."""
+
+    def __init__(self, parties: int, plafond: int):
+        self.parties = parties
+        self.plafond = plafond
+        super().__init__(
+            f"Ce message porte {parties} parties distinctes à cribler, au-delà "
+            f"de la limite de {plafond} d'un filtrage synchrone. Découpez-le en "
+            f"plusieurs messages : chacun sera criblé et tracé normalement."
+        )
+
+
 def _distinct_parties(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Deduplique les parties du message par (nom, pays, BIC), roles agreges."""
     seen: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
@@ -268,6 +321,75 @@ def _filtering_index(entities: List[Dict[str, Any]], filtering_cfg: Dict[str, An
     return index
 
 
+# Index de filtrage du PROCESSUS. Il etait reconstruit A CHAQUE MESSAGE :
+# aplatir l'index de criblage, dedupliquer par entity_id, puis regenerer les
+# cles de blocage de TOUT l'univers. Mesure sur un corpus aux proportions de la
+# production (832 470 fiches) : 17,0 s de generation de cles et 1,7 s
+# d'aplatissement — dix-neuf secondes payees dans la requete HTTP, sur le canal
+# dont l'exigence premiere est le temps de reponse.
+#
+# La signature couvre TOUT ce qui change les cles : l'empreinte des listes en
+# production, le layout du canal, les capacites du moteur (translitteration,
+# phonetique) et les equivalences linguistiques actives. La restriction de
+# listes n'y figure PAS : elle s'applique a la selection des candidats, pas a
+# la construction de l'index.
+_CACHE_INDEX_FILTRAGE: Dict[str, Any] = {"signature": None, "index": None}
+_VERROU_INDEX_FILTRAGE = threading.Lock()
+
+
+def _signature_index_filtrage(watchlist_hash: str, filtering_cfg: Dict[str, Any]):
+    from fiskr import capabilities as caps
+    from fiskr import resources
+    contexte = resources.current_context() or {}
+    index_res = contexte.get("index")
+    return (
+        watchlist_hash,
+        tuple((filtering_cfg.get("blocking") or {}).get("custom_key_layout") or ()),
+        caps.current_context("FILTERING"),
+        tuple(sorted(contexte.get("fields") or ())),
+        getattr(index_res, "content_hash", None),
+    )
+
+
+def index_de_filtrage(watchlist_index: Dict[str, List[Dict[str, Any]]],
+                      filtering_cfg: Dict[str, Any],
+                      watchlist_hash: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Index de blocage du canal filtrage, construit une fois par parametrage."""
+    signature = _signature_index_filtrage(watchlist_hash, filtering_cfg)
+    if (_CACHE_INDEX_FILTRAGE["signature"] == signature
+            and _CACHE_INDEX_FILTRAGE["index"] is not None):
+        return _CACHE_INDEX_FILTRAGE["index"]
+    with _VERROU_INDEX_FILTRAGE:
+        # Re-teste sous le verrou : pendant l'attente, un autre fil a pu batir
+        # exactement le meme index. On ne le refait pas.
+        if (_CACHE_INDEX_FILTRAGE["signature"] == signature
+                and _CACHE_INDEX_FILTRAGE["index"] is not None):
+            return _CACHE_INDEX_FILTRAGE["index"]
+        depart = time.perf_counter()
+        uniques: Dict[str, Dict[str, Any]] = {}
+        for seau in watchlist_index.values():
+            for entite in seau:
+                uniques.setdefault(entite.get("entity_id"), entite)
+        index = _filtering_index(list(uniques.values()), filtering_cfg)
+        logger.info(
+            f"Index de filtrage construit : {len(uniques)} fiches, {len(index)} seaux, "
+            f"{time.perf_counter() - depart:.1f} s. Réutilisé jusqu'au prochain "
+            f"changement de listes ou de paramétrage."
+        )
+        _CACHE_INDEX_FILTRAGE["index"] = index
+        _CACHE_INDEX_FILTRAGE["signature"] = signature
+        return index
+
+
+def invalider_index_de_filtrage() -> None:
+    """Jette l'index du processus (rechargement de listes, changement de
+    reglage). La signature suffit en regime normal ; ceci sert aux tests et aux
+    chemins qui savent, eux, que l'univers vient de changer."""
+    with _VERROU_INDEX_FILTRAGE:
+        _CACHE_INDEX_FILTRAGE["signature"] = None
+        _CACHE_INDEX_FILTRAGE["index"] = None
+
+
 def party_blocking_keys(party: Dict[str, Any], filtering_cfg: Dict[str, Any]) -> set:
     """
     Cles d'interrogation d'une partie de paiement, pour le layout du canal
@@ -305,11 +427,24 @@ def party_blocking_keys(party: Dict[str, Any], filtering_cfg: Dict[str, Any]) ->
 
 def _party_candidates(party: Dict[str, Any],
                       index: Dict[str, Dict[str, Dict[str, Any]]],
-                      filtering_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Candidats de la watchlist pour une partie de paiement (index du filtrage)."""
+                      filtering_cfg: Dict[str, Any],
+                      allowed_lists: Optional[List[str]] = None
+                      ) -> Dict[str, Dict[str, Any]]:
+    """
+    Candidats de la watchlist pour une partie de paiement (index du filtrage).
+
+    La restriction de listes s'applique ICI, sur les quelques candidats d'un
+    seau, et non a la construction de l'index : celui-ci est bati une fois pour
+    l'univers entier et partage par tous les messages. La restreindre en amont
+    obligerait a reconstruire un index complet par combinaison de listes.
+    """
     candidates: Dict[str, Dict[str, Any]] = {}
     for key in party_blocking_keys(party, filtering_cfg):
         candidates.update(index.get(key, {}))
+    if allowed_lists:
+        permises = set(allowed_lists)
+        candidates = {i: e for i, e in candidates.items()
+                      if e.get("_list_type") in permises}
     return candidates
 
 
@@ -353,7 +488,15 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     tracee dans chaque ligne d'audit). Chaque partie criblee laisse une ligne
     d'audit ; chaque hit ALERT ouvre une alerte de travail. Verdict global :
     HIT des qu'une partie est en alerte, PASS sinon.
+
+    Leve `MessageTropVolumineux` AVANT toute lecture de reglage et tout calcul
+    quand le message porte plus de `MAX_PARTIES_PAR_MESSAGE` parties : rien de
+    ce qui suit ne doit etre paye pour un message qui ne sera pas crible.
     """
+    parties = _distinct_parties(parsed)
+    if len(parties) > MAX_PARTIES_PAR_MESSAGE:
+        raise MessageTropVolumineux(len(parties), MAX_PARTIES_PAR_MESSAGE)
+
     msg_id = parsed.get("msg_id") or "SANS-ID"
     party_results: List[Dict[str, Any]] = []
     verdict = "PASS"
@@ -365,14 +508,11 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     filtering_cfg = blocking_config_for(blocking_layout(db, "FILTERING"), channel="FILTERING")
     # Seuils de cut-off a chaud (reglage > config.yaml), memes regles qu'au criblage
     scoring_config = scoring_config_with_thresholds(db, channel="FILTERING")
-    all_entities = [item for items in watchlist_index.values() for item in items]
-    # Dedup par entity_id (une entite apparait sous plusieurs cles de l'index criblage)
-    unique_entities = {e["entity_id"]: e for e in all_entities}.values()
-    index = _filtering_index(list(unique_entities), filtering_cfg, screening_lists)
+    index = index_de_filtrage(watchlist_index, filtering_cfg, watchlist_hash)
 
-    for idx, party in enumerate(_distinct_parties(parsed)):
+    for idx, party in enumerate(parties):
         client_id = f"TXN:{msg_id}:{idx}"
-        candidates = _party_candidates(party, index, filtering_cfg)
+        candidates = _party_candidates(party, index, filtering_cfg, screening_lists)
 
         best: Optional[Dict[str, Any]] = None
         best_client: Optional[Dict[str, Any]] = None

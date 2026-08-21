@@ -470,8 +470,14 @@ def _match_chunk(bounds: Tuple[int, int, int]) -> Dict[str, Any]:
         trouvees = []
         for ent in candidates.values():
             score = match_entities(client, ent, config)
-            score["watchlist_entity"] = ent
             if score.get("status") == "ALERT":
+                # La fiche listee n'est PAS jointe : le parent a le meme index
+                # en memoire (il l'a transmis par fork), il la rattache par son
+                # identifiant. Depuis que toutes les correspondances remontent,
+                # la joindre pesait 863 octets par correspondance au lieu de
+                # 355 — 1,2 Go de pickle pour 500 clients tres homonymes, la ou
+                # 504 Mo suffisent. C'est la meme donnee, transmise une fois.
+                score["_entity_id"] = ent.get("entity_id")
                 trouvees.append(score)
         if trouvees:
             trouvees.sort(key=lambda s: -s["final_score"])
@@ -530,8 +536,31 @@ def parallel_match(clients: Sequence[Dict[str, Any]], index, screening_cfg,
         _G.clients = _G.index = _G.cfg = _G.queue = None
         _G.caps_override = _G.res_override = None
 
+    # Rattachement des fiches listees : les enfants n'ont renvoye que leurs
+    # identifiants (cf. `_match_chunk`). L'index du parent est le MEME objet
+    # que celui herite par les enfants, donc la fiche rattachee est identique
+    # a celle qui a servi au calcul — pas une relecture qui pourrait differer.
+    par_id: Dict[str, Dict[str, Any]] = {}
+    for bucket in index.values():
+        for ent in bucket:
+            par_id.setdefault(ent.get("entity_id"), ent)
+
     hits: List[Tuple[int, Dict[str, Any]]] = []
     for part in sorted(partials, key=lambda p: p["_chunk_index"]):
-        hits.extend(part["hits"])
+        for indice, trouvees in part["hits"]:
+            for score in trouvees:
+                identifiant = score.pop("_entity_id", None)
+                fiche = par_id.get(identifiant)
+                if fiche is None:
+                    # Ne peut pas arriver (l'index est le meme), mais une
+                    # correspondance sans sa fiche produirait une ligne d'audit
+                    # muette : on la laisse tomber bruyamment plutot que
+                    # silencieusement.
+                    logger.error(
+                        f"Re-criblage : fiche {identifiant!r} absente de l'index "
+                        "du parent — correspondance ignorée.")
+                    continue
+                score["watchlist_entity"] = fiche
+            hits.append((indice, [s for s in trouvees if "watchlist_entity" in s]))
     hits.sort(key=lambda h: h[0])
-    return hits
+    return [(i, t) for i, t in hits if t]

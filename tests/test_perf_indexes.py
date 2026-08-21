@@ -26,6 +26,36 @@ def test_browse_indexes_are_declared():
     assert "ix_wl_entities_production" in noms
 
 
+def test_les_dates_des_alertes_sont_indexees():
+    """
+    Depuis qu'un criblage ouvre une alerte PAR CORRESPONDANCE, cette table
+    grossit du nombre d'homonymes : un seul « Mohammed Ali » sans pays en
+    ajoute 2 976. L'accueil, les exports, les indicateurs et la courbe
+    journalière filtrent et trient tous sur `created_at` et `decided_at` —
+    aucune des deux n'était indexée, donc chaque chargement de l'accueil
+    parcourait la table entière deux fois.
+    """
+    noms = {ix.name for ix in database._PERFORMANCE_INDEXES}
+    assert "ix_alerts_created_at" in noms
+    assert "ix_alerts_decided_at" in noms
+
+
+def test_la_cle_etrangere_vers_le_journal_est_indexee():
+    """
+    PostgreSQL n'indexe PAS automatiquement le côté RÉFÉRENÇANT d'une clé
+    étrangère. Sans index sur `alerts.audit_id`, chaque ligne de
+    `compliance_audit_trail` supprimée par la rétention déclenche un parcours
+    SÉQUENTIEL de `alerts` pour vérifier l'intégrité référentielle : purger
+    100 000 lignes d'audit valait 100 000 parcours d'une table qui se compte
+    désormais en millions.
+    """
+    par_nom = {ix.name: ix for ix in database._PERFORMANCE_INDEXES}
+    assert "ix_alerts_audit_id" in par_nom
+    assert [c.name for c in par_nom["ix_alerts_audit_id"].columns] == ["audit_id"]
+    # La colonne EST bien une clé étrangère : c'est ce qui motive l'index.
+    assert database.Alert.__table__.c.audit_id.foreign_keys
+
+
 def test_production_index_is_partial_on_non_excluded():
     """L'index de production est PARTIEL : il n'indexe que les fiches non
     exclues, c'est-à-dire exactement le périmètre lu — sinon il pèserait pour

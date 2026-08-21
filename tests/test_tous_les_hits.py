@@ -414,8 +414,11 @@ def test_aucun_modele_ne_cloture_un_hard_match():
     """Un identifiant officiel identique est une identification, pas une
     homonymie : aucun modèle proposé ne doit le clôturer."""
     from fiskr.fprules import RULE_TEMPLATES, run_rule
+    from fiskr.rarete import profil_indisponible
     ctx = {"hits_count": 5000, "hit_rank": 900, "hard_match": True,
            "final_score": 100.0, "base_score": 100.0,
+           "rarity": {**profil_indisponible(), "disponible": True,
+                      "nom_repandu": True, "sans_token_commun": False},
            "corroboration": {"name_only": True, "corroborated": False,
                              "has_dob": False, "has_country": False,
                              "has_identity_document": False,

@@ -1179,6 +1179,7 @@ function switchSubTab(sectionId, subTabId) {
  // Paramétrage moteur : clés de blocking + capacités du moteur
  fetchBlockingSettings();
  fetchEngineSettings();
+ fetchNameRarity();
  loadSimulationPanels();
  } else if (subTabId === "filtering-blocking") {
  // Clé de blocage du canal FILTRAGE (déplacée dans l'onglet Filtrage)
@@ -2347,6 +2348,7 @@ async function handleCompareSnapshots(event) {
  li.innerHTML = ` ID: <code>${escapeHtml(item.id)}</code> | Nom: <strong>${escapeHtml(item.primary_name)}</strong> | Type: <span class="status-badge no_match">${item.type}</span>`;
  addedItems.appendChild(li);
  });
+ appendDeltaTruncation(addedItems, report.details.added_truncated, "li");
  }
  
  // Populate REMOVED details
@@ -2360,6 +2362,7 @@ async function handleCompareSnapshots(event) {
  li.innerHTML = ` ID: <code>${escapeHtml(item.id)}</code> | Nom: <strong>${escapeHtml(item.primary_name)}</strong> | Type: <span class="status-badge alert">${item.type}</span>`;
  removedItems.appendChild(li);
  });
+ appendDeltaTruncation(removedItems, report.details.removed_truncated, "li");
  }
  
  // Populate MODIFIED details
@@ -2379,6 +2382,7 @@ async function handleCompareSnapshots(event) {
  `;
  modifiedTbody.appendChild(tr);
  });
+ appendDeltaTruncation(modifiedTbody, report.details.modified_truncated, "tr", 5);
  }
  
  // Expand Accordions automatically to show data
@@ -2393,6 +2397,24 @@ async function handleCompareSnapshots(event) {
  btn.disabled = false;
  btn.textContent = "Comparer les versions";
  }
+}
+
+// Le détail d'une comparaison est BORNÉ (les compteurs, eux, restent exacts) :
+// deux instantanés de la plus grosse liste font 709 511 fiches de chaque côté.
+// L'échantillon doit dire qu'il en est un, sinon un réviseur croit avoir vu la
+// totalité de ce qu'il approuve.
+function appendDeltaTruncation(conteneur, restant, balise, colonnes) {
+ if (!restant) return;
+ const noeud = document.createElement(balise);
+ const texte = `… et ${Number(restant).toLocaleString(uiLocale())} autre(s) non affiché(s) — les compteurs ci-dessus restent exacts.`;
+ if (balise === "tr") {
+ noeud.innerHTML = `<td colspan="${colonnes || 1}" style="color: var(--text-muted); font-style: italic;">${escapeHtml(texte)}</td>`;
+ } else {
+ noeud.style.color = "var(--text-muted)";
+ noeud.style.fontStyle = "italic";
+ noeud.textContent = texte;
+ }
+ conteneur.appendChild(noeud);
 }
 
 // Met à jour le hash du cache moteur en sidebar (lit le cache, pas la base)
@@ -2952,7 +2974,7 @@ function renderScreeningResult(data) {
  formatAdjustment("adj-geo-val", "adj-geo-desc", geo.score, geo.description);
  }
  const eqBox = document.getElementById("screen-equivalences");
- if (eqBox) eqBox.innerHTML = best.hard_match_triggered ? "" : resourceEquivalencesHtml(best);
+ if (eqBox) eqBox.innerHTML = best.hard_match_triggered ? "" : (resourceEquivalencesHtml(best) + nameRarityHtml(best));
 }
 
 function formatAdjustment(valId, descId, score, desc) {
@@ -3221,7 +3243,7 @@ async function viewAuditLogDetail(logId) {
  </ul>
  `;
  }
- adjHtml += resourceEquivalencesHtml(tree);
+ adjHtml += resourceEquivalencesHtml(tree) + nameRarityHtml(tree);
  
  content.innerHTML = `
  <div class="modal-section">
@@ -5905,6 +5927,7 @@ async function openAlertModal(alertId) {
  <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
  </div>
  ${resourceEquivalencesHtml(a.decision_tree)}
+ ${nameRarityHtml(a.decision_tree)}
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
  <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Pièces jointes</h3>
@@ -6601,7 +6624,7 @@ async function renderBatchWidget(body) {
  ? '<ul class="home-list">' + items.map(c => `
  <li onclick="switchTab('screening'); switchSubTab('screening', 'screening-batch')">
  <span class="item-main">${escapeHtml(c.name || c.file_name || "?")} — ${escapeHtml(statusLabel(c.status))}</span>
- <span class="item-meta">${c.alert_count ?? 0} alerte(s) / ${c.total_clients ?? 0} · ${formatDateTime(c.created_at)}</span>
+ <span class="item-meta">${c.alert_count ?? 0} client(s) en alerte / ${c.total_clients ?? 0} · ${formatDateTime(c.created_at)}</span>
  </li>`).join("") + '</ul>'
  : '<div class="dash-widget-empty">Aucune campagne lancée.</div>';
  } catch (e) {
@@ -6990,6 +7013,28 @@ function resourceEquivalencesHtml(tree) {
  </div>`;
 }
 
+// Rarete des mots du nom rapproche (fiskr/rarete.py). Un analyste qui ouvre
+// l'une des 2 976 correspondances de « Mohammed Ali » doit lire, sans avoir a
+// le deviner, que ces mots-la sont portes par des milliers de fiches — et,
+// symetriquement, qu'un rapprochement sur un mot rare vaut une attention
+// immediate. Les libelles viennent du corpus liste : ils sont echappes.
+function nameRarityHtml(tree) {
+ const r = (tree || {}).name_rarity;
+ if (!r || !r.disponible || !(r.tokens || []).length) return "";
+ const repandu = !!r.nom_repandu;
+ const couleur = repandu ? "var(--color-warning)" : "var(--color-safe)";
+ const titre = repandu
+ ? "Nom composé uniquement de mots très répandus dans les listes"
+ : "Le nom partage au moins un mot discriminant";
+ const lignes = r.tokens.map(t => `<li><code>${escapeHtml(t.token)}</code> — porté par <strong>${Number(t.df).toLocaleString(uiLocale())}</strong> fiche(s) <small style="color: var(--text-muted);">(${Number(t.part).toLocaleString(uiLocale(), { maximumFractionDigits: 2 })} % du corpus)</small>${t.repandu ? ' <span style="color: var(--color-warning);">répandu</span>' : ""}</li>`).join("");
+ return `
+ <div style="margin-top: 0.75rem; padding: 0.6rem 0.8rem; border-left: 3px solid ${couleur}; background: var(--surface-2);">
+ <strong style="font-size: 0.85rem; color: ${couleur};">Rareté du nom : ${escapeHtml(String(r.rarete))} / 100 — ${escapeHtml(titre)}</strong>
+ <ul style="margin: 0.35rem 0 0; font-size: 0.85rem;">${lignes}</ul>
+ <small style="color: var(--text-muted);">Corpus mesuré : ${Number(r.corpus).toLocaleString(uiLocale())} fiches — un mot est dit « répandu » au-delà de ${Number(r.seuil_repandu).toLocaleString(uiLocale())} fiches.</small>
+ </div>`;
+}
+
 // ------------------ RESSOURCES LINGUISTIQUES ------------------
 
 let resourcesState = null;
@@ -7170,7 +7215,9 @@ function renderImpactReport(containerId, report) {
  <div style="border-left: 3px solid ${color}; padding: 0.75rem 1rem; background: var(--surface-2);">
  <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center;">
  <div><strong style="font-size: 1.25rem;">${report.alerts_before} → ${report.alerts_after}</strong>
- <small style="color: var(--text-muted);">alertes</small></div>
+ <small style="color: var(--text-muted);" title="Nombre de clients du panel qui déclenchent au moins une correspondance.">clients interceptés</small></div>
+ ${report.hits_before !== undefined ? `<div><strong style="font-size: 1.25rem;">${report.hits_before} → ${report.hits_after}</strong>
+ <small style="color: var(--text-muted);" title="Une alerte est ouverte par correspondance au-dessus du seuil : c'est le volume de travail, pas le nombre de clients.">alertes ouvertes</small></div>` : ""}
  <div><strong style="font-size: 1.25rem; color: ${color};">${sign}${report.delta}</strong>
  ${report.delta_pct !== null && report.delta_pct !== undefined ? `<small style="color: var(--text-muted);">(${sign}${report.delta_pct} %)</small>` : ""}</div>
  <div><small style="color: var(--text-muted);">Interception :</small> ${report.interception_before_pct} % → ${report.interception_after_pct} %</div>
@@ -7256,6 +7303,46 @@ let engineDraft = {};
 
 function engineChannel() {
  return (document.getElementById("engine-channel-select") || {}).value || "SCREENING";
+}
+
+// ------------------ RARETÉ DES NOMS ------------------
+// Calibrage des règles volumétriques : ce que le corpus listé porte
+// réellement. Sans cet écran, un seuil de rareté s'écrit à l'aveugle.
+async function fetchNameRarity() {
+ const cible = document.getElementById("rarity-result");
+ if (!cible) return;
+ const nom = (document.getElementById("rarity-name") || {}).value || "";
+ const url = nom.trim()
+ ? `/api/screening/name-rarity?name=${encodeURIComponent(nom.trim())}`
+ : "/api/screening/name-rarity?top=60";
+ cible.innerHTML = '<small style="color: var(--text-muted);">Mesure…</small>';
+ try {
+ const response = await apiFetch(url);
+ const data = await response.json();
+ if (!response.ok) { cible.innerHTML = `<small style="color: var(--color-alert);">${escapeHtml(data.detail || "échec.")}</small>`; return; }
+ if (!data.available) {
+ cible.innerHTML = `<small style="color: var(--text-muted);">${escapeHtml(data.message || "Aucune mesure disponible.")}</small>`;
+ return;
+ }
+ const entete = `<p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.5rem;">Corpus mesuré : <strong>${Number(data.corpus).toLocaleString(uiLocale())}</strong> fiches — un mot est dit « répandu » au-delà de <strong>${Number(data.threshold).toLocaleString(uiLocale())}</strong> fiches — ${Number(data.kept_tokens).toLocaleString(uiLocale())} mots indexés.</p>`;
+ if (data.profile) {
+ cible.innerHTML = entete + nameRarityHtml({ name_rarity: data.profile })
+ + (data.profile.sans_token_commun ? '<small style="color: var(--text-muted);">Aucun mot indexé dans ce nom.</small>' : "");
+ return;
+ }
+ const lignes = (data.tokens || []).map((t, i) => `<tr>
+ <td>${i + 1}</td><td><code>${escapeHtml(t.token)}</code></td>
+ <td style="text-align: right;">${Number(t.df).toLocaleString(uiLocale())}</td>
+ <td style="text-align: right;">${Number(t.part).toLocaleString(uiLocale(), { maximumFractionDigits: 2 })} %</td>
+ <td>${t.repandu ? '<span style="color: var(--color-warning);">répandu</span>' : ""}</td>
+ </tr>`).join("");
+ cible.innerHTML = entete + `<div class="table-container" style="max-height: 420px;">
+ <table><thead><tr><th>#</th><th>Mot</th><th style="text-align: right;">Fiches</th><th style="text-align: right;">Part</th><th></th></tr></thead>
+ <tbody>${lignes || '<tr><td colspan="5" style="color: var(--text-muted);">Aucun mot indexé.</td></tr>'}</tbody></table></div>`;
+ } catch (e) {
+ console.error("Error fetching name rarity:", e);
+ cible.innerHTML = '<small style="color: var(--color-alert);">Erreur réseau.</small>';
+ }
 }
 
 async function fetchEngineSettings() {
@@ -8571,7 +8658,8 @@ async function fetchBatchCampaigns() {
  <td>${c.trigger === "inbox" ? '<span class="badge-secondary"> CFT</span>' : '<span class="badge-secondary">Manuel</span>'}</td>
  <td>${campaignStatusBadge(c.status)}${c.error_message ? `<br><small style="color: var(--color-alert);">${escapeHtml(c.error_message)}</small>` : ""}</td>
  <td>${c.processed_clients} / ${c.total_clients}</td>
- <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};">${c.alert_count}</strong></td>
+ <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong></td>
+ <td title="Une alerte par correspondance au-dessus du seuil : le volume de travail, pas le nombre de clients.">${c.hits_count ?? "—"}</td>
  <td>${c.rejected_count || 0}</td>
  <td>${formatDateTime(c.created_at)}</td>
  <td>
@@ -8638,7 +8726,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Campagne #${c.id} — ${escapeHtml(c.name)} ${campaignStatusBadge(c.status)}</h3>
  <p class="section-desc" style="margin-bottom: 0.75rem;">
  ${c.processed_clients}/${c.total_clients} client(s) criblé(s) ·
- <strong style="color: var(--color-alert);">${c.alert_count} alerte(s)</strong> ·
+ <strong style="color: var(--color-alert);">${c.alert_count} client(s) en alerte</strong>${c.hits_count ? ` · <strong>${c.hits_count} alerte(s) ouverte(s)</strong>` : ""} ·
  ${c.no_match_count} sans match · ${c.rejected_count} rejet(s) quality gate
  </p>
  <div class="filter-bar" style="margin-bottom: 0.5rem;">

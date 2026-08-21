@@ -257,6 +257,12 @@ def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
         for key in generate_blocking_keys(ent, screening_cfg):
             index.setdefault(key, []).append(ent)
 
+    # Meme table de rarete qu'en production, construite avant le fork : un
+    # cahier de tests doit predire la production, donc voir les memes
+    # frequences de mots qu'elle.
+    from fiskr import rarete
+    rarete.table_pour(db)
+
     whitelist_keys = _active_whitelist_keys(db)
     # Les regles sont detachees de la session AVANT de la liberer : un rollback
     # expire les objets ORM, et la boucle rechargerait alors chaque regle depuis

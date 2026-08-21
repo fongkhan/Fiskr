@@ -111,6 +111,64 @@ Le cyrillique et le grec, alphabétiques, franchissent sans difficulté. Le
 scoring rattrape une partie de ces cas quand les noms arrivent en champs
 séparés ; le blocking, non.
 
+### Voie rapide ASCII
+
+Un texte **purement ASCII** traverse la normalisation de comparaison
+**inchangé**, quelles que soient les capacités : `detect_scripts` n'y trouve
+aucune écriture non latine (donc aucune translittération), et la décomposition
+NFKD d'ASCII est ASCII sans caractère combinant (donc aucun diacritique à
+retirer). La démonstration est exhaustive sur les 128 points de code, et tenue
+par un test — un raccourci sur un chemin de conformité se prouve, il ne se
+constate pas sur trois exemples.
+
+C'est le chemin le plus chaud du moteur, emprunté **deux fois par
+comparaison**, sur un univers entier de candidats. Et **98,3 %** des noms
+listés de la production sont ASCII purs (mesuré sur un échantillon de 12 500
+fiches).
+
+| | Sans la voie rapide | Avec |
+|---|---:|---:|
+| normalisation, cache chaud | 1,01 µs | 0,23 µs (×4,5) |
+| normalisation, sans cache | 5,39 µs | 0,34 µs (×16) |
+| rapprochement complet | 191,3 µs | 178,7 µs (×1,07) |
+| clés de blocking d'un univers de 832 470 fiches | 18,1 s | 16,0 s (×1,13) |
+
+Le gain en bout de chaîne est modeste — les métriques de chaîne dominent — mais
+il est gratuit, et il rend abordables les passes qui parcourent tout le corpus.
+
+---
+
+## 📊 Ce que le moteur mesure sans le noter : la rareté des noms
+
+Rapprocher deux noms sur « MOHAMMED » et « ALI » n'identifie personne : des
+milliers de fiches les portent. Le faire sur « TYURIN » identifie presque
+sûrement. Le moteur compte donc, sur l'univers **réellement criblé**, dans
+combien de fiches apparaît chaque mot de nom (fréquence *documentaire*), et
+joint ce compte aux correspondances en **ALERTE**.
+
+**Elle ne déplace aucun score.** Ajouter un terme au calcul déplacerait d'un
+coup tous les seuils calibrés, toutes les règles écrites contre eux et tous les
+cahiers de tests homologués. Le signal est donné à qui décide — la règle,
+l'analyste — il n'est pas imposé au moteur. C'est la différence avec une
+capacité : rien à activer, rien à recalibrer.
+
+Où elle apparaît :
+
+- **arbre de décision** des alertes (donc relisible en contrôle, des mois plus
+  tard, avec le corpus qui l'a produite) ;
+- `ctx["rarity"]` des règles anti-faux positifs — détail par mot, seuil de
+  « répandu », drapeau `nom_repandu` (cf. `REGLES_ET_BLOCKING.md`) ;
+- `GET /api/screening/name-rarity` et l'écran **Moteur**, pour calibrer une
+  règle avant d'y écrire un seuil.
+
+Coût mesuré : 13,7 µs par rapprochement en ALERTE (jamais sur les candidats
+écartés — au criblage d'un univers entier, ce serait le chemin le plus chaud),
+et 4,4 s pour bâtir la table sur 832 000 noms distincts, au chargement du
+cache. La table ne garde que les 20 000 mots les plus fréquents : les mots qui
+décident quelque chose se comptent en centaines, et tout mot absent est **plus
+rare** que le dernier conservé — une borne *supérieure*, jamais zéro, pour
+qu'un mot inconnu ne fasse jamais clôturer.
+
 ---
 
 ## 🎯 Sélection des candidats

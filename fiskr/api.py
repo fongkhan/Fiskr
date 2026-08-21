@@ -7,6 +7,7 @@ import re
 import asyncio
 import hashlib
 import heapq
+import secrets
 import logging
 import shutil
 import threading
@@ -23,11 +24,12 @@ from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
+from fiskr import rarete
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
                             BLOCKING_FIELDS as _BLOCKING_FIELDS)
 from fiskr.scoring import match_entities, jaro_wink_similarity
-from fiskr.delta import calculate_delta
+from fiskr.delta import calculate_delta, calculate_delta_db
 from fiskr.tasks import _refresh_production_cache
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
@@ -79,12 +81,13 @@ from fiskr.sync import (
     OPENSANCTIONS_RUNNERS,
     get_sync_config, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
-    _supersede_previous_snapshots, _snapshot_entity_dicts, _latest_ready_snapshot,
+    _supersede_previous_snapshots, _latest_ready_snapshot,
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
 from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
-from fiskr.transactions import parse_iso20022_payment, screen_payment_message
+from fiskr.transactions import (parse_iso20022_payment, screen_payment_message,
+                                MessageTropVolumineux, MAX_PARTIES_PAR_MESSAGE)
 from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
@@ -104,7 +107,7 @@ from fiskr.settings import (
     SETTING_AUTO_RESCREEN, SETTING_BACKTEST_REQUIRED, SETTING_BACKTEST_MAX_GAP_PCT,
     SETTING_AUTO_BACKTEST_ENABLED, SETTING_AUTO_BACKTEST_PANEL,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
-    BLOCKING_COMPONENTS, MAX_BLOCKING_FIELDS,
+    BLOCKING_COMPONENTS, BLOCKING_FIELD_COMPONENTS, MAX_BLOCKING_FIELDS,
     blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
@@ -245,6 +248,11 @@ def load_watchlist_cache(db: Session):
     watchlist_index = temp_index
     watchlist_index_layout = screening_layout
     watchlist_search_index = temp_search
+    # Frequence des mots de nom sur le corpus qui vient d'etre charge : c'est
+    # la seule fois ou l'on tient l'univers crible en entier, et le compte doit
+    # porter sur CE corpus, pas sur un autre. La table est posee dans le
+    # processus ; le pool de criblage l'herite par fork.
+    rarete.installer(rarete.construire(temp_store, "SCREENING", watchlist_hash))
     logger.info(f"Loaded {len(watchlist_store)} active database entities into memory across {len(watchlist_index)} blocking blocks.")
 
 def seed_watchlist_json(db: Session):
@@ -1047,6 +1055,28 @@ async def lifespan(app: FastAPI):
         if (config.get("jobs") or {}).get("autostart", True):
             background_tasks.append(asyncio.create_task(_worker_watchdog()))
         background_tasks.append(asyncio.create_task(_watchlist_epoch_watcher()))
+    elif mode == "eager":
+        # Execution INLINE : un job termine avant que l'endpoint reponde. Aucun
+        # planificateur, et aucune reprise de file.
+        #
+        # Ils y etaient, et ils faisaient tomber la suite de tests au hasard.
+        # Chaque `TestClient(app)` entre dans le lifespan : six boucles se
+        # reveillaient a la minute pleine suivante et, sur une suite de quatre
+        # minutes, quatre tics tombaient sur le test qui passait par la — purge
+        # de retention, planificateur de sources, fouille d'homonymes — tous
+        # sur la MEME base que les tests. D'ou un echec par passe, sur un test
+        # different a chaque fois, avec des lignes disparues sous les pieds du
+        # test en cours (ObjectDeletedError).
+        #
+        # `requeue_stale` est exclu pour la meme raison : il bascule en ERROR
+        # les jobs QUEUED orphelins, ce qui n'a aucun sens quand rien n'est
+        # jamais mis en file — mais suffit a casser un test qui pose une ligne
+        # QUEUED a la main.
+        #
+        # Les tics eux-memes restent des fonctions synchrones testables une par
+        # une (_cron_sync_tick, _retention_tick, _digest_tick...) : ce qui est
+        # retire ici, c'est la boucle, pas la logique.
+        logger.info("Mode inline : planificateurs periodiques non demarres.")
     else:
         # Sans demon : reprise de la file ici (les orphelins passent en ERROR
         # relancable — personne ne prendrait un QUEUED), puis planificateurs
@@ -1164,16 +1194,33 @@ class ScreenCountries(BaseModel):
     birth_country: List[str] = []
     registration_country: List[str] = []
 
+# Longueur maximale d'un nom entrant dans le moteur. C'est EXACTEMENT ce que la
+# base sait stocker (`String(1000)` sur client_name, watchlist_name,
+# primary_name) : au-dela, le nom ne peut de toute facon pas etre persiste, donc
+# le comparer est du calcul perdu — et ce calcul n'est pas gratuit.
+#
+# La distance de Damerau-Levenshtein est LINEAIRE en la longueur du nom crible
+# (l'autre cote, la fiche listee, est court). Mesure : 82,55 ms pour un score de
+# base sur un nom de 20 000 caracteres, contre 1,19 ms a 100. Multiplie par le
+# nombre de candidats d'un seau — 415 en moyenne sur la production — un seul nom
+# de 20 000 caracteres vaut 34 s de calcul pour une requete.
+#
+# Le plus long nom REEL du corpus de production mesure 310 caracteres
+# (etablissement penitentiaire russe, mesure sur un echantillon de 12 500
+# fiches). La borne en laisse plus de trois fois autant.
+LONGUEUR_MAX_NOM = 1000
+
+
 class ScreenClientRequest(BaseModel):
     client_id: Optional[str] = Field(None, json_schema_extra={"example": "CUST-0091"})
     client_type: str = Field(..., description="PP (Individu) ou PM (Entreprise)", json_schema_extra={"example": "PP"})
-    client_first_name: Optional[str] = Field(None, json_schema_extra={"example": "Vladimir"})
-    client_last_name: Optional[str] = Field(None, json_schema_extra={"example": "Putin"})
-    client_maiden_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+    client_first_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": "Vladimir"})
+    client_last_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": "Putin"})
+    client_maiden_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": ""})
     # Denominations alternatives : criblees comme le nom principal
     client_aliases: Optional[List[str]] = Field(
-        None, json_schema_extra={"example": ["Vladimir Poutine"]})
-    client_company_name: Optional[str] = Field(None, json_schema_extra={"example": ""})
+        None, max_length=200, json_schema_extra={"example": ["Vladimir Poutine"]})
+    client_company_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM, json_schema_extra={"example": ""})
     client_dob: Optional[str] = Field(None, json_schema_extra={"example": "1952-10-07"})
     client_gender: Optional[str] = Field("U", json_schema_extra={"example": "M"})
     client_is_deceased: Optional[bool] = Field(False)
@@ -1218,6 +1265,12 @@ class ScreenClientRequest(BaseModel):
 class DeltaRequest(BaseModel):
     snapshot_old_id: str
     snapshot_new_id: str
+    # Nombre de lignes de DETAIL rendues par categorie. Les COMPTEURS restent
+    # exacts quoi qu'il arrive ; seul l'echantillon est coupe, et il le dit.
+    # Sans cette borne, comparer deux instantanes de la plus grosse liste
+    # (WATCHLIST_PEP, 709 511 fiches) chargeait les deux en entier — ~1,66 Go
+    # mesures par extrapolation — pour une reponse de la meme taille.
+    limit: int = Field(1000, ge=1, le=5000)
 
 class LoginRequest(BaseModel):
     username: str
@@ -1226,6 +1279,95 @@ class LoginRequest(BaseModel):
 
 
 # ------------------ AUTHENTICATION ENDPOINTS ------------------
+
+# ------------------ BORNES DE TELEVERSEMENT ------------------
+#
+# Aucun endpoint de televersement n'etait borne. Un fichier lu en entier en
+# memoire (`await file.read()` du filtrage transactionnel) ou recopie sur le
+# disque sans plafond suffit a epuiser l'un ou l'autre — et la boite CFT
+# surveillee est alimentee par un systeme amont, donc l'entree n'est pas
+# toujours celle d'un operateur attentif.
+#
+# Les plafonds different par nature de fichier : une liste officielle est
+# volumineuse par construction (SDN_ADVANCED.XML de l'OFAC pese 126 Mo,
+# mesure), une piece jointe d'alerte ne l'est pas.
+TAILLE_MAX_TELEVERSEMENT = {
+    "liste": 512 * 1024 * 1024,      # import de liste officielle
+    "clients": 64 * 1024 * 1024,     # referentiel clients / campagne batch
+    "message": 8 * 1024 * 1024,      # message de paiement ISO 20022
+    "piece": 32 * 1024 * 1024,       # piece jointe, justificatif
+}
+
+
+def _refus_taille(nature: str, plafond: int):
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=(f"Fichier trop volumineux : la limite est de "
+                f"{plafond // (1024 * 1024)} Mo pour ce type de dépôt ({nature})."))
+
+
+async def lire_televersement(file, nature: str) -> bytes:
+    """Lit un fichier televerse EN MEMOIRE, borne. Leve 413 au-dela."""
+    plafond = TAILLE_MAX_TELEVERSEMENT[nature]
+    morceaux, recu = [], 0
+    while morceau := await file.read(1024 * 1024):
+        recu += len(morceau)
+        if recu > plafond:
+            raise _refus_taille(nature, plafond)
+        morceaux.append(morceau)
+    return b"".join(morceaux)
+
+
+def copier_televersement(file, destination, nature: str, hasher=None,
+                         progres=None) -> int:
+    """
+    Recopie un fichier televerse VERS LE DISQUE, borne. Leve 413 au-dela, apres
+    avoir efface ce qui avait deja ete ecrit : un refus ne laisse pas la moitie
+    d'un fichier occuper la place qu'on refusait de lui donner.
+    """
+    plafond = TAILLE_MAX_TELEVERSEMENT[nature]
+    recu = 0
+    try:
+        while morceau := file.file.read(1024 * 1024):
+            recu += len(morceau)
+            if recu > plafond:
+                raise _refus_taille(nature, plafond)
+            destination.write(morceau)
+            if hasher is not None:
+                hasher.update(morceau)
+            if progres is not None:
+                progres(recu)
+    except HTTPException:
+        try:
+            destination.flush()
+            destination.truncate(0)
+        except Exception:
+            pass
+        raise
+    return recu
+
+
+def copier_televersement_vers(chemin, file, nature: str) -> int:
+    """
+    Variante qui gere elle-meme le fichier de destination : en cas de refus, le
+    fichier partiel est supprime plutot que laisse vide sur le disque.
+    """
+    try:
+        with open(chemin, "wb") as destination:
+            return copier_televersement(file, destination, nature)
+    except HTTPException:
+        try:
+            Path(chemin).unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+# Empreinte d'un mot de passe aleatoire, calculee une fois au demarrage. Elle
+# ne correspond a aucun compte : elle sert uniquement a faire payer au chemin
+# « compte inexistant » le meme temps de calcul qu'au chemin normal.
+_EMPREINTE_FACTICE = hash_password(secrets.token_urlsafe(32))
+
 
 @app.post("/api/auth/login")
 async def login(
@@ -1271,7 +1413,25 @@ async def login(
                          target=request_data.username, detail=f"{reason} (IP {client_ip})")
         db.commit()
 
-    if not user or not verify_password(request_data.password, user.hashed_password, user.salt):
+    # Verification a COUT CONSTANT, que le compte existe ou non.
+    #
+    # `verify_password` derive PBKDF2-SHA256 sur 100 000 iterations : 67 ms
+    # mesurees. En court-circuitant sur un compte inexistant, la reponse
+    # revenait en quelques millisecondes au lieu de 67 — ecart trivialement
+    # observable sur le reseau, donc enumeration des comptes valides. Le
+    # message d'erreur, lui, etait deja identique dans les deux cas ; c'est le
+    # chronometre qui parlait.
+    #
+    # Un compte inconnu fait donc verifier une empreinte factice : meme calcul,
+    # meme duree, meme reponse.
+    if user:
+        mot_de_passe_valide = verify_password(
+            request_data.password, user.hashed_password, user.salt)
+    else:
+        verify_password(request_data.password, *_EMPREINTE_FACTICE)
+        mot_de_passe_valide = False
+
+    if not mot_de_passe_valide:
         _register_failure("Mot de passe incorrect")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2338,6 +2498,27 @@ async def list_api_keys(
     rows = db.query(ApiKey).order_by(ApiKey.created_at.desc()).all()
     return {"items": [_api_key_summary(k) for k in rows]}
 
+def _match_allege(resultat: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Element de `all_matches` prive de la rarete du nom.
+
+    La reponse de criblage NE GROSSIT PAS avec le perimetre : c'est un contrat,
+    pose apres les ~240 Mo mesures en production sur un nom courant sans pays,
+    et un test le verifie. Poser la rarete sur chaque ligne le rompait — mesure
+    sur ce test : 45 366 o pour 60 candidats contre 50 835 o pour 200, soit
+    +12 % la ou le contrat tolere 10 %.
+
+    Elle reste rendue EN ENTIER sur `best_match`, et ECRITE dans le journal
+    d'audit immuable de CHAQUE correspondance : la base fait foi, la reponse
+    n'a pas a la retransporter autant de fois qu'il y a de correspondances.
+    """
+    if "name_rarity" not in resultat:
+        return resultat
+    allege = dict(resultat)
+    del allege["name_rarity"]
+    return allege
+
+
 @app.post("/api/apikeys/{key_id}/revoke")
 async def revoke_api_key(
     key_id: int,
@@ -2703,7 +2884,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "blocking_keys_generated": list(client_keys),
         "candidates_count": len(candidates),
         "best_match": best_match,
-        "all_matches": [r for _, _, r in sorted(meilleurs, key=lambda t: (-t[0], t[1]))],
+        "all_matches": [_match_allege(r)
+                        for _, _, r in sorted(meilleurs, key=lambda t: (-t[0], t[1]))],
         "all_matches_truncated": len(candidates) > SCREEN_MAX_MATCHES,
         # Toutes les correspondances >= seuil sont persistees (journal + alerte).
         # Ce resume dit ce qui a ete ecrit ; `all_matches` n'en montre que le
@@ -2815,7 +2997,7 @@ async def screen_transaction_message(
         if set(requested_lists) == set(WATCHLIST_FILE_TYPES):
             requested_lists = None
 
-    content = await file.read()
+    content = await lire_televersement(file, "message")
     try:
         parsed = parse_iso20022_payment(content)
     except ValueError as e:
@@ -2825,10 +3007,16 @@ async def screen_transaction_message(
     # « N/A » comme hash de liste. Place apres le parsing : un message invalide
     # est rejete sans payer le chargement.
     _ensure_watchlist_cache(db)
-    result = screen_payment_message(
-        db, parsed, watchlist_index, watchlist_version, watchlist_hash,
-        current_user["username"], screening_lists=requested_lists
-    )
+    try:
+        result = screen_payment_message(
+            db, parsed, watchlist_index, watchlist_version, watchlist_hash,
+            current_user["username"], screening_lists=requested_lists
+        )
+    except MessageTropVolumineux as e:
+        # Refus IMMEDIAT plutot qu'une heure de calcul suivie d'un delai
+        # d'attente : le message dit combien de parties il porte et quoi faire.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
     if result.get("verdict") == "HIT":
         hits = [p for p in (result.get("parties") or []) if p.get("status") == "ALERT"]
         emit(db, "filtering_hit", {
@@ -2985,13 +3173,11 @@ def ingest_snapshot(
                                  label=f"Import {file_type} — {file.filename}",
                                  started_by=current_user.get("username") or "?")
         hasher = hashlib.sha256()
-        bytes_received = 0
         with open(temp_file_path, "wb") as buffer:
-            while chunk := file.file.read(1024 * 1024):
-                buffer.write(chunk)
-                hasher.update(chunk)
-                bytes_received += len(chunk)
-                progress_registry.update(progress_id, phase="UPLOAD", processed=bytes_received)
+            bytes_received = copier_televersement(
+                file, buffer, "liste", hasher=hasher,
+                progres=lambda recu: progress_registry.update(
+                    progress_id, phase="UPLOAD", processed=recu))
         fhash = hasher.hexdigest()
             
         # Clean up any existing failed snapshots with the same hash
@@ -3630,22 +3816,13 @@ async def compare_snapshots(
             detail="Cannot compare snapshots of different file types."
         )
         
-    # Query all entities for both snapshots
-    if snap_old.file_type in WATCHLIST_FILE_TYPES:
-        old_ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == request.snapshot_old_id).all()
-        new_ents = db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == request.snapshot_new_id).all()
-        key_column = "entity_id"
-    else:
-        old_ents = db.query(ClientEntity).filter(ClientEntity.snapshot_id == request.snapshot_old_id).all()
-        new_ents = db.query(ClientEntity).filter(ClientEntity.snapshot_id == request.snapshot_new_id).all()
-        key_column = "client_id"
-        
-    # Serialize to dictionary for Delta Engine
-    old_list = [{c.name: getattr(ent, c.name) for c in ent.__table__.columns} for ent in old_ents]
-    new_list = [{c.name: getattr(ent, c.name) for c in ent.__table__.columns} for ent in new_ents]
-    
-    # Calculate delta
-    report = calculate_delta(old_list, new_list, key_column)
+    # Calcule EN BASE : charger les deux instantanes entiers en memoire pour
+    # les comparer coutait ~1,66 Go sur la plus grosse liste de la production
+    # (mesure par extrapolation, cf. fiskr/delta.py).
+    key_column = ("entity_id" if snap_old.file_type in WATCHLIST_FILE_TYPES
+                  else "client_id")
+    report = calculate_delta_db(db, request.snapshot_old_id, request.snapshot_new_id,
+                                limite=request.limit, cle=key_column)
     
     # Add metadata to report matching Section 8.4 spec
     report["comparison_metadata"] = {
@@ -4240,6 +4417,37 @@ def _entity_names_map(db: Session, entity_ids) -> Dict[str, str]:
             names[entity_id] = name
     return names
 
+def _list_types_map(db: Session, entity_ids) -> Dict[str, str]:
+    """
+    Resout entity_id -> type de liste d'origine (fiches en production d'abord).
+
+    Cette resolution se faisait par BALAYAGE LINEAIRE du cache memoire —
+    `next(e["_list_type"] for e in watchlist_store if e["entity_id"] == ...)` —
+    soit 832 470 comparaisons par identifiant sur la production. Dans la mise
+    en liste blanche en masse depuis un rapport de cahier de tests, ce
+    balayage etait DANS la boucle : 500 paires proposees valaient 416 millions
+    de comparaisons. La base a un index sur `entity_id` ; une requete unique
+    resout tout le lot.
+    """
+    ids = [i for i in {str(i).strip() for i in entity_ids if i} if i]
+    if not ids:
+        return {}
+    types: Dict[str, str] = {}
+    for tranche in (ids[i:i + 800] for i in range(0, len(ids), 800)):
+        rows = (
+            db.query(WatchlistEntity.entity_id, Snapshot.file_type, Snapshot.status)
+              .join(Snapshot, WatchlistEntity.snapshot_id == Snapshot.snapshot_id)
+              .filter(WatchlistEntity.entity_id.in_(tranche),
+                      Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
+              .all()
+        )
+        for entity_id, file_type, snap_status in rows:
+            # La production l'emporte sur une fiche en attente ou remplacee
+            if entity_id not in types or snap_status == "READY":
+                types[entity_id] = file_type
+    return types
+
+
 def _relation_view(rel: EntityRelationship, names: Dict[str, str]) -> Dict[str, Any]:
     return {
         "id": rel.id,
@@ -4745,7 +4953,8 @@ def _campaign_summary(c: BatchCampaign) -> Dict[str, Any]:
         "status": c.status, "error_message": c.error_message,
         "screening_lists": c.screening_lists or "ALL",
         "total_clients": c.total_clients, "processed_clients": c.processed_clients,
-        "alert_count": c.alert_count, "no_match_count": c.no_match_count,
+        "alert_count": c.alert_count, "hits_count": c.hits_count or 0,
+        "no_match_count": c.no_match_count,
         "rejected_count": c.rejected_count,
         "created_by": c.created_by,
         "created_at": c.created_at.isoformat() if c.created_at else None,
@@ -4783,6 +4992,10 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                     audit_id=result.get("audit_trail_id"),
                     alert_id=result.get("alert_id"),
                 ))
+                # Correspondances effectivement ouvertes par ce client : le
+                # criblage en ouvre une par correspondance au-dessus du seuil.
+                campaign.hits_count = (campaign.hits_count or 0) + int(
+                    (result.get("hits") or {}).get("hits", 0))
                 if result_status == "ALERT":
                     campaign.alert_count += 1
                 else:
@@ -4803,13 +5016,17 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         campaign.status = "DONE"
         campaign.finished_at = datetime.utcnow()
         db.commit()
-        logger.info(f"Campagne batch #{campaign_id} terminée : {campaign.alert_count} alerte(s) "
+        logger.info(f"Campagne batch #{campaign_id} terminée : "
+                    f"{campaign.alert_count} client(s) en alerte, "
+                    f"{campaign.hits_count or 0} correspondance(s) ouverte(s), "
                     f"sur {campaign.processed_clients} client(s).")
         emit(db, "batch_campaign_done", {
             "_actor": campaign.created_by,
             "Campagne": f"#{campaign.id} {campaign.name}",
             "Déclencheur": campaign.trigger, "Clients criblés": campaign.processed_clients,
-            "Alertes": campaign.alert_count, "Sans correspondance": campaign.no_match_count,
+            "Clients en alerte": campaign.alert_count,
+            "Alertes ouvertes": campaign.hits_count or 0,
+            "Sans correspondance": campaign.no_match_count,
             "Fiches rejetées": campaign.rejected_count,
             "Lancée par": campaign.created_by,
         })
@@ -4887,8 +5104,7 @@ async def create_batch_campaign(
     safe_upload_name = safe_upload_filename(file.filename, "clients.csv")
     temp_path = PROJECT_ROOT / "temp_ingestion" / f"batch_{uuid.uuid4().hex[:8]}_{safe_upload_name}"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(temp_path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
+    copier_televersement_vers(temp_path, file, "clients")
     try:
         profiles = _parse_batch_csv(temp_path)
     finally:
@@ -5776,14 +5992,44 @@ async def get_client_overview(
 
 # ------------------ EXPORTS CSV (alertes, journal d'audit, listes) ------------------
 
+# Caracteres qui, en TETE d'une cellule, font interpreter celle-ci comme une
+# FORMULE par Excel, LibreOffice et Google Sheets.
+_CSV_DEBUTS_DANGEREUX = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_neutralise(valeur):
+    """
+    Neutralise l'injection de formules dans une cellule.
+
+    Ces exports sont faits POUR etre ouverts dans Excel (BOM UTF-8, separateur
+    « ; »), et leur contenu vient de l'exterieur : noms de fiches listees
+    telechargees, referentiel clients importe par CSV, parties de messages de
+    paiement ISO 20022, commentaires d'analystes. Une cellule commencant par
+    « = » est executee a l'ouverture — `=HYPERLINK("http://…"&A1,"…")` exfiltre
+    la ligne voisine d'un simple clic, et les variantes `=cmd|…` vont plus loin.
+
+    Le prefixe apostrophe est la parade usuelle (OWASP) : le tableur affiche la
+    valeur telle quelle et ne l'evalue pas. La donnee n'est pas alteree, elle
+    est marquee comme texte.
+    """
+    if not isinstance(valeur, str) or not valeur:
+        return valeur
+    return "'" + valeur if valeur[0] in _CSV_DEBUTS_DANGEREUX else valeur
+
+
 def _csv_response(filename: str, header: List[str], rows) -> Response:
-    """CSV « ; » avec BOM UTF-8 : ouverture directe dans Excel FR."""
+    """CSV « ; » avec BOM UTF-8 : ouverture directe dans Excel FR.
+
+    Toutes les cellules passent par `_csv_neutralise` : c'est le point de
+    passage unique de tous les exports, donc le seul endroit ou cette garantie
+    doit tenir.
+    """
     import csv as _csv
     import io
     buffer = io.StringIO()
     writer = _csv.writer(buffer, delimiter=";")
-    writer.writerow(header)
-    writer.writerows(rows)
+    writer.writerow([_csv_neutralise(c) for c in header])
+    writer.writerows([_csv_neutralise(c) for c in ligne] for ligne in rows)
     return Response(
         content="\ufeff" + buffer.getvalue(),
         media_type="text/csv; charset=utf-8",
@@ -7570,6 +7816,22 @@ async def update_blocking_settings(
             )
         if len(set(layout)) != len(layout):
             raise HTTPException(status_code=400, detail=f"{label} : composantes en double.")
+        # Plafond des composantes de CHAMP. Il etait verifie a la LECTURE
+        # seulement : un layout qui le depassait etait accepte (200 « cache
+        # rechargé »), ecrit en base, trace au journal d'administration — puis
+        # SILENCIEUSEMENT ignore par le moteur, qui retombait sur le layout par
+        # defaut. L'exploitant croyait avoir change le criblage ; rien n'avait
+        # change. Le plafond existe parce que l'interrogation essaie toutes les
+        # combinaisons de jokers de ces composantes : 2^N sondes par criblage.
+        champs = [c for c in layout if c in BLOCKING_FIELD_COMPONENTS]
+        if len(champs) > MAX_BLOCKING_FIELDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{label} : {len(champs)} composantes de champ "
+                        f"({', '.join(champs)}) alors que le maximum est "
+                        f"{MAX_BLOCKING_FIELDS}. L'interrogation essaie toutes "
+                        f"les combinaisons de jokers de ces composantes, soit "
+                        f"2^{len(champs)} sondes par criblage."))
 
     reloaded = False
     if payload.screening_layout is not None:
@@ -8245,6 +8507,45 @@ async def get_screening_perimeters(
     }
 
 
+@app.get("/api/screening/name-rarity")
+async def get_name_rarity(
+    name: Optional[str] = Query(None),
+    against: Optional[str] = Query(None),
+    top: int = Query(50, ge=1, le=500),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Frequence des mots de nom dans le corpus liste effectivement crible.
+
+    Sans parametre : les `top` mots les plus repandus, avec le seuil au-dela
+    duquel un mot est dit « repandu ». C'est de quoi CALIBRER une regle : on
+    voit ce que le corpus contient avant d'ecrire un seuil dans le code d'une
+    regle.
+
+    Avec `name` (et facultativement `against`) : le profil de rarete du nom,
+    tel que le verra une regle dans `ctx["rarity"]`. Sans `against`, le nom est
+    profile contre lui-meme — ce qui donne la rarete de CHACUN de ses mots.
+    """
+    table = rarete.table_courante()
+    if table is None or table.total <= 0:
+        return {"available": False, "corpus": 0, "threshold": 0, "tokens": [],
+                "message": "Le cache de production n'est pas chargé dans ce processus."}
+    reponse: Dict[str, Any] = {
+        "available": True,
+        "corpus": table.total,
+        "threshold": table.seuil_repandu,
+        "kept_tokens": len(table),
+        "min_document_frequency": rarete.DF_MIN_CONSERVE,
+        "watchlist_hash": table.empreinte,
+    }
+    if name and name.strip():
+        reponse["profile"] = table.profil(name.strip(),
+                                          (against or name).strip(), "SCREENING")
+    else:
+        reponse["tokens"] = rarete.mots_les_plus_repandus(table, top)
+    return reponse
+
+
 @app.get("/api/fprules/templates")
 async def list_fp_rule_templates(
     channel: Optional[str] = Query(None),
@@ -8889,10 +9190,11 @@ def _capture_review_record(db: Session, snap: Snapshot, decision: str,
     else:
         # Import manuel, ou production changee depuis la synchronisation : on
         # recalcule pour que le dossier porte le vrai ecart, pas un trou.
-        old_entities = _snapshot_entity_dicts(db, production_id) if production_id else []
-        new_entities = _snapshot_entity_dicts(db, snap.snapshot_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
-        delta_summary, delta_details = delta["summary"], _truncate_delta_details(delta)
+        # Calcule EN BASE : charger les deux instantanes entiers pour n'en
+        # publier que cent lignes par categorie coutait plusieurs gigaoctets sur
+        # les grandes listes, dans une requete HTTP (cf. fiskr/delta.py).
+        delta_details = calculate_delta_db(db, production_id, snap.snapshot_id)
+        delta_summary = delta_details["summary"]
 
     excluded_count = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id == snap.snapshot_id,
@@ -9136,11 +9438,8 @@ async def get_review_detail(
     if stored is not None:
         delta_summary, delta_details, delta_source = stored["summary"], stored, "stored"
     else:
-        old_entities = _snapshot_entity_dicts(db, production_id) if production_id else []
-        new_entities = _snapshot_entity_dicts(db, snapshot_id)
-        delta = calculate_delta(old_entities, new_entities, "entity_id")
-        delta_summary, delta_details, delta_source = \
-            delta["summary"], _truncate_delta_details(delta), "computed"
+        delta_details = calculate_delta_db(db, production_id, snapshot_id)
+        delta_summary, delta_source = delta_details["summary"], "computed"
     # Etat du DERNIER job de cahier de tests de ce snapshot : un plantage ou
     # une mise en file doit se voir DANS l'ecran d'homologation (avec relance
     # ou annulation), pas seulement au fond du panneau des travaux.
@@ -9410,8 +9709,7 @@ async def set_review_exclusions(
         target_dir = EXCLUSION_EVIDENCE_DIR / snap.snapshot_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-        with open(target_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        copier_televersement_vers(target_path, file, "piece")
         evidence_name = safe_name
         evidence_path = str(target_path)
 
@@ -10894,10 +11192,10 @@ class HookClientUpsert(BaseModel):
     # Fiche client unitaire : memes champs que l'import CLIENT_BASE
     client_id: str
     client_type: str = "PP"
-    client_first_name: Optional[str] = None
-    client_last_name: Optional[str] = None
-    client_maiden_name: Optional[str] = None
-    client_company_name: Optional[str] = None
+    client_first_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
+    client_last_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
+    client_maiden_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
+    client_company_name: Optional[str] = Field(None, max_length=LONGUEUR_MAX_NOM)
     client_dob: Optional[str] = None
     client_gender: Optional[str] = "U"
     client_countries: Optional[Dict[str, Any]] = None
@@ -11670,8 +11968,7 @@ async def add_alert_attachment(
     safe_name = re.sub(r"[^\w.\-]", "_", file.filename or "piece_jointe")
     ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     target_path = ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
-    with open(target_path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
+    copier_televersement_vers(target_path, file, "piece")
     attachment = AlertAttachment(
         alert_id=alert_id, file_name=safe_name, file_path=str(target_path),
         comment=(comment or "").strip() or None, uploaded_by=current_user["username"],
@@ -11910,17 +12207,13 @@ async def create_whitelist_pair(
         safe_name = os.path.basename(file.filename).replace("..", "_")
         WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
         target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-        with open(target_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        copier_televersement_vers(target_path, file, "piece")
         evidence_name = safe_name
         evidence_path = str(target_path)
 
     # Type de liste derive cote serveur (jamais fourni par le client) :
     # cache de production d'abord, sinon la derniere alerte de la paire
-    list_type = next(
-        (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == watchlist_entity_id),
-        None
-    )
+    list_type = _list_types_map(db, [watchlist_entity_id]).get(watchlist_entity_id)
     if list_type is None:
         last_alert = db.query(Alert).filter(
             Alert.client_id == client_id,
@@ -11989,6 +12282,13 @@ async def create_whitelist_pairs_bulk(
             detail="Une justification commune est obligatoire pour une mise en liste blanche (réglage actif)."
         )
 
+    # Types de liste resolus EN UNE requete pour tout le lot : cette resolution
+    # etait un balayage lineaire du cache DANS la boucle — jusqu'a 500 paires
+    # x 832 470 fiches, soit 416 millions de comparaisons pour un appel.
+    types_par_id = _list_types_map(
+        db, [p.watchlist_entity_id for p in payload.pairs
+             if not (p.list_type or "").strip()])
+
     created, skipped = [], []
     for p in payload.pairs:
         client_id = p.client_id.strip()
@@ -12000,9 +12300,7 @@ async def create_whitelist_pairs_bulk(
             skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "paire déjà active"})
             continue
         # Type de liste : fourni par le rapport de backtest, sinon derive du cache
-        list_type = (p.list_type or "").strip() or next(
-            (e.get("_list_type") for e in watchlist_store if e.get("entity_id") == entity_id), None
-        )
+        list_type = (p.list_type or "").strip() or types_par_id.get(entity_id)
         pair = WhitelistPair(
             client_id=client_id,
             watchlist_entity_id=entity_id,

@@ -228,9 +228,18 @@ def build_screening_ctx(client: Dict[str, Any], entity: Dict[str, Any],
     seulement sur la ligne.
     """
     from fiskr.perimeters import perimetre_de
+    from fiskr import rarete
     return {
         "hits_count": int(hits_count),
         "hit_rank": int(hit_rank),
+        # Frequence des mots du nom dans le corpus liste : un rapprochement sur
+        # « MOHAMMED ALI » n'identifie personne, un rapprochement sur « TYURIN »
+        # identifie presque surement. Cf. fiskr/rarete.py.
+        # Deja calcule par le moteur sur les alertes (scoring.match_entities) :
+        # on relit plutot que de recompter.
+        "rarity": best_match.get("name_rarity") or rarete.profil(
+            best_match.get("best_client_name") or "",
+            best_match.get("best_watchlist_name") or "", "SCREENING"),
         # SANCTION (gel des avoirs) ou HORS_SANCTION (PEP, regulateurs,
         # exclusions). Manquer une sanction est constatable a l'audit et
         # sanctionnable ; manquer un PEP ne l'est pas de la meme facon.
@@ -268,9 +277,15 @@ def build_filtering_ctx(party: Dict[str, Any], entity: Dict[str, Any],
     « nom seul » y est la norme plutot que l'exception.
     """
     from fiskr.perimeters import perimetre_de
+    from fiskr import rarete
     return {
         "hits_count": int(hits_count),
         "hit_rank": int(hit_rank),
+        # Deja calcule par le moteur sur les alertes (scoring.match_entities) :
+        # on relit plutot que de recompter.
+        "rarity": best_match.get("name_rarity") or rarete.profil(
+            best_match.get("best_client_name") or "",
+            best_match.get("best_watchlist_name") or "", "FILTERING"),
         "perimeter": perimetre_de(entity.get("_list_type"), perimeter_overrides),
         "corroboration": corroboration_context(party, best_match),
         "channel": "FILTERING",
@@ -545,6 +560,26 @@ _CODE_SANCTION_REPERE = '\n'.join([
     '',
 ])
 
+_CODE_NOM_REPANDU = '\n'.join([
+    'def rule(ctx):',
+    '    """Nom compose uniquement de mots tres repandus dans les listes.',
+    '',
+    '    Le rapprochement ne partage avec la fiche listee que des mots que des',
+    '    milliers d autres fiches portent aussi (MOHAMMED, ALI, AL, BIN...).',
+    '    Il ne designe donc personne en particulier. Un seul mot rare partage',
+    '    suffit a faire echouer la regle, et l alerte reste ouverte.',
+    '    """',
+    '    if ctx["hard_match"]:',
+    '        return False     # identifiant officiel identique : jamais cloture',
+    '    if ctx["corroboration"]["corroborated"]:',
+    '        return False     # date de naissance ou pays concordant : on garde',
+    '    r = ctx.get("rarity") or {}',
+    '    if not r.get("disponible") or r.get("sans_token_commun"):',
+    '        return False     # sans mesure de rarete, on ne cloture rien',
+    '    return bool(r.get("nom_repandu"))',
+    '',
+])
+
 RULE_TEMPLATES = (
     {
         "key": "name_only_volume",
@@ -560,6 +595,23 @@ RULE_TEMPLATES = (
                  "HORS DE PORTÉE de cette règle : un gel d'avoirs manqué est "
                  "constatable à l'audit, un PEP manqué ne l'est pas de la même façon."),
         "code": _CODE_NOM_SEUL_VOLUME,
+    },
+    {
+        "key": "common_name_tokens",
+        "name": "Hors sanctions — le nom ne partage que des mots très répandus",
+        "channel": "SCREENING",
+        "perimeters": ["HORS_SANCTION"],
+        "summary": ("Clôture les correspondances dont TOUS les mots communs avec la fiche "
+                    "listée sont portés par des milliers d'autres fiches — « MOHAMMED », "
+                    "« ALI », « AL », « BIN » — et qu'aucun élément du profil ne corrobore. "
+                    "Un seul mot rare partagé suffit à conserver l'alerte."),
+        "loss": ("Une personne réellement listée dont le nom n'est composé que de mots "
+                 "répandus sera clôturée tant que le profil client n'apporte ni date de "
+                 "naissance ni pays concordant. C'est le même arbitrage que « nom seul », "
+                 "mais fondé sur ce que le nom vaut dans le corpus plutôt que sur le "
+                 "nombre de correspondances : il vise le nom banal, pas le criblage "
+                 "volumineux. Périmètre SANCTION hors de portée."),
+        "code": _CODE_NOM_REPANDU,
     },
     {
         "key": "no_corroboration_beyond_top",
