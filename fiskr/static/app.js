@@ -1179,6 +1179,7 @@ function switchSubTab(sectionId, subTabId) {
  // Paramétrage moteur : clés de blocking + capacités du moteur
  fetchBlockingSettings();
  fetchEngineSettings();
+ fetchNameRarity();
  loadSimulationPanels();
  } else if (subTabId === "filtering-blocking") {
  // Clé de blocage du canal FILTRAGE (déplacée dans l'onglet Filtrage)
@@ -2952,7 +2953,7 @@ function renderScreeningResult(data) {
  formatAdjustment("adj-geo-val", "adj-geo-desc", geo.score, geo.description);
  }
  const eqBox = document.getElementById("screen-equivalences");
- if (eqBox) eqBox.innerHTML = best.hard_match_triggered ? "" : resourceEquivalencesHtml(best);
+ if (eqBox) eqBox.innerHTML = best.hard_match_triggered ? "" : (resourceEquivalencesHtml(best) + nameRarityHtml(best));
 }
 
 function formatAdjustment(valId, descId, score, desc) {
@@ -3221,7 +3222,7 @@ async function viewAuditLogDetail(logId) {
  </ul>
  `;
  }
- adjHtml += resourceEquivalencesHtml(tree);
+ adjHtml += resourceEquivalencesHtml(tree) + nameRarityHtml(tree);
  
  content.innerHTML = `
  <div class="modal-section">
@@ -5905,6 +5906,7 @@ async function openAlertModal(alertId) {
  <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
  </div>
  ${resourceEquivalencesHtml(a.decision_tree)}
+ ${nameRarityHtml(a.decision_tree)}
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
  <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Pièces jointes</h3>
@@ -6990,6 +6992,28 @@ function resourceEquivalencesHtml(tree) {
  </div>`;
 }
 
+// Rarete des mots du nom rapproche (fiskr/rarete.py). Un analyste qui ouvre
+// l'une des 2 976 correspondances de « Mohammed Ali » doit lire, sans avoir a
+// le deviner, que ces mots-la sont portes par des milliers de fiches — et,
+// symetriquement, qu'un rapprochement sur un mot rare vaut une attention
+// immediate. Les libelles viennent du corpus liste : ils sont echappes.
+function nameRarityHtml(tree) {
+ const r = (tree || {}).name_rarity;
+ if (!r || !r.disponible || !(r.tokens || []).length) return "";
+ const repandu = !!r.nom_repandu;
+ const couleur = repandu ? "var(--color-warning)" : "var(--color-safe)";
+ const titre = repandu
+ ? "Nom composé uniquement de mots très répandus dans les listes"
+ : "Le nom partage au moins un mot discriminant";
+ const lignes = r.tokens.map(t => `<li><code>${escapeHtml(t.token)}</code> — porté par <strong>${Number(t.df).toLocaleString(uiLocale())}</strong> fiche(s) <small style="color: var(--text-muted);">(${Number(t.part).toLocaleString(uiLocale(), { maximumFractionDigits: 2 })} % du corpus)</small>${t.repandu ? ' <span style="color: var(--color-warning);">répandu</span>' : ""}</li>`).join("");
+ return `
+ <div style="margin-top: 0.75rem; padding: 0.6rem 0.8rem; border-left: 3px solid ${couleur}; background: var(--surface-2);">
+ <strong style="font-size: 0.85rem; color: ${couleur};">Rareté du nom : ${escapeHtml(String(r.rarete))} / 100 — ${escapeHtml(titre)}</strong>
+ <ul style="margin: 0.35rem 0 0; font-size: 0.85rem;">${lignes}</ul>
+ <small style="color: var(--text-muted);">Corpus mesuré : ${Number(r.corpus).toLocaleString(uiLocale())} fiches — un mot est dit « répandu » au-delà de ${Number(r.seuil_repandu).toLocaleString(uiLocale())} fiches.</small>
+ </div>`;
+}
+
 // ------------------ RESSOURCES LINGUISTIQUES ------------------
 
 let resourcesState = null;
@@ -7258,6 +7282,46 @@ let engineDraft = {};
 
 function engineChannel() {
  return (document.getElementById("engine-channel-select") || {}).value || "SCREENING";
+}
+
+// ------------------ RARETÉ DES NOMS ------------------
+// Calibrage des règles volumétriques : ce que le corpus listé porte
+// réellement. Sans cet écran, un seuil de rareté s'écrit à l'aveugle.
+async function fetchNameRarity() {
+ const cible = document.getElementById("rarity-result");
+ if (!cible) return;
+ const nom = (document.getElementById("rarity-name") || {}).value || "";
+ const url = nom.trim()
+ ? `/api/screening/name-rarity?name=${encodeURIComponent(nom.trim())}`
+ : "/api/screening/name-rarity?top=60";
+ cible.innerHTML = '<small style="color: var(--text-muted);">Mesure…</small>';
+ try {
+ const response = await apiFetch(url);
+ const data = await response.json();
+ if (!response.ok) { cible.innerHTML = `<small style="color: var(--color-alert);">${escapeHtml(data.detail || "échec.")}</small>`; return; }
+ if (!data.available) {
+ cible.innerHTML = `<small style="color: var(--text-muted);">${escapeHtml(data.message || "Aucune mesure disponible.")}</small>`;
+ return;
+ }
+ const entete = `<p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.5rem;">Corpus mesuré : <strong>${Number(data.corpus).toLocaleString(uiLocale())}</strong> fiches — un mot est dit « répandu » au-delà de <strong>${Number(data.threshold).toLocaleString(uiLocale())}</strong> fiches — ${Number(data.kept_tokens).toLocaleString(uiLocale())} mots indexés.</p>`;
+ if (data.profile) {
+ cible.innerHTML = entete + nameRarityHtml({ name_rarity: data.profile })
+ + (data.profile.sans_token_commun ? '<small style="color: var(--text-muted);">Aucun mot indexé dans ce nom.</small>' : "");
+ return;
+ }
+ const lignes = (data.tokens || []).map((t, i) => `<tr>
+ <td>${i + 1}</td><td><code>${escapeHtml(t.token)}</code></td>
+ <td style="text-align: right;">${Number(t.df).toLocaleString(uiLocale())}</td>
+ <td style="text-align: right;">${Number(t.part).toLocaleString(uiLocale(), { maximumFractionDigits: 2 })} %</td>
+ <td>${t.repandu ? '<span style="color: var(--color-warning);">répandu</span>' : ""}</td>
+ </tr>`).join("");
+ cible.innerHTML = entete + `<div class="table-container" style="max-height: 420px;">
+ <table><thead><tr><th>#</th><th>Mot</th><th style="text-align: right;">Fiches</th><th style="text-align: right;">Part</th><th></th></tr></thead>
+ <tbody>${lignes || '<tr><td colspan="5" style="color: var(--text-muted);">Aucun mot indexé.</td></tr>'}</tbody></table></div>`;
+ } catch (e) {
+ console.error("Error fetching name rarity:", e);
+ cible.innerHTML = '<small style="color: var(--color-alert);">Erreur réseau.</small>';
+ }
 }
 
 async function fetchEngineSettings() {

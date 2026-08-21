@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
+from fiskr import rarete
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
                             BLOCKING_FIELDS as _BLOCKING_FIELDS)
@@ -246,6 +247,11 @@ def load_watchlist_cache(db: Session):
     watchlist_index = temp_index
     watchlist_index_layout = screening_layout
     watchlist_search_index = temp_search
+    # Frequence des mots de nom sur le corpus qui vient d'etre charge : c'est
+    # la seule fois ou l'on tient l'univers crible en entier, et le compte doit
+    # porter sur CE corpus, pas sur un autre. La table est posee dans le
+    # processus ; le pool de criblage l'herite par fork.
+    rarete.installer(rarete.construire(temp_store, "SCREENING", watchlist_hash))
     logger.info(f"Loaded {len(watchlist_store)} active database entities into memory across {len(watchlist_index)} blocking blocks.")
 
 def seed_watchlist_json(db: Session):
@@ -2446,6 +2452,27 @@ async def list_api_keys(
     rows = db.query(ApiKey).order_by(ApiKey.created_at.desc()).all()
     return {"items": [_api_key_summary(k) for k in rows]}
 
+def _match_allege(resultat: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Element de `all_matches` prive de la rarete du nom.
+
+    La reponse de criblage NE GROSSIT PAS avec le perimetre : c'est un contrat,
+    pose apres les ~240 Mo mesures en production sur un nom courant sans pays,
+    et un test le verifie. Poser la rarete sur chaque ligne le rompait — mesure
+    sur ce test : 45 366 o pour 60 candidats contre 50 835 o pour 200, soit
+    +12 % la ou le contrat tolere 10 %.
+
+    Elle reste rendue EN ENTIER sur `best_match`, et ECRITE dans le journal
+    d'audit immuable de CHAQUE correspondance : la base fait foi, la reponse
+    n'a pas a la retransporter autant de fois qu'il y a de correspondances.
+    """
+    if "name_rarity" not in resultat:
+        return resultat
+    allege = dict(resultat)
+    del allege["name_rarity"]
+    return allege
+
+
 @app.post("/api/apikeys/{key_id}/revoke")
 async def revoke_api_key(
     key_id: int,
@@ -2811,7 +2838,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "blocking_keys_generated": list(client_keys),
         "candidates_count": len(candidates),
         "best_match": best_match,
-        "all_matches": [r for _, _, r in sorted(meilleurs, key=lambda t: (-t[0], t[1]))],
+        "all_matches": [_match_allege(r)
+                        for _, _, r in sorted(meilleurs, key=lambda t: (-t[0], t[1]))],
         "all_matches_truncated": len(candidates) > SCREEN_MAX_MATCHES,
         # Toutes les correspondances >= seuil sont persistees (journal + alerte).
         # Ce resume dit ce qui a ete ecrit ; `all_matches` n'en montre que le
@@ -8387,6 +8415,45 @@ async def get_screening_perimeters(
         "cut_off_threshold": seuils["cut_off_threshold"],
         "cut_off_overrides": seuils["cut_off_overrides"],
     }
+
+
+@app.get("/api/screening/name-rarity")
+async def get_name_rarity(
+    name: Optional[str] = Query(None),
+    against: Optional[str] = Query(None),
+    top: int = Query(50, ge=1, le=500),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Frequence des mots de nom dans le corpus liste effectivement crible.
+
+    Sans parametre : les `top` mots les plus repandus, avec le seuil au-dela
+    duquel un mot est dit « repandu ». C'est de quoi CALIBRER une regle : on
+    voit ce que le corpus contient avant d'ecrire un seuil dans le code d'une
+    regle.
+
+    Avec `name` (et facultativement `against`) : le profil de rarete du nom,
+    tel que le verra une regle dans `ctx["rarity"]`. Sans `against`, le nom est
+    profile contre lui-meme — ce qui donne la rarete de CHACUN de ses mots.
+    """
+    table = rarete.table_courante()
+    if table is None or table.total <= 0:
+        return {"available": False, "corpus": 0, "threshold": 0, "tokens": [],
+                "message": "Le cache de production n'est pas chargé dans ce processus."}
+    reponse: Dict[str, Any] = {
+        "available": True,
+        "corpus": table.total,
+        "threshold": table.seuil_repandu,
+        "kept_tokens": len(table),
+        "min_document_frequency": rarete.DF_MIN_CONSERVE,
+        "watchlist_hash": table.empreinte,
+    }
+    if name and name.strip():
+        reponse["profile"] = table.profil(name.strip(),
+                                          (against or name).strip(), "SCREENING")
+    else:
+        reponse["tokens"] = rarete.mots_les_plus_repandus(table, top)
+    return reponse
 
 
 @app.get("/api/fprules/templates")

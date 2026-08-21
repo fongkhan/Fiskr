@@ -839,6 +839,19 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
 
     equivalences = collect_name_equivalences(best_c_name, best_w_name)
 
+    # Rarete des mots du nom rapproche, calculee UNIQUEMENT sur les alertes :
+    # elle ne sert qu'a expliquer et a trier ce qui est retenu, et la calculer
+    # sur les rapprochements ecartes coûterait sur le chemin le plus chaud du
+    # criblage (un univers entier de candidats). Elle est ECRITE dans l'arbre
+    # de decision, pas seulement affichee : une rarete se relit avec le corpus
+    # qui l'a produite, des mois plus tard, en controle.
+    profil_rarete = None
+    if status == "ALERT":
+        from fiskr import rarete
+        profil_rarete = rarete.profil(best_c_name, best_w_name, channel)
+        if not profil_rarete.get("disponible"):
+            profil_rarete = None
+
     result = {
         "status": status,
         "base_score": round(best_base_score, 2),
@@ -866,4 +879,6 @@ def match_entities(client: dict, watchlist_entry: dict, config: dict) -> Dict[st
     # criblages existants garde exactement sa forme actuelle
     if equivalences:
         result["resource_equivalences"] = equivalences
+    if profil_rarete:
+        result["name_rarity"] = profil_rarete
     return _traced(result, capabilities_applied)

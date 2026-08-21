@@ -1515,6 +1515,22 @@
  <div id="engine-sim-result" style="margin-top: 0.75rem;"></div>
  </div>
  </div>
+
+ <!-- RARETÉ DES NOMS (calibrage des règles volumétriques) -->
+ <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+ <div class="card result-card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-chart"></use></svg> Rareté des noms — fréquence des mots dans vos listes</h2>
+ <p class="section-desc">Rapprocher deux noms sur « MOHAMMED » et « ALI » n'identifie personne : des milliers de fiches les portent. Le faire sur « TYURIN » identifie presque sûrement. Ce tableau donne, sur <strong>votre</strong> univers criblé, les mots que le corpus porte le plus souvent — de quoi calibrer une règle avant d'écrire un seuil dans son code. Le classement dépend des listes activées. La rareté ne déplace aucun score : elle est jointe à l'alerte et lisible par les règles (<code>ctx["rarity"]</code>).</p>
+ <div style="display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 0.75rem;">
+ <label>Profiler un nom<br>
+ <input type="text" id="rarity-name" placeholder="Mohammed Ali" style="min-width: 240px;">
+ </label>
+ <button class="btn btn-secondary" onclick="fetchNameRarity()">Mesurer</button>
+ <button class="btn btn-secondary" onclick="document.getElementById('rarity-name').value=''; fetchNameRarity();">↻ Mots les plus répandus</button>
+ </div>
+ <div id="rarity-result"></div>
+ </div>
+ </div>
  </div>
 
  <!-- RESSOURCES LINGUISTIQUES (rôle blocking/admin) -->
@@ -2151,6 +2167,16 @@
  </table>
  <p class="guide-p">Une liste dont le périmètre n'est pas connu est traitée comme une <strong>sanction</strong> — le côté qui ne clôture rien. Le défaut penche vers ce qui ne fait rien perdre.</p>
  <p class="guide-p">Une règle anti-faux positifs <strong>déclare le périmètre où elle s'applique</strong>, et c'est le moteur qui le fait respecter : une règle « hors sanctions » ne peut pas clôturer une correspondance de gel d'avoirs, même si son code l'oublie. Un contrôleur lit cette portée sur la règle, sans avoir à en relire le code.</p>
+
+ <h3>Ce que vaut un nom : la rareté de ses mots</h3>
+ <p class="guide-p">Deux fiches nommées « Mohammed Ali » sont indiscernables par le score — leurs noms <em>sont</em> identiques, et aucune métrique de chaîne ne peut ni ne doit les départager. Ce qui les sépare est ailleurs : dans le corpus listé, « MOHAMMED » et « ALI » sont portés par des milliers de fiches, « TYURIN » par une seule. Rapprocher deux noms sur des mots omniprésents n'identifie personne ; le faire sur un mot rare identifie presque sûrement.</p>
+ <p class="guide-p">Fiskr compte donc, sur l'univers réellement criblé, dans combien de fiches apparaît chaque mot de nom, et joint ce compte à l'alerte :</p>
+ <ul class="guide-list">
+ <li><strong>Dans l'arbre de décision</strong> — l'analyste lit « MOHAMMED : porté par 24 318 fiches (2,9 % du corpus) » sans avoir à le deviner. Le compte est <strong>écrit</strong> avec la décision, pas seulement affiché : une rareté se relit des mois plus tard, en contrôle, avec le corpus qui l'a produite.</li>
+ <li><strong>Dans les règles anti-faux positifs</strong> — <code>ctx["rarity"]</code> porte le détail par mot, le seuil de « répandu » et le drapeau <code>nom_repandu</code>. Le modèle livré « <em>le nom ne partage que des mots très répandus</em> » s'en sert : il clôture le nom banal sans corroboration, et <strong>un seul mot rare partagé suffit à conserver l'alerte</strong>.</li>
+ <li><strong>Pour calibrer</strong> — l'écran d'expert expose les mots les plus répandus de <em>votre</em> univers. Le classement dépend des listes activées : un univers à 80 % de PEP latino-américains porte JOSE, MARIA, SILVA et SANTOS là où un univers de gels d'avoirs porte AL, BIN et MOHAMMAD.</li>
+ </ul>
+ <p class="guide-p"><strong>La rareté ne déplace aucun score.</strong> Ajouter un terme au calcul déplacerait d'un coup tous les seuils calibrés, toutes les règles écrites contre eux et tous les cahiers de tests homologués. Le signal est donné à qui décide — la règle, l'analyste — il n'est pas imposé au moteur. Et il ne s'applique qu'au périmètre hors sanctions : un nom banal reste un nom banal, mais un sanctionné manqué se constate en contrôle.</p>
 
  <h3>Les trois modes de criblage</h3>
  <ul class="guide-list">

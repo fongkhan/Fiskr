@@ -141,6 +141,13 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     from fiskr.database import production_watchlist_reference
     watchlist_version, watchlist_hash = production_watchlist_reference(db)
 
+    # Rarete des mots de nom : construite ICI, dans le parent, AVANT le fork du
+    # pool — les enfants en heritent. Sans cet appel le demon travailleur n'a
+    # pas de table, et une regle fondee sur la rarete cloturerait au criblage
+    # unitaire (processus API) mais pas au re-criblage : deux verites.
+    from fiskr import rarete
+    rarete.table_pour(db)
+
     clients = _client_dicts(db)
     total_clients = len(clients)
     result["clients_screened"] = total_clients

@@ -170,6 +170,47 @@ def test_la_reponse_ne_grossit_plus_avec_le_perimetre(contexte, monkeypatch):
         "la reponse grossit encore avec le perimetre")
 
 
+def test_la_rarete_des_noms_ne_rompt_pas_la_borne(contexte, monkeypatch):
+    """
+    La rareté des noms est jointe à chaque correspondance en ALERTE. Posée sur
+    chaque ligne de `all_matches`, elle rendait la réponse à nouveau
+    proportionnelle au périmètre — mesuré ici : 45 366 o pour 60 candidats
+    contre 50 835 o pour 200, là où le contrat tolère 10 %. Elle reste rendue
+    en entier sur `best_match` et écrite dans le journal d'audit.
+    """
+    from fiskr import rarete
+
+    client, fiches = contexte
+    precedente = rarete.table_courante()
+    rarete.installer(rarete.construire(
+        [{"primary_name": f["primary_name"]} for f in fiches] * 30))
+    try:
+        perimetre = {"fiches": fiches[:60]}
+
+        class _IndexVariable(dict):
+            def get(self, cle, defaut=None):
+                return perimetre["fiches"]
+
+        monkeypatch.setattr(api_module, "watchlist_index", _IndexVariable())
+        requete = {"client_id": f"C-{TAG}", "client_type": "PP",
+                   "client_first_name": "IVAN", "client_last_name": "IVANOV"}
+        poids_60 = len(client.post("/api/screen", json=requete).content)
+
+        perimetre["fiches"] = fiches
+        reponse = client.post("/api/screen", json=requete)
+        poids_200 = len(reponse.content)
+        corps = reponse.json()
+
+        assert poids_200 <= poids_60 * 1.1, (
+            f"{poids_60} o pour 60 candidats, {poids_200} o pour {NB_CANDIDATS} : "
+            "la rareté a remis la réponse à la taille du périmètre")
+        assert all("name_rarity" not in m for m in corps["all_matches"])
+        # Mais elle est bien là où elle sert : sur la correspondance retenue.
+        assert corps["best_match"]["name_rarity"]["disponible"] is True
+    finally:
+        rarete.installer(precedente)
+
+
 def test_le_sommet_rendu_est_celui_du_tri_complet(contexte):
     """Le point le plus delicat du tas : il doit rendre EXACTEMENT le sommet
     du tri complet d'avant. Reference calculee ici, candidat par candidat,
