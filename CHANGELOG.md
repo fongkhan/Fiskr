@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — three counts that credited the system for work it had not done
+Same question as the backtest fix, asked of the rest of the surface: *does each published number count what its label says?* Three did not, all on the alert-volume side, and all in the same direction — the system was credited with more work opened, and less noise absorbed, than reality.
+
+**A re-screening announced alerts it had not opened.** `open_or_redetect_alerts` — the name says it — opens **or** re-detects, and returns the exact breakdown: `opened`, `redetected`, `closed_by_rule`. The re-screening threw that return value away and kept its own tally, incrementing "new alerts" on every match that got past the whitelist and the rules. A match landing on an **already open** alert creates nothing. Measured on the plainest case there is — the same list re-screened twice:
+
+| | announced | actually created |
+|---|---:|---:|
+| first pass | 1 new alert | 1 |
+| second pass | **1 new alert** | **0** |
+
+The case is not marginal, it is the ordinary one: on every list refresh, a listed record that changed but still matches the same client produces a re-detection. And a **lookback** — which re-screens the whole production universe — produces almost nothing else, so it announced as many novelties as it found matches. The number reaches three recipients (the step e-mail after a promotion, the approval e-mail, the end-of-sync message), all labelled "new alerts". It is the number read by whoever just approved a list, to judge what their approval did.
+
+The counts now come from what actually happened. And the report's shape is defined in one place, because it had already drifted: `rule_suppressed` appeared in the result **only if a rule had fired**, and `rescreen_lookback`'s empty return did not carry it at all — a recipient could not tell "no rule fired" from "nobody told me".
+
+**A batch campaign counted whitelisted matches as opened alerts.** `hits_count` counts matches above the cut-off — *all* of them, whitelist and FP rules included — and every screen presented it as "alerts opened", column header included. The model's own comment asserted that screening "opens one alert for each". It does not, and it is wrong by exactly what the system absorbs. Measured, one client, one Good Guy on the matched pair:
+
+| | clients in alert | matches found | alerts opened |
+|---|---:|---:|---:|
+| without whitelist | 1 | 1 | 1 |
+| with one Good Guy | 0 | 1 | **0** |
+
+The screen showed "0 clients in alert" next to "1 alert opened" — contradicting itself in two adjacent columns. `opened_count` now carries the alerts actually opened, and the gap between the two numbers is exactly what the whitelist and the rules removed: the one thing those two mechanisms produce, and it was invisible. Additive column: earlier campaigns carry NULL and the screen shows "—" rather than a zero that would read as a measurement.
+
+**The dashboard's false-positive rate ignored the rules.** `CLOSED_BY_RULE` is a closed status, deliberately outside the rate — an alert closed by a rule was reviewed by nobody and says nothing about the quality of what reaches an analyst. That is defensible, and the tile said "rate on closed alerts", which is not what it measures. It now says *reviewed* alerts, publishes its denominator, and shows the volume the rules absorbed beside it — without which the harder the rules work, the less the screen shows of the noise the system actually produces.
+
 ### Fixed — the backtest counted the same client twice, and never split the volume per list
 Two defects on the screen that gates a list's approval, both found from the same question: *do alerts and hits actually break down per list delta?*
 

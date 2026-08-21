@@ -747,13 +747,26 @@ class BatchCampaign(Base):
     screening_lists = Column(JSON, nullable=True)    # restriction eventuelle
     total_clients = Column(Integer, default=0)
     processed_clients = Column(Integer, default=0)
-    # `alert_count` compte les CLIENTS qui declenchent au moins une
-    # correspondance ; `hits_count` compte les CORRESPONDANCES, dont le
-    # criblage ouvre une alerte chacune. Un client homonyme d'un nom courant
-    # en porte des centaines : sans le second chiffre, une campagne annonce
-    # « 12 alertes » quand elle vient d'en ouvrir trois mille.
+    # Trois comptes, trois questions distinctes.
+    #
+    # `alert_count`  : les CLIENTS qui declenchent au moins une correspondance.
+    # `hits_count`   : les CORRESPONDANCES au-dessus du seuil — TOUTES, liste
+    #                  blanche et regles anti-FP comprises. Un client homonyme
+    #                  d'un nom courant en porte des centaines.
+    # `opened_count` : les ALERTES reellement ouvertes.
+    #
+    # Les deux derniers etaient confondus, et le commentaire de cette colonne
+    # affirmait meme que le criblage « ouvre une alerte chacune ». C'est faux
+    # d'exactement ce que le dispositif absorbe : une correspondance en liste
+    # blanche n'ouvre rien, une correspondance close par regle est ouverte puis
+    # refermee. L'ecart entre les deux chiffres EST le travail epargne — le
+    # confondre avec le travail restant le rendait invisible.
+    #
+    # Colonne additive : les campagnes anterieures portent NULL, et un ecran
+    # qui ne sait pas ne doit pas inventer.
     alert_count = Column(Integer, default=0)
     hits_count = Column(Integer, nullable=True, default=0)
+    opened_count = Column(Integer, nullable=True, default=0)
     no_match_count = Column(Integer, default=0)
     rejected_count = Column(Integer, default=0)      # lignes refusees par le quality gate
     created_by = Column(String(100), nullable=True)

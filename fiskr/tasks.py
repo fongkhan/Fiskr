@@ -188,6 +188,7 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
             "Commentaire": snap.review_comment or "—",
             "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
             "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
+            "Alertes re-détectées (re-criblage)": (rescreen_result or {}).get("redetected_alerts", 0),
         })
         ctx.set_result({"snapshot_id": snapshot_id, "rescreen": rescreen_result})
     finally:
