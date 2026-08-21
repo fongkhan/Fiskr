@@ -513,6 +513,22 @@ class EntityRelationship(Base):
 _PERFORMANCE_INDEXES = (
     Index("ix_alerts_status_channel", Alert.status, Alert.channel),
     Index("ix_alerts_client_entity", Alert.client_id, Alert.watchlist_entity_id),
+    # ---- Dates des alertes ----
+    # Depuis qu'un criblage ouvre une alerte PAR CORRESPONDANCE, cette table
+    # grossit du nombre d'homonymes : un seul « Mohammed Ali » sans pays en
+    # ajoute 2 976. Or l'accueil, les exports, les indicateurs et la courbe
+    # journaliere filtrent et trient tous sur ces deux dates, dont aucune
+    # n'etait indexee — chaque chargement de l'accueil parcourait la table
+    # entiere deux fois (« alertes creees 24 h », « decidees 24 h »).
+    Index("ix_alerts_created_at", Alert.created_at),
+    Index("ix_alerts_decided_at", Alert.decided_at),
+    # Cle etrangere vers le journal d'audit. PostgreSQL n'indexe PAS
+    # automatiquement le cote referencant : sans cet index, chaque ligne de
+    # `compliance_audit_trail` supprimee par la retention declenche un parcours
+    # SEQUENTIEL de `alerts` pour verifier l'integrite referentielle. Purger
+    # 100 000 lignes d'audit valait 100 000 parcours d'une table qui se compte
+    # desormais en millions.
+    Index("ix_alerts_audit_id", Alert.audit_id),
     Index("ix_audit_trail_timestamp", AuditTrail.timestamp),
     Index("ix_audit_trail_client_id", AuditTrail.client_id),
     # Filtres du journal d'audit (/api/history) : statut de decision et liste
