@@ -455,6 +455,19 @@ function tableEmpty(target, cols, message, icon = "") {
  tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
 }
 
+// État d'ERREUR homogène — volontairement distinct de l'état vide.
+//
+// Sur un produit de conformité, « aucune alerte pour ce filtre » et « le
+// serveur n'a pas répondu » ne doivent jamais se ressembler : la seconde
+// lecture ferait conclure à un analyste qu'il n'y a rien à instruire. Plusieurs
+// écrans laissaient pire encore — les lignes squelette du chargement, donc un
+// tableau qui semble charger indéfiniment, ou un tableau vidé sans un mot.
+function tableError(target, cols, message = "Chargement impossible.") {
+ const tbody = _tbodyOf(target);
+ if (!tbody) return;
+ tbody.innerHTML = `<tr><td colspan="${cols}" class="error-state"><span class="error-icon">⚠</span>${escapeHtml(message)}<br><small>Réessayez ; si cela persiste, prévenez l'exploitation.</small></td></tr>`;
+}
+
 // ------------------ FILTRES GÉNÉRIQUES DE TABLEAU (côté client) ------------------
 // Une barre de filtres au-dessus d'un tableau rendu en mémoire : une
 // recherche plein texte + des menus déroulants dont les valeurs sont DÉDUITES
@@ -1533,6 +1546,10 @@ async function fetchSnapshots(page = 1) {
  if (filterEl && filterEl.value) params.set("file_type", filterEl.value);
 
  const response = await apiFetch(`/api/snapshots?${params}`);
+ if (!response.ok) {
+ tableError("#snapshots-table", 5, "Liste des instantanés indisponible.");
+ return;
+ }
  const data = await response.json();
  activeSnapshots = data.items || [];
 
@@ -1541,6 +1558,7 @@ async function fetchSnapshots(page = 1) {
  data.page_size || SNAPSHOTS_PAR_PAGE);
  } catch (e) {
  console.error("Error fetching snapshots:", e);
+ tableError("#snapshots-table", 5, "Liste des instantanés indisponible.");
  }
 }
 
@@ -2544,6 +2562,7 @@ async function fetchWatchlist(page = 1) {
  const data = await response.json();
  if (!response.ok) {
  showToast(`Erreur de lecture de la base : ${data.detail || JSON.stringify(data)}`, "error");
+ tableError("#watchlist-table", 7, "Base des listés indisponible.");
  return;
  }
  // Grand périmètre : le repli approché n'est pas calculé dans la requête —
@@ -3165,12 +3184,17 @@ async function fetchAuditHistory(page = null) {
  // lus qu'a l'ouverture de la modale d'inspection.
  params.set("include_details", "false");
  const response = await apiFetch(`/api/history?${params}`);
+ if (!response.ok) {
+ tableError("#audit-table", 7, "Journal de criblage indisponible.");
+ return;
+ }
  const data = await response.json();
  auditHistory = data.items || [];
  renderAuditHistoryTable(auditHistory);
  renderAuditPagination(data.total || 0, data.page || 1, data.page_size || 50);
  } catch (e) {
  console.error("Error loading history:", e);
+ tableError("#audit-table", 7, "Journal de criblage indisponible.");
  }
 }
 
@@ -5764,7 +5788,10 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  if (assigneeFilterEl && assigneeFilterEl.value) params.set("assigned_to", assigneeFilterEl.value);
  tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
  const response = await apiFetch(`/api/alerts?${params}`);
- if (!response.ok) return;
+ if (!response.ok) {
+ tableError(`#${conf.table}`, 10, "File d'alertes indisponible.");
+ return;
+ }
  const data = await response.json();
  renderAlertsTable(channel, data.items || []);
  renderQueuePagination(
@@ -8720,7 +8747,7 @@ async function fetchBatchCampaigns() {
  const data = await response.json();
  const items = data.items || [];
  if (!items.length) {
- tableEmpty(tbody, 9, "Aucune campagne : lancez-en une avec un fichier CSV, ou déposez un fichier dans l'inbox CFT.", "");
+ tableEmpty(tbody, 10, "Aucune campagne : lancez-en une avec un fichier CSV, ou déposez un fichier dans l'inbox CFT.", "");
  } else {
  tbody.innerHTML = items.map(c => `
  <tr>
@@ -10238,7 +10265,7 @@ async function fetchActivityReport() {
  const report = await response.json();
  if (!response.ok) {
  showToast("Erreur : " + (report.detail || "Rapport indisponible."), "error");
- tableEmpty(tbody, 3, "Rapport indisponible.", "");
+ tableError(tbody, 3, "Rapport d'activité indisponible.");
  return;
  }
  const rows = [];
@@ -10293,7 +10320,7 @@ async function fetchWorkload() {
  const channel = document.getElementById("workload-channel")?.value || "";
  const params = channel ? `?channel=${channel}` : "";
  const response = await apiFetch(`/api/alerts/workload${params}`);
- if (!response.ok) { tableEmpty(tbody, 9, "Charge indisponible.", ""); return; }
+ if (!response.ok) { tableError(tbody, 9, "Charge de travail indisponible."); return; }
  const data = await response.json();
  const totalsEl = document.getElementById("workload-totals");
  if (totalsEl) {
