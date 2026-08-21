@@ -486,11 +486,18 @@ RULE_TEMPLATE = '''def rule(ctx):
       final_score, base_score, hard_match, adjustments,
       client (profil complet, criblage), entity (fiche listée complète),
       party (name/roles/country/bic/is_agent, filtrage), message (type/msg_id),
+      perimeter       : SANCTION ou HORS_SANCTION — une règle volumétrique n'a
+                        rien à faire sur le premier,
       hits_count      : nombre de correspondances >= seuil de CE criblage,
       hit_rank        : rang de celle-ci par score décroissant (1 = meilleure),
       corroboration   : has_dob, has_country, has_identity_document,
                         name_only, corroborated, dob_score, gender_score,
-                        geography_score.
+                        geography_score,
+      rarity          : fréquence des mots du nom dans le corpus listé —
+                        disponible, nom_repandu, sans_token_commun, rarete,
+                        df_min, df_max, seuil_repandu, couverture, tokens.
+                        Sans table, disponible vaut False et tous les drapeaux
+                        sont au repos : la règle ne clôture rien.
     Modules disponibles : re, math, datetime, date, timedelta, unicodedata.
     """
     # Exemple : supprimer les scores faibles sans correspondance exacte

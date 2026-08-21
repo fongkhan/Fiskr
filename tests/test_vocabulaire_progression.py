@@ -70,7 +70,8 @@ def _kinds_emis():
 def _libelles_front():
     bloc = re.search(r"const PROGRESS_PHASE_LABELS = \{(.*?)\n\};", APP_JS, re.S)
     assert bloc, "PROGRESS_PHASE_LABELS introuvable dans app.js"
-    return set(re.findall(r"^\s*([A-Z_]+):", bloc.group(1), re.M))
+    # Plusieurs libelles par ligne : la cle est ce qui precede un `: "`
+    return set(re.findall(r'([A-Z_]+)\s*:\s*"', bloc.group(1)))
 
 
 def _icones_front():
