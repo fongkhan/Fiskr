@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the backtest counted the same client twice, and never split the volume per list
+Two defects on the screen that gates a list's approval, both found from the same question: *do alerts and hits actually break down per list delta?*
+
+**A panel of one client could report a 200 % interception rate.** The backtest screens two ways. In **full** mode, one pass over the production universe and one over the candidate. In **delta** mode — the default, and the one that runs in production — one pass over the *shared* universe (everything that does not move), then two tiny passes over the removed and added records. A client matched **both** by an unchanged record and by a record in the delta received an outcome in each pass, and the passes were added together: that client was counted twice. Reproduced with the most ordinary case there is — an official list carrying the same individual twice, under two programmes and two ids, of which the candidate version adds the second:
+
+| | delta mode | single pass |
+|---|---:|---:|
+| clients intercepted | **2** | 1 |
+| interception rate | **200 %** | 100 % |
+| matches (hits) | 2 | 2 |
+
+`hits` was right — two passes cover disjoint record sets, so a match cannot appear in both. `alerts` was not, and `gap_pct`, the number that decides the approval, is computed from it.
+
+The fix is one sentence: **one client, one outcome** — the one a single pass would have kept, the best match. The aggregation is rebuilt around a `par_client` map from which every published counter derives, so they cannot contradict each other; combining the delta passes now goes through the very same merge that combines the slices of a parallel screening. Whitelisted outcomes had to start carrying their client id and score, without which two passes could not tell they were talking about the same client. A test pins delta mode to a single pass, number by number, and fails against the previous behaviour.
+
+**The alert volume was never split per list.** A consolidated backtest covers a wave of deltas, and its per-list table gave "alerts gained / lost" — which are *clients newly intercepted*, not alerts. Matches now carry the list of the record that triggered them, all the way to the report: each list shows its own alert volume, before and after. The difference is exactly the point — in the duplicate case above the list intercepts **no new client** and yet opens **one more alert**, and the reviewer could see neither number before. The global counters, meanwhile, cover the *whole* screened universe, untested lists included; they never answered "what does approving this list add?".
+
+Which surfaced a third one: the report's own cards announced `alerts` as "N alerte(s)" while it counts clients, and never showed the volume at all. The vocabulary discipline already applied on the approval file — *clients intercepted* against *alerts opened* — now holds on the report too, and the guard test was widened to catch it.
+
 ### Fixed — the README announced 153 tests while the suite held 1 370
 A number written once in a document ages exactly like a hand-copied table, and this one was off by a factor of ten. It is corrected, and now derived from `tests/` by a test rather than trusted. `FISKR_JOBS_MODE` is documented too — it **overrides** `config.yaml`'s `jobs.mode`, which is worth knowing before wondering why a freshly edited `jobs.mode` has no effect. Three variables the code reads were missing from `.env.example` altogether, `ANTHROPIC_API_KEY` among them: an operator starts from that file, so a variable absent from it is invisible — the two AI functions declined cleanly without anything ever saying what to fill in. A test now holds every read variable against the template.
 

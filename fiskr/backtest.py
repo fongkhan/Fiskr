@@ -541,18 +541,18 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
                  for cle in ("added", "removed", "modified", "unchanged")}
 
     def _combine(shared_part, delta_part):
-        merged = {
-            "pairs": dict(shared_part["pairs"]),
-            "whitelisted_suppressed": shared_part["whitelisted_suppressed"] + delta_part["whitelisted_suppressed"],
-            "alerts_before_rules": shared_part["alerts_before_rules"] + delta_part["alerts_before_rules"],
-            "rule_suppressed": shared_part["rule_suppressed"] + delta_part["rule_suppressed"],
-            "rule_suppressed_pairs": (shared_part["rule_suppressed_pairs"]
-                                      + delta_part["rule_suppressed_pairs"])[:MAX_PAIR_DETAILS],
-            "hits": shared_part.get("hits", 0) + delta_part.get("hits", 0),
-        }
-        merged["pairs"].update(delta_part["pairs"])
-        merged["alerts"] = len(merged["pairs"])
-        return merged
+        """
+        Reunit la passe partagee et une passe de delta EN UN SEUL criblage.
+
+        La fusion passe par `screenpool.merge_partials`, celle-la meme qui
+        reunit les tranches d'un criblage parallele : un client touche des deux
+        cotes garde le sort de sa MEILLEURE correspondance, exactement comme
+        une passe unique sur l'univers entier l'aurait retenu. Additionner les
+        deux passes comptait ce client deux fois — un panel d'un seul client
+        pouvait afficher 200 % d'interception, et l'ecart d'homologation se
+        calculait la-dessus.
+        """
+        return screenpool.merge_partials([shared_part, delta_part])
 
     shared_reused = False
     if delta is not None:
@@ -674,6 +674,13 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
     gagnees = Counter(candidate["pairs"][k].get("list_type") for k in new_keys)
     perdues = Counter(current["pairs"][k].get("list_type") for k in resolved_keys)
     types_testes = {s.file_type for s in pendings}
+    # Les CORRESPONDANCES par liste : c'est le volume de travail que chaque
+    # liste va reellement ouvrir. Un client homonyme d'un nom courant porte des
+    # centaines de correspondances pour UNE interception — le chiffre global
+    # melangeait celles de toutes les listes du cahier, y compris celles qu'il
+    # ne teste pas.
+    hits_courant = current.get("hits_by_list") or {}
+    hits_candidat = candidate.get("hits_by_list") or {}
     # Une regle candidate peut supprimer des paires sur des listes NON testees :
     # ces mouvements existent, ils ne sont simplement imputables a aucune des
     # listes du cahier. On les rend a part plutot que de les taire.
@@ -721,7 +728,13 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
              # Ecart imputable A CETTE liste : sans quoi un cahier consolide
              # rend un chiffre global que personne ne sait attribuer.
              "new_pairs_count": gagnees.get(s.file_type, 0),
-             "resolved_pairs_count": perdues.get(s.file_type, 0)}
+             "resolved_pairs_count": perdues.get(s.file_type, 0),
+             # Correspondances de CETTE liste, avant et apres. Leur ecart est
+             # le volume d'alertes que son homologation ajoute ou retire.
+             "hits_current": hits_courant.get(s.file_type, 0),
+             "hits_candidate": hits_candidat.get(s.file_type, 0),
+             "hits_delta": (hits_candidat.get(s.file_type, 0)
+                            - hits_courant.get(s.file_type, 0))}
             for s in pendings
         ],
         "unattributed_pairs": hors_perimetre,
@@ -741,6 +754,9 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             # centaines — c'est le volume de travail que cette liste va creer,
             # et il n'a rien a voir avec le nombre de clients intercepte.
             "hits": current.get("hits", 0),
+            # Ventilation par liste : y compris les listes NON testees, dont le
+            # cahier montre ainsi qu'il ne les a pas fait bouger.
+            "hits_by_list": dict(hits_courant),
             "whitelisted_suppressed": current["whitelisted_suppressed"],
             "alerts_before_rules": current["alerts_before_rules"],
             "rule_suppressed": current["rule_suppressed"],
@@ -755,6 +771,7 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             # centaines — c'est le volume de travail que cette liste va creer,
             # et il n'a rien a voir avec le nombre de clients intercepte.
             "hits": candidate.get("hits", 0),
+            "hits_by_list": dict(hits_candidat),
             "whitelisted_suppressed": candidate["whitelisted_suppressed"],
             "alerts_before_rules": candidate["alerts_before_rules"],
             "rule_suppressed": candidate["rule_suppressed"],

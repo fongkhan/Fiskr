@@ -50,14 +50,42 @@ def test_la_campagne_batch_porte_les_deux_chiffres():
     assert "Clients en alerte" in INDEX and "Alertes ouvertes" in INDEX
 
 
+# Les valeurs qui comptent des CLIENTS, sous tous leurs noms dans le frontal.
+# `alerts` en est une : le rapport de cahier de tests l'affichait « N alerte(s) »
+# alors qu'elle compte des clients interceptés, et le volume réel — `hits` — ne
+# figurait nulle part sur cet écran.
+_COMPTES_DE_CLIENTS = ("alert_count", ".alerts", "side.alerts")
+
+
 def test_aucun_ecran_ne_dit_plus_seulement_alertes_pour_un_compte_de_clients():
     """Garde-fou de vocabulaire : les libellés qui comptent des clients le
     disent. Un « N alerte(s) » nu, sur une valeur qui compte des clients, est
     exactement le défaut corrigé ici."""
-    fautifs = [l.strip() for l in APP_JS.split("\n")
-               if "alert_count" in l and "alerte(s)" in l
-               and "client(s) en alerte" not in l]
-    assert not fautifs, f"libellé ambigu : {fautifs}"
+    formulations_justes = ("client(s) en alerte", "client(s) intercepté(s)",
+                           "Clients interceptés", "clients interceptés")
+    fautifs = []
+    for ligne in APP_JS.split("\n"):
+        if "alerte(s)" not in ligne:
+            continue
+        if not any(compte in ligne for compte in _COMPTES_DE_CLIENTS):
+            continue
+        if any(juste in ligne for juste in formulations_justes):
+            continue
+        fautifs.append(ligne.strip()[:160])
+    assert not fautifs, (
+        "Un compte de CLIENTS annoncé comme un compte d'alertes :\n  "
+        + "\n  ".join(fautifs))
+
+
+def test_le_rapport_de_cahier_montre_le_volume_et_pas_seulement_la_couverture():
+    """
+    L'écran principal du cahier de tests ne montrait que les clients
+    interceptés. C'est la couverture, pas la charge : le réviseur approuvait
+    une liste sans voir combien de dossiers elle allait ouvrir.
+    """
+    assert "side.hits" in APP_JS, (
+        "la carte du rapport doit afficher les correspondances, pas seulement "
+        "les clients interceptés")
 
 
 def test_le_compte_de_correspondances_remonte_du_criblage():

@@ -5292,28 +5292,43 @@ async function cancelReviewBacktest(jobId, snapshotId) {
 // porte le type de liste de l'entité qui l'a déclenchée.
 function attributionParListe(report) {
  const listes = report.snapshots || [];
- if (listes.length < 2) return "";  // une seule liste : l'écart lui revient en entier
+ if (!listes.length) return "";
  const horsPerimetre = report.unattributed_pairs || {};
+ // Deux colonnes, deux questions. « Clients gagnés » : combien de clients de
+ // plus cette liste fait entrer dans le champ. « Alertes ouvertes » : combien
+ // de dossiers elle crée réellement — un client homonyme d'un nom courant en
+ // porte des dizaines à lui seul. Les compteurs globaux, eux, portent sur
+ // TOUT l'univers criblé, listes non testées comprises : ils ne répondent pas
+ // à la question « qu'est-ce que CETTE homologation ajoute ? ».
+ const signe = (n) => (n > 0 ? `<strong>+${n}</strong>` : (n < 0 ? `−${-n}` : "—"));
  const lignes = listes.map(s => {
   const d = s.delta_sizes || {};
+  const avant = s.hits_current, apres = s.hits_candidate;
+  const chiffre = (typeof avant === "number" && typeof apres === "number")
+   ? `${avant} → ${apres} &nbsp;${signe(s.hits_delta || 0)}` : "—";
   return `<tr>
    <td>${listTypeBadge(s.file_type)}</td>
    <td>${(d.added || 0)} / ${(d.modified || 0)} / ${(d.removed || 0)}</td>
    <td>${s.new_pairs_count ? `<strong>+${s.new_pairs_count}</strong>` : "—"}</td>
    <td>${s.resolved_pairs_count ? `−${s.resolved_pairs_count}` : "—"}</td>
+   <td>${chiffre}</td>
   </tr>`;
  }).join("");
  const reste = (horsPerimetre.new_pairs_count || horsPerimetre.resolved_pairs_count)
   ? `<tr><td><em>Hors listes testées</em></td><td>—</td>
      <td>${horsPerimetre.new_pairs_count ? `+${horsPerimetre.new_pairs_count}` : "—"}</td>
-     <td>${horsPerimetre.resolved_pairs_count ? `−${horsPerimetre.resolved_pairs_count}` : "—"}</td></tr>`
+     <td>${horsPerimetre.resolved_pairs_count ? `−${horsPerimetre.resolved_pairs_count}` : "—"}</td>
+     <td>—</td></tr>`
   : "";
+ const titre = listes.length > 1
+  ? `Écart par liste (${listes.length} listes couvertes)`
+  : "Écart imputable à cette liste";
  return `
-  <h4 style="margin: 0.75rem 0 0.4rem;">Écart par liste (${listes.length} listes couvertes)</h4>
-  <p class="section-desc">Ce cahier couvre plusieurs listes en une passe. Chaque paire est attribuée à la liste de l'entité qui l'a déclenchée : la colonne « Alertes gagnées » dit laquelle pèse dans l'écart global.</p>
+  <h4 style="margin: 0.75rem 0 0.4rem;">${titre}</h4>
+  <p class="section-desc">Chaque correspondance est attribuée à la liste de l'entité qui l'a déclenchée : le compte est exact, jamais une estimation. « Clients gagnés » dit combien de clients de plus entrent dans le champ ; « Alertes ouvertes » dit combien de dossiers cette liste va réellement créer — un seul client homonyme d'un nom très courant en porte des dizaines.</p>
   <div class="table-container" style="max-height: 260px; overflow-y: auto;">
    <table>
-    <thead><tr><th>Liste</th><th>Delta (+ / ~ / −)</th><th>Alertes gagnées</th><th>Alertes perdues</th></tr></thead>
+    <thead><tr><th>Liste</th><th>Delta (+ / ~ / −)</th><th>Clients gagnés</th><th>Clients perdus</th><th>Alertes ouvertes (avant → après)</th></tr></thead>
     <tbody>${lignes}${reste}</tbody>
    </table>
   </div>`;
@@ -5331,11 +5346,16 @@ function renderBacktestReport(report) {
  return;
  }
 
+ // Deux chiffres, jamais un seul. `alerts` compte des CLIENTS interceptés,
+ // `hits` compte les correspondances — la production ouvre une alerte
+ // chacune. Les appeler tous les deux « alertes » a déjà trompé un réviseur :
+ // un client homonyme d'un nom courant pèse un client et des dizaines de
+ // dossiers.
  const rateCard = (title, side, accent) => `
  <div class="metric" style="flex: 1; background: var(--surface-hover); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color);">
  <span class="metric-label" style="font-weight: 600; color: ${accent};">${title}</span>
- <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} alerte(s)</span>
- <small style="color: var(--text-muted);">taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
+ <span class="metric-value" style="font-size: 1.4rem;">${side.alerts} client(s) intercepté(s)</span>
+ <small style="color: var(--text-muted);">${typeof side.hits === "number" ? `${side.hits} alerte(s) ouverte(s) · ` : ""}taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
  </div>`;
 
  const pairRow = (p, withCheckbox) => `
