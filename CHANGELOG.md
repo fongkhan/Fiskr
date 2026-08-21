@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — dead CSS was hiding a lost affordance, and a rule nothing could change
+Two defects hide behind one another in a stylesheet that has lived.
+
+**A rule nobody names any more.** The markup moves on, the rule stays. Harmless — until it was carrying something the new markup never took back. That is what happened to the notification centre: `.notif-item` held the padding, the pointer cursor and the hover of clickable rows; the rendering moved to bare `<li>`s, the rule was orphaned, and the rows lost every sign that they can be clicked. Nothing broke, so nothing reported it. The proof that the cursor was expected is in the rendering itself: the rows that are *not* clickable ("Nothing to handle.") still give themselves `style="cursor: default;"` — which only means something against a `cursor: pointer` baseline. The sibling list built by the same code, `.home-list li`, kept all of it. Eight orphaned rules are removed and the affordance is restored.
+
+**A rule an inline style had already overruled.** `#notif-panel` was styled twice: a stylesheet rule, and an inline `style` attribute redeclaring every one of its properties with *different* values. The rule was unreachable — you could edit the width, the radius, the z-index and see strictly nothing. The evidence that someone hit this: the mobile rule for the same panel carries four `!important` flags added to win against that inline style, and the one declaration that was **not** flagged, `right: 0.5rem`, loses to the inline `right: 0` — so on a phone the panel sits flush against the right edge instead of keeping its gutter. The inline values are moved into the stylesheet (identical rendering, one place to change it), the `!important` flags are gone, and the gutters are symmetric again.
+
+Both are now held by derived tests, including one that accounts for `!important` — `.hidden { display: none !important }` legitimately beats an inline `display`, and a naive check would have called it a bug.
+
+### Fixed — five translation keys written twice, and the better wording lost
+In a JavaScript object literal a repeated key raises nothing: **the second silently overwrites the first**. Five keys appeared twice in the dictionary, and two carried *different* translations — so the wording someone chose deliberately was never displayed, and nobody could learn it. "Campagnes batch" rendered in Chinese as 批量任务 ("batch task") instead of 批量筛查活动 ("batch screening campaign"), the precise term, and the one its own sibling entry `📦 Campagnes batch` still uses on the very same screen.
+
+The existing i18n tests could not see this: they sample ("one key entry", "a probe on one entry"), and a sample cannot find a hole somewhere else. The dictionaries are now parsed and checked in full — 640 label entries, 97 paragraphs, 10 composed rules, each carrying its five target languages, no key written twice, and no `$3` referring to a group its pattern never captures.
+
+### Fixed — two documented endpoints did not exist
+`GET /api/clients/quality`, in the client-integration guide, is really `GET /api/quality/clients` — the two segments are the wrong way round, so an integrator following the guide gets a 404. The other was in an entry of this changelog. Documentation is a hand-copied table like any other, and it drifts the same way: every endpoint, repository file path and internal link cited in `README.md` and `Documentation/` is now checked against the live route table and the repository itself. That sweep also found fifteen links pointing at `file:///e:/Program Files/git/Fiskr/...` — the drafting machine of whoever wrote those pages, useless to every other reader, one of them broken even there. They are repository-relative now.
+
 ### Fixed — the upload cap closed one door and left the other open
 The previous batch capped every upload. But a list enters Fiskr through **two** doors: an operator drops a file on the import screen, or a configured source serves it over https. It is the same artefact, read by the same parser, written to the same working directory — and the second door had no cap at all.
 
@@ -119,7 +136,7 @@ None of the six upload endpoints had a size cap. Transaction filtering read the 
 Three bounded helpers replace the raw copies, with caps differentiated by nature of deposit — an official list is bulky by construction (OFAC's `SDN_ADVANCED.XML` weighs 126 MB, measured), an alert attachment is not: **list 512 MB, clients 64 MB, attachment 32 MB, message 8 MB**. Past the cap a 413 is raised and nothing partial is left on disk. An AST test checks that every endpoint function taking an `UploadFile` goes through one of the helpers, so the next endpoint written cannot reintroduce the hole.
 
 ### Fixed — a single malformed record made every screening that saw it fail
-The multi-valued fields — `countries.citizenship`, `aliases.high_priority`, `dates_of_birth`, `genders` — are JSON columns whose shape no schema guarantees. Two documented doors let a string through where the engine expects a list: `PATCH /api/entities/{id}` declares `countries: Dict[str, Any]` (so `{"citizenship": "FR"}` is **valid** to Pydantic), and the client upsert webhook declares `client_countries: Dict[str, Any]`, fed system-to-system by an upstream nobody controls.
+The multi-valued fields — `countries.citizenship`, `aliases.high_priority`, `dates_of_birth`, `genders` — are JSON columns whose shape no schema guarantees. Two documented doors let a string through where the engine expects a list: `PATCH /api/watchlist/entity/{entity_pk}` declares `countries: Dict[str, Any]` (so `{"citizenship": "FR"}` is **valid** to Pydantic), and the client upsert webhook declares `client_countries: Dict[str, Any]`, fed system-to-system by an upstream nobody controls.
 
 `[] + "FR"` raises. On the client side the request returned 500 — annoying. On the **listed record** side it was far worse: one malformed record made **every** screening whose blocking selects it fail, and a screening that does not complete leaves **no audit line at all**. An invisible false negative. Losing one context field beats losing the screening.
 

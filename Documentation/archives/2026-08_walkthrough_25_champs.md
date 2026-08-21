@@ -9,8 +9,8 @@ Ce document présente les améliorations apportées pour afficher les **25 champ
 ### 1. Affichage Complet des 25 Colonnes (Gestion des Watchlists)
 Afin de ne pas surcharger visuellement le tableau de la Watchlist Active avec 25 colonnes horizontales :
 * **Lignes de tableau cliquables** : Les lignes (`<tr>`) du tableau disposent dorénavant d'un style `cursor: pointer` et d'une info-bulle d'aide.
-* **Fenêtre de Détails Modal (`#details-modal`)** : Un clic sur n'importe quelle ligne appelle la fonction `showWatchlistDetails(item)` dans [app.js](file:///e:/Program%20Files/git/Fiskr/fiskr/static/app.js).
-* **Grid Layout CSS** : Une grille responsive à 2 colonnes (`.details-grid` et `.details-item` dans [styles.css](file:///e:/Program%20Files/git/Fiskr/fiskr/static/styles.css)) structure l'intégralité des 25 champs (Lieu de naissance, Adresses alternatives, IMO Code, LEI, Fonction/Désignation, Remarques, etc.) de manière claire et aérée.
+* **Fenêtre de Détails Modal (`#details-modal`)** : Un clic sur n'importe quelle ligne appelle la fonction `showWatchlistDetails(item)` dans [app.js](../../fiskr/static/app.js).
+* **Grid Layout CSS** : Une grille responsive à 2 colonnes (`.details-grid` et `.details-item` dans [styles.css](../../fiskr/static/styles.css)) structure l'intégralité des 25 champs (Lieu de naissance, Adresses alternatives, IMO Code, LEI, Fonction/Désignation, Remarques, etc.) de manière claire et aérée.
 
 ---
 
@@ -35,14 +35,14 @@ Dans l'onglet **Criblage** -> **Criblage Temps Réel** :
   - **Entité / Personne Morale (PM)**
   - **Navire (Vessel)**
   - **Autre**
-* **Champs Adaptatifs (`toggleFormFields()`)** : La fonction dans [app.js](file:///e:/Program%20Files/git/Fiskr/fiskr/static/app.js) réagit au changement pour masquer/afficher uniquement les informations pertinentes (Passeports/CNI pour les individus, LEI pour les entreprises, IMO pour les navires, Tail Number pour les aéronefs).
+* **Champs Adaptatifs (`toggleFormFields()`)** : La fonction dans [app.js](../../fiskr/static/app.js) réagit au changement pour masquer/afficher uniquement les informations pertinentes (Passeports/CNI pour les individus, LEI pour les entreprises, IMO pour les navires, Tail Number pour les aéronefs).
 * **Nouveaux Accordions** : Ajout d'un nouvel accordéon **Localisation, Origine & Détails Supplémentaires** pour renseigner l'Adresse, la Ville, l'État, le Pays, le Lieu de Naissance, la Date de Décès, l'Origine, la Fonction/Désignation, les informations additionnelles et les adresses alternatives.
 
 ---
 
 ### 4. Robustesse du Backend et Normalisation du Type Client
-* **Normalisation automatique** : Pour pallier les problèmes de cache navigateur et d'appels API directs, l'API backend ([api.py](file:///e:/Program%20Files/git/Fiskr/fiskr/api.py)) convertit automatiquement à la volée le type client reçu (`I` ou `PP` en `PP`, et tout autre type en `PM`) avant de le soumettre au Data Quality Gate. Cela garantit un fonctionnement robuste sans aucune erreur d'incohérence de structure.
-* **Cache-Busting v2.6** : Incrémentation du paramètre de version à `v=2.6` dans [index.html](file:///e:/Program%20Files/git/Fiskr/fiskr/static/index.html) pour garantir le chargement immédiat des formulaires étendus.
+* **Normalisation automatique** : Pour pallier les problèmes de cache navigateur et d'appels API directs, l'API backend ([api.py](../../fiskr/api.py)) convertit automatiquement à la volée le type client reçu (`I` ou `PP` en `PP`, et tout autre type en `PM`) avant de le soumettre au Data Quality Gate. Cela garantit un fonctionnement robuste sans aucune erreur d'incohérence de structure.
+* **Cache-Busting v2.6** : Incrémentation du paramètre de version à `v=2.6` dans [index.html](../../fiskr/static/index.html) pour garantir le chargement immédiat des formulaires étendus.
 
 ---
 

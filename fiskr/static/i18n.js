@@ -426,7 +426,6 @@
         // Pilotage
         "Indicateurs de Pilotage du Dispositif": { en: "Programme steering indicators", de: "Steuerungskennzahlen", es: "Indicadores de pilotaje", zh: "体系运行指标", ar: "مؤشرات قيادة المنظومة" },
         "Listes en production (fiches par type)": { en: "Lists in production (records per type)", de: "Produktive Listen (Einträge je Typ)", es: "Listas en producción (fichas por tipo)", zh: "在产名单（按类型）", ar: "القوائم المنشورة (سجلات حسب النوع)" },
-        "Dernières synchronisations": { en: "Latest synchronizations", de: "Letzte Synchronisationen", es: "Últimas sincronizaciones", zh: "最近同步", ar: "آخر المزامنات" },
         "Delta": { en: "Delta", de: "Delta", es: "Delta", zh: "增量", ar: "الفرق" },
         "Traitement par analyste (alertes décidées)": { en: "Per-analyst handling (decided alerts)", de: "Bearbeitung je Analyst (entschiedene Alarme)", es: "Tratamiento por analista (alertas decididas)", zh: "分析员处理量（已决警报）", ar: "معالجة حسب المحلل (تنبيهات مقررة)" },
         "Analyste": { en: "Analyst", de: "Analyst", es: "Analista", zh: "分析员", ar: "المحلل" },
@@ -484,7 +483,6 @@
         "Décisions de criblage": { en: "Screening decisions", de: "Screening-Entscheidungen", es: "Decisiones de cribado", zh: "筛查决定", ar: "قرارات الفحص" },
         "Alertes clôturées": { en: "Closed alerts", de: "Geschlossene Alarme", es: "Alertas cerradas", zh: "已关闭警报", ar: "تنبيهات مغلقة" },
         "Rapports de sync": { en: "Sync reports", de: "Sync-Berichte", es: "Informes de sync", zh: "同步报告", ar: "تقارير المزامنة" },
-        "Campagnes batch": { en: "Batch campaigns", de: "Batch-Kampagnen", es: "Campañas por lotes", zh: "批量任务", ar: "حملات الدفعات" },
         "Heure de purge (cron 5 champs)": { en: "Purge time (5-field cron)", de: "Löschzeitpunkt (5-Feld-Cron)", es: "Hora de purga (cron 5 campos)", zh: "清除时间（5段cron）", ar: "وقت الحذف (cron من 5 حقول)" },
         "Enregistrer la politique": { en: "Save policy", de: "Richtlinie speichern", es: "Guardar política", zh: "保存策略", ar: "احفظ السياسة" },
         "🗑 Purger maintenant…": { en: "🗑 Purge now…", de: "🗑 Jetzt löschen…", es: "🗑 Purgar ahora…", zh: "🗑 立即清除…", ar: "🗑 احذف الآن…" },
@@ -529,8 +527,6 @@
         "Confirmer": { en: "Confirm", de: "Bestätigen", es: "Confirmar", zh: "确认", ar: "تأكيد" },
         "Mon Profil & Sécurité": { en: "My profile & security", de: "Mein Profil & Sicherheit", es: "Mi perfil y seguridad", zh: "我的资料与安全", ar: "ملفي وأماني" },
         "Changer le Mot de Passe": { en: "Change password", de: "Passwort ändern", es: "Cambiar contraseña", zh: "修改密码", ar: "تغيير كلمة المرور" },
-        "Mot de passe actuel": { en: "Current password", de: "Aktuelles Passwort", es: "Contraseña actual", zh: "当前密码", ar: "كلمة المرور الحالية" },
-        "Nouveau mot de passe": { en: "New password", de: "Neues Passwort", es: "Nueva contraseña", zh: "新密码", ar: "كلمة المرور الجديدة" },
         "Mettre en Liste Blanche": { en: "Add to whitelist", de: "Auf die Whitelist setzen", es: "Añadir a lista blanca", zh: "加入白名单", ar: "أضف إلى القائمة البيضاء" },
         "Pièce jointe justificative": { en: "Supporting attachment", de: "Belegender Anhang", es: "Adjunto justificativo", zh: "证明附件", ar: "مرفق داعم" },
         "Confirmer la mise en liste blanche": { en: "Confirm whitelisting", de: "Whitelisting bestätigen", es: "Confirmar lista blanca", zh: "确认加入白名单", ar: "أكد الإدراج في القائمة البيضاء" },
@@ -548,7 +544,6 @@
         // Attributs (title / placeholder / aria-label)
         "Basculer le thème clair/sombre": { en: "Toggle light/dark theme", de: "Hell-/Dunkelmodus umschalten", es: "Cambiar tema claro/oscuro", zh: "切换明暗主题", ar: "بدّل السمة الفاتحة/الداكنة" },
         "Centre de notifications": { en: "Notification center", de: "Benachrichtigungszentrum", es: "Centro de notificaciones", zh: "通知中心", ar: "مركز الإشعارات" },
-        "Notifications": { en: "Notifications", de: "Benachrichtigungen", es: "Notificaciones", zh: "通知", ar: "الإشعارات" },
         "Recherche globale": { en: "Global search", de: "Globale Suche", es: "Búsqueda global", zh: "全局搜索", ar: "بحث شامل" },
         "Recherche globale (Ctrl+K)": { en: "Global search (Ctrl+K)", de: "Globale Suche (Strg+K)", es: "Búsqueda global (Ctrl+K)", zh: "全局搜索（Ctrl+K）", ar: "بحث شامل (Ctrl+K)" },
         "Ouvrir le menu de navigation": { en: "Open navigation menu", de: "Navigationsmenü öffnen", es: "Abrir menú de navegación", zh: "打开导航菜单", ar: "افتح قائمة التنقل" },

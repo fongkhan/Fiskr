@@ -277,7 +277,7 @@ La réponse porte `best_match` (score, statut, `resource_equivalences`),
    aucune liste n'est chargée, aucune alerte n'est attendue : c'est le
    référentiel de listes qu'il faut vérifier en premier.
 2. **Vérifiez `record_count`** contre le nombre de lignes du fichier.
-3. **Contrôlez la qualité** : `GET /api/clients/quality` donne la complétude
+3. **Contrôlez la qualité** : `GET /api/quality/clients` donne la complétude
    par champ et les fiches à risque pour le criblage (DOB manquante, pays
    manquant, `PP` sans prénom).
 4. **Constituez un panel et mesurez** avant d'ouvrir en production —

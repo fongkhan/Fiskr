@@ -1417,12 +1417,6 @@ th.sortable.sort-desc::after {
 }
 
 /* ------------------ Accueil « Vue d'ensemble » ------------------ */
-.home-tiles {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 1rem;
-    margin-bottom: 2rem;
-}
 
 .home-tile {
     background: var(--bg-card);
@@ -1463,19 +1457,7 @@ th.sortable.sort-desc::after {
     margin-top: 0.3rem;
 }
 
-.home-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-    gap: 2rem;
-    align-items: start;
-}
 
-.chart-card h3, .home-list-card h3 {
-    font-family: var(--font-heading);
-    font-size: 1.05rem;
-    font-weight: 600;
-    margin-bottom: 1rem;
-}
 
 .chart-svg {
     width: 100%;
@@ -1641,8 +1623,7 @@ th.sortable.sort-desc::after {
         display: inline-flex;
     }
 
-    .grid-layout,
-    .home-grid {
+    .grid-layout {
         grid-template-columns: 1fr;
     }
 }
@@ -1673,9 +1654,6 @@ th.sortable.sort-desc::after {
         gap: 0.75rem;
     }
 
-    .home-tiles {
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    }
 }
 
 /* ===== Lot confort : glisser-deposer, cloche, pagination, client 360 ===== */
@@ -1686,19 +1664,7 @@ th.sortable.sort-desc::after {
     background: rgba(99, 102, 241, 0.06);
 }
 
-.queue-pagination {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 0.6rem;
-    font-size: 0.85rem;
-    color: var(--text-muted);
-}
 
-.bell-wrap {
-    position: relative;
-}
 
 #bell-badge {
     position: absolute;
@@ -1717,42 +1683,27 @@ th.sortable.sort-desc::after {
     justify-content: center;
 }
 
+/* Le balisage portait ces memes proprietes en style inline, avec d'AUTRES
+   valeurs : la regle ci-dessous etait entierement ecrasee, et la modifier
+   n'avait aucun effet visible. Les valeurs conservees sont celles que le
+   style inline appliquait — le rendu est inchange, il n'a plus qu'un seul
+   endroit ou se regler. */
 #notif-panel {
     position: absolute;
-    top: calc(100% + 8px);
+    top: 48px;
     right: 0;
-    width: 320px;
-    max-height: 420px;
+    width: 400px;
+    max-width: 92vw;
+    max-height: 74vh;
     overflow-y: auto;
     background: var(--modal-bg);
     border: 1px solid var(--border-color);
-    border-radius: 10px;
+    border-radius: 12px;
     box-shadow: var(--shadow-modal);
-    z-index: 300;
-    padding: 0.5rem;
+    z-index: 1100;
+    padding: 0.75rem;
 }
 
-.notif-item {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.55rem 0.6rem;
-    border-radius: 8px;
-    cursor: pointer;
-    color: var(--text-primary);
-    font-size: 0.88rem;
-}
-
-.notif-item:hover {
-    background: var(--surface-hover);
-}
-
-.notif-empty {
-    padding: 1rem;
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 0.85rem;
-}
 
 .c360-section {
     margin-top: 1rem;
@@ -2134,7 +2085,24 @@ th.sortable.sort-desc::after {
     font-size: 0.8rem; padding: 0 0.3rem; border-radius: 4px; flex: none;
 }
 .notif-dismiss-btn:hover { color: var(--color-alert); }
-#notif-list li { display: flex; align-items: center; gap: 0.4rem; }
+/* Chaque <li> porte un onclick : sans curseur ni survol, rien ne dit au
+   lecteur que la ligne se clique. Ces declarations vivaient dans une regle
+   `.notif-item` que le balisage n'utilise plus depuis qu'il rend des <li>
+   nus — la regle etait devenue morte, et l'affordance avec elle. Le meme
+   rendu que `.home-list li`, qui est la liste soeur. */
+#notif-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.6rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.88rem;
+    color: var(--text-primary);
+    transition: var(--transition-fast);
+}
+
+#notif-list li:hover { background: var(--surface-hover); }
 #notif-list li .item-main { flex: 1; min-width: 0; }
 
 /* Petit desktop : on resserre la barre avant de céder au défilement */
@@ -2175,9 +2143,9 @@ th.sortable.sort-desc::after {
     .app-header h1 { font-size: 1.15rem; }
     /* Panneau cloche : pleine largeur ancrée sous l'en-tête */
     #notif-panel {
-        position: fixed !important;
-        left: 0.5rem; right: 0.5rem; top: 64px !important;
-        width: auto !important; max-width: none !important;
+        position: fixed;
+        left: 0.5rem; right: 0.5rem; top: 64px;
+        width: auto; max-width: none;
     }
     /* Barres de filtres : une colonne pleine largeur */
     .filter-bar { flex-direction: column; align-items: stretch; }
