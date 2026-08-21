@@ -113,6 +113,15 @@ A purely ASCII text passes through `strip_accents_for_matching` **unchanged**, w
 
 This is the engine's hottest path — taken twice per comparison, over a whole universe of candidates — and **98,3 %** of production listed names are pure ASCII. Measured: 1,01 µs per call with a warm cache against 0,23 µs on the fast path (×4,5); with no cache, 5,39 against 0,34 (×16). End to end: ×1,07 on a full match (the string metrics dominate), ×1,13 on generating a universe's blocking keys, and building the rarity table drops from 12,79 s to 4,43 s over 832 000 distinct names.
 
+### Fixed — the periodic schedulers ran during the test suite
+Every `TestClient(app)` enters the application lifespan. In `eager` mode — the tests' mode — six loops were started there: source scheduler, retention purge, notification digest, KPI digest, homonym mining, CFT inbox polling. All of them wake **on the next full minute**, and all of them work on the **same database** as the tests.
+
+Over a four-minute suite that is roughly four ticks landing on whichever test happens to be running. Hence one failure per run, on a **different test each time**, with rows vanishing under the running test's feet (`ObjectDeletedError`) — a retention purge, a scheduler submitting a real synchronization. Verified on `b3a577e`, before this batch: the lifespan does create the six tasks in eager mode there too, so the defect predates it; a night of repeated runs merely made it visible.
+
+`requeue_stale` is excluded for the same reason: it flips orphaned QUEUED jobs to ERROR, which means nothing when nothing is ever queued — but is enough to break a test that inserts a QUEUED row by hand.
+
+What is removed is the **loop**, not the logic: each scheduler keeps its synchronous tick (`_cron_sync_tick`, `_retention_tick`, `_digest_tick`…), tested one by one and callable without a clock. The `thread` mode (deployment without a daemon) and `worker` mode keep exactly their behaviour.
+
 ### Fixed — the list type of a record was resolved by scanning the cache
 `next(e["_list_type"] for e in watchlist_store if e["entity_id"] == …)` — 832 470 comparisons per identifier in production. In bulk whitelisting from a test-book report that scan was **inside the loop**: 500 proposed pairs were worth 416 million comparisons for one call. The database already indexes `entity_id`; `_list_types_map(db, ids)` resolves the whole batch in one query (chunks of 800), production winning over a pending or superseded record — the same rule as `_entity_names_map`, of which it is the counterpart.
 

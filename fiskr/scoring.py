@@ -662,9 +662,16 @@ def _valeurs(brut: Any) -> List[str]:
     if isinstance(brut, str):
         return [brut] if brut.strip() else []
     if isinstance(brut, (list, tuple, set, frozenset)):
+        # Cas courant traite SANS recursion : une liste de chaines. Le moteur
+        # traverse ceci pour chaque candidat d'un univers, et un appel de
+        # fonction par element s'y voit au profil.
         sortie = []
         for valeur in brut:
-            sortie.extend(_valeurs(valeur))
+            if isinstance(valeur, str):
+                if valeur.strip():
+                    sortie.append(valeur)
+            elif valeur is not None:
+                sortie.extend(_valeurs(valeur))
         return sortie
     if isinstance(brut, dict):
         # Un dictionnaire n'est pas une liste de valeurs : le champ est
