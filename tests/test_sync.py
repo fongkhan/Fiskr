@@ -577,41 +577,65 @@ def test_with_retries_exhausts_then_raises_runtime():
     assert "3 tentatives" in str(exc.value)
 
 
+class _FauxFlux:
+    """
+    Double de reponse en streaming : http_get_text lit le corps par blocs pour
+    le borner (TAILLE_MAX_PAGE), donc le double doit se comporter comme un
+    `client.stream(...)` httpx et pas comme un `client.get(...)`.
+    """
+
+    def __init__(self, status_code, corps, charset_encoding=None, headers=None):
+        self.status_code = status_code
+        self._corps = corps.encode("utf-8") if isinstance(corps, str) else corps
+        self.charset_encoding = charset_encoding
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_bytes(self, chunk_size=65536):
+        for i in range(0, len(self._corps), chunk_size):
+            yield self._corps[i:i + chunk_size]
+
+
+def _client_qui_sert(reponses):
+    """Client double dont `stream` rend les reponses de `reponses` dans l'ordre
+    (une fonction, ou une liste consommee appel apres appel)."""
+    compteur = {"n": 0}
+
+    class FauxClient:
+        def stream(self, method, url, timeout=None, headers=None):
+            compteur["n"] += 1
+            r = reponses(compteur["n"]) if callable(reponses) else reponses[compteur["n"] - 1]
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+    return FauxClient(), compteur
+
+
 def test_http_get_text_retries_transport_then_succeeds(monkeypatch):
     import httpx
     _zero_backoff_config(monkeypatch)
-    calls = {"n": 0}
 
-    class FakeResponse:
-        status_code = 200
-        text = "<html>Journal Officiel</html>"
+    def reponses(n):
+        if n < 3:
+            return httpx.ConnectError("connection reset by peer")
+        return _FauxFlux(200, "<html>Journal Officiel</html>")
 
-    class FakeClient:
-        def get(self, url, timeout=None):
-            calls["n"] += 1
-            if calls["n"] < 3:
-                raise httpx.ConnectError("connection reset by peer")
-            return FakeResponse()
-
-    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: FakeClient())
+    client, calls = _client_qui_sert(reponses)
+    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: client)
     assert http_get_text("https://eur-lex.europa.eu/oj") == "<html>Journal Officiel</html>"
     assert calls["n"] == 3
 
 
 def test_http_get_text_404_fails_immediately_without_retry(monkeypatch):
     _zero_backoff_config(monkeypatch)
-    calls = {"n": 0}
-
-    class FakeResponse:
-        status_code = 404
-        text = "not found"
-
-    class FakeClient:
-        def get(self, url, timeout=None):
-            calls["n"] += 1
-            return FakeResponse()
-
-    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: FakeClient())
+    client, calls = _client_qui_sert(lambda n: _FauxFlux(404, "not found"))
+    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: client)
     with pytest.raises(RuntimeError):
         http_get_text("https://eur-lex.europa.eu/absent")
     assert calls["n"] == 1  # erreur deterministe : aucune reprise inutile
@@ -620,21 +644,11 @@ def test_http_get_text_404_fails_immediately_without_retry(monkeypatch):
 def test_http_get_text_empty_200_is_retried(monkeypatch):
     # Anti-robot EUR-Lex : 200 a corps vide, puis la vraie page
     _zero_backoff_config(monkeypatch)
-    calls = {"n": 0}
-
-    class FakeClient:
-        def get(self, url, timeout=None):
-            calls["n"] += 1
-
-            class R:
-                status_code = 200
-                text = "" if calls["n"] == 1 else "<html>page</html>"
-            return R()
-
-    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: FakeClient())
+    client, calls = _client_qui_sert(
+        lambda n: _FauxFlux(200, "" if n == 1 else "<html>page</html>"))
+    monkeypatch.setattr(sync_mod, "_get_shared_client", lambda: client)
     assert http_get_text("https://eur-lex.europa.eu/oj") == "<html>page</html>"
     assert calls["n"] == 2
-
 
 def test_download_to_file_sends_browser_user_agent(monkeypatch, tmp_path):
     import httpx

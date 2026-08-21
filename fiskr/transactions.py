@@ -26,7 +26,7 @@ from fiskr.config import config
 from fiskr.database import log_compliance_decision, log_compliance_decisions
 from fiskr.names import parse_individual_name
 from fiskr.scoring import match_entities, resolve_cut_off
-from fiskr.alerts import open_or_redetect_alert, open_or_redetect_alerts
+from fiskr.alerts import open_or_redetect_alerts
 
 logger = logging.getLogger("fiskr.transactions")
 

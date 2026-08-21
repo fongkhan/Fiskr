@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the upload cap closed one door and left the other open
+The previous batch capped every upload. But a list enters Fiskr through **two** doors: an operator drops a file on the import screen, or a configured source serves it over https. It is the same artefact, read by the same parser, written to the same working directory — and the second door had no cap at all.
+
+- `download_to_file` wrote to disk for as long as the host kept sending. On shared hosting a full disk is an outage, and a refusal that leaves half a file behind occupies exactly the space it was refusing to grant — so the partial file is now removed.
+- `http_get_text` returned `response.text` with **no bound whatsoever**. It serves the negative-press RSS feeds and the EUR-Lex scraping, so the size of what it reads is decided entirely by the far end.
+
+Bounding `http_get_text` meant changing *how* it reads, not adding a check: `client.get()` buffers the entire body before returning, so any measurement taken afterwards protects nothing — by the time you can measure, the memory is already spent. It now streams and refuses at the first chunk past the ceiling; a test asserts the flow really stops there rather than after the fact, because a cap that only reports is not a cap.
+
+The ceilings live in one place, `fiskr/limites.py`, and the download ceiling is **derived** from the list-upload ceiling rather than copied next to it — the same anti-divergence rule the front-end tables above are now held to. A page or an RSS feed is not a data file and gets its own, much lower ceiling: 32 MB, against 12 KB measured for a real Google News feed on a name query. An overflow is deliberately **not** retried — the response will not shrink, and replaying it would pay twice for the download just refused.
+
+### Fixed — a second, dead copy of the alert-opening path
+`open_or_redetect_alert` (singular) was imported by three modules and called by none, while duplicating ninety-five lines of the most sensitive compliance path there is: deduplication, priority, SLA due date, closure by rule, event journal, notification. Two implementations of the same regulatory obligation, one of them never exercised by a single test, is a trap with a fuse: the next person to fix a bug in alert opening had one chance in two of fixing the copy nobody runs. It is removed; `open_or_redetect_alerts` (plural, batched) is the only path, and a test now holds that it stays the only one.
+
+### Fixed — the upload cap did not bound what a connector holds in memory
+Three official connectors are JSON — the French national freeze registry, the American Consolidated Screening List, World Bank debarment — and the standard library offers no streaming reader: `json.load` builds the whole tree. That tree weighs **more** than the file, and by how much depends on the content. Measured with `tracemalloc`:
+
+| Content | Factor | 512 MB would give |
+|---|---:|---:|
+| realistic CSL entries | ×4,0 | 2,0 GB |
+| distinct short strings | ×6,0 | 3,0 GB |
+| tiny objects `{"a":1}` | ×15,1 | 7,5 GB |
+| empty lists `[]` | ×16,1 | 8,0 GB |
+
+The upload cap set in the previous batch (512 MB for a list) was therefore not enough: on shared hosting the process dies, and under Passenger the whole web worker goes with it.
+
+`TAILLE_MAX_LECTURE_BLOC` (64 MB) now bounds what a connector **without** a streaming reader accepts. That is more than three times the largest real file — trade.gov's CSL weighs about twenty megabytes — and it bounds the adversarial worst case to roughly one gigabyte. The refusal is explicit and says what to do: a bigger file must come through a streaming connector.
+
+Two readers needed no cap, only to be written as streams: the British ConList did `f.read().splitlines()` — half a gigabyte of text plus the header of several million `str` objects before reading a single useful line — and the regulator alert pages materialised the whole page, where `HTMLParser.feed` accepts chunks.
+
+### Fixed — three front-end tables had drifted from what the server produces
+Same class of defect each time: a table copied by hand, a source that moves on, and a screen that shows a raw code or — worse — offers a key that does not exist. All three are now **derived** by a test from what the code actually produces.
+
+**The rule editor's palette offered keys that do not exist.** The false-positive rules screen offers `ctx` keys at a click, their sub-keys, and code templates.
+
+- **Five keys were missing**: `perimeter`, `hits_count`, `hit_rank`, `corroboration`, `rarity` — precisely those that exist *so that* a rule can reason about volumetry, corroboration and how banal a name is. A rule author could not discover them.
+- Two `entity` sub-keys **did not exist**: `programs` and `designation_date` (the real columns are `sanction_programs` and `listed_on`). A rule written from those chips always read `None`.
+- A shipped template read `adjustments["country_penalty"]`, which does not exist: the comparison was `0 <= -10`, so **the rule never fired**.
+
+That last one is the worst defect possible on this screen: a silently inert rule tells nobody — not its author, not its validator, not the auditor. Two templates are added, one on name-only matches and one on rarity, both written to respect the sanctions perimeter. `RULE_TEMPLATE`, the first thing a rule author reads, enumerated the context without `perimeter` or `rarity` either.
+
+**The administration journal spoke in English capitals.** It is the screen a controller opens first. **Twenty-eight of the thirty-five logged actions** had no French label and showed as raw codes: `RETENTION_PURGE`, `ACCOUNT_LOCKED`, `APIKEY_REVOKED`, `MFA_RESET`, `LOGIN_FAILED`… All thirty-five are now named, grouped by family.
+
+**The progress vocabulary had drifted three ways.** A long operation announces a *phase* and a *kind*. Four emitted phases were declared nowhere, including `QUEUED` — the phase every queued job carries, so the one an operator saw most often, shown as a raw code in the middle of a French interface. `INDEX` was declared on both sides and emitted by nothing. Nine of the fourteen kinds submitted had neither icon nor deep link — and `#batch`, the link on the batch-campaign row, resolved to no screen at all (`applyHashRoute` looks for `sec-<tab>`, and `sec-batch` does not exist), so the click did nothing.
+
+### Fixed — a table in error must not look like an empty table
+On a compliance product this is a distinction of substance. An analyst who sees an empty table concludes there is nothing to investigate; if the call actually failed, they have just concluded wrong, and nothing tells them.
+
+Three shapes existed on the list screens, all bad: **no check of the status code** (the error payload was read as data, `data.items` was `undefined`, and the table showed "no snapshot" / "no decision"); **a bare `return`** (the loading skeleton stayed on screen, so a table that seems to load forever); and **the empty state reused to say an error** (right text, wrong colour, indistinguishable at a glance).
+
+`tableError()` now paints a distinct state — red frame, warning icon, and what to do — that `tableEmpty()` cannot imitate. Along the way, one colspan gap: the batch-campaign empty state announced nine columns since a tenth — "alerts opened" — had been added to the table. A test now checks that **every** empty, error or loading state spans the full width of its table.
+
+### Fixed — ten form fields were mute to a screen reader
+A `<select>` or `<input>` with no accessible name is announced as "combo box" or "edit", nothing more: the user hears that a control is there, not what it does. On a product analysts use all day that is a real obstacle, and WCAG 2.1 criterion 4.1.2.
+
+The screen already uses all three valid forms (`<label for>`, wrapping `<label>`, `aria-label`); ten fields had none — mostly filter lists standing alone in a toolbar, and file pickers. Twelve accessible names were also missing from the translation dictionary, which the i18n engine explicitly translates: a name left in French is read as-is by a screen reader set to English, German or Arabic.
+
 ### Added — what a name is worth: the rarity of its words
 Keeping every match above the cut-off is the audit requirement; "Mohammed Ali" without a country produces **2 976** of them in production, dozens of them at 100,00. No string metric separates those records — the names *are* identical, and no metric should. What separates them is elsewhere: in the listed corpus, "MOHAMMED" and "ALI" are borne by thousands of records; "TYURIN" by one. Matching two names on omnipresent words identifies nobody.
 

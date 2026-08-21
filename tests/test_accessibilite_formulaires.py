@@ -88,3 +88,25 @@ def test_les_modales_annoncent_leur_role():
               / "app.js").read_text(encoding="utf-8")
     assert 'setAttribute("role", "dialog")' in app_js
     assert 'setAttribute("aria-modal", "true")' in app_js
+
+
+def test_les_noms_accessibles_sont_traduits():
+    """
+    Le moteur d'internationalisation traduit explicitement les attributs
+    `aria-label` : un nom accessible laissé en français est lu tel quel par un
+    lecteur d'écran configuré en anglais, en allemand ou en arabe. Quatorze
+    l'étaient — quatre d'origine, dix ajoutés en même temps que ce test.
+
+    Seul « Langue / Language » reste hors dictionnaire : il est bilingue par
+    construction, c'est le sélecteur de langue lui-même.
+    """
+    import json
+
+    i18n = (Path(__file__).resolve().parent.parent / "fiskr" / "static"
+            / "i18n.js").read_text(encoding="utf-8")
+    labels = set(re.findall(r'aria-label="([^"]+)"', INDEX))
+    assert len(labels) >= 20, "détection des aria-label cassée"
+    non_traduits = [l for l in labels
+                    if json.dumps(l, ensure_ascii=False) not in i18n
+                    and l != "Langue / Language"]
+    assert not non_traduits, f"noms accessibles non traduits : {sorted(non_traduits)}"

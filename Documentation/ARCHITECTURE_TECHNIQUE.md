@@ -436,6 +436,39 @@ graph
 
 ---
 
+### 6.4 Vocabulaires partagés : dérivés, jamais recopiés
+
+Un même vocabulaire vit à plusieurs endroits : le code qui l'**émet**, la
+constante serveur qui le **déclare**, et la table du frontal qui lui donne un
+**libellé**, une **icône** ou un **lien**. Trois recopies, trois occasions de
+diverger — et la divergence est silencieuse : l'écran affiche un code brut, une
+ligne ne mène nulle part, ou pire, une clé proposée à l'auteur d'une règle
+n'existe pas et sa règle reste inerte sans que rien ne le signale.
+
+C'est arrivé quatre fois, sur quatre vocabulaires différents. La règle est donc
+posée : **toute table partagée est vérifiée par un test qui DÉRIVE la vérité de
+la source**, au lieu de la recopier.
+
+| Vocabulaire | Source de vérité | Test |
+|---|---|---|
+| Phases et natures d'opération | ce que le code émet (`phase=`, `_submit_job`) | `test_vocabulaire_progression` |
+| Actions d'administration | les appels à `log_admin_action` | `test_journal_admin_lisible` |
+| Contexte des règles anti-FP | `build_screening_ctx` / `build_filtering_ctx` | `test_palette_regles` |
+| Sources de synchronisation | `_SYNC_SOURCE_ALIASES` | `test_registre_runners_sync` |
+| Index de performance | `_PERFORMANCE_INDEXES` | `test_perf_indexes` |
+| Périmètres, capacités, seuils | leurs catalogues respectifs | `test_perimetres`, `test_capability_wiring` |
+
+Chacun de ces tests vérifie les **deux sens** :
+
+* rien d'émis n'est absent de la déclaration — sinon l'écran montre un code
+  brut, ou l'action n'a ni icône ni destination ;
+* rien de déclaré n'est inerte — un libellé sans émetteur fait croire qu'une
+  chose est tracée alors que plus rien ne l'écrit.
+
+Et chacun porte une garde contre lui-même : une assertion sur le **nombre**
+d'éléments détectés, pour qu'une expression régulière cassée échoue au lieu de
+rendre le test vert à vide.
+
 ## 7. Piste d'Audit et Explicabilité (Compliance Audit Trail)
 
 Chaque décision logicielle doit pouvoir être reconstruite à des fins de contrôle réglementaire (ACPR/AMF). Le système persiste de manière immuable en base de données relationnelle (PostgreSQL cible) :
