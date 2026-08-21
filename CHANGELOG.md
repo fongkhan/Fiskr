@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed — the README announced 153 tests while the suite held 1 370
-A number written once in a document ages exactly like a hand-copied table, and this one was off by a factor of ten. It is corrected, and now derived from `tests/` by a test rather than trusted. `FISKR_JOBS_MODE` is documented too — it **overrides** `config.yaml`'s `jobs.mode`, which is worth knowing before wondering why a freshly edited `jobs.mode` has no effect.
+A number written once in a document ages exactly like a hand-copied table, and this one was off by a factor of ten. It is corrected, and now derived from `tests/` by a test rather than trusted. `FISKR_JOBS_MODE` is documented too — it **overrides** `config.yaml`'s `jobs.mode`, which is worth knowing before wondering why a freshly edited `jobs.mode` has no effect. Three variables the code reads were missing from `.env.example` altogether, `ANTHROPIC_API_KEY` among them: an operator starts from that file, so a variable absent from it is invisible — the two AI functions declined cleanly without anything ever saying what to fill in. A test now holds every read variable against the template.
 
 Swept in the same pass, with nothing found: every repository file path and internal link cited in the documentation (58 and 0 broken respectively), the 676 element ids of the interface (no duplicates), every `getElementById` target, all 239 front-end API calls against the live route table, the endpoints quoted inside the in-app guide, the client list-type labels against the 42 types the server produces, and the environment variables the code reads against those the documentation names.
 

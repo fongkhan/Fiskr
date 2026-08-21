@@ -172,3 +172,42 @@ def test_le_compte_de_tests_annonce_par_le_readme_est_juste():
     assert f"{fichiers} fichiers" in readme, (
         f"Le README doit annoncer {fichiers} fichiers de test.")
 
+_LECTURE_ENV = (
+    re.compile(r'os\.getenv\(\s*["\']([A-Z][A-Z0-9_]*)["\']'),
+    re.compile(r'os\.environ(?:\.get\(|\[)\s*["\']([A-Z][A-Z0-9_]*)["\']'),
+)
+# Posee par pytest lui-meme, jamais par un exploitant.
+_ENV_HORS_EXPLOITATION = {"PYTEST_CURRENT_TEST"}
+
+
+def test_chaque_variable_d_environnement_lue_figure_dans_le_modele():
+    """
+    Un exploitant part de `.env.example`. Une variable que le code lit sans la
+    citer la est invisible pour lui : la fonction qu'elle commande restera
+    eteinte, sans message, et il n'aura aucun moyen d'apprendre qu'elle existe.
+    C'etait le cas d'`ANTHROPIC_API_KEY` — les deux fonctions IA refusaient
+    proprement, sans que rien ne dise quoi renseigner.
+    """
+    dossier = os.path.join(DEPOT, "fiskr")
+    source = ""
+    for nom in sorted(os.listdir(dossier)):
+        if nom.endswith(".py"):
+            with open(os.path.join(dossier, nom), encoding="utf-8") as f:
+                source += f.read()
+
+    lues = set()
+    for motif in _LECTURE_ENV:
+        lues |= set(motif.findall(source))
+    lues -= _ENV_HORS_EXPLOITATION
+    assert len(lues) >= 8, f"detection suspecte : {len(lues)} variable(s)"
+
+    with open(os.path.join(DEPOT, ".env.example"), encoding="utf-8") as f:
+        modele = f.read()
+    # Une ligne commentee compte : elle montre le nom et sa forme attendue.
+    declarees = set(re.findall(r"^\s*#?\s*([A-Z][A-Z0-9_]*)\s*=", modele, re.M))
+
+    absentes = sorted(lues - declarees)
+    assert not absentes, (
+        "Variables lues par le code et absentes de .env.example — ajoutez-les, "
+        "commentees si elles sont optionnelles :\n  " + "\n  ".join(absentes))
+
