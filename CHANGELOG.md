@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a synchronisation could not say where it was, from another process
+Reported from production: two syncs showing "Analysing the file…", indeterminate bar, counter at zero, apparently forever. They were not stuck. PEP finished normally while the diagnosis was under way — **707 951 records in thirteen and a half minutes**. It was invisible, not blocked.
+
+`SyncProgress` published its phases into `fiskr.progress`, an **in-memory registry private to the process that writes it**. A sync runs in the worker daemon; the screen queries an API process that will never see that registry — `/api/diagnostic/jobs` said so plainly, `progress_active: []`. The queue row does cross processes, and it kept the phase stamped at claim time — `PARSE`, rendered as "Analysing the file…" — from the first second to the last, with `processed` at 0.
+
+The bridge already existed and its docstring describes this exact case: *"the registry does not cross processes, the jobs row does"*. The sync simply did not take it. It does now — every phase change goes straight through, a phase that has not changed is rewritten at most every three seconds, and a broken bridge never interrupts a sync. The snapshot row, meanwhile, had known all along: `PERSIST, 593 000 records processed`.
+
+What it cost is not cosmetic: an operator had no way to tell a source that is advancing from a source that has stopped responding. On the very same screen, the DFAT source — whose host accepts the connection and then never sends a single byte — displayed exactly the same thing.
+
+### Fixed — the direct DFAT route has never worked, and cost a work slot every day
+Measured on 22/08/2026: `dfat.gov.au` answers 403 to a HEAD, then accepts a GET connection and sends **nothing** — 110 s, zero bytes. So the download never ends on its own: it burns the whole retry budget (4 attempts × 120 s read timeout, plus backoff) before failing, about **nine minutes of a work slot on every run**. In production that source has **never** produced a single snapshot, while the failure notification could not be delivered either (SMTP has been timing out on every message).
+
+With two slots and two long syncs, everything else waits: 13 snapshots had piled up awaiting approval and 11 promotion jobs sat queued. They all drained the moment a slot came free — observed live.
+
+Australia is covered without it by the `au_dfat` source (OpenSanctions aggregate of the same perimeter), which syncs normally — 3 737 records, promoted the same morning. The shipped configuration now says so, next to the URL, rather than leaving a dead host looking like a working default.
+
 ### Fixed — three counts that credited the system for work it had not done
 Same question as the backtest fix, asked of the rest of the surface: *does each published number count what its label says?* Three did not, all on the alert-volume side, and all in the same direction — the system was credited with more work opened, and less noise absorbed, than reality.
 

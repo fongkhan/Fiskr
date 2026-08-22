@@ -195,6 +195,19 @@ sync:
   # onusiennes transposees et les designations autonomes australiennes.
   # L'extension de l'url choisit le lecteur : .csv (natif) ou .xlsx, cette
   # derniere voie demandant le paquet optionnel openpyxl.
+  #
+  # ATTENTION - VOIE DIRECTE INDISPONIBLE (constate le 22/08/2026). L'hote
+  # dfat.gov.au repond 403 a une requete HEAD, puis ACCEPTE la connexion d'un
+  # GET sans jamais envoyer un octet. Le telechargement ne se termine donc
+  # jamais de lui-meme : il epuise le budget de reprises (4 tentatives x 120 s
+  # de timeout de lecture, plus le backoff) avant d'echouer, soit ~9 minutes
+  # d'un creneau de travail a chaque passage — mesure en production, ou cette
+  # source n'a JAMAIS produit d'instantane.
+  #
+  # L'Australie est couverte sans cela par la source `au_dfat` (agregat
+  # OpenSanctions du meme perimetre), qui se synchronise normalement. Laissez
+  # `dfat` desactive tant que le portail officiel ne repond pas ; ne l'activez
+  # que pour une url dont vous avez verifie qu'elle se telecharge.
   dfat:
     enabled: false
     url: "https://www.dfat.gov.au/sites/default/files/regulation8_consolidated.csv"
