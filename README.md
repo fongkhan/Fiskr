@@ -668,6 +668,23 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 2. Connectez-vous avec les identifiants administrateur (par défaut : **`admin`** / **`adminpassword`**).
 3. Une fois authentifié, un jeton JWT sécurisé et un cookie `HttpOnly` sont générés, vous donnant accès au dashboard de contrôle.
 
+> **Première mise en route : l'écran vous attend.** Sur une base vide, Fiskr
+> ouvre de lui-même **Guide → Mise en service** (`GET /api/setup/status`,
+> réservé à l'administrateur). Chaque point y est **vérifié à l'instant**, pas
+> mémorisé : secrets restés à la valeur du code source, repli SQLite, démon
+> travailleur absent, index de performance différés, aucune liste en
+> production, référentiel clients, seuils jamais revus, comptes, SMTP.
+>
+> Un bandeau persiste tant qu'un point **bloquant** subsiste — un poste de
+> criblage sans liste en production répond « aucune correspondance » sans
+> jamais s'en plaindre, et c'est l'état le plus dangereux du produit.
+>
+> Le relevé constate qu'un serveur SMTP est *configuré*, jamais qu'il
+> *répond* : la sonde « Tester l'envoi de courriel » ouvre une vraie connexion,
+> à la demande et bornée par un timeout court. La distinction n'est pas
+> théorique — elle a été constatée en production, sur un SMTP correctement
+> déclaré dont chaque envoi tombait en délai dépassé.
+
 Le dashboard interactif se compose de 7 onglets principaux :
 * **Gestion des Watchlists** : **Consultation en direct de la base de données des listés** (`GET /api/watchlist/db` — recherche **sur n'importe quel champ** via le sélecteur de champ (`search_field` : alias, pays, adresses, documents, référence officielle… ou « tout champ »), **tolérante aux fautes de frappe** (repli fuzzy Jaro-Winkler classé par similarité, uniquement quand la recherche exacte ne donne rien), filtres par liste et par statut, pagination côté serveur ; y compris hors production : snapshots en attente d'homologation, remplacés, rejetés et entités exclues), fenêtre de détails des 26 attributs AML, **édition contrôlée des fiches en production** (`PATCH /api/watchlist/entity/{id}`, réservée aux rôles reviewer/admin) avec **journal des modifications** immuable (qui, quand, avant → après, consultable dans la fiche) et **référence officielle datée** (extraite des sources UE/ONU/DGT/OFSI ; sa date de mise à jour peut être ramenée à la date du jour lors d'un patch), **import de fichiers** (sous-onglet dédié), **Snapshots & Comparateur** (Delta Engine, filtre par liste), sources automatiques, **mode homologation** et ajouts manuels via formulaire adaptatif.
 * **Criblage** : Crible temps réel unitaire (Sandbox avec champs s'adaptant au type de tiers), crible de masse (simulateur batch) et **filtrage transactionnel ISO 20022** (messages `pain.001` / `pacs.008`). Les trois acceptent un **périmètre de listes restreint** (`screening_lists`, défaut toutes — toute restriction est tracée dans l'audit) ; un criblage en alerte affiche un **lien direct « Instruire l'alerte »**.
@@ -682,7 +699,7 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète — **1 404 fonctions de test** réparties sur 141
+Exécutez la suite complète — **1 419 fonctions de test** réparties sur 142
 fichiers — avec pytest :
 ```bash
 python -m pytest

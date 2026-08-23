@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — a commissioning screen that checks *this* installation, on first start
+A fresh install starts silent. Nothing says that no list is in production — so screening will answer "no match" for ever without complaining — that the worker daemon is absent, or that the secrets are still the ones in the source code. Those three states lived in a startup WARNING, in a log nobody opens, or nowhere at all.
+
+**Guide → Mise en service** (`GET /api/setup/status`, admin only) reports twelve checks across four families — Foundation, Lists, Screening, Operations — each with what was observed, what to do about it, and a link to the screen that settles it. On an empty base the screen opens by itself; a banner then persists on every screen for as long as a **blocking** point remains.
+
+Three levels, and the difference matters: **Blocking** — the product cannot do its job, or a door is open (default secrets, daemon down, no list in production). **Warning** — it works, but it will be paid for later (SQLite fallback, deferred indexes, silent notifications). **To do** — a normal step of getting started, not a defect.
+
+**Nothing is stored.** Each check queries the same source as the screen it describes: the database for lists, the queue for the daemon, `fiskr.config` for the secrets, the last `init_db` for the indexes. A point that turned false again six months after go-live would say so — that is what separates a check from a box ticked once. A test pins it: the secrets check flips from blocking to verified within the same session, purely from the state changing.
+
+**Configured is not reachable.** The report observes that an SMTP server is *declared*; never that it *answers*. Answering means opening a connection, which a status page has no business doing on every render — hence the explicit probe, triggered by a human, bounded by a short timeout, journalised. The distinction is not theoretical: it was found in production, on a correctly declared SMTP whose every send timed out while the application believed itself able to warn — including about a source's synchronisation failure.
+
+One thing the deferred performance indexes needed on the way: `init_db` decides not to create them (an ordinary `CREATE INDEX` locks the table for minutes) and said so in a startup WARNING only. The list is now readable, rebuilt at every `init_db` — never a copy to maintain, always what the last start observed.
+
 ### Fixed — one stray `</div>` put four screens outside their own tab
 Reported from production as "a big display problem". Diagnosed by driving a browser against the running application: four panels — Ajout Manuel, Sources, Homologation, Historique — were children of **`<body>`**. A surplus `</div>` closed `#sec-watchlist-mgmt` early, and the parser hoisted everything after it out of the layout entirely.
 

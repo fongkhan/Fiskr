@@ -594,6 +594,19 @@ TRIGRAM_SEARCH_INDEXES = (
 # indexees automatiquement.
 LARGE_TABLE_ROW_GUARD = 200_000
 
+# Index de performance que `init_db` a DELIBEREMENT laisses de cote, faute de
+# pouvoir les creer sans verrouiller une grosse table. L'information n'existait
+# que dans un WARNING du demarrage — c'est-a-dire nulle part pour qui regarde
+# l'application. La liste est relevee ici pour que l'ecran de mise en service
+# puisse la montrer, et elle est reconstruite a chaque `init_db` : jamais une
+# copie a maintenir, toujours ce que le dernier demarrage a constate.
+_INDEX_DIFFERES: list = []
+
+
+def index_de_performance_manquants() -> list:
+    """(nom d'index, table) des index differes au dernier demarrage."""
+    return list(_INDEX_DIFFERES)
+
 
 def _add_missing_nullable_columns(engine, inspector) -> list:
     """
@@ -1353,6 +1366,8 @@ def init_db():
             perf_index.create(bind=engine, checkfirst=True)
         except Exception as e:
             logger.warning(f"Index {perf_index.name} non créé : {e}")
+    _INDEX_DIFFERES.clear()
+    _INDEX_DIFFERES.extend(_deferred_indexes)
     if _deferred_indexes:
         noms = ", ".join(n for n, _ in _deferred_indexes)
         logger.warning(

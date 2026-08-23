@@ -171,6 +171,15 @@
  <button id="worker-down-restart" class="btn btn-sm btn-primary hidden" onclick="restartWorker()">Relancer le démon</button>
  </div>
 
+ <!-- Mise en service : tant qu'un point BLOQUANT subsiste, l'exploitant doit
+ le savoir depuis n'importe quel écran. Un produit de conformité sans liste
+ en production répond « aucune correspondance » sans jamais se plaindre. -->
+ <div id="setup-banner" class="worker-down-banner hidden" role="alert">
+ <span class="worker-down-icon" aria-hidden="true">!</span>
+ <span id="setup-banner-text" class="worker-down-text"></span>
+ <button class="btn btn-sm btn-primary" onclick="ouvrirMiseEnService()">Ouvrir la mise en service</button>
+ </div>
+
  <!-- SECTION 0 : VUE D'ENSEMBLE (ACCUEIL) -->
  <section id="sec-home" class="tab-content active">
  <!-- Accueil personnalisable : chaque utilisateur compose sa grille de
@@ -1972,6 +1981,9 @@
       paragraphe n'utilise la classe section-desc (réservée aux écrans). -->
  <section id="sec-guide" class="tab-content">
  <div class="sub-tabs">
+ <button id="sub-btn-guide-setup" class="sub-tab-btn" onclick="switchSubTab('guide', 'guide-setup')">
+ Mise en service
+ </button>
  <button id="sub-btn-guide-start" class="sub-tab-btn active" onclick="switchSubTab('guide', 'guide-start')">
  Démarrer
  </button>
@@ -1996,6 +2008,20 @@
  </div>
 
  <!-- Guide 1/7 : Démarrer -->
+ <div id="sub-sec-guide-setup" class="sub-tab-content hidden">
+ <div class="card guide-wrap">
+ <h2>Mise en service de cette installation</h2>
+ <p class="guide-p">Chaque point ci-dessous est <strong>vérifié à l'instant</strong> sur cette installation-ci : rien n'est mémorisé, rien n'est recopié. Un point qui redeviendrait faux dans six mois le redirait ici.</p>
+ <p class="guide-p"><strong>Bloquant</strong> : le produit ne peut pas faire son travail, ou une porte est ouverte. <strong>Attention</strong> : cela fonctionne, mais se paiera plus tard. <strong>À faire</strong> : une étape normale de mise en route, pas un défaut.</p>
+ <div style="display: flex; gap: 0.75rem; align-items: center; margin: 1rem 0;">
+ <button class="btn btn-primary" onclick="rafraichirMiseEnService()">Revérifier</button>
+ <button class="btn btn-secondary" onclick="sonderSmtp()">Tester l'envoi de courriel</button>
+ <span id="setup-smtp-result" style="font-size: 0.85rem;"></span>
+ </div>
+ <div id="setup-checks"></div>
+ </div>
+ </div>
+
  <div id="sub-sec-guide-start" class="sub-tab-content active">
  <div class="card guide-wrap">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-book"></use></svg> Bienvenue dans Fiskr</h2>

@@ -15,6 +15,19 @@
 
     // ---- Dictionnaire : « chaîne française » -> { en, de, es, zh, ar } ----
     const T = {
+        "Mise en service": { en: "Commissioning", de: "Inbetriebnahme", es: "Puesta en servicio", zh: "启用检查", ar: "بدء التشغيل" },
+        "Revérifier": { en: "Re-check", de: "Erneut prüfen", es: "Volver a verificar", zh: "重新检查", ar: "إعادة الفحص" },
+        "Tester l'envoi de courriel": { en: "Test e-mail delivery", de: "E-Mail-Versand testen", es: "Probar el envío de correo", zh: "测试邮件发送", ar: "اختبار إرسال البريد" },
+        "Ouvrir la mise en service": { en: "Open commissioning", de: "Inbetriebnahme öffnen", es: "Abrir la puesta en servicio", zh: "打开启用检查", ar: "فتح بدء التشغيل" },
+        "Ouvrir l'écran": { en: "Open the screen", de: "Zum Bildschirm", es: "Abrir la pantalla", zh: "打开该页面", ar: "فتح الشاشة" },
+        "Connexion en cours…": { en: "Connecting…", de: "Verbindung läuft…", es: "Conectando…", zh: "正在连接…", ar: "جارٍ الاتصال…" },
+        "Sonde impossible.": { en: "Probe failed.", de: "Prüfung nicht möglich.", es: "Sondeo imposible.", zh: "探测失败。", ar: "تعذّر الفحص." },
+        "État de mise en service indisponible.": { en: "Commissioning status unavailable.", de: "Inbetriebnahme-Status nicht verfügbar.", es: "Estado de puesta en servicio no disponible.", zh: "无法获取启用状态。", ar: "حالة بدء التشغيل غير متاحة." },
+        "Bloquant": { en: "Blocking", de: "Blockierend", es: "Bloqueante", zh: "阻断", ar: "حاجب" },
+        "À faire": { en: "To do", de: "Zu erledigen", es: "Por hacer", zh: "待办", ar: "للتنفيذ" },
+        "Vérifié": { en: "Checked", de: "Geprüft", es: "Verificado", zh: "已核实", ar: "تم التحقق" },
+        "Socle": { en: "Foundation", de: "Basis", es: "Base", zh: "基础", ar: "الأساس" },
+        "Exploitation": { en: "Operations", de: "Betrieb", es: "Explotación", zh: "运维", ar: "التشغيل" },
         "Correspondances": { en: "Matches", de: "Treffer", es: "Coincidencias", zh: "匹配数", ar: "المطابقات" },
         "Taux de faux positifs instruits": { en: "False-positive rate on reviewed alerts", de: "Fehlalarmquote auf bearbeiteten Alarmen", es: "Tasa de falsos positivos instruidos", zh: "已审查警报的误报率", ar: "معدّل الإنذارات الكاذبة على التنبيهات المدروسة" },
         "taux sur alertes instruites": { en: "rate on reviewed alerts", de: "Quote auf bearbeiteten Alarmen", es: "tasa sobre alertas instruidas", zh: "已审查警报的比率", ar: "النسبة على التنبيهات المدروسة" },

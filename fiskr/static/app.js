@@ -714,6 +714,105 @@ async function refreshSidebarCounters() {
  } catch (e) { /* silencieux : simple polling de badges */ }
 }
 
+
+// ------------------ MISE EN SERVICE (premier démarrage) ------------------
+// Une installation neuve démarre muette. Rien ne dit qu'aucune liste n'est en
+// production — donc que le criblage ne trouvera jamais rien —, que le démon est
+// absent, ou que les secrets sont restés ceux du code source. Ces états se
+// lisaient dans un WARNING du démarrage, dans un journal que personne n'ouvre.
+//
+// Réservé à l'administrateur : chaque point renvoie vers un écran que lui seul
+// peut régler. Un 403 est donc un état normal, pas une panne — d'où le silence.
+
+const SETUP_ETATS = {
+ BLOQUANT: { libelle: "Bloquant", couleur: "var(--color-alert)", fond: "rgba(239, 68, 68, 0.10)" },
+ ATTENTION: { libelle: "Attention", couleur: "var(--color-warning)", fond: "rgba(245, 158, 11, 0.10)" },
+ A_FAIRE: { libelle: "À faire", couleur: "var(--text-secondary)", fond: "var(--surface-hover)" },
+ OK: { libelle: "Vérifié", couleur: "var(--color-safe)", fond: "transparent" },
+};
+
+let _setupDejaOuvert = false;
+
+async function rafraichirMiseEnService() {
+ const cible = document.getElementById("setup-checks");
+ try {
+ const reponse = await apiFetch("/api/setup/status", { silent: true });
+ if (!reponse.ok) return null;          // 403 pour un non-admin : normal
+ const etat = await reponse.json();
+ majBandeauMiseEnService(etat);
+ if (cible) cible.innerHTML = rendreControles(etat);
+ return etat;
+ } catch (e) {
+ if (cible) tableError("#setup-checks", 1, "État de mise en service indisponible.");
+ return null;
+ }
+}
+
+function rendreControles(etat) {
+ const parFamille = {};
+ (etat.controles || []).forEach(c => (parFamille[c.famille] = parFamille[c.famille] || []).push(c));
+ return (etat.familles || []).filter(f => parFamille[f]).map(famille => `
+ <h3 style="margin: 1.2rem 0 0.5rem; font-size: 1rem;">${escapeHtml(famille)}</h3>
+ ${parFamille[famille].map(c => {
+   const e = SETUP_ETATS[c.etat] || SETUP_ETATS.A_FAIRE;
+   return `<div style="border: 1px solid var(--border-color); border-left: 3px solid ${e.couleur};
+       background: ${e.fond}; border-radius: 8px; padding: 0.7rem 0.9rem; margin-bottom: 0.5rem;">
+     <div style="display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;">
+      <strong>${escapeHtml(c.titre)}</strong>
+      <span class="status-badge" style="background: ${e.fond}; color: ${e.couleur};">${e.libelle}</span>
+      ${c.lien ? `<a href="${escapeHtml(c.lien)}" style="margin-left: auto; font-size: 0.85rem;">Ouvrir l'écran</a>` : ""}
+     </div>
+     <p style="margin: 0.35rem 0 0; font-size: 0.88rem;">${escapeHtml(c.constat)}</p>
+     ${c.remede ? `<p style="margin: 0.35rem 0 0; font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(c.remede)}</p>` : ""}
+    </div>`;
+ }).join("")}`).join("");
+}
+
+function majBandeauMiseEnService(etat) {
+ const bandeau = document.getElementById("setup-banner");
+ if (!bandeau) return;
+ const bloquants = (etat && etat.bloquants) || 0;
+ bandeau.classList.toggle("hidden", bloquants === 0);
+ const txt = document.getElementById("setup-banner-text");
+ if (txt && bloquants) {
+  const titres = (etat.controles || []).filter(c => c.etat === "BLOQUANT")
+    .map(c => c.titre).join(" · ");
+  txt.textContent = `Mise en service incomplète — ${bloquants} point(s) bloquant(s) : ${titres}`;
+ }
+}
+
+function ouvrirMiseEnService() {
+ switchTab("guide");
+ switchSubTab("guide", "guide-setup");
+}
+
+async function sonderSmtp() {
+ const zone = document.getElementById("setup-smtp-result");
+ if (zone) zone.textContent = "Connexion en cours…";
+ try {
+ const reponse = await apiFetch("/api/setup/probe-smtp", { method: "POST" });
+ const d = await reponse.json();
+ if (zone) {
+  zone.textContent = d.detail || "";
+  zone.style.color = d.ok ? "var(--color-safe)" : "var(--color-alert)";
+ }
+ showToast(d.detail || "Sonde terminée.", d.ok ? "success" : "error", 8000);
+ } catch (e) {
+ if (zone) { zone.textContent = "Sonde impossible."; zone.style.color = "var(--color-alert)"; }
+ }
+}
+
+// Premier démarrage : aucune liste ET aucun client. On ouvre l'écran une fois,
+// sans insister — la détection ne doit pas devenir un obstacle pour qui sait
+// déjà ce qu'il fait.
+async function verifierMiseEnService() {
+ const etat = await rafraichirMiseEnService();
+ if (etat && etat.premier_demarrage && !_setupDejaOuvert) {
+ _setupDejaOuvert = true;
+ ouvrirMiseEnService();
+ }
+}
+
 // ------------------ SUPERVISION DU DÉMON TRAVAILLEUR ------------------
 // En production mutualisée (mode « worker »), tout le calcul lourd — dont les
 // synchronisations — passe par un démon séparé. S'il est arrêté, les jobs
@@ -817,6 +916,9 @@ document.addEventListener("DOMContentLoaded", () => {
  initDropZones();
  // Check authentication and load user info
  checkAuthUser();
+ // Mise en service : après l'authentification (l'état est réservé à
+ // l'administrateur), une seule fois, sans bloquer le reste du chargement.
+ setTimeout(verifierMiseEnService, 1200);
  initListTypeControls();
  populateManualListSelects();
  initSidebarCollapse();
@@ -1176,6 +1278,10 @@ function switchSubTab(sectionId, subTabId) {
  // Rupture de flux corrigée : les snapshots en attente d'homologation
  // sont rechargés à chaque ouverture du sous-onglet, plus seulement au load
  fetchPendingReviews();
+ } else if (subTabId === "guide-setup") {
+ // Relevé refait à chaque ouverture : un écran de mise en service qui
+ // montrerait un état d'il y a une heure serait pire que pas d'écran.
+ rafraichirMiseEnService();
  } else if (subTabId === "watchlist-history") {
  fetchReviewHistory(1);
  } else if (subTabId === "alerts-screening") {

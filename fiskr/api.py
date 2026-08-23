@@ -10484,6 +10484,56 @@ async def flush_notification_digest(
             **report}
 
 
+# ------------------ MISE EN SERVICE (premier demarrage) ------------------
+
+
+@app.get("/api/setup/status")
+async def get_setup_status(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Ce que CETTE installation a encore a regler, constate a l'instant.
+
+    Reserve a l'administrateur : chaque point renvoie vers un ecran qu'il est
+    seul a pouvoir regler, et le releve nomme des secrets (jamais leur valeur).
+    Rien n'est memorise : le releve est refait a chaque appel, sur les memes
+    sources que les ecrans qu'il decrit. Un point qui redeviendrait faux le
+    redirait donc, meme des mois apres la mise en route.
+    """
+    from fiskr.mise_en_service import etat_de_mise_en_service
+    return etat_de_mise_en_service(db)
+
+
+@app.post("/api/setup/probe-smtp")
+async def probe_setup_smtp(
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    Ouvre une VRAIE connexion au serveur de courriel configure.
+
+    « Configure » et « joignable » sont deux choses differentes. Constate en
+    production : un SMTP correctement declare dont chaque envoi tombait en
+    timeout, pendant que l'application se croyait capable de prevenir — y
+    compris de l'echec d'une synchronisation. Une page de statut n'a pas le
+    droit d'ouvrir une connexion reseau a chaque affichage ; cette sonde-ci est
+    donc declenchee par un humain, bornee par un timeout court, et journalisee.
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    from fiskr.mise_en_service import sonder_smtp
+    # La sonde bloque (socket) : elle part au pool de threads pour ne pas
+    # immobiliser la boucle d'evenements pendant son timeout.
+    resultat = await run_in_threadpool(sonder_smtp)
+    log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED",
+                     target="smtp_probe",
+                     detail=("Sonde SMTP : " + ("succès" if resultat["ok"] else "échec")
+                             + " — " + resultat["detail"][:200]))
+    db.commit()
+    return resultat
+
+
 @app.get("/api/settings/checklist")
 async def get_checklist_settings(
     db: Session = Depends(get_db),
