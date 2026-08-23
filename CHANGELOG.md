@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — two startup jobs wired to a startup production never runs
+Fiskr is served by Passenger through `a2wsgi.ASGIMiddleware`, which builds one `http` scope per request and **does not implement** the ASGI `lifespan` protocol. FastAPI's startup therefore never runs in production. The codebase already says so in four places, each written after a real incident — the "Active hash" badge stuck at N/A, a first screening at 64 s, a screening returning NO MATCH against an empty cache.
+
+That makes a defect class that only exists in production: work wired into `lifespan` runs everywhere — under uvicorn in development, in every `TestClient` in the suite — and nowhere that counts. Two were left.
+
+**The daemon's autostart hook.** `jobs.on_submit_hook = ensure_worker` was set in `lifespan`. On shared hosting there is no systemd, so the application starting its own daemon is, in the words of the comment above `ensure_worker`, *the only way to have one at all* — and it was wired at precisely the point shared hosting does not reach. Verified by loading `fiskr.wsgi` exactly as Passenger does: the hook reads `None` before the first request, and `None` after it. Submitting a job from the application woke nothing, and a dead daemon stayed dead until a human pressed "restart". The assignment now happens at module import, where it costs nothing — no database, no process — and it is gone from `lifespan`, so there is one place, not two.
+
+**The repair of imports stuck in `PROCESSING`.** It fires after one hour; in production a PEP snapshot sat frozen for three days. It has moved to the worker daemon, which does start in production and is unique (flock), so it runs once whatever the number of web processes — and it now sits where it belongs, right beside the requeue of jobs killed by a brutal stop. A job put back in the queue without its snapshot leaves a list out of production with all its records in the database, which is exactly the observed state. It also runs every five minutes, not only at start: a snapshot can freeze *while* the daemon lives — the job dies, the snapshot stays — and waiting for the next restart is what cost three days.
+
+Not everything in `lifespan` is affected, and the difference is worth stating: `init_db` is covered, because `get_db` calls it lazily on the first request (checked: `SessionLocal` goes from unset to set with no `lifespan` in sight), and the engine cache has `_ensure_watchlist_cache` as its documented net. What has no path is what was fixed. The same sweep over every module looking for process-local state answering a user-visible question came back empty.
+
 ### Fixed — twelve modals claimed `aria-modal="true"` and left the keyboard outside
 A modal that carries `aria-modal="true"` asserts that nothing else exists while it is open. Measured in a real browser, one modal at a time: **twelve out of twelve** left focus where it was — behind the dialog — and Tab walked straight back into the page underneath. For a mouse the modal was open; for a keyboard it had merely appeared.
 

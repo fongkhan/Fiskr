@@ -904,6 +904,24 @@ def ensure_worker(db=None, force: bool = False) -> bool:
     return False
 
 
+# L'autostart n'a de sens qu'en mode `worker`, et il doit etre arme DES
+# L'IMPORT du module — pas au demarrage FastAPI. Sous Passenger,
+# `a2wsgi.ASGIMiddleware` n'implemente pas le protocole ASGI `lifespan` : le
+# demarrage n'y tourne jamais, donc `on_submit_hook` restait a None dans tous
+# les processus web. Verifie en simulant un processus Passenger : None avant
+# la premiere requete, None apres. Autrement dit, le mecanisme decrit comme
+# « le seul moyen d'avoir un demon en hebergement mutualise » etait branche a
+# l'endroit precis ou l'hebergement mutualise ne passe pas — deposer un job
+# depuis l'application ne reveillait rien, et un demon mort le restait jusqu'a
+# ce qu'un humain clique sur « relancer ».
+#
+# L'affectation ne coute rien (aucune base, aucun processus) : c'est
+# `jobs.submit` qui appellera l'accroche, et `ensure_worker` sort aussitot si
+# le battement de coeur est frais.
+if job_queue.jobs_mode() == "worker":
+    job_queue.on_submit_hook = ensure_worker
+
+
 async def _worker_watchdog():
     """Toutes les 60 s : si le demon est mort (tue par l'hebergeur), le
     relancer. Ses jobs interrompus seront repris a SON redemarrage."""
@@ -1047,7 +1065,8 @@ async def lifespan(app: FastAPI):
     if mode == "worker":
         # Le demon travailleur porte les jobs ET les planificateurs : un seul
         # tic quel que soit le nombre de processus API (Passenger en lance N).
-        job_queue.on_submit_hook = ensure_worker
+        # (L'accroche d'autostart est armee des l'import du module : sous
+        # Passenger ce demarrage-ci ne tourne pas.)
         try:
             ensure_worker(db)
         except Exception as e:
