@@ -43,11 +43,20 @@ def test_l_impact_moteur_porte_les_deux_chiffres():
 def test_la_campagne_batch_porte_les_deux_chiffres():
     from fiskr.database import BatchCampaign
     colonnes = {c.name for c in BatchCampaign.__table__.columns}
-    assert "hits_count" in colonnes
-    assert BatchCampaign.__table__.c.hits_count.nullable, (
-        "colonne additive : les campagnes anciennes n'ont pas ce compte")
-    assert "c.hits_count" in APP_JS
-    assert "Clients en alerte" in INDEX and "Alertes ouvertes" in INDEX
+    assert {"hits_count", "opened_count"} <= colonnes
+    for nom in ("hits_count", "opened_count"):
+        assert BatchCampaign.__table__.c[nom].nullable, (
+            f"{nom} : colonne additive, les campagnes anciennes ne l'ont pas")
+    assert "c.hits_count" in APP_JS and "c.opened_count" in APP_JS
+    # L'en-tête de colonne portait « Alertes ouvertes » au-dessus de
+    # `hits_count`, qui compte des correspondances — liste blanche comprise.
+    # Ce test le vérifiait par une recherche dans TOUT le document, et passait
+    # grâce à une occurrence d'un autre écran.
+    entete = INDEX[INDEX.index("Clients en alerte"):][:400]
+    assert "Correspondances" in entete, (
+        "la colonne alimentée par hits_count doit nommer des correspondances")
+    assert "Alertes ouvertes" not in entete, (
+        "hits_count n'est pas un compte d'alertes ouvertes")
 
 
 # Les valeurs qui comptent des CLIENTS, sous tous leurs noms dans le frontal.

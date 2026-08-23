@@ -19,6 +19,7 @@ l'application et envoye par email si un serveur SMTP est configure (.env).
 """
 import os
 import re
+import time
 import uuid
 import hashlib
 import logging
@@ -838,23 +839,64 @@ class SyncProgress:
     avant, seul le cycle generique publiait ses phases et les autres sources
     n'apparaissaient qu'en barre indeterminee. Le jeton `sync:<source>` est le
     meme que celui interroge par le tableau de bord.
+
+    LA PROGRESSION EST ECRITE DEUX FOIS, ET C'EST NECESSAIRE. Le registre
+    memoire (`fiskr.progress`) est propre au processus qui l'ecrit. Une
+    synchronisation tourne dans le DEMON TRAVAILLEUR ; l'ecran, lui, interroge
+    un processus API qui ne verra jamais ce registre. La ligne de la file
+    (`jobs`), elle, traverse les processus : c'est le seul canal par lequel
+    une phase peut atteindre un lecteur.
+
+    Sans ce reflet, la ligne de job gardait la phase posee a la prise en
+    charge — `PARSE` — du debut a la fin. Constate en production sur une
+    synchronisation PEP de 708 000 fiches : treize minutes d'affichage
+    « Analyse du fichier... », compteur a zero, barre indeterminee, pendant que
+    la ligne du snapshot savait exactement ou on en etait (`PERSIST`, 593 000
+    fiches traitees). Rien n'etait bloque ; rien n'etait visible non plus, et
+    l'exploitant n'avait aucun moyen de distinguer une source qui avance d'une
+    source qui ne repond plus.
     """
+
+    # Reflet borne : une phase inchangee n'est reecrite qu'a cette cadence,
+    # mais un CHANGEMENT de phase part immediatement — c'est le signal utile,
+    # et il est rare.
+    _CADENCE_REFLET_S = 3.0
 
     def __init__(self, source: str, started_by: str = "système"):
         from fiskr import progress as progress_registry
         self._registry = progress_registry
         self.token = f"sync:{source.lower()}"
         self.source = source
+        self._derniere_phase: Optional[str] = None
+        self._dernier_reflet = 0.0
         # `started_by` n'ecrase jamais une valeur deja posee : un declenchement
         # manuel inscrit le nom de l'utilisateur avant d'appeler le cycle
         self._registry.update(self.token, phase="DOWNLOAD", kind="sync",
                               label=f"Synchronisation {source}",
                               started_by=started_by)
+        self._refleter("DOWNLOAD", 0, None, None)
 
     def phase(self, phase: str, processed: int = 0, total: Optional[int] = None,
               snapshot_id: Optional[str] = None) -> None:
         self._registry.update(self.token, phase=phase, processed=processed,
                               total=total, snapshot_id=snapshot_id)
+        self._refleter(phase, processed, total, snapshot_id)
+
+    def _refleter(self, phase: str, processed: int, total: Optional[int],
+                  snapshot_id: Optional[str]) -> None:
+        """Reporte la phase sur la ligne de la file, seul canal inter-processus."""
+        maintenant = time.monotonic()
+        change = phase != self._derniere_phase
+        if not change and maintenant - self._dernier_reflet < self._CADENCE_REFLET_S:
+            return
+        self._derniere_phase = phase
+        self._dernier_reflet = maintenant
+        try:
+            from fiskr import jobs
+            jobs.mirror_progress(self.token, phase=phase, processed=processed,
+                                 total=total, snapshot_id=snapshot_id)
+        except Exception as e:  # une progression cassee n'interrompt jamais une sync
+            logger.debug(f"Reflet de progression ignoré pour {self.token}: {e}")
 
     def downloading(self):
         """Callback octets recus / taille annoncee pour download_to_file."""

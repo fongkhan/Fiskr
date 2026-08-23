@@ -1941,8 +1941,16 @@ async function finishSourceSync(state) {
  if (!report) return;
  const srcLabel = SYNC_SOURCE_LABELS[report.source] || report.source;
  let msg = `Synchronisation ${srcLabel} : ${report.status} — delta +${report.added_count} / ~${report.modified_count} / −${report.removed_count}`;
- if (report.rescreen && report.rescreen.new_alerts) {
- msg += ` · re-criblage : ${report.rescreen.new_alerts} nouvelle(s) alerte(s)`;
+ if (report.rescreen) {
+ // « Nouvelle » veut dire créée. Une correspondance qui retombe sur une
+ // alerte déjà ouverte est une re-détection : la dire nouvelle gonfle
+ // l'impact apparent de la mise en production.
+ const rc = report.rescreen;
+ const parts = [];
+ if (rc.new_alerts) parts.push(`${rc.new_alerts} nouvelle(s) alerte(s)`);
+ if (rc.redetected_alerts) parts.push(`${rc.redetected_alerts} re-détectée(s)`);
+ if (rc.closed_by_rule) parts.push(`${rc.closed_by_rule} close(s) par règle`);
+ if (parts.length) msg += ` · re-criblage : ${parts.join(", ")}`;
  }
  showToast(msg, report.status === "ERROR" ? "error" : "success", 8000);
  // Fluidité du parcours : proposer d'enchaîner sur l'homologation
@@ -6234,7 +6242,12 @@ async function fetchKpis() {
  tile("Alertes ouvertes", a.open ?? 0, "var(--color-warning)") +
  tile("Faux positifs clos", a.closed_false_positive ?? 0, "var(--color-safe)") +
  tile("Vrais positifs confirmés", a.closed_confirmed ?? 0, "var(--color-alert)") +
- tile("Taux de faux positifs", a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined ? a.false_positive_rate_pct + " %" : "—") +
+ // Le taux porte sur les alertes INSTRUITES : une alerte close par règle n'a
+ // été vue par personne. Le volume qu'elles absorbent se lit donc à côté —
+ // sans lui, plus les règles travaillent, moins l'écran montre le bruit que
+ // le dispositif produit réellement.
+ tile("Clôturées par règle", a.closed_by_rule ?? 0, "var(--text-secondary)") +
+ tile("Taux de faux positifs instruits", a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined ? a.false_positive_rate_pct + " %" : "—") +
  tile("Délai moyen de décision", a.avg_decision_hours !== null && a.avg_decision_hours !== undefined ? a.avg_decision_hours + " h" : "—") +
  tile("Paires en liste blanche", k.whitelist_active_pairs ?? 0);
 
@@ -6416,7 +6429,7 @@ const DASHBOARD_WIDGETS = {
  "tile-overdue": { cat: "kpi", icon: uiIcon("clock"), title: "Retards SLA", sub: "alertes en dépassement",
  value: d => d.counters.overdue_alerts ?? 0,
  go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
- "tile-fp-rate": { cat: "kpi", icon: uiIcon("trend"), title: "Faux positifs", sub: "taux sur alertes closes",
+ "tile-fp-rate": { cat: "kpi", icon: uiIcon("trend"), title: "Faux positifs", sub: "taux sur alertes instruites",
  value: d => (d.alerts.false_positive_rate_pct ?? null) === null ? "—" : d.alerts.false_positive_rate_pct + " %",
  go: "switchTab('kpi')" },
  "tile-avg-delay": { cat: "kpi", icon: uiIcon("clock"), title: "Délai moyen", sub: "création → décision",
@@ -8777,7 +8790,7 @@ async function fetchBatchCampaigns() {
  <td>${campaignStatusBadge(c.status)}${c.error_message ? `<br><small style="color: var(--color-alert);">${escapeHtml(c.error_message)}</small>` : ""}</td>
  <td>${c.processed_clients} / ${c.total_clients}</td>
  <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong></td>
- <td title="Une alerte par correspondance au-dessus du seuil : le volume de travail, pas le nombre de clients.">${c.hits_count ?? "—"}</td>
+ <td title="Correspondances au-dessus du seuil, liste blanche et règles comprises. Entre parenthèses : les alertes réellement ouvertes — l'écart est ce que le dispositif a absorbé.">${c.hits_count ?? "—"}${typeof c.opened_count === "number" ? ` <small style="color: var(--text-muted);">(${c.opened_count} ouverte(s))</small>` : ""}</td>
  <td>${c.rejected_count || 0}</td>
  <td>${formatDateTime(c.created_at)}</td>
  <td>
@@ -8844,7 +8857,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Campagne #${c.id} — ${escapeHtml(c.name)} ${campaignStatusBadge(c.status)}</h3>
  <p class="section-desc" style="margin-bottom: 0.75rem;">
  ${c.processed_clients}/${c.total_clients} client(s) criblé(s) ·
- <strong style="color: var(--color-alert);">${c.alert_count} client(s) en alerte</strong>${c.hits_count ? ` · <strong>${c.hits_count} alerte(s) ouverte(s)</strong>` : ""} ·
+ <strong style="color: var(--color-alert);">${c.alert_count} client(s) en alerte</strong>${c.hits_count ? ` · <strong>${c.hits_count} correspondance(s)</strong>` : ""}${typeof c.opened_count === "number" ? ` · <strong>${c.opened_count} alerte(s) ouverte(s)</strong>` : ""} ·
  ${c.no_match_count} sans match · ${c.rejected_count} rejet(s) quality gate
  </p>
  <div class="filter-bar" style="margin-bottom: 0.5rem;">

@@ -3646,13 +3646,21 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                  snapshot_id=snap_id)
             except JobConflict:
                 pass
-        if rescreen_result and rescreen_result.get("new_alerts"):
+        # Une correspondance qui retombe sur une alerte deja ouverte ne cree
+        # rien : la porte reste la meme (le re-criblage a bien produit
+        # quelque chose), mais les trois nombres sont maintenant distincts.
+        # Les confondre gonflait l'impact apparent d'une homologation.
+        _mouvements = sum(int((rescreen_result or {}).get(cle) or 0)
+                          for cle in ("new_alerts", "redetected_alerts", "closed_by_rule"))
+        if rescreen_result and _mouvements:
             # Le re-criblage a produit des alertes : etape structurante, mail immediat
             emit(db, "rescreen_completed", {
                 "Liste": file_type, "Snapshot": snap_id,
                 "Fiches modifiées": rescreen_result.get("changed_entities"),
                 "Clients re-criblés": rescreen_result.get("clients_screened"),
                 "Nouvelles alertes": rescreen_result.get("new_alerts"),
+                "Alertes re-détectées": rescreen_result.get("redetected_alerts"),
+                "Clôturées par règle": rescreen_result.get("closed_by_rule"),
             }, urgency_override="immediate")
         progress_registry.finish(progress_id)
         return {
@@ -4953,6 +4961,10 @@ def _campaign_summary(c: BatchCampaign) -> Dict[str, Any]:
         "screening_lists": c.screening_lists or "ALL",
         "total_clients": c.total_clients, "processed_clients": c.processed_clients,
         "alert_count": c.alert_count, "hits_count": c.hits_count or 0,
+        # `None` pour les campagnes anterieures a cette colonne : un ecran qui
+        # ne sait pas doit afficher « — », pas un zero qui se lit comme une
+        # mesure.
+        "opened_count": c.opened_count,
         "no_match_count": c.no_match_count,
         "rejected_count": c.rejected_count,
         "created_by": c.created_by,
@@ -4991,10 +5003,13 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                     audit_id=result.get("audit_trail_id"),
                     alert_id=result.get("alert_id"),
                 ))
-                # Correspondances effectivement ouvertes par ce client : le
-                # criblage en ouvre une par correspondance au-dessus du seuil.
-                campaign.hits_count = (campaign.hits_count or 0) + int(
-                    (result.get("hits") or {}).get("hits", 0))
+                # Deux chiffres, deux questions. `hits` compte ce que le
+                # criblage a TROUVE au-dessus du seuil ; `opened`, ce qu'il a
+                # reellement OUVERT — la liste blanche et les regles ont
+                # absorbe la difference.
+                resume = result.get("hits") or {}
+                campaign.hits_count = (campaign.hits_count or 0) + int(resume.get("hits", 0))
+                campaign.opened_count = (campaign.opened_count or 0) + int(resume.get("opened", 0))
                 if result_status == "ALERT":
                     campaign.alert_count += 1
                 else:
@@ -5017,14 +5032,16 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         db.commit()
         logger.info(f"Campagne batch #{campaign_id} terminée : "
                     f"{campaign.alert_count} client(s) en alerte, "
-                    f"{campaign.hits_count or 0} correspondance(s) ouverte(s), "
+                    f"{campaign.hits_count or 0} correspondance(s) trouvée(s), "
+                    f"{campaign.opened_count or 0} alerte(s) ouverte(s), "
                     f"sur {campaign.processed_clients} client(s).")
         emit(db, "batch_campaign_done", {
             "_actor": campaign.created_by,
             "Campagne": f"#{campaign.id} {campaign.name}",
             "Déclencheur": campaign.trigger, "Clients criblés": campaign.processed_clients,
             "Clients en alerte": campaign.alert_count,
-            "Alertes ouvertes": campaign.hits_count or 0,
+            "Correspondances trouvées": campaign.hits_count or 0,
+            "Alertes ouvertes": campaign.opened_count or 0,
             "Sans correspondance": campaign.no_match_count,
             "Fiches rejetées": campaign.rejected_count,
             "Lancée par": campaign.created_by,
@@ -12454,6 +12471,13 @@ async def get_compliance_kpis(
     open_alerts = sum(alert_counts.get(s, 0) for s in ALERT_OPEN_STATUSES)
     closed_fp = alert_counts.get("CLOSED_FALSE_POSITIVE", 0)
     closed_tp = alert_counts.get("CLOSED_CONFIRMED", 0)
+    # CLOSED_BY_RULE est un statut CLOS, mais volontairement hors de ce taux :
+    # une alerte close par regle n'a ete instruite par personne, elle ne dit
+    # rien de la qualite de ce qui arrive a l'analyste. Le taux mesure donc les
+    # alertes INSTRUITES — et c'est pour cela que le volume absorbe par les
+    # regles doit etre publie A COTE : sans lui, plus les regles travaillent,
+    # moins l'ecran montre le bruit reellement produit par le dispositif.
+    closed_by_rule = alert_counts.get("CLOSED_BY_RULE", 0)
     closed_total = closed_fp + closed_tp
     fp_rate = round(closed_fp / closed_total * 100.0, 1) if closed_total else None
 
@@ -12588,7 +12612,11 @@ async def get_compliance_kpis(
             "open_by_list_type": {k or "UNKNOWN": int(v) for k, v in open_by_list.items()},
             "closed_false_positive": closed_fp,
             "closed_confirmed": closed_tp,
+            "closed_by_rule": closed_by_rule,
             "false_positive_rate_pct": fp_rate,
+            # Denominateur explicite : un taux sans son assiette ne se relit pas
+            # en controle, des mois plus tard.
+            "false_positive_rate_basis": closed_total,
             "avg_decision_hours": avg_decision_hours,
             "timeseries_30d": timeseries,
             "by_analyst": by_analyst,

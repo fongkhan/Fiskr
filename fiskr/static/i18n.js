@@ -15,6 +15,9 @@
 
     // ---- Dictionnaire : « chaîne française » -> { en, de, es, zh, ar } ----
     const T = {
+        "Correspondances": { en: "Matches", de: "Treffer", es: "Coincidencias", zh: "匹配数", ar: "المطابقات" },
+        "Taux de faux positifs instruits": { en: "False-positive rate on reviewed alerts", de: "Fehlalarmquote auf bearbeiteten Alarmen", es: "Tasa de falsos positivos instruidos", zh: "已审查警报的误报率", ar: "معدّل الإنذارات الكاذبة على التنبيهات المدروسة" },
+        "taux sur alertes instruites": { en: "rate on reviewed alerts", de: "Quote auf bearbeiteten Alarmen", es: "tasa sobre alertas instruidas", zh: "已审查警报的比率", ar: "النسبة على التنبيهات المدروسة" },
         "Liste actuelle (production)": { en: "Current list (production)", de: "Aktuelle Liste (Produktion)", es: "Lista actual (producción)", zh: "当前名单（生产）", ar: "القائمة الحالية (الإنتاج)" },
         "Liste candidate": { en: "Candidate list", de: "Kandidatenliste", es: "Lista candidata", zh: "候选名单", ar: "القائمة المرشحة" },
         "Clients gagnés": { en: "Clients gained", de: "Gewonnene Kunden", es: "Clientes ganados", zh: "新增命中客户", ar: "عملاء مضافون" },
@@ -45,7 +48,6 @@
         "décisions à valider": { en: "decisions to validate", de: "zu bestätigende Entscheidungen", es: "decisiones por validar", zh: "待确认决定", ar: "قرارات بانتظار التحقق" },
         "snapshots en attente": { en: "pending snapshots", de: "wartende Snapshots", es: "instantáneas pendientes", zh: "待处理快照", ar: "لقطات معلقة" },
         "alertes en dépassement": { en: "alerts past due", de: "überfällige Alarme", es: "alertas vencidas", zh: "逾期警报", ar: "تنبيهات متأخرة" },
-        "taux sur alertes closes": { en: "rate on closed alerts", de: "Quote geschlossener Alarme", es: "tasa sobre alertas cerradas", zh: "已结警报占比", ar: "النسبة على التنبيهات المغلقة" },
         "création → décision": { en: "creation → decision", de: "Erstellung → Entscheidung", es: "creación → decisión", zh: "创建 → 决定", ar: "الإنشاء ← القرار" },
         // Panneaux graphiques et tableaux (titres avec et sans pictogramme)
         "Dernières synchronisations": { en: "Latest synchronizations", de: "Letzte Synchronisationen", es: "Últimas sincronizaciones", zh: "最近同步", ar: "آخر عمليات المزامنة" },

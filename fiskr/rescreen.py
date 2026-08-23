@@ -105,6 +105,33 @@ def _client_dicts(db) -> List[Dict[str, Any]]:
     return [{c.name: getattr(r, c.name) for c in r.__table__.columns} for r in rows]
 
 
+def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
+    """
+    Forme UNIQUE du compte rendu d'un re-criblage.
+
+    Elle est definie ici et nulle part ailleurs parce qu'elle l'etait a deux
+    endroits qui avaient deja diverge : le retour a vide de `rescreen_lookback`
+    ne portait pas `rule_suppressed`, et le compteur lui-meme n'apparaissait
+    dans le resultat QUE si une regle avait tranche. Un destinataire ne pouvait
+    pas distinguer « aucune regle n'a joue » de « personne ne me l'a dit ».
+
+    Les trois comptes d'alertes viennent de ce que `open_or_redetect_alerts` a
+    reellement fait, jamais d'un decompte parallele :
+      - `new_alerts`        : alertes OUVERTES par ce passage ;
+      - `redetected_alerts` : alertes deja existantes, re-confirmees ;
+      - `closed_by_rule`    : ouvertes puis closes par une regle, en clair.
+    """
+    return {
+        "changed_entities": int(changed_entities),
+        "clients_screened": 0,
+        "new_alerts": 0,
+        "redetected_alerts": 0,
+        "closed_by_rule": 0,
+        "rule_suppressed": 0,
+        "whitelisted_suppressed": 0,
+    }
+
+
 def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
                             trigger_detail: str,
                             progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, int]:
@@ -116,12 +143,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     qui suit une approbation d'homologation peut durer plusieurs minutes sur un
     gros referentiel. Jamais bloquant.
     """
-    result = {
-        "changed_entities": len(changed_entities),
-        "clients_screened": 0,
-        "new_alerts": 0,
-        "whitelisted_suppressed": 0,
-    }
+    result = compteurs_de_recriblage(len(changed_entities))
     if not changed_entities:
         return result
 
@@ -195,9 +217,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             regle = evaluate_fp_rules(db, "SCREENING", ctx, rules=regles_actives)
             if regle is not None:
                 annotate_suppression(hit, regle)
-                result["rule_suppressed"] = result.get("rule_suppressed", 0) + 1
-            else:
-                result["new_alerts"] += 1
+                result["rule_suppressed"] += 1
             a_journaliser.append((hit, regle))
 
         lignes = log_compliance_decisions(
@@ -210,9 +230,19 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         if not a_alerter:
             db.commit()
         if a_alerter:
-            open_or_redetect_alerts(
+            # `open_or_redetect_alerts` sait exactement ce qu'il a fait de chaque
+            # correspondance — ouverte, deja existante et re-confirmee, ou close
+            # par une regle. Ce compte-la est le seul juste : une correspondance
+            # qui retombe sur une alerte deja ouverte n'ouvre rien. Compte a la
+            # main, un lookback — qui repasse TOUTE la production — annoncait
+            # autant de « nouvelles alertes » qu'il trouvait de correspondances,
+            # sans en creer une seule.
+            compte = open_or_redetect_alerts(
                 db, a_alerter, client_id=client_ref, username=RESCREEN_USERNAME,
                 channel="SCREENING", detail_suffix=f" {trigger_detail}")
+            result["new_alerts"] += int(compte.get("opened", 0))
+            result["redetected_alerts"] += int(compte.get("redetected", 0))
+            result["closed_by_rule"] += int(compte.get("closed_by_rule", 0))
 
     # ---- Phase 1 : trouver les correspondances (calcul pur, parallelisable) ----
     # Le re-criblage repasse TOUTE la base clients apres chaque mise en
@@ -281,7 +311,10 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
 
     logger.info(
         f"Re-criblage ({trigger_detail}) : {result['changed_entities']} entités changées, "
-        f"{result['clients_screened']} clients criblés, {result['new_alerts']} nouvelle(s) alerte(s), "
+        f"{result['clients_screened']} clients criblés, "
+        f"{result['new_alerts']} alerte(s) ouverte(s), "
+        f"{result['redetected_alerts']} re-détectée(s), "
+        f"{result['closed_by_rule']} close(s) par règle, "
         f"{result['whitelisted_suppressed']} supprimée(s) par liste blanche."
     )
     return result
@@ -329,7 +362,7 @@ def rescreen_lookback(db, file_type: Optional[str] = None,
         ).all()
     ]
     if not snap_ids:
-        return {"changed_entities": 0, "clients_screened": 0, "new_alerts": 0, "whitelisted_suppressed": 0}
+        return compteurs_de_recriblage(0)
     entities = _entity_dicts(db, snap_ids)
     label = file_type or "toutes listes"
     return _screen_clients_against(db, entities,

@@ -203,12 +203,20 @@ def test_rescreen_targets_changed_entities_only(db):
     assert event.username == RESCREEN_USERNAME
     assert "Re-criblage automatique" in event.detail
 
-    # Rejouer le meme delta : dedup -> pas de nouvelle alerte (REDETECTED)
+    # Rejouer le meme delta : dedup -> pas de nouvelle alerte (REDETECTED).
+    # Le compte rendu doit le dire. Il annoncait « 1 nouvelle alerte » alors
+    # qu'il n'en creait aucune — sur un lookback, qui repasse toute la
+    # production, cela revenait a annoncer autant de nouveautes qu'il y a de
+    # correspondances.
     result2 = rescreen_after_snapshot_change(db, "WATCHLIST_DGT", "wl-v2", "wl-v1")
-    assert result2["new_alerts"] == 1  # re-detection comptee comme hit...
+    assert result2["new_alerts"] == 0, "aucune alerte n'a ete ouverte"
+    assert result2["redetected_alerts"] == 1, "l'alerte existante a ete re-confirmee"
     assert db.query(Alert).filter(Alert.client_id == "CUST-777").count() == 1
     actions = [e.action for e in db.query(AlertEvent).order_by(AlertEvent.id).all()]
     assert actions == ["CREATED", "REDETECTED"]
+    # Le premier passage, lui, avait bien ouvert : la distinction n'est pas
+    # un simple renommage.
+    assert result["new_alerts"] == 1 and result.get("redetected_alerts", 0) == 0
 
 
 def test_rescreen_respects_whitelist(db):

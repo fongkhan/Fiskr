@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — one stray `</div>` put four screens outside their own tab
+Reported from production as "a big display problem". Diagnosed by driving a browser against the running application: four panels — Ajout Manuel, Sources, Homologation, Historique — were children of **`<body>`**. A surplus `</div>` closed `#sec-watchlist-mgmt` early, and the parser hoisted everything after it out of the layout entirely.
+
+Three consequences, all of them visible on screen:
+
+- **They showed on every tab.** Outside any `.tab-content`, they escaped `display: none` — Screening, Audit, Settings, whichever tab was selected.
+- **They stacked.** `switchSubTab` deactivates panels with a query **scoped** to the section (`section.querySelectorAll`) but activates by **global** id. A panel outside the section could therefore be switched on and never off. Measured: three to four panels rendered at once, a page 6 424 px tall instead of 4 451.
+- **They slid under the sidebar.** Outside `.main-content` they lost its `margin-left: 280px` and started at x = 0, beneath a `position: fixed` sidebar that is 95 % opaque — which is why the screenshots showed the form legible *through* the navigation.
+
+That asymmetry in `switchSubTab` — scoped off, global on — is what turned a markup slip into an accumulation. What the browser reports after the fix: one panel at a time, page height back to 4 451 px, content at x = 328 instead of 0.
+
+The guard derives the answer from the markup itself: every `.sub-tab-content` inside a `.tab-content`, everything inside `.main-content`, both served pages structurally balanced, and one panel active per section in the shipped HTML. Verified to bite — it fails on three counts against the previous file. A browser says nothing about a stray `</div>`: it closes the tag, moves the rest, and renders something plausible.
+
+### Fixed — a synchronisation could not say where it was, from another process
+Reported from production: two syncs showing "Analysing the file…", indeterminate bar, counter at zero, apparently forever. They were not stuck. PEP finished normally while the diagnosis was under way — **707 951 records in thirteen and a half minutes**. It was invisible, not blocked.
+
+`SyncProgress` published its phases into `fiskr.progress`, an **in-memory registry private to the process that writes it**. A sync runs in the worker daemon; the screen queries an API process that will never see that registry — `/api/diagnostic/jobs` said so plainly, `progress_active: []`. The queue row does cross processes, and it kept the phase stamped at claim time — `PARSE`, rendered as "Analysing the file…" — from the first second to the last, with `processed` at 0.
+
+The bridge already existed and its docstring describes this exact case: *"the registry does not cross processes, the jobs row does"*. The sync simply did not take it. It does now — every phase change goes straight through, a phase that has not changed is rewritten at most every three seconds, and a broken bridge never interrupts a sync. The snapshot row, meanwhile, had known all along: `PERSIST, 593 000 records processed`.
+
+What it cost is not cosmetic: an operator had no way to tell a source that is advancing from a source that has stopped responding. On the very same screen, the DFAT source — whose host accepts the connection and then never sends a single byte — displayed exactly the same thing.
+
+### Fixed — the direct DFAT route has never worked, and cost a work slot every day
+Measured on 22/08/2026: `dfat.gov.au` answers 403 to a HEAD, then accepts a GET connection and sends **nothing** — 110 s, zero bytes. So the download never ends on its own: it burns the whole retry budget (4 attempts × 120 s read timeout, plus backoff) before failing, about **nine minutes of a work slot on every run**. In production that source has **never** produced a single snapshot, while the failure notification could not be delivered either (SMTP has been timing out on every message).
+
+With two slots and two long syncs, everything else waits: 13 snapshots had piled up awaiting approval and 11 promotion jobs sat queued. They all drained the moment a slot came free — observed live.
+
+Australia is covered without it by the `au_dfat` source (OpenSanctions aggregate of the same perimeter), which syncs normally — 3 737 records, promoted the same morning. The shipped configuration now says so, next to the URL, rather than leaving a dead host looking like a working default.
+
+### Fixed — three counts that credited the system for work it had not done
+Same question as the backtest fix, asked of the rest of the surface: *does each published number count what its label says?* Three did not, all on the alert-volume side, and all in the same direction — the system was credited with more work opened, and less noise absorbed, than reality.
+
+**A re-screening announced alerts it had not opened.** `open_or_redetect_alerts` — the name says it — opens **or** re-detects, and returns the exact breakdown: `opened`, `redetected`, `closed_by_rule`. The re-screening threw that return value away and kept its own tally, incrementing "new alerts" on every match that got past the whitelist and the rules. A match landing on an **already open** alert creates nothing. Measured on the plainest case there is — the same list re-screened twice:
+
+| | announced | actually created |
+|---|---:|---:|
+| first pass | 1 new alert | 1 |
+| second pass | **1 new alert** | **0** |
+
+The case is not marginal, it is the ordinary one: on every list refresh, a listed record that changed but still matches the same client produces a re-detection. And a **lookback** — which re-screens the whole production universe — produces almost nothing else, so it announced as many novelties as it found matches. The number reaches three recipients (the step e-mail after a promotion, the approval e-mail, the end-of-sync message), all labelled "new alerts". It is the number read by whoever just approved a list, to judge what their approval did.
+
+The counts now come from what actually happened. And the report's shape is defined in one place, because it had already drifted: `rule_suppressed` appeared in the result **only if a rule had fired**, and `rescreen_lookback`'s empty return did not carry it at all — a recipient could not tell "no rule fired" from "nobody told me".
+
+**A batch campaign counted whitelisted matches as opened alerts.** `hits_count` counts matches above the cut-off — *all* of them, whitelist and FP rules included — and every screen presented it as "alerts opened", column header included. The model's own comment asserted that screening "opens one alert for each". It does not, and it is wrong by exactly what the system absorbs. Measured, one client, one Good Guy on the matched pair:
+
+| | clients in alert | matches found | alerts opened |
+|---|---:|---:|---:|
+| without whitelist | 1 | 1 | 1 |
+| with one Good Guy | 0 | 1 | **0** |
+
+The screen showed "0 clients in alert" next to "1 alert opened" — contradicting itself in two adjacent columns. `opened_count` now carries the alerts actually opened, and the gap between the two numbers is exactly what the whitelist and the rules removed: the one thing those two mechanisms produce, and it was invisible. Additive column: earlier campaigns carry NULL and the screen shows "—" rather than a zero that would read as a measurement.
+
+**The dashboard's false-positive rate ignored the rules.** `CLOSED_BY_RULE` is a closed status, deliberately outside the rate — an alert closed by a rule was reviewed by nobody and says nothing about the quality of what reaches an analyst. That is defensible, and the tile said "rate on closed alerts", which is not what it measures. It now says *reviewed* alerts, publishes its denominator, and shows the volume the rules absorbed beside it — without which the harder the rules work, the less the screen shows of the noise the system actually produces.
+
 ### Fixed — the backtest counted the same client twice, and never split the volume per list
 Two defects on the screen that gates a list's approval, both found from the same question: *do alerts and hits actually break down per list delta?*
 
