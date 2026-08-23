@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — seventeen commands the keyboard could not reach
+An element that *reacts* to a click must be reachable and triggerable without a mouse. `<button>` and `<a href>` are, natively; a `<li onclick>` or a `<div onclick>` is not — it is skipped by tabbing altogether. Counted on the rendered page: **344 clickable elements, 17 of them unreachable** — the eight modal close crosses, every sortable table header, the rows of the notification centre and of the home screen, the user badge in the sidebar.
+
+The stylesheet had already stated the intent for the crosses: `.close-modal` carried `background: none; border: none; padding: 0` — rules written for a button, applied to a `<span>`. Turning those eight spans into `<button type="button" aria-label="Fermer">` therefore changes not one pixel, and gives back what the markup had promised.
+
+Sorting was mouse-only on **every table in the product**: `<th>` is not a command as far as the browser is concerned. The headers now carry `tabindex="0"` and `role="button"`, and Enter or Space sorts. Space is intercepted only over a header — measured on a text field, `preventDefault` stays false, so typing a space still types a space.
+
+The generated rows are the harder half: the front end rebuilds its lists on every refresh, so marking once at load would not hold. One observer picks up each injected fragment and one delegation handles the key — never a listener per row. Cost measured on 800 injected rows: **3.3 ms, all 804 marked**. Re-counted afterwards: **17 unreachable → 1**, that one being the sidebar overlay, left out on purpose — Escape closes the drawer, and adding it to the tab order would only buy an empty stop.
+
+### Fixed — the mechanism that turned a markup slip into an accumulation
+The stray `</div>` was fixed last release; what made it *visible as four stacked screens* was not. `switchSubTab` turned panels off with a query **scoped** to the section and back on by **global** id, so a panel that had escaped its section could be lit and never extinguished.
+
+Both halves now query the section. A panel that exists globally but not in this section is no longer activated — it is reported: `console.error` naming the panel, the section, and what to check. A tab that does not answer is a defect you can find; a tab that lights up and stays lit is a defect that looks like a rendering bug.
+
+Searched across the whole file, function by function: this was the only place mixing the two scopes. Two guards keep it that way — one reads the body of `switchSubTab` and refuses the global form of the *assignment* (while leaving the diagnostic branch alone), the other checks every `switchSubTab('section', 'panel')` call in the HTML and the JS against where that panel actually lives in the markup.
+
+### Checked — two full sweeps of the interface, nothing found
+Both run against the real application in a real browser, screen by screen across all **35 sub-tabs**: **zero JavaScript errors** and **zero failing network requests**. Recorded here because a sweep that finds nothing is only worth something if it is written down — otherwise the same ground gets walked again next time, and the fact that it was once clean is lost.
+
 ### Added — a commissioning screen that checks *this* installation, on first start
 A fresh install starts silent. Nothing says that no list is in production — so screening will answer "no match" for ever without complaining — that the worker daemon is absent, or that the secrets are still the ones in the source code. Those three states lived in a startup WARNING, in a log nobody opens, or nowhere at all.
 

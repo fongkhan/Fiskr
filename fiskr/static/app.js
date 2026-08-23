@@ -618,11 +618,23 @@ function initSortableTables() {
  table.querySelectorAll("thead th").forEach((th) => {
  if (!th.textContent.trim() || th.classList.contains("no-sort")) return;
  th.classList.add("sortable");
+ // Un en-tête de tri est une commande : il doit s'atteindre au clavier et
+ // s'annoncer comme telle. Un <th> ne l'est pas nativement — trier était
+ // donc réservé à la souris, sur tous les tableaux du produit.
+ if (!th.hasAttribute("tabindex")) th.setAttribute("tabindex", "0");
+ if (!th.hasAttribute("role")) th.setAttribute("role", "button");
  });
  });
- document.addEventListener("click", (e) => {
- const th = e.target.closest("th.sortable");
+ const trier = (th) => {
  if (th && !th.closest("table")?.hasAttribute("data-no-client-sort")) sortTableByHeader(th);
+ };
+ document.addEventListener("click", (e) => trier(e.target.closest("th.sortable")));
+ document.addEventListener("keydown", (e) => {
+ if (e.key !== "Enter" && e.key !== " ") return;
+ const th = e.target.closest && e.target.closest("th.sortable");
+ if (!th) return;
+ e.preventDefault();   // Espace ferait défiler la page
+ trier(th);
  });
 }
 
@@ -649,6 +661,68 @@ function statusLabel(status) {
 }
 
 // ------------------ ACCESSIBILITÉ (modales, onglets) ------------------
+
+// Un élément qui RÉAGIT au clic doit pouvoir être atteint et déclenché au
+// clavier. <button> et <a href> le sont nativement ; un <li onclick> ou un
+// <div onclick>, non — ils sont invisibles à la tabulation, donc inutilisables
+// sans souris. Mesuré sur la page : dix-sept commandes dans ce cas, dont les
+// lignes du centre de notifications et celles de l'accueil.
+//
+// Le frontal re-rend ses listes en permanence : marquer une fois au chargement
+// ne tiendrait pas. Un observateur reprend donc chaque fragment injecté, et le
+// déclenchement passe par une seule délégation — jamais un écouteur par ligne.
+
+const _BALISES_FOCALISABLES = new Set(["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA", "SUMMARY"]);
+
+function rendreCliquablesAccessibles(racine) {
+ if (!racine || !racine.querySelectorAll) return;
+ const candidats = racine.matches && racine.matches("[onclick]") ? [racine] : [];
+ racine.querySelectorAll("[onclick]").forEach(el => candidats.push(el));
+ candidats.forEach(el => {
+ if (_BALISES_FOCALISABLES.has(el.tagName)) return;
+ if (el.hasAttribute("tabindex")) return;
+ // Le voile de la barre latérale n'est pas une commande : Échap la ferme,
+ // et l'ajouter au parcours de tabulation n'apporterait qu'un arrêt vide.
+ if (el.classList.contains("sidebar-overlay")) return;
+ el.setAttribute("tabindex", "0");
+ if (!el.hasAttribute("role")) el.setAttribute("role", "button");
+ });
+}
+
+function initClavierSurCliquables() {
+ rendreCliquablesAccessibles(document.body);
+ // Une seule délégation pour toute la page : Entrée et Espace déclenchent ce
+ // que la souris déclenche, et rien d'autre.
+ document.addEventListener("keydown", (e) => {
+ if (e.key !== "Enter" && e.key !== " ") return;
+ const el = e.target;
+ if (!el || !el.hasAttribute || !el.hasAttribute("onclick")) return;
+ if (_BALISES_FOCALISABLES.has(el.tagName)) return;   // le navigateur s'en charge
+ e.preventDefault();
+ el.click();
+ });
+ // Les listes sont reconstruites à chaque rafraîchissement : on reprend les
+ // fragments ajoutés, par lot, sans jamais bloquer le rendu.
+ try {
+ const enAttente = [];
+ let planifie = false;
+ const traiter = () => {
+  planifie = false;
+  while (enAttente.length) rendreCliquablesAccessibles(enAttente.shift());
+ };
+ new MutationObserver(mutations => {
+  for (const m of mutations) {
+  for (const n of m.addedNodes) {
+   if (n.nodeType === 1) enAttente.push(n);
+  }
+  }
+  if (enAttente.length && !planifie) {
+  planifie = true;
+  requestAnimationFrame(traiter);
+  }
+ }).observe(document.body, { childList: true, subtree: true });
+ } catch (e) { /* pas d'observateur : le marquage initial reste acquis */ }
+}
 
 function initA11y() {
  // Échap ferme la modale visible la plus haute (la modale générique gère déjà le sien)
@@ -910,6 +984,7 @@ document.addEventListener("DOMContentLoaded", () => {
  // Thème (icône du bouton), accessibilité et tri des tables
  applyTheme(currentTheme());
  initA11y();
+ initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();
  initHashRouting();
@@ -1248,24 +1323,38 @@ function switchSubTab(sectionId, subTabId) {
  btn.setAttribute("aria-selected", "false");
  });
 
- // Activate clicked sub-tab button
- const activeBtn = document.getElementById(`sub-btn-${subTabId}`);
+ // Les deux moitiés doivent parler du MÊME ensemble. On éteint par une
+ // requête portée à la section ; on allume donc dans la section aussi, et
+ // jamais par identifiant global.
+ //
+ // C'est ce qui a transformé une faute de balisage en panne visible : un
+ // `</div>` excédentaire avait sorti quatre panneaux de leur section. Éteints
+ // par la requête portée — qui ne les voyait plus — mais allumés par
+ // `document.getElementById` — qui les trouvait toujours —, ils s'allumaient
+ // sans jamais s'éteindre, et s'empilaient. Cherché dans tout le fichier :
+ // c'était la seule fonction à mélanger les deux portées.
+ const activeBtn = section.querySelector(`#sub-btn-${CSS.escape(subTabId)}`);
  if (activeBtn) {
  activeBtn.classList.add("active");
  activeBtn.setAttribute("aria-selected", "true");
  }
- 
+
  // Hide all sub-tab content panels inside this section
  section.querySelectorAll(".sub-tab-content").forEach(content => {
  content.classList.remove("active");
  content.classList.add("hidden");
  });
- 
+
  // Show active sub-tab content panel
- const activeContent = document.getElementById(`sub-sec-${subTabId}`);
+ const activeContent = section.querySelector(`#sub-sec-${CSS.escape(subTabId)}`);
  if (activeContent) {
  activeContent.classList.add("active");
  activeContent.classList.remove("hidden");
+ } else if (document.getElementById(`sub-sec-${subTabId}`)) {
+ // Le panneau existe, mais hors de cette section : le balisage est cassé.
+ // On le DIT plutôt que de l'allumer sans pouvoir jamais l'éteindre.
+ console.error(`Fiskr : le panneau « sub-sec-${subTabId} » n'est pas dans ` +
+   `la section « sec-${sectionId} ». Vérifiez l'imbrication du balisage.`);
  }
  updateLocationHash(sectionId, subTabId);
 
