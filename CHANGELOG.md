@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — twelve modals claimed `aria-modal="true"` and left the keyboard outside
+A modal that carries `aria-modal="true"` asserts that nothing else exists while it is open. Measured in a real browser, one modal at a time: **twelve out of twelve** left focus where it was — behind the dialog — and Tab walked straight back into the page underneath. For a mouse the modal was open; for a keyboard it had merely appeared.
+
+Three gestures, held in one place: focus enters on open, stays while the dialog is open, and returns where it came from on close. Entering means the first control that is *not* the close cross — a form modal opens on its first field, a reading modal on its own container so the dialog announces itself. Leaving means the element that opened it, and only if that element is still on the page: a dialog opened from a table row the refresh has since replaced has no "where it came from".
+
+**A modal closes one way.** Escape and the backdrop click used to add the `hidden` class directly, which is not what the cross does. `closeAlertModal` resets the current alert id; Escape left a stale one behind. `closeAuditModal` also clears an inline style. The close command is already declared in the markup — the cross carries it — so both now replay it rather than keeping a second list here that will drift.
+
+Two things the measurement caught that no error would have. `.modal` is `position: fixed`, so `offsetParent` is null even wide open: the first visibility test declared all twelve permanently closed and therefore never opened anything. And `[href]` alone matches the `<use href="#icon">` inside an SVG — it satisfies the selector and refuses focus, so two modals out of eleven stayed unreachable in silence. The code now *checks* that focus actually moved instead of assuming it.
+
+Dialogs also announce their own name now: `aria-labelledby` points at the heading already present in the markup, instead of a screen reader saying "dialog" twelve times.
+
+### Removed — a screen that had been replaced, and a rule written twice
+The **Mon Profil & Sécurité** modal did profile and password; the **Mon compte** tab does profile, password, MFA, absence and delegation, notifications and display preferences. Nothing had opened the modal since — but it was still there, still translated into six languages, still read by anyone trying to understand how a password gets changed. Removed with its form and its three orphaned translation keys, which the i18n guard flagged the moment the markup went.
+
+The backdrop click had two implementations too: `initA11y`, covering all twelve modals, and a `window.onclick` assignment covering four of them, closing them without their close command — and clobbering any other handler on the way. Removed; one rule, one place.
+
+A guard now states the general form: **no function in `app.js` may be unreachable**. It holds with no exception list, and it fails on the previous file, naming `openProfileModal`. Two more alongside it — every command in the markup resolves to a function that exists, and every id the code looks up is still in the markup. None of those three defects surfaces at runtime: the browser reports nothing, a missing function only throws on click, and `getElementById` simply returns `null`.
+
 ### Fixed — seventeen commands the keyboard could not reach
 An element that *reacts* to a click must be reachable and triggerable without a mouse. `<button>` and `<a href>` are, natively; a `<li onclick>` or a `<div onclick>` is not — it is skipped by tabbing altogether. Counted on the rendered page: **344 clickable elements, 17 of them unreachable** — the eight modal close crosses, every sortable table header, the rows of the notification centre and of the home screen, the user badge in the sidebar.
 

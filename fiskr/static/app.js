@@ -724,20 +724,134 @@ function initClavierSurCliquables() {
  } catch (e) { /* pas d'observateur : le marquage initial reste acquis */ }
 }
 
+// ------------------ MODALES : ENTRER, RESTER, REVENIR ------------------
+
+// Une modale porte `aria-modal="true"` : elle affirme que RIEN d'autre
+// n'existe tant qu'elle est ouverte. Mesuré sur les douze modales du produit :
+// aucune ne faisait entrer le focus, et la tabulation repartait aussitôt dans
+// la page du dessous. Au clavier, l'affirmation était donc fausse douze fois
+// sur douze — la modale s'ouvrait, et l'utilisateur restait derrière elle.
+//
+// Trois gestes, et un seul endroit qui les tient : on entre à l'ouverture, on
+// reste tant qu'elle est ouverte, on revient d'où l'on venait à la fermeture.
+
+// `[href]` tout court attraperait les <use href="#icone"> des SVG : ils portent
+// bien un href, mais ne prennent pas le focus — le premier « focalisable » d'une
+// modale à icône aurait été un élément qui ne peut pas l'être, et le focus
+// serait resté dehors sans que rien ne le signale.
+const _SELECTEUR_FOCALISABLE =
+ 'button:not([disabled]), a[href], area[href], input:not([type="hidden"]):not([disabled]), ' +
+ 'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+const _RETOUR_DE_MODALE = new Map();   // id de modale → élément à re-focaliser
+
+function _modaleVisible(m) {
+ // `offsetParent` ne dit rien ici : une modale est en `position: fixed`, donc
+ // son offsetParent est nul même grande ouverte. C'est le style calculé qui
+ // tranche — et il couvre du même coup la modale d'audit, qui bascule par
+ // style en ligne et non par la classe.
+ return !m.classList.contains("hidden") && getComputedStyle(m).display !== "none";
+}
+
+function _modaleAuDessus() {
+ return Array.from(document.querySelectorAll(".modal")).filter(_modaleVisible).pop() || null;
+}
+
+function _focalisablesDe(m) {
+ return Array.from(m.querySelectorAll(_SELECTEUR_FOCALISABLE))
+  .filter(el => el.getClientRects().length > 0 || el === document.activeElement);
+}
+
+function fermerModale(m) {
+ // La marche à suivre est DÉCLARÉE dans le balisage : la croix de la modale
+ // porte déjà sa commande de fermeture, avec le ménage qui va avec (remise à
+ // zéro de l'alerte courante, style en ligne de la modale d'audit…). On la
+ // rejoue plutôt que d'entretenir ici une seconde liste — sinon Échap et le
+ // clic sur le fond finissent par fermer autrement que la croix.
+ const croix = m.querySelector(".close-modal[onclick]");
+ if (croix) croix.click();
+ else m.classList.add("hidden");
+}
+
+function _entrerDansLaModale(m) {
+ const cibles = _focalisablesDe(m);
+ // Éviter d'atterrir sur la croix : on entre dans le contenu, pas sur la
+ // sortie. À défaut de contenu focalisable, on prend la modale elle-même,
+ // pour que le lecteur d'écran annonce son titre.
+ const cible = m.querySelector("[autofocus]")
+  || cibles.find(el => !el.classList.contains("close-modal"))
+  || cibles[0];
+ // On VÉRIFIE que le focus a bougé : un élément peut satisfaire le sélecteur
+ // sans accepter le focus. À défaut, la modale elle-même le reçoit.
+ if (cible) { cible.focus(); if (m.contains(document.activeElement)) return; }
+ if (!m.hasAttribute("tabindex")) m.setAttribute("tabindex", "-1");
+ m.focus();
+}
+
+function _surBasculeDeModale(m) {
+ const visible = _modaleVisible(m);
+ const memoire = _RETOUR_DE_MODALE.get(m.id);
+ if (visible && memoire === undefined) {
+  const depart = document.activeElement;
+  _RETOUR_DE_MODALE.set(m.id, (depart && depart !== document.body) ? depart : null);
+  _entrerDansLaModale(m);
+ } else if (!visible && memoire !== undefined) {
+  _RETOUR_DE_MODALE.delete(m.id);
+  // Ne rendre le focus qu'à un élément encore présent ET encore atteignable :
+  // une modale ouverte depuis une ligne de tableau que le rafraîchissement a
+  // remplacée n'a plus de « d'où l'on venait ».
+  if (memoire && memoire.isConnected && memoire.getClientRects().length > 0) memoire.focus();
+ }
+}
+
+function initFocusDesModales() {
+ const modales = Array.from(document.querySelectorAll(".modal"));
+ modales.forEach(m => {
+  // La modale d'audit bascule aussi par style en ligne : on surveille les deux.
+  new MutationObserver(() => _surBasculeDeModale(m))
+   .observe(m, { attributes: true, attributeFilter: ["class", "style"] });
+  if (_modaleVisible(m)) _surBasculeDeModale(m);
+ });
+ // La tabulation ne sort pas d'une modale ouverte : elle en fait le tour.
+ document.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const m = _modaleAuDessus();
+  if (!m) return;
+  const cibles = _focalisablesDe(m);
+  if (!cibles.length) { e.preventDefault(); return; }
+  const premier = cibles[0], dernier = cibles[cibles.length - 1];
+  if (!m.contains(document.activeElement)) {
+   e.preventDefault();
+   (e.shiftKey ? dernier : premier).focus();
+  } else if (e.shiftKey && document.activeElement === premier) {
+   e.preventDefault(); dernier.focus();
+  } else if (!e.shiftKey && document.activeElement === dernier) {
+   e.preventDefault(); premier.focus();
+  }
+ });
+}
+
 function initA11y() {
  // Échap ferme la modale visible la plus haute (la modale générique gère déjà le sien)
  document.addEventListener("keydown", (e) => {
  if (e.key !== "Escape") return;
  const open = Array.from(document.querySelectorAll(".modal:not(.hidden)"))
  .filter((m) => m.id !== "app-dialog").pop();
- if (open) open.classList.add("hidden");
+ if (open) fermerModale(open);
  });
  document.querySelectorAll(".modal").forEach((m) => {
  m.setAttribute("role", "dialog");
  m.setAttribute("aria-modal", "true");
+ // Une modale s'annonce par son titre, pas par le mot « dialogue » : le
+ // titre est déjà dans le balisage, on le désigne au lieu de le recopier.
+ const titre = m.querySelector(".modal-content > h2, .modal-content > h3");
+ if (titre && !m.hasAttribute("aria-labelledby")) {
+ if (!titre.id) titre.id = `titre-${m.id}`;
+ m.setAttribute("aria-labelledby", titre.id);
+ }
  // Clic sur le fond = fermeture (hors modale générique à Promise)
  if (m.id !== "app-dialog") {
- m.addEventListener("click", (e) => { if (e.target === m) m.classList.add("hidden"); });
+ m.addEventListener("click", (e) => { if (e.target === m) fermerModale(m); });
  }
  });
  document.querySelectorAll(".sub-tabs").forEach((bar) => bar.setAttribute("role", "tablist"));
@@ -984,6 +1098,7 @@ document.addEventListener("DOMContentLoaded", () => {
  // Thème (icône du bouton), accessibilité et tri des tables
  applyTheme(currentTheme());
  initA11y();
+ initFocusDesModales();
  initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();
@@ -4314,91 +4429,14 @@ async function deleteUserAccount(userId, username) {
 }
 
 // -------------------------------------------------------------------------
-// MON PROFIL & SÉCURITÉ (SELF SERVICE)
+// MON PROFIL & SÉCURITÉ — l'onglet « Mon compte » (sec-account) porte
+// désormais tout : profil, mot de passe, MFA, absence, notifications,
+// préférences. La modale qui faisait la moitié de ce travail n'était plus
+// ouverte par personne — deuxième chemin figé, retiré avec son formulaire.
+// Le clic sur le fond d'une modale, lui, est posé une seule fois dans
+// `initA11y` pour les douze modales ; la copie qui n'en couvrait que quatre,
+// et les fermait sans passer par leur commande de fermeture, a suivi.
 // -------------------------------------------------------------------------
-
-function openProfileModal() {
- if (!currentUser) return;
-
- document.getElementById("profile-input-username").value = currentUser.username;
- document.getElementById("profile-input-fullname").value = currentUser.full_name || "";
- document.getElementById("profile-old-password").value = "";
- document.getElementById("profile-new-password").value = "";
-
- document.getElementById("profile-modal").classList.remove("hidden");
-}
-
-function closeProfileModal() {
- document.getElementById("profile-modal").classList.add("hidden");
-}
-
-async function handleUpdateProfile(event) {
- event.preventDefault();
- const username = document.getElementById("profile-input-username").value.trim();
- const fullName = document.getElementById("profile-input-fullname").value.trim();
- const oldPassword = document.getElementById("profile-old-password").value;
- const newPassword = document.getElementById("profile-new-password").value;
-
- try {
- // 1. Update Profile Info
- const profileResp = await apiFetch("/api/users/me/profile", {
- method: "PUT",
- headers: { "Content-Type": "application/json" },
- body: JSON.stringify({ username, full_name: fullName })
- });
- const profileData = await profileResp.json();
- if (!profileResp.ok) {
- showToast("Erreur Profil: " + (profileData.detail || "Échec de la mise à jour du profil."), "error");
- return;
- }
-
- // 2. Update Password if requested
- if (oldPassword || newPassword) {
- if (!oldPassword || !newPassword) {
- showToast("Pour modifier votre mot de passe, veuillez saisir l'ancien ET le nouveau mot de passe.", "error");
- return;
- }
- const passResp = await apiFetch("/api/users/me/password", {
- method: "PUT",
- headers: { "Content-Type": "application/json" },
- body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
- });
- const passData = await passResp.json();
- if (!passResp.ok) {
- showToast("Erreur Mot de Passe: " + (passData.detail || "Échec du changement de mot de passe."), "error");
- return;
- }
- }
-
- showToast("Votre profil et vos paramètres de sécurité ont été mis à jour.", "success");
- closeProfileModal();
- checkAuthUser();
- } catch (err) {
- console.error("Update profile error:", err);
- showToast("Erreur de communication avec le serveur.", "error");
- }
-}
-
-// Global Modal Backdrop Click Listener
-window.onclick = function(event) {
- const auditModal = document.getElementById("audit-modal");
- const detailsModal = document.getElementById("details-modal");
- const userModal = document.getElementById("user-modal");
- const profileModal = document.getElementById("profile-modal");
-
- if (event.target === auditModal) {
- auditModal.style.display = "none";
- }
- if (event.target === detailsModal) {
- detailsModal.classList.add("hidden");
- }
- if (event.target === userModal) {
- userModal.classList.add("hidden");
- }
- if (event.target === profileModal) {
- profileModal.classList.add("hidden");
- }
-};
 
 
 
