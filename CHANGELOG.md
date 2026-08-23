@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — one stray `</div>` put four screens outside their own tab
+Reported from production as "a big display problem". Diagnosed by driving a browser against the running application: four panels — Ajout Manuel, Sources, Homologation, Historique — were children of **`<body>`**. A surplus `</div>` closed `#sec-watchlist-mgmt` early, and the parser hoisted everything after it out of the layout entirely.
+
+Three consequences, all of them visible on screen:
+
+- **They showed on every tab.** Outside any `.tab-content`, they escaped `display: none` — Screening, Audit, Settings, whichever tab was selected.
+- **They stacked.** `switchSubTab` deactivates panels with a query **scoped** to the section (`section.querySelectorAll`) but activates by **global** id. A panel outside the section could therefore be switched on and never off. Measured: three to four panels rendered at once, a page 6 424 px tall instead of 4 451.
+- **They slid under the sidebar.** Outside `.main-content` they lost its `margin-left: 280px` and started at x = 0, beneath a `position: fixed` sidebar that is 95 % opaque — which is why the screenshots showed the form legible *through* the navigation.
+
+That asymmetry in `switchSubTab` — scoped off, global on — is what turned a markup slip into an accumulation. What the browser reports after the fix: one panel at a time, page height back to 4 451 px, content at x = 328 instead of 0.
+
+The guard derives the answer from the markup itself: every `.sub-tab-content` inside a `.tab-content`, everything inside `.main-content`, both served pages structurally balanced, and one panel active per section in the shipped HTML. Verified to bite — it fails on three counts against the previous file. A browser says nothing about a stray `</div>`: it closes the tag, moves the rest, and renders something plausible.
+
 ### Fixed — a synchronisation could not say where it was, from another process
 Reported from production: two syncs showing "Analysing the file…", indeterminate bar, counter at zero, apparently forever. They were not stuck. PEP finished normally while the diagnosis was under way — **707 951 records in thirteen and a half minutes**. It was invisible, not blocked.
 
