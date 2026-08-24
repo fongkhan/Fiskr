@@ -12570,6 +12570,28 @@ async def download_whitelist_evidence(
         raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
     return FileResponse(str(file_path), filename=pair.evidence_file_name or file_path.name)
 
+@app.get("/api/screening/couverture")
+async def couverture_du_criblage_endpoint(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Combien de clients du referentiel n'ont JAMAIS ete cribles.
+
+    « Tous vos clients ont-ils ete cribles ? » est la premiere question d'un
+    controle, et le produit ne savait pas y repondre : importer un referentiel
+    clients declenche un controle de completude, pas un criblage, et le
+    re-criblage automatique se declenche quand une LISTE change — jamais quand
+    des CLIENTS arrivent. Un referentiel fraichement importe restait donc
+    entier hors du criblage sans que rien ne le signale.
+
+    Lu en base a chaque appel : c'est un fait, pas un compteur a entretenir.
+    """
+    from fiskr.couverture import couverture_du_criblage, phrase_de_couverture
+    mesure = couverture_du_criblage(db)
+    return {**mesure, "phrase": phrase_de_couverture(mesure)}
+
+
 @app.post("/api/rescreen/run")
 async def run_manual_rescreen(
     payload: RescreenRunRequest,

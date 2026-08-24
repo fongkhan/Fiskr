@@ -287,7 +287,7 @@ def _conservation(db) -> Dict[str, Any]:
             "conservation", "Exploitation", "Conservation des pièces probantes", OK,
             f"Journal de criblage et alertes clôturées conservés au moins "
             f"{DUREE_LEGALE_JOURS} jours (cinq ans).",
-            lien="#settings/settings-retention")
+            lien="#settings/settings-governance")
     return _controle(
         "conservation", "Exploitation", "Conservation des pièces probantes", ATTENTION,
         " ; ".join(e["message"] for e in ecarts)
@@ -299,9 +299,40 @@ def _conservation(db) -> Dict[str, Any]:
         "#settings/settings-retention")
 
 
+def _couverture_du_criblage(db) -> Dict[str, Any]:
+    """
+    « Tous vos clients ont-ils été criblés ? » — la première question d'un
+    contrôle, et le produit ne savait pas y répondre.
+
+    Importer un référentiel clients déclenche un contrôle de complétude, pas un
+    criblage ; le re-criblage automatique se déclenche quand une LISTE change,
+    jamais quand des CLIENTS arrivent. Un référentiel fraîchement importé
+    restait donc entier hors du criblage, sans que rien ne le signale.
+    """
+    from fiskr.couverture import couverture_du_criblage, phrase_de_couverture
+    mesure = couverture_du_criblage(db)
+    if mesure["sans_referentiel"]:
+        return _controle(
+            "couverture", "Criblage", "Couverture du criblage", A_FAIRE,
+            "Aucun référentiel clients en production : rien à cribler pour "
+            "l'instant.", lien="#watchlist-mgmt/watchlist-import")
+    if not mesure["jamais_cribles"]:
+        return _controle(
+            "couverture", "Criblage", "Couverture du criblage", OK,
+            f"Les {mesure['clients']} clients du référentiel ont tous été "
+            f"criblés au moins une fois.", lien="#screening/screening-batch")
+    return _controle(
+        "couverture", "Criblage", "Couverture du criblage", ATTENTION,
+        phrase_de_couverture(mesure),
+        "Lancez un lookback (Criblage → Re-criblage) : il confronte tout le "
+        "référentiel aux listes en production. C'est l'opération la plus lourde "
+        "du produit — elle part en tâche de fond et se suit par jeton.",
+        "#screening/screening-batch")
+
+
 _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
                    _sources_automatiques, _homologation, _referentiel_clients,
-                   _seuils, _comptes, _conservation)
+                   _seuils, _comptes, _conservation, _couverture_du_criblage)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _smtp, _url_publique)
 
 

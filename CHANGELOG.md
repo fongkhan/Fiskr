@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — "have all your clients been screened?", and the button that answers it
+That is the first question an inspection asks. The product could not answer it.
+
+Importing a client base triggers a **completeness check**, not a screening. Automatic re-screening fires when a **list** changes (`rescreen_after_snapshot_change`) — never when **clients** arrive. A freshly imported client base therefore sat entirely outside screening until a list moved or someone ran a lookback, and nothing anywhere said so: no screen, no counter, no message on import.
+
+Worse: the action that repairs it — the lookback — existed in the API (`POST /api/rescreen/run`) **with no button at all**. The only operation capable of screening a freshly imported client base was reachable only by calling the API by hand. Measuring without being able to act helps nobody, so the measurement and the action now live on the same card, in Screening → Batch: how many clients still have no decision in their name, a list-type selector, and a **Launch a lookback** button. It follows the same path as every other heavy job — the pill tracks it, and when it ends the coverage figure is re-read, since that is exactly the number the lookback just changed.
+
+**What the measure says, and what it does not.** It answers "has this client ever been screened?", by looking for a trace in the immutable screening journal — a plain question the database can answer plainly. It does *not* claim to answer "has this client been screened against the list in production today". After a promotion, re-screening compares the client base only to **new or modified** records — that is what makes it tenable — and writes an audit row only for matches. A clean client leaves no dated trace of that pass. Counting traces carrying today's hash would report "nobody is covered" the day after every promotion: that would be false, and a false indicator is worse than none.
+
+Measured cost: 20 000 clients, 10 000 of them without a trace — **0,01 s**. The planner resolves the correlated subquery as an anti-join rather than probing the index client by client. The cap stays as a net, not a necessity, and when it bites the measure *says so* instead of returning a number that would look exact.
+
+The commissioning screen carries the same figure, through the same function — one wording, not two that would drift.
+
+### Fixed — four commissioning links pointed at screens that do not exist
+`#clients` twice, `settings-retention`, `screening-rescreen`: all four added by me in the last two batches, all pointing nowhere. A commissioning point that links into the void is worse than one with no link — it promises a remedy and opens a blank page.
+
+The new guard derives from the **output** rather than the source text: it walks the real report and checks each link against the ids actually present in the markup. A link can be passed by keyword or by position, and a guard reading the source misses half the cases — which is precisely how these four got through.
+
 ### Fixed — thirty days is not five years, and only the thirty was written down
 `RETENTION_MIN_DAYS` is 30. That is a **technical** guard: it stops someone emptying the database by accident. Article **L561-12 of the French Code monétaire et financier** requires **five years** of retention for the documents and information relating to transactions and the business relationship — which, in Fiskr, means the proof that screening happened and what it decided (the screening journal), and the handling of an alert with its justification (closed alerts).
 

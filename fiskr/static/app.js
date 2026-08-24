@@ -225,6 +225,86 @@ function onWatchlistFieldChange() {
 }
 
 // Options des selects de filtre « Liste » (valeur UNKNOWN = enregistrements sans type)
+// ------------------ COUVERTURE DU CRIBLAGE & LOOKBACK ------------------
+
+// « Tous vos clients ont-ils été criblés ? » est la première question d'un
+// contrôle. Le produit ne savait pas y répondre : importer un référentiel
+// clients déclenche un contrôle de complétude, pas un criblage, et le
+// re-criblage automatique se déclenche quand une LISTE change — jamais quand
+// des CLIENTS arrivent.
+//
+// L'action qui répare, le lookback, existait dans l'API (POST
+// /api/rescreen/run) sans le moindre bouton : la seule opération capable de
+// cribler un référentiel fraîchement importé n'était atteignable qu'en
+// appelant l'API à la main. La mesure et l'action sont ici au même endroit —
+// constater sans pouvoir agir n'aide personne.
+
+async function chargerCouvertureDuCriblage() {
+ const constat = document.getElementById("couverture-constat");
+ if (!constat) return;
+ remplirTypesDeListePourLookback();
+ try {
+ const response = await apiFetch("/api/screening/couverture", { silent: true });
+ if (!response.ok) { constat.textContent = "Couverture indisponible."; return; }
+ const data = await response.json();
+ if (data.sans_referentiel) {
+  constat.textContent = "Aucun référentiel clients en production : rien à cribler pour l'instant.";
+  constat.style.color = "var(--text-muted)";
+  return;
+ }
+ if (!data.jamais_cribles) {
+  constat.textContent = `Les ${data.clients} clients du référentiel ont tous été criblés au moins une fois.`;
+  constat.style.color = "var(--color-success, #2e7d32)";
+  return;
+ }
+ constat.textContent = data.phrase || "";
+ constat.style.color = "var(--color-warning, #b8860b)";
+ } catch (e) { console.error("Couverture fetch error:", e); }
+}
+
+function remplirTypesDeListePourLookback() {
+ const select = document.getElementById("lookback-file-type");
+ // Une seule fois : le contenu ne dépend pas de l'état, seulement du
+ // vocabulaire partagé des types de liste.
+ if (!select || select.options.length > 1) return;
+ for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
+ if (value === "CLIENT_BASE") continue;
+ const option = document.createElement("option");
+ option.value = value;
+ option.textContent = label;
+ select.appendChild(option);
+ }
+}
+
+async function lancerLookback() {
+ const fileType = document.getElementById("lookback-file-type")?.value || "";
+ const portee = fileType ? listTypeLabel(fileType) : "toutes les listes en production";
+ const ok = await confirmDialog(
+ `Lancer un lookback sur ${portee} ? Tout le référentiel clients sera confronté `
+ + `aux fiches listées : c'est l'opération la plus lourde du produit. Elle part en `
+ + `tâche de fond — vous pouvez continuer à travailler.`);
+ if (!ok) return;
+ try {
+ const response = await apiFetch("/api/rescreen/run", {
+ method: "POST", headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ file_type: fileType || null }),
+ });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "lookback refusé."), "error");
+ return;
+ }
+ showToast(data.message || "Lookback lancé.", "success");
+ // Même chemin que les autres travaux lourds : la pastille suit la
+ // progression, et la couverture se relit quand le job se termine —
+ // c'est précisément le chiffre que le lookback vient de changer.
+ onOperationDone(data.job_token, () => chargerCouvertureDuCriblage());
+ } catch (e) {
+ console.error("Lookback error:", e);
+ showToast("Erreur réseau au lancement du lookback.", "error");
+ }
+}
+
 function listTypeFilterOptions(withUnknown) {
  let html = '<option value="">Toutes les listes</option>';
  for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
@@ -1524,6 +1604,7 @@ function switchSubTab(sectionId, subTabId) {
  initActivityReportDates();
  } else if (subTabId === "screening-batch") {
  fetchBatchCampaigns();
+ chargerCouvertureDuCriblage();
  } else if (subTabId === "audit-screening") {
  fetchAuditHistory(1);
  } else if (subTabId === "audit-admin") {
