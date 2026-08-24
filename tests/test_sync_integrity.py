@@ -326,18 +326,141 @@ def test_source_network_override_from_config(monkeypatch):
     assert source_network_config("eurlex")["retries"] == 42
 
 
-def test_persistent_202_failure_message_is_actionable():
-    """Le rapport doit dire quoi régler, pas seulement compter les échecs."""
+def test_persistent_202_avec_corps_est_une_page_d_attente():
+    """
+    Un 202 qui a un CORPS, c'est « la page se prépare » : attendre davantage
+    peut aboutir, et c'est bien ce que le message doit conseiller.
+    """
     from fiskr.sync import _with_retries, _RetryableHTTP
 
-    def _always_202():
-        raise _RetryableHTTP("HTTP 202 (0 octets)")
+    def _toujours_202():
+        raise _RetryableHTTP("HTTP 202")
 
     with pytest.raises(RuntimeError) as exc:
-        _with_retries(_always_202, "https://eur-lex.europa.eu/x", retries=0, backoff=0)
+        _with_retries(_toujours_202, "https://eur-lex.europa.eu/x", retries=0, backoff=0)
     message = str(exc.value)
-    assert "anti-robot" in message
+    assert "page d'attente" in message
     assert "retries" in message
+
+
+def test_persistent_202_a_corps_vide_est_un_portique():
+    """
+    Un 202 à corps VIDE, c'est un refus. Mesuré sur le portail EUR-Lex depuis
+    deux réseaux : corps vide sur la page du jour ET sur la racine, aucun
+    cookie, aucun Retry-After. Conseiller d'augmenter le nombre de reprises
+    envoyait l'exploitant sur une route sans issue — le message doit dire ce
+    qui a été constaté, et ce qui change vraiment quelque chose.
+    """
+    from fiskr.sync import _with_retries, _RetryableHTTP
+
+    def _portique():
+        raise _RetryableHTTP("HTTP 202 (corps vide)", porte_close=True)
+
+    with pytest.raises(RuntimeError) as exc:
+        _with_retries(_portique, "https://eur-lex.europa.eu/x", retries=0, backoff=0)
+    message = str(exc.value)
+    assert "CORPS VIDE" in message
+    assert "retries" not in message, "ce conseil-là ne peut rien donner ici"
+
+
+def test_le_portique_ne_consomme_pas_tout_le_budget():
+    """
+    Sept tentatives sur un portail qui refuse, c'est presque deux minutes de
+    créneau de travail par jour pour un résultat connu d'avance. Trois refus
+    identiques suffisent à conclure.
+    """
+    from fiskr.sync import _with_retries, _RetryableHTTP
+
+    appels = []
+
+    def _portique():
+        appels.append(1)
+        raise _RetryableHTTP("HTTP 202 (corps vide)", porte_close=True)
+
+    with pytest.raises(RuntimeError):
+        _with_retries(_portique, "https://eur-lex.europa.eu/x", retries=6, backoff=0)
+    assert len(appels) == 3, f"budget dépensé : {len(appels)} tentatives sur 7"
+
+
+def test_un_202_avec_corps_garde_tout_son_budget():
+    """La coupure ne doit mordre que sur le refus, jamais sur l'attente."""
+    from fiskr.sync import _with_retries, _RetryableHTTP
+
+    appels = []
+
+    def _attente():
+        appels.append(1)
+        raise _RetryableHTTP("HTTP 202")
+
+    with pytest.raises(RuntimeError):
+        _with_retries(_attente, "https://eur-lex.europa.eu/x", retries=6, backoff=0)
+    assert len(appels) == 7
+
+
+def test_le_prechauffage_rapporte_ce_qu_il_a_obtenu(monkeypatch):
+    """
+    Un préchauffage muet est un rite : il coûte une requête par synchronisation
+    et personne ne sait s'il sert. Il doit RAPPORTER — statut et cookies — pour
+    qu'un échec ultérieur soit diagnosticable.
+    """
+    from fiskr import sync as m
+
+    class _Reponse:
+        status_code = 202
+
+    class _Portail:
+        cookies = {}
+
+        def get(self, *a, **k):
+            return _Reponse()
+
+    monkeypatch.setattr(m, "_get_shared_client", lambda: _Portail())
+    constat = m.warm_up_session("https://eur-lex.europa.eu/")
+    assert constat["statut"] == 202
+    assert constat["cookies"] == 0
+    assert constat["erreur"] is None
+
+
+def test_l_echec_eurlex_dit_que_le_portail_n_a_pas_ouvert_de_session(monkeypatch):
+    """
+    Savoir que la racine du portail n'a même pas donné de session, c'est la
+    moitié du diagnostic : cela distingue « portail lent » de « requête
+    refusée à la porte ».
+    """
+    from datetime import date
+
+    from fiskr import sync as m
+
+    monkeypatch.setattr(m, "warm_up_session",
+                        lambda url: {"url": url, "statut": 202, "cookies": 0, "erreur": None})
+
+    def _refus(url):
+        raise RuntimeError("Echec apres 3 tentatives")
+
+    with pytest.raises(RuntimeError) as exc:
+        m.fetch_eurlex_acts(date(2026, 8, 24), _refus,
+                            "https://eur-lex.europa.eu/oj/{date}", "mesures restrictives")
+    assert "prechauffage" in str(exc.value)
+    assert "n'a pas ouvert de session" in str(exc.value)
+
+
+def test_le_prechauffage_reussi_ne_pollue_pas_l_erreur(monkeypatch):
+    """Si le portail a bien ouvert une session, l'échec vient d'ailleurs : le
+    message ne doit pas accuser le préchauffage."""
+    from datetime import date
+
+    from fiskr import sync as m
+
+    monkeypatch.setattr(m, "warm_up_session",
+                        lambda url: {"url": url, "statut": 200, "cookies": 2, "erreur": None})
+
+    def _refus(url):
+        raise RuntimeError("lecture impossible")
+
+    with pytest.raises(RuntimeError) as exc:
+        m.fetch_eurlex_acts(date(2026, 8, 24), _refus,
+                            "https://eur-lex.europa.eu/oj/{date}", "mesures restrictives")
+    assert "prechauffage" not in str(exc.value)
 
 
 def test_warm_up_never_breaks_the_sync(monkeypatch):

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a closed gate is not a waiting room, and the advice given for one could not work
+Production fails the EUR-Lex synchronisation every single day: seven attempts, HTTP 202 each time, **105 seconds of a work slot**, then a failure notification that cannot be delivered either. The code read 202 as "page being prepared" and gave the operator a matching instruction — *raise `sync.<source>.network.retries` / `backoff_seconds`*.
+
+Measured against the live portal from two different networks: the body is **empty — zero bytes**, on the daily page *and* on the portal root, with no cookie set and no `Retry-After`. Five requests over ten seconds, all identical. The server accepts the request and deliberately returns nothing. No amount of patience gets past that, so the advice sent the operator down a road with no end — and each extra attempt cost slot time for an answer known in advance.
+
+**A 202 is now judged on its body, not its status.** With content, it is a waiting room: retrying can work, the full budget stays, and the advice about `retries` is the right advice. Empty, it is a gate: after three identical refusals the remaining attempts are abandoned, and the message says what was seen and what actually changes something — the request's origin, not its patience. Three and not two, so a portal genuinely preparing a page keeps two retries.
+
+Against the real portal, end to end: **16.6 s instead of 105 s**, and the failure now reads *"the portal returns a 202 with an EMPTY BODY: it is refusing the request, not preparing a page"*.
+
+**The warm-up request was a ritual.** Fiskr fetched the portal root before the useful page, on the stated grounds that "EUR-Lex serves its interstitial to clients with no session cookie" — a comment that read as a guarantee. The root answers 202 with an empty body and sets no cookie at all, so the warm-up obtained nothing, cost a request per synchronisation, and said nothing about it: its result was discarded and its exceptions swallowed at debug level. It now reports what it observed — status and cookie count — logs a warning when it comes back empty-handed, and that observation is carried into the failure: *"warm-up: HTTP 202, 0 cookie(s) — the portal did not open a session"*. That single line separates "slow portal" from "request refused at the door".
+
+Nothing here defeats an anti-robot filter, and nothing tries to. What changes is that the product now states what it observed instead of what it assumed, and stops paying for a conclusion it already has.
+
 ### Fixed — two startup jobs wired to a startup production never runs
 Fiskr is served by Passenger through `a2wsgi.ASGIMiddleware`, which builds one `http` scope per request and **does not implement** the ASGI `lifespan` protocol. FastAPI's startup therefore never runs in production. The codebase already says so in four places, each written after a real incident — the "Active hash" badge stuck at N/A, a first screening at 64 s, a screening returning NO MATCH against an empty cache.
 
