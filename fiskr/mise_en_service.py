@@ -268,9 +268,40 @@ def _url_publique() -> Dict[str, Any]:
         "Renseignez l'adresse publique de l'application dans .env.")
 
 
+def _conservation(db) -> Dict[str, Any]:
+    """
+    La durée de conservation des pièces probantes, confrontée à ce que la loi
+    exige — pas au garde-fou technique de 30 jours, qui empêche seulement de
+    vider la base par inadvertance.
+
+    Le contrôle se pose ici et pas seulement à l'instant du réglage : une
+    politique se change un jour et se vit des années. Une purge sous le
+    plancher légal doit rester lisible longtemps après la personne qui l'a
+    décidée — c'est précisément ce qu'un contrôle vient chercher.
+    """
+    from fiskr.settings import (retention_policy, retention_sous_la_duree_legale,
+                                DUREE_LEGALE_JOURS)
+    ecarts = retention_sous_la_duree_legale(retention_policy(db))
+    if not ecarts:
+        return _controle(
+            "conservation", "Exploitation", "Conservation des pièces probantes", OK,
+            f"Journal de criblage et alertes clôturées conservés au moins "
+            f"{DUREE_LEGALE_JOURS} jours (cinq ans).",
+            lien="#settings/settings-retention")
+    return _controle(
+        "conservation", "Exploitation", "Conservation des pièces probantes", ATTENTION,
+        " ; ".join(e["message"] for e in ecarts)
+        + " Le produit fonctionne ; c'est la preuve qui manquera le jour où on "
+          "la demandera, et elle ne se reconstitue pas.",
+        "Portez ces durées à 1825 jours au moins (0 = conservation illimitée), "
+        "ou assurez-vous que l'archive de purge est bien externalisée et "
+        "conservée le temps requis.",
+        "#settings/settings-retention")
+
+
 _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
                    _sources_automatiques, _homologation, _referentiel_clients,
-                   _seuils, _comptes)
+                   _seuils, _comptes, _conservation)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _smtp, _url_publique)
 
 

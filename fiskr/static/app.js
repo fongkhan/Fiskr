@@ -10363,7 +10363,29 @@ async function fetchRetentionSettings() {
  const archiveEl = document.getElementById("retention-archive");
  if (archiveEl) archiveEl.checked = policy.archive !== false;
  renderRetentionPreview(data.preview || {});
+ renderRetentionLegal(data.sous_la_duree_legale, data.duree_legale_jours);
  } catch (e) { console.error("Retention fetch error:", e); }
+}
+
+// Le minimum technique (30 jours) et le plancher légal (cinq ans, L561-12 du
+// Code monétaire et financier) ne se ressemblent pas : le premier empêche de
+// vider la base par mégarde, le second dit combien de temps la preuve doit
+// exister. Régler le journal de criblage sur 31 jours était accepté sans un
+// mot — et un mois plus tard la preuve n'existait plus. On ne l'interdit pas :
+// on refuse seulement que le choix se fasse sans le savoir.
+function renderRetentionLegal(ecarts, planchers) {
+ const el = document.getElementById("retention-legal");
+ if (!el) return;
+ const liste = Array.isArray(ecarts) ? ecarts : [];
+ if (!liste.length) {
+ el.classList.add("hidden");
+ el.textContent = "";
+ return;
+ }
+ el.classList.remove("hidden");
+ el.textContent = "Conservation sous la durée légale — "
+  + liste.map(e => e.message || `${e.famille} : ${e.jours} j`).join(" ")
+  + ` Le réglage reste possible, mais il est tracé au journal d'administration.`;
 }
 
 function renderRetentionPreview(preview) {
@@ -10398,8 +10420,14 @@ async function saveRetentionSettings() {
  showToast("Erreur : " + (data.detail || "Réglage refusé."), "error");
  return;
  }
+ const alertes = data.avertissements || [];
+ if (alertes.length) {
+ showToast(alertes.join(" ") + " Réglage enregistré et tracé au journal.", "warning");
+ } else {
  showToast(data.message || "Politique de rétention mise à jour.", "success");
+ }
  renderRetentionPreview(data.preview || {});
+ fetchRetentionSettings();
  } catch (e) { console.error("Retention save error:", e); }
 }
 

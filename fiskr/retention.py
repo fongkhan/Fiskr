@@ -26,7 +26,8 @@ from fiskr.database import (
     AuditTrail, Alert, AlertEvent, AlertAttachment, AdminAuditLog,
     BatchCampaign, BatchResult, SyncReport, ALERT_CLOSED_STATUSES,
 )
-from fiskr.settings import retention_policy, RETENTION_FAMILIES
+from fiskr.settings import (retention_policy, RETENTION_FAMILIES,
+                            retention_sous_la_duree_legale)
 
 logger = logging.getLogger("fiskr.retention")
 
@@ -186,15 +187,28 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
             deleted["batch_campaigns"] = db.query(BatchCampaign).filter(
                 BatchCampaign.id.in_(campaign_ids)).delete(synchronize_session=False)
 
+    # Dernière ligne : une purge qui emporte de la preuve sous le plancher légal
+    # le DIT, dans le journal que le contrôle lira. Elle ne s'interrompt pas —
+    # ce serait décider à la place de l'exploitant, et sans lui laisser de
+    # moyen d'agir — mais elle ne passe plus inaperçue.
+    ecarts = retention_sous_la_duree_legale(policy)
     if any(deleted.values()):
         archived_to = str(archive_path) if archive_enabled and archive_path.exists() else None
+        avertissement = ""
+        if ecarts and any(deleted.get(e["famille"]) for e in ecarts):
+            avertissement = " — CONSERVATION SOUS LA DURÉE LÉGALE : " + " ; ".join(
+                e["message"] for e in ecarts if deleted.get(e["famille"]))
+            logger.warning("Purge de rétention sous la durée légale :%s", avertissement)
         db.add(AdminAuditLog(
             username=username, action="RETENTION_PURGE", target="retention",
             after={**deleted, "policy": {f: policy[f] for f in RETENTION_FAMILIES},
-                   "archive": archived_to},
+                   "archive": archived_to,
+                   "sous_la_duree_legale": [e["famille"] for e in ecarts
+                                            if deleted.get(e["famille"])]},
             detail="Purge de rétention : " + ", ".join(
                 f"{family}={count}" for family, count in deleted.items() if count)
-                   + (f" — archivée dans {archived_to}" if archived_to else " — sans archive"),
+                   + (f" — archivée dans {archived_to}" if archived_to else " — sans archive")
+                   + avertissement,
         ))
         logger.info(f"Purge de rétention effectuée : {deleted} (archive : {archived_to})")
     db.commit()

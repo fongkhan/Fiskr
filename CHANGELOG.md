@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — thirty days is not five years, and only the thirty was written down
+`RETENTION_MIN_DAYS` is 30. That is a **technical** guard: it stops someone emptying the database by accident. Article **L561-12 of the French Code monétaire et financier** requires **five years** of retention for the documents and information relating to transactions and the business relationship — which, in Fiskr, means the proof that screening happened and what it decided (the screening journal), and the handling of an alert with its justification (closed alerts).
+
+The two do not resemble each other, and only the first existed anywhere in the code. An administrator could therefore set the screening journal to 31 days: accepted without a word, and a month later the proof was gone. That is a defect nobody sees on the day it is made — only on the day an inspector asks — and it does not repair: destroyed evidence cannot be reconstituted.
+
+The floor is now **named**, and derived rather than repeated — one function answers "is this policy below the legal floor?", and settings, commissioning and purge all ask it. The distinction between evidential families (screening journal, closed alerts) and operational ones (sync reports, batch campaigns) is explicit: imposing five years on the latter would be an invented requirement.
+
+What this is **not** is a prohibition. An installation outside France may fall under a different rule, and that is the operator's decision. What is refused is the choice being made *without knowing*:
+
+- the settings API returns the legal floor alongside the technical minimum, and the specific gaps, so the screen shows both and says which one is crossed;
+- the setting is accepted and **recorded in the administration journal with the article named** — an inspection two years later can find who shortened retention, when, and by how much;
+- the commissioning screen carries the point as a **Warning**, because a policy is changed one day and lived with for years: the warning at the moment of setting is not enough on its own;
+- and the purge itself writes into the journal that what it destroyed was below the legal floor. It does not interrupt — that would be deciding for the operator without giving them any way to act — but it no longer passes unnoticed.
+
 ### Fixed — the complete map of the API was public, and the health probe cried wolf permanently
 An inventory of every route in the application, following each one's full dependency chain — a guard can be posted by a closure, so the check descends the whole tree rather than reading the first level. Of 189 routes, six answer an anonymous visitor, and all six should: the login page and its POST (you cannot require being logged in to log in), the root redirect, the favicon, and the supervision probe. That inventory is now a test: a route added without a guard fails it by name.
 
