@@ -1124,7 +1124,18 @@ app = FastAPI(
     title="Fiskr API Server",
     description="Compliance PEP/Sanctions Engine with Snapshots and Versioning Delta Engine",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    # La documentation vit plus bas, derriere l'authentification. Servie par
+    # FastAPI, elle est ANONYME : verifie sur la production, /docs,
+    # /openapi.json et /redoc repondaient 200 sans le moindre identifiant —
+    # 170 chemins dont 39 d'administration, 66 schemas, et les descriptions
+    # issues des docstrings, qui detaillent les defenses elles-memes
+    # (verrouillage anti-force brute, enrolement MFA, import de reglages).
+    # Les points d'entree restent proteges ; ce qui etait offert, c'est leur
+    # carte complete.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 # En-tetes de securite HTTP sur toutes les reponses. CSP : le dashboard repose
@@ -1181,28 +1192,78 @@ async def translate_api_messages(request: Request, call_next):
     return Response(content=body, status_code=response.status_code,
                     headers=headers, media_type="application/json")
 
+# ------------------ DOCUMENTATION DE L'API (AUTHENTIFIEE) ------------------
+# Le cookie de session est HttpOnly et porte par le navigateur : Swagger UI
+# charge donc /openapi.json avec, et fonctionne exactement comme avant pour
+# qui est connecte. `include_in_schema=False` : la documentation ne se
+# documente pas elle-meme.
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_authentifie(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Schema OpenAPI complet — reserve aux utilisateurs authentifies."""
+    return app.openapi()
+
+
+@app.get("/docs", include_in_schema=False)
+async def docs_authentifiee(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Swagger UI — reserve aux utilisateurs authentifies."""
+    from fastapi.openapi.docs import get_swagger_ui_html
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="Fiskr — API")
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_authentifiee(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """ReDoc — reserve aux utilisateurs authentifies."""
+    from fastapi.openapi.docs import get_redoc_html
+    return get_redoc_html(openapi_url="/openapi.json", title="Fiskr — API")
+
+
 @app.get("/api/health")
 async def healthcheck():
     """
     Sonde de supervision (SANS authentification, volontairement minimale) :
-    base de donnees joignable et cache de criblage charge. A brancher sur le
-    monitoring d'exploitation (liveness/readiness).
+    base joignable et referentiel en production. A brancher sur le monitoring
+    d'exploitation (liveness/readiness).
+
+    POURQUOI LE CRITERE A CHANGE
+    ----------------------------
+    Il portait sur `watchlist_store`, la memoire de CE processus. Sous
+    Passenger, un processus web n'a pas de cache tant qu'il n'a pas cribl :
+    le lifespan ASGI n'y tourne pas, le chargement est paresseux et documente
+    comme tel. La sonde repondait donc « degraded » en permanence — verifie sur
+    la production : six appels, six « degraded », avec 830 744 fiches en
+    service, le demon vivant et la file a jour. Une sonde qui crie au loup en
+    continu ne sert plus a rien : ou elle est ignoree, ou elle n'est branchee
+    sur rien.
+
+    Le bon critere est un FAIT, pas l'etat d'un processus : y a-t-il un
+    referentiel en production ? La reponse est en base, la meme pour tous les
+    processus, et servie par l'index (`ix_snapshots_status_type`) — pas de
+    COUNT sur le referentiel, une sonde se doit d'etre gratuite.
+
+    Le cache reste rapporte, parce que c'est une information utile ; il ne
+    decide simplement plus de l'etat de sante.
     """
     db_ok = True
+    referentiel = False
     try:
         db = next(get_db())
         try:
             from sqlalchemy import text as _sql_text
             db.execute(_sql_text("SELECT 1"))
+            referentiel = db.query(Snapshot.snapshot_id).filter(
+                Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+                Snapshot.status == "READY",
+            ).first() is not None
         finally:
             db.close()
     except Exception:
         db_ok = False
-    cache_ok = len(watchlist_store) > 0
     return {
-        "status": "ok" if (db_ok and cache_ok) else "degraded",
+        "status": "ok" if (db_ok and referentiel) else "degraded",
         "database": db_ok,
-        "watchlist_cache_loaded": cache_ok,
+        "watchlist_in_production": referentiel,
+        "watchlist_cache_loaded": len(watchlist_store) > 0,
     }
 
 # ------------------ PYDANTIC MODELS ------------------

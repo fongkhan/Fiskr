@@ -631,6 +631,18 @@ Clés d'API) passée en `X-API-Key` — lecture seule par construction (toute
 curl -sS -H "X-API-Key: fsk_..." https://votre-instance/api/diagnostic/jobs | python -m json.tool
 ```
 
+### Documentation de l'API : `/docs`, `/redoc`, `/openapi.json`
+
+Le schéma OpenAPI complet est servi **aux utilisateurs authentifiés
+uniquement**. Ouvrez `/docs` dans le navigateur où vous êtes connecté : le
+cookie de session suit, Swagger UI se charge normalement.
+
+Ces trois adresses répondaient auparavant à n'importe quel visiteur : 170
+chemins dont 39 d'administration, 66 schémas, et les descriptions issues des
+docstrings — c'est-à-dire le plan complet de l'application, défenses
+comprises. Les points d'entrée eux-mêmes ont toujours été protégés ; ce qui
+était offert, c'est leur carte.
+
 <a id="installation"></a>
 
 ## 🚀 Installation & Lancement
@@ -699,7 +711,7 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète — **1 449 fonctions de test** réparties sur 146
+Exécutez la suite complète — **1 455 fonctions de test** réparties sur 147
 fichiers — avec pytest :
 ```bash
 python -m pytest

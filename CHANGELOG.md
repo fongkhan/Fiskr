@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the complete map of the API was public, and the health probe cried wolf permanently
+An inventory of every route in the application, following each one's full dependency chain — a guard can be posted by a closure, so the check descends the whole tree rather than reading the first level. Of 189 routes, six answer an anonymous visitor, and all six should: the login page and its POST (you cannot require being logged in to log in), the root redirect, the favicon, and the supervision probe. That inventory is now a test: a route added without a guard fails it by name.
+
+The map of the API was the exception. `/docs`, `/openapi.json` and `/redoc` answered **200 with no credentials at all** — checked against production: **170 paths, 39 of them administrative, 66 schemas, 178 KB**, with the descriptions taken straight from the docstrings, which document the defences themselves — the brute-force lockout, the MFA enrolment flow, what the settings import does with unknown keys. The endpoints themselves were always protected; what was on offer was their complete plan. The three now require a session. Closing the door does not condemn the room: the session cookie is HttpOnly and travels with the browser, so Swagger UI loads exactly as before for whoever is logged in — and the README says where to find it.
+
+**The health probe judged this process's memory.** Its readiness criterion was `watchlist_store`, the in-memory cache of the process answering the call. Under Passenger a web process has no cache until it has screened something — the ASGI `lifespan` does not run there, loading is lazy, and that is documented. So the probe answered `degraded` for ever: six calls to production, six `degraded`, with 830 744 records in service, the daemon alive and the queue up to date. A probe that cries wolf continuously stops being read — it is either ignored, or wired to nothing.
+
+The criterion is now a fact rather than a process's state: is there a reference list in production? The answer is in the database, identical for every process, and served by an index — no `COUNT` over the reference list, since a probe must be free. The cache is still reported, because it is useful to know; it simply no longer decides. A test proves the difference: with an empty cache and a list in production, the answer is `ok`.
+
 ### Fixed — a closed gate is not a waiting room, and the advice given for one could not work
 Production fails the EUR-Lex synchronisation every single day: seven attempts, HTTP 202 each time, **105 seconds of a work slot**, then a failure notification that cannot be delivered either. The code read 202 as "page being prepared" and gave the operator a matching instruction — *raise `sync.<source>.network.retries` / `backoff_seconds`*.
 

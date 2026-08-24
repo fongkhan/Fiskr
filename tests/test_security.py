@@ -140,8 +140,43 @@ def test_healthcheck_unauthenticated(client):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] in ("ok", "degraded")
-    assert set(data.keys()) == {"status", "database", "watchlist_cache_loaded"}
+    assert set(data.keys()) == {
+        "status", "database", "watchlist_in_production", "watchlist_cache_loaded"}
     assert data["database"] is True
+
+
+def test_la_sonde_ne_juge_pas_sur_la_memoire_du_processus(client, monkeypatch):
+    """
+    Le verdict portait sur `watchlist_store`, la mémoire de CE processus. Sous
+    Passenger un processus web n'a pas de cache tant qu'il n'a pas criblé — le
+    chargement y est paresseux et documenté comme tel. La sonde répondait donc
+    « degraded » en permanence : vérifié sur la production, six appels, six
+    « degraded », avec 830 744 fiches en service et le démon vivant.
+
+    Une sonde qui crie au loup en continu ne sert plus à rien. Le critère est
+    désormais un fait en base, le même pour tous les processus.
+    """
+    from fiskr import api as api_module
+    from fiskr.database import Snapshot
+
+    monkeypatch.setattr(api_module, "watchlist_store", {})   # cache vide
+
+    db = next(get_db())
+    identifiant = f"sante-{uuid.uuid4().hex[:8]}"
+    db.add(Snapshot(snapshot_id=identifiant, file_type="WATCHLIST_UN",
+                    file_name="sante.xml", file_hash=uuid.uuid4().hex,
+                    record_count=1, status="READY", uploaded_at=datetime.utcnow()))
+    db.commit()
+    try:
+        data = client.get("/api/health").json()
+        assert data["watchlist_cache_loaded"] is False, "le cache doit bien être vide"
+        assert data["watchlist_in_production"] is True
+        assert data["status"] == "ok", (
+            "un cache vide dans CE processus ne dit rien de la santé du service")
+    finally:
+        db.query(Snapshot).filter(Snapshot.snapshot_id == identifiant).delete()
+        db.commit()
+        db.close()
 
 
 # ------------------ CLES D'API TECHNIQUES ------------------
