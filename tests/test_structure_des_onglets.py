@@ -26,6 +26,7 @@ structure, seule chose qui garantisse que les deux moitiés parlent du même
 ensemble de panneaux.
 """
 import os
+import re
 
 import pytest
 
@@ -159,3 +160,64 @@ def test_la_page_de_connexion_est_equilibree_aussi():
     login = _analyse("login.html")
     assert not login.fautes, "\n".join(login.fautes[:5])
     assert not login.pile
+
+# ------------------------------------------------ le JS et le balisage d'accord
+
+_APPEL_SOUS_ONGLET = re.compile(r"switchSubTab\(\s*['\"]([a-z0-9-]+)['\"]\s*,\s*['\"]([a-z0-9-]+)['\"]")
+
+
+def _sources_frontales():
+    for nom in ("index.html", "app.js"):
+        chemin = os.path.join(STATIC, nom)
+        with open(chemin, encoding="utf-8") as f:
+            yield nom, f.read()
+
+
+def test_chaque_renvoi_vers_un_sous_onglet_designe_sa_vraie_section(index):
+    """
+    `switchSubTab(section, panneau)` éteint les panneaux de `section` puis
+    allume `panneau` DANS cette même section. Un appel qui nomme la mauvaise
+    section n'allume donc plus rien — et c'est bien mieux que d'allumer un
+    panneau qu'on ne pourra plus éteindre.
+
+    Ce test attrape la faute là où elle s'écrit, avant qu'un utilisateur ne
+    clique sur un onglet qui ne répond pas.
+    """
+    section_du_panneau = {p: s for p, s, _ in index.panneaux}
+    fautes = []
+    for nom, source in _sources_frontales():
+        for section, panneau in _APPEL_SOUS_ONGLET.findall(source):
+            attendue = section_du_panneau.get(f"sub-sec-{panneau}")
+            if attendue is None:
+                fautes.append(f"{nom} : switchSubTab('{section}', '{panneau}') — panneau inexistant")
+            elif attendue != f"sec-{section}":
+                fautes.append(
+                    f"{nom} : switchSubTab('{section}', '{panneau}') — le panneau "
+                    f"vit dans « {attendue} », pas dans « sec-{section} »")
+    assert not fautes, "Renvois incohérents :\n  " + "\n  ".join(sorted(set(fautes)))
+
+
+def test_les_deux_moities_du_basculement_parlent_du_meme_ensemble():
+    """
+    Garde de source. Éteindre par une requête PORTÉE à la section et allumer par
+    identifiant GLOBAL, c'est laisser les deux moitiés parler d'ensembles
+    différents. Un panneau sorti de sa section s'allumait alors sans jamais
+    pouvoir s'éteindre : c'est ainsi qu'un `</div>` en trop est devenu un
+    empilement de quatre écrans.
+    """
+    with open(os.path.join(STATIC, "app.js"), encoding="utf-8") as f:
+        app_js = f.read()
+    debut = app_js.index("function switchSubTab(")
+    corps = app_js[debut:app_js.index("\n}", debut)]
+    # Le code retire des classes via `section.querySelectorAll` : il doit donc
+    # aussi les poser via `section`. Ce qui est proscrit, c'est de RETENIR
+    # l'élément à allumer par une recherche globale — pas de s'en servir pour
+    # DIAGNOSTIQUER un balisage cassé, ce que fait la branche `else if`.
+    assert "section.querySelectorAll" in corps
+    for cible in ("sub-sec-", "sub-btn-"):
+        assert f"= document.getElementById(`{cible}" not in corps, (
+            f"l'élément à activer ({cible}…) est retenu par une recherche "
+            f"globale : les deux moitiés ne parleraient plus du même ensemble")
+    assert "section.querySelector(`#sub-sec-" in corps
+    assert "section.querySelector(`#sub-btn-" in corps
+

@@ -168,8 +168,13 @@ MAX_REPORT_DETAILS = 100
 
 
 # Budget reseau par defaut d'une source qui en demande davantage. EUR-Lex
-# repond HTTP 202 « page en preparation » (anti-robot) : 4 tentatives sur 18 s
-# ne suffisent pas a franchir son interstitiel.
+# repond HTTP 202 ; on a longtemps lu ce statut comme « page en preparation »,
+# d'ou ce budget plus genereux. Mesure depuis deux reseaux le 24/08/2026 : le
+# corps est VIDE, sur la page du jour comme sur la racine du portail, sans
+# cookie ni Retry-After — c'est un refus, pas une file d'attente, et aucune
+# patience n'en vient a bout. Le budget reste en place pour le cas ou le
+# portail servirait vraiment une page d'attente ; `_with_retries` coupe de
+# lui-meme des que le refus se repete (cf. _202_VIDES_AVANT_ABANDON).
 _SOURCE_NETWORK_DEFAULTS = {
     "eurlex": {"retries": 6, "backoff_seconds": 5},
 }
@@ -433,11 +438,18 @@ class _RetryableHTTP(RuntimeError):
     Porte le delai demande par le serveur (`Retry-After`) quand il en a
     fourni un : c'est le serveur qui sait quand il acceptera de nouveau, pas
     nous. L'ignorer, c'est se faire bloquer plus durement et plus longtemps.
+
+    `porte_close` distingue les deux 202 qui ne se ressemblent pas : un 202
+    avec un CORPS, c'est « en preparation, repassez » — retenter a un sens ;
+    un 202 a corps VIDE, c'est un portique. Le serveur a accepte la requete et
+    n'a rien rendu, deliberement.
     """
 
-    def __init__(self, message: str, retry_after: Optional[float] = None):
+    def __init__(self, message: str, retry_after: Optional[float] = None,
+                 porte_close: bool = False):
         super().__init__(message)
         self.retry_after = retry_after
+        self.porte_close = porte_close
 
 
 # Plafond de l'attente imposee par un serveur : un Retry-After de plusieurs
@@ -471,12 +483,45 @@ def parse_retry_after(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def _retryable_from_response(response) -> _RetryableHTTP:
+# Un 202 a corps vide de suite : au-dela, le budget restant ne peut plus rien
+# changer. Trois et non deux : on laisse sa chance a un portail qui prepare
+# vraiment sa page (deux reprises), et on coupe la queue inutile.
+_202_VIDES_AVANT_ABANDON = 3
+
+
+# Un 202 se juge sur son corps, pas sur son statut : « accepte, la page arrive »
+# et « accepte, et je ne vous rends rien » portent le meme code. On lit donc ce
+# que le portail a mis dedans — borne a quelques kilo-octets, un corps de 202
+# n'est jamais volumineux — avant de decider si retenter a un sens.
+_TAILLE_SONDE_202 = 8 * 1024
+
+
+def _corps_de_202_vide(response) -> Optional[bool]:
+    """Vrai si un 202 n'a rien dans le ventre. None si la question ne se pose
+    pas (autre statut) ou si le corps n'est pas lisible ici."""
+    if response.status_code != 202:
+        return None
+    try:
+        lu = b""
+        for morceau in response.iter_bytes(chunk_size=_TAILLE_SONDE_202):
+            lu += morceau
+            if len(lu) >= _TAILLE_SONDE_202:
+                break
+        return not lu.strip()
+    except Exception:
+        return None
+
+
+def _retryable_from_response(response, corps_vide: Optional[bool] = None) -> _RetryableHTTP:
     """Construit l'exception de reprise d'une reponse transitoire, en
-    conservant le delai que le serveur a demande."""
+    conservant le delai que le serveur a demande, et — pour un 202 — le fait
+    que le corps soit vide ou non."""
     delay = parse_retry_after(response.headers.get("retry-after"))
     suffix = f", Retry-After: {delay:.0f}s" if delay is not None else ""
-    return _RetryableHTTP(f"HTTP {response.status_code}{suffix}", retry_after=delay)
+    if corps_vide:
+        suffix += " (corps vide)"
+    return _RetryableHTTP(f"HTTP {response.status_code}{suffix}", retry_after=delay,
+                          porte_close=bool(corps_vide) and response.status_code == 202)
 
 
 def _with_retries(operation, url: str, retries: int, backoff: float):
@@ -494,27 +539,47 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
     import time
     import httpx
     last_error: Exception = RuntimeError(f"Echec inconnu sur {url}")
+    portes_closes = 0
     for attempt in range(retries + 1):
         try:
             return operation()
         except (_RetryableHTTP, httpx.TransportError) as e:
             last_error = e
             logger.warning(f"{url}: {e} — tentative {attempt + 1}/{retries + 1}")
+            portes_closes = portes_closes + 1 if getattr(e, "porte_close", False) else 0
+            if portes_closes >= _202_VIDES_AVANT_ABANDON:
+                logger.warning(
+                    f"{url}: {portes_closes} reponses 202 a corps vide d'affilee — "
+                    f"portique, pas file d'attente : abandon des "
+                    f"{retries - attempt} tentative(s) restante(s).")
+                break
             if attempt < retries:
                 wait = backoff * (attempt + 1)
                 asked = getattr(e, "retry_after", None)
                 if asked is not None:
                     wait = min(max(wait, asked), MAX_RETRY_AFTER_SECONDS)
                 time.sleep(wait)
+    tentatives_faites = attempt + 1
     hint = ""
-    if isinstance(last_error, _RetryableHTTP) and "HTTP 202" in str(last_error):
-        # 202 persistant = interstitiel anti-robot jamais franchi : l'exploitant
-        # doit savoir quoi regler plutot que de lire un simple compte d'echecs
-        hint = (" — le portail sert sa page d'attente anti-robot : augmentez "
+    if getattr(last_error, "porte_close", False):
+        # Le conseil precedent — « augmentez retries / backoff_seconds » —
+        # envoyait l'exploitant sur une route sans issue. Mesure sur le portail
+        # EUR-Lex, depuis deux reseaux differents : 202 a corps vide sur la page
+        # du jour ET sur la racine du portail, aucun cookie pose, aucun
+        # Retry-After. Attendre plus longtemps ne change rien ; ce qui change
+        # quelque chose, c'est l'adresse d'ou part la requete.
+        hint = (" — le portail rend un 202 a CORPS VIDE : il refuse la requete, "
+                "il ne prepare pas une page. Attendre davantage n'y fera rien "
+                "(ni cookie de session, ni Retry-After). Ce filtre porte sur "
+                "l'origine de la requete : desactivez la source, ou faites-la "
+                "partir d'une adresse acceptee par le portail.")
+    elif isinstance(last_error, _RetryableHTTP) and "HTTP 202" in str(last_error):
+        hint = (" — le portail sert une page d'attente : augmentez "
                 "sync.<source>.network.retries / backoff_seconds, ou relancez "
                 "la source plus tard")
+    mot = "tentative" if tentatives_faites == 1 else "tentatives"
     raise RuntimeError(
-        f"Echec apres {retries + 1} tentatives sur {url}: {last_error}{hint}")
+        f"Echec apres {tentatives_faites} {mot} sur {url}: {last_error}{hint}")
 
 
 def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
@@ -564,7 +629,7 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
         with httpx.stream("GET", url, timeout=granular_timeout, follow_redirects=True,
                           headers=request_headers) as response:
             if response.status_code in _RETRYABLE_STATUS:
-                raise _retryable_from_response(response)
+                raise _retryable_from_response(response, _corps_de_202_vide(response))
             if response.status_code == 304:
                 # Source inchangee depuis le dernier passage : rien a lire
                 return {"not_modified": True,
@@ -620,19 +685,43 @@ def _portal_root(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}/"
 
 
-def warm_up_session(base_url: str) -> None:
+def warm_up_session(base_url: str) -> Dict[str, Any]:
     """
     Requete de prechauffage : recupere la page d'accueil du portail avec le
     client partage (qui conserve ses cookies) avant d'attaquer la page utile.
+    L'idee est qu'un portail servant un interstitiel aux clients sans cookie
+    de session reconnaisse ensuite le notre.
 
-    EUR-Lex sert un interstitiel HTTP 202 aux clients sans cookie de session ;
-    passer d'abord par l'accueil donne au client de quoi etre reconnu. Un
-    echec de prechauffage n'est jamais bloquant : la requete utile suivra.
+    Elle RAPPORTE ce qu'elle a obtenu, au lieu d'avaler le resultat. Un
+    prechauffage muet est un rite : il coute une requete par synchronisation
+    et personne ne sait s'il a servi a quelque chose. Mesure sur EUR-Lex,
+    depuis deux reseaux : la racine du portail repond elle-meme 202 avec un
+    corps vide et ne pose AUCUN cookie — le prechauffage n'y obtenait donc
+    rien, et le commentaire qui promettait le contraire se lisait comme une
+    garantie. Ce que la fonction constate remonte maintenant dans le journal
+    et, en cas d'echec, dans le rapport de synchronisation.
+
+    N'echoue jamais : la requete utile suivra de toute facon.
     """
+    constat: Dict[str, Any] = {"url": base_url, "statut": None, "cookies": 0, "erreur": None}
     try:
-        _get_shared_client().get(base_url, timeout=get_sync_config()["network"]["timeout_seconds"])
+        client = _get_shared_client()
+        reponse = client.get(base_url, timeout=get_sync_config()["network"]["timeout_seconds"])
+        constat["statut"] = reponse.status_code
+        try:
+            constat["cookies"] = len(client.cookies)
+        except Exception:
+            constat["cookies"] = 0
     except Exception as e:
-        logger.debug(f"Prechauffage de session ignore sur {base_url}: {e}")
+        constat["erreur"] = f"{type(e).__name__}: {e}"
+        logger.debug(f"Prechauffage de session en echec sur {base_url}: {e}")
+        return constat
+    if constat["statut"] != 200 or not constat["cookies"]:
+        logger.warning(
+            f"Prechauffage sans effet sur {base_url} : HTTP {constat['statut']}, "
+            f"{constat['cookies']} cookie(s). Le portail ne donne pas de session — "
+            f"la requete utile partira sans.")
+    return constat
 
 
 def http_get_text(url: str, timeout: Optional[float] = None,
@@ -672,7 +761,7 @@ def http_get_text(url: str, timeout: Optional[float] = None,
             # Les en-tetes sont la avant le corps : un statut transitoire ou
             # une erreur franche se tranche sans lire un seul octet de contenu.
             if response.status_code in _RETRYABLE_STATUS:
-                raise _retryable_from_response(response)
+                raise _retryable_from_response(response, _corps_de_202_vide(response))
             if response.status_code != 200:
                 raise RuntimeError(f"Reponse invalide de {url} (HTTP {response.status_code})")
             morceaux, recu = [], 0
@@ -2150,10 +2239,21 @@ def fetch_eurlex_acts(
     """
     daily_url = daily_url_template.format(date=for_date.strftime("%d%m%Y"))
     logger.info(f"Sync EUR-Lex: lecture du Journal Officiel {daily_url}")
-    # Cookie de session avant la page du jour : sans lui, EUR-Lex sert son
-    # interstitiel HTTP 202 et la lecture n'aboutit jamais
-    warm_up_session(_portal_root(daily_url))
-    daily_html = http_get(daily_url)
+    # Tentative de cookie de session avant la page du jour. Ce qu'elle obtient
+    # est CONSTATE, pas suppose : quand la lecture echoue ensuite, savoir que
+    # le portail n'a pas meme donne de session a la racine est la moitie du
+    # diagnostic — et c'est ce qui distingue « portail lent » de « requete
+    # refusee a la porte ».
+    constat = warm_up_session(_portal_root(daily_url))
+    try:
+        daily_html = http_get(daily_url)
+    except Exception as e:
+        if constat.get("statut") != 200 or not constat.get("cookies"):
+            raise RuntimeError(
+                f"{e} [prechauffage : HTTP {constat.get('statut')}, "
+                f"{constat.get('cookies')} cookie(s) — le portail n'a pas ouvert "
+                f"de session]") from e
+        raise
     return extract_daily_acts(daily_html, daily_url, keyword)
 
 

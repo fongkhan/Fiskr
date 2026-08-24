@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the complete map of the API was public, and the health probe cried wolf permanently
+An inventory of every route in the application, following each one's full dependency chain — a guard can be posted by a closure, so the check descends the whole tree rather than reading the first level. Of 189 routes, six answer an anonymous visitor, and all six should: the login page and its POST (you cannot require being logged in to log in), the root redirect, the favicon, and the supervision probe. That inventory is now a test: a route added without a guard fails it by name.
+
+The map of the API was the exception. `/docs`, `/openapi.json` and `/redoc` answered **200 with no credentials at all** — checked against production: **170 paths, 39 of them administrative, 66 schemas, 178 KB**, with the descriptions taken straight from the docstrings, which document the defences themselves — the brute-force lockout, the MFA enrolment flow, what the settings import does with unknown keys. The endpoints themselves were always protected; what was on offer was their complete plan. The three now require a session. Closing the door does not condemn the room: the session cookie is HttpOnly and travels with the browser, so Swagger UI loads exactly as before for whoever is logged in — and the README says where to find it.
+
+**The health probe judged this process's memory.** Its readiness criterion was `watchlist_store`, the in-memory cache of the process answering the call. Under Passenger a web process has no cache until it has screened something — the ASGI `lifespan` does not run there, loading is lazy, and that is documented. So the probe answered `degraded` for ever: six calls to production, six `degraded`, with 830 744 records in service, the daemon alive and the queue up to date. A probe that cries wolf continuously stops being read — it is either ignored, or wired to nothing.
+
+The criterion is now a fact rather than a process's state: is there a reference list in production? The answer is in the database, identical for every process, and served by an index — no `COUNT` over the reference list, since a probe must be free. The cache is still reported, because it is useful to know; it simply no longer decides. A test proves the difference: with an empty cache and a list in production, the answer is `ok`.
+
+### Fixed — a closed gate is not a waiting room, and the advice given for one could not work
+Production fails the EUR-Lex synchronisation every single day: seven attempts, HTTP 202 each time, **105 seconds of a work slot**, then a failure notification that cannot be delivered either. The code read 202 as "page being prepared" and gave the operator a matching instruction — *raise `sync.<source>.network.retries` / `backoff_seconds`*.
+
+Measured against the live portal from two different networks: the body is **empty — zero bytes**, on the daily page *and* on the portal root, with no cookie set and no `Retry-After`. Five requests over ten seconds, all identical. The server accepts the request and deliberately returns nothing. No amount of patience gets past that, so the advice sent the operator down a road with no end — and each extra attempt cost slot time for an answer known in advance.
+
+**A 202 is now judged on its body, not its status.** With content, it is a waiting room: retrying can work, the full budget stays, and the advice about `retries` is the right advice. Empty, it is a gate: after three identical refusals the remaining attempts are abandoned, and the message says what was seen and what actually changes something — the request's origin, not its patience. Three and not two, so a portal genuinely preparing a page keeps two retries.
+
+Against the real portal, end to end: **16.6 s instead of 105 s**, and the failure now reads *"the portal returns a 202 with an EMPTY BODY: it is refusing the request, not preparing a page"*.
+
+**The warm-up request was a ritual.** Fiskr fetched the portal root before the useful page, on the stated grounds that "EUR-Lex serves its interstitial to clients with no session cookie" — a comment that read as a guarantee. The root answers 202 with an empty body and sets no cookie at all, so the warm-up obtained nothing, cost a request per synchronisation, and said nothing about it: its result was discarded and its exceptions swallowed at debug level. It now reports what it observed — status and cookie count — logs a warning when it comes back empty-handed, and that observation is carried into the failure: *"warm-up: HTTP 202, 0 cookie(s) — the portal did not open a session"*. That single line separates "slow portal" from "request refused at the door".
+
+Nothing here defeats an anti-robot filter, and nothing tries to. What changes is that the product now states what it observed instead of what it assumed, and stops paying for a conclusion it already has.
+
+### Fixed — two startup jobs wired to a startup production never runs
+Fiskr is served by Passenger through `a2wsgi.ASGIMiddleware`, which builds one `http` scope per request and **does not implement** the ASGI `lifespan` protocol. FastAPI's startup therefore never runs in production. The codebase already says so in four places, each written after a real incident — the "Active hash" badge stuck at N/A, a first screening at 64 s, a screening returning NO MATCH against an empty cache.
+
+That makes a defect class that only exists in production: work wired into `lifespan` runs everywhere — under uvicorn in development, in every `TestClient` in the suite — and nowhere that counts. Two were left.
+
+**The daemon's autostart hook.** `jobs.on_submit_hook = ensure_worker` was set in `lifespan`. On shared hosting there is no systemd, so the application starting its own daemon is, in the words of the comment above `ensure_worker`, *the only way to have one at all* — and it was wired at precisely the point shared hosting does not reach. Verified by loading `fiskr.wsgi` exactly as Passenger does: the hook reads `None` before the first request, and `None` after it. Submitting a job from the application woke nothing, and a dead daemon stayed dead until a human pressed "restart". The assignment now happens at module import, where it costs nothing — no database, no process — and it is gone from `lifespan`, so there is one place, not two.
+
+**The repair of imports stuck in `PROCESSING`.** It fires after one hour; in production a PEP snapshot sat frozen for three days. It has moved to the worker daemon, which does start in production and is unique (flock), so it runs once whatever the number of web processes — and it now sits where it belongs, right beside the requeue of jobs killed by a brutal stop. A job put back in the queue without its snapshot leaves a list out of production with all its records in the database, which is exactly the observed state. It also runs every five minutes, not only at start: a snapshot can freeze *while* the daemon lives — the job dies, the snapshot stays — and waiting for the next restart is what cost three days.
+
+Not everything in `lifespan` is affected, and the difference is worth stating: `init_db` is covered, because `get_db` calls it lazily on the first request (checked: `SessionLocal` goes from unset to set with no `lifespan` in sight), and the engine cache has `_ensure_watchlist_cache` as its documented net. What has no path is what was fixed. The same sweep over every module looking for process-local state answering a user-visible question came back empty.
+
+### Fixed — twelve modals claimed `aria-modal="true"` and left the keyboard outside
+A modal that carries `aria-modal="true"` asserts that nothing else exists while it is open. Measured in a real browser, one modal at a time: **twelve out of twelve** left focus where it was — behind the dialog — and Tab walked straight back into the page underneath. For a mouse the modal was open; for a keyboard it had merely appeared.
+
+Three gestures, held in one place: focus enters on open, stays while the dialog is open, and returns where it came from on close. Entering means the first control that is *not* the close cross — a form modal opens on its first field, a reading modal on its own container so the dialog announces itself. Leaving means the element that opened it, and only if that element is still on the page: a dialog opened from a table row the refresh has since replaced has no "where it came from".
+
+**A modal closes one way.** Escape and the backdrop click used to add the `hidden` class directly, which is not what the cross does. `closeAlertModal` resets the current alert id; Escape left a stale one behind. `closeAuditModal` also clears an inline style. The close command is already declared in the markup — the cross carries it — so both now replay it rather than keeping a second list here that will drift.
+
+Two things the measurement caught that no error would have. `.modal` is `position: fixed`, so `offsetParent` is null even wide open: the first visibility test declared all twelve permanently closed and therefore never opened anything. And `[href]` alone matches the `<use href="#icon">` inside an SVG — it satisfies the selector and refuses focus, so two modals out of eleven stayed unreachable in silence. The code now *checks* that focus actually moved instead of assuming it.
+
+Dialogs also announce their own name now: `aria-labelledby` points at the heading already present in the markup, instead of a screen reader saying "dialog" twelve times.
+
+### Removed — a screen that had been replaced, and a rule written twice
+The **Mon Profil & Sécurité** modal did profile and password; the **Mon compte** tab does profile, password, MFA, absence and delegation, notifications and display preferences. Nothing had opened the modal since — but it was still there, still translated into six languages, still read by anyone trying to understand how a password gets changed. Removed with its form and its three orphaned translation keys, which the i18n guard flagged the moment the markup went.
+
+The backdrop click had two implementations too: `initA11y`, covering all twelve modals, and a `window.onclick` assignment covering four of them, closing them without their close command — and clobbering any other handler on the way. Removed; one rule, one place.
+
+A guard now states the general form: **no function in `app.js` may be unreachable**. It holds with no exception list, and it fails on the previous file, naming `openProfileModal`. Two more alongside it — every command in the markup resolves to a function that exists, and every id the code looks up is still in the markup. None of those three defects surfaces at runtime: the browser reports nothing, a missing function only throws on click, and `getElementById` simply returns `null`.
+
+### Fixed — seventeen commands the keyboard could not reach
+An element that *reacts* to a click must be reachable and triggerable without a mouse. `<button>` and `<a href>` are, natively; a `<li onclick>` or a `<div onclick>` is not — it is skipped by tabbing altogether. Counted on the rendered page: **344 clickable elements, 17 of them unreachable** — the eight modal close crosses, every sortable table header, the rows of the notification centre and of the home screen, the user badge in the sidebar.
+
+The stylesheet had already stated the intent for the crosses: `.close-modal` carried `background: none; border: none; padding: 0` — rules written for a button, applied to a `<span>`. Turning those eight spans into `<button type="button" aria-label="Fermer">` therefore changes not one pixel, and gives back what the markup had promised.
+
+Sorting was mouse-only on **every table in the product**: `<th>` is not a command as far as the browser is concerned. The headers now carry `tabindex="0"` and `role="button"`, and Enter or Space sorts. Space is intercepted only over a header — measured on a text field, `preventDefault` stays false, so typing a space still types a space.
+
+The generated rows are the harder half: the front end rebuilds its lists on every refresh, so marking once at load would not hold. One observer picks up each injected fragment and one delegation handles the key — never a listener per row. Cost measured on 800 injected rows: **3.3 ms, all 804 marked**. Re-counted afterwards: **17 unreachable → 1**, that one being the sidebar overlay, left out on purpose — Escape closes the drawer, and adding it to the tab order would only buy an empty stop.
+
+### Fixed — the mechanism that turned a markup slip into an accumulation
+The stray `</div>` was fixed last release; what made it *visible as four stacked screens* was not. `switchSubTab` turned panels off with a query **scoped** to the section and back on by **global** id, so a panel that had escaped its section could be lit and never extinguished.
+
+Both halves now query the section. A panel that exists globally but not in this section is no longer activated — it is reported: `console.error` naming the panel, the section, and what to check. A tab that does not answer is a defect you can find; a tab that lights up and stays lit is a defect that looks like a rendering bug.
+
+Searched across the whole file, function by function: this was the only place mixing the two scopes. Two guards keep it that way — one reads the body of `switchSubTab` and refuses the global form of the *assignment* (while leaving the diagnostic branch alone), the other checks every `switchSubTab('section', 'panel')` call in the HTML and the JS against where that panel actually lives in the markup.
+
+### Checked — two full sweeps of the interface, nothing found
+Both run against the real application in a real browser, screen by screen across all **35 sub-tabs**: **zero JavaScript errors** and **zero failing network requests**. Recorded here because a sweep that finds nothing is only worth something if it is written down — otherwise the same ground gets walked again next time, and the fact that it was once clean is lost.
+
 ### Added — a commissioning screen that checks *this* installation, on first start
 A fresh install starts silent. Nothing says that no list is in production — so screening will answer "no match" for ever without complaining — that the worker daemon is absent, or that the secrets are still the ones in the source code. Those three states lived in a startup WARNING, in a log nobody opens, or nowhere at all.
 

@@ -77,6 +77,51 @@ def _write_heartbeat(session) -> None:
     })
 
 
+def reparer_instantanes_bloques(session) -> dict:
+    """
+    Remet d'aplomb les imports restes en PROCESSING.
+
+    La reparation existait, testee, appelee depuis le `lifespan` de FastAPI —
+    c'est-a-dire jamais en production : sous Passenger, `a2wsgi.ASGIMiddleware`
+    ne construit qu'un scope `http` par requete et n'implemente pas le
+    protocole `lifespan`. Le demarrage FastAPI n'y tourne pas. Constate sur
+    l'installation reelle : un instantane PEP fige en PROCESSING depuis trois
+    jours, alors que la reparation se declenche au bout d'une heure.
+
+    Le demon travailleur, lui, demarre VRAIMENT en production — et il est
+    unique (flock), donc la reparation n'arrive qu'une fois quel que soit le
+    nombre de processus web. C'est ici, a cote de la reprise des jobs, que
+    cette reprise-la doit vivre : le job mort est remis en file, l'instantane
+    qu'il construisait doit l'etre aussi.
+
+    Ne leve jamais : une reprise ne doit pas empecher le demon de demarrer.
+    """
+    try:
+        from fiskr import api as api_module
+        return api_module._repair_stuck_snapshots(session)
+    except Exception as e:
+        logger.warning(f"Reparation des instantanes bloques impossible : {e}")
+        return {"repaired": 0, "failed": 0}
+
+
+def reprise(session) -> None:
+    """
+    LA REPRISE, au demarrage du demon : ce qu'un arret brutal a laisse en
+    plan. Les jobs tues repartent de zero (plafonnes par `attempts`), et les
+    instantanes qu'ils construisaient sont recomptes depuis leurs fiches
+    reelles — un job remis en file sans son instantane laisserait une liste
+    hors production avec toutes ses fiches en base.
+    """
+    requeued = jobs.requeue_stale(session, worker_present=True)
+    if requeued:
+        logger.info(f"Reprise : {requeued} job(s) interrompu(s) traites.")
+    bilan = reparer_instantanes_bloques(session)
+    if bilan.get("repaired") or bilan.get("failed"):
+        logger.warning(
+            f"Reprise : {bilan['repaired']} instantane(s) remis en production, "
+            f"{bilan['failed']} marque(s) en erreur (aucune fiche).")
+
+
 def _heartbeat_loop():
     """Trois battements : les lignes jobs RUNNING de ce demon (la reprise s'y
     fie), le reglage global (l'autostart de l'API s'y fie), et — toutes les
@@ -98,6 +143,13 @@ def _heartbeat_loop():
                 if repaired:
                     logger.warning(f"Réparation périodique : {repaired} job(s) "
                                    f"zombie(s) traités (battement de coeur périmé).")
+            if beats % 20 == 0:  # ~ toutes les 5 min
+                # Un instantane peut se figer PENDANT que ce demon vit : le job
+                # meurt, l'instantane reste. Attendre le redemarrage suivant,
+                # c'est ce qui a laisse trois jours une liste hors production.
+                # La cadence est lache a dessein : la reparation ne mord qu'au
+                # bout d'une heure, et la requete est un filtre sur un index.
+                reparer_instantanes_bloques(session)
         except Exception as e:
             logger.warning(f"Battement de coeur en echec : {e}")
             try:
@@ -174,10 +226,7 @@ def main() -> int:
 
     session = jobs._fresh_session()
     try:
-        # LA REPRISE : les jobs tues par le dernier arret repartent de zero
-        requeued = jobs.requeue_stale(session, worker_present=True)
-        if requeued:
-            logger.info(f"Reprise : {requeued} job(s) interrompu(s) traites.")
+        reprise(session)
         jobs.purge_old(session)
         _write_heartbeat(session)
     finally:
