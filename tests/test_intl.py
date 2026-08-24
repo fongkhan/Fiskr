@@ -315,4 +315,15 @@ def test_i18n_paragraphs_and_locales():
     # Locales par langue + dates localisees dans app.js
     assert 'zh: "zh-CN"' in i18n and 'ar: "ar-SA-u-nu-latn"' in i18n
     assert "function uiLocale()" in app_js
-    assert '"fr-FR"' not in app_js.replace('? window.fiskrI18n.locale() : "fr-FR"', "")
+    # La locale d'affichage vient d'i18n. Un repli reste nécessaire — i18n.js
+    # peut être absent ou en cours de chargement — mais il n'a qu'UNE place :
+    # la constante que `uiLocale` consomme. Ailleurs, une locale en dur fige
+    # les dates en français pour tout le monde.
+    #
+    # L'exemption précédente citait « ? window.fiskrI18n.locale() : "fr-FR" »,
+    # un texte qui n'a jamais existé dans app.js : la garde passait donc par
+    # accident, et le vrai repli — un appel récursif à `uiLocale` — dormait
+    # dessous.
+    assert app_js.count('"fr-FR"') == 1, (
+        "la locale de repli doit être écrite une seule fois (LOCALE_DE_REPLI)")
+    assert 'const LOCALE_DE_REPLI = "fr-FR";' in app_js

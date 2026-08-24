@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the helper written against silent empty tables was itself producing one
+On a compliance product, "no alert to handle" and "the server did not answer" must never look alike: read the second as the first and an analyst concludes there is nothing to do. The product knew this — a helper existed, `tableError`, with that reasoning written above it.
+
+Measured in a real browser with the API cut off **before the first byte**, so every loader genuinely ran against a dead network: **twelve screens out of fourteen said nothing at all.** Two causes, and the first is the instructive one.
+
+**`_tbodyOf` resolved its target with `getElementById`.** Callers pass a *selector* — `"#my-table"`. `getElementById("#my-table")` returns `null`, and all three helpers then returned without a word. So the function written *against* the silent empty table produced, itself, a silent empty table. Seven of the nine `tableError` calls were in that state, on the highest-traffic tables: snapshots, the reference list, the screening journal, the alert queues, the commissioning checks. It now accepts what callers actually pass — a selector, a bare id, or the element — and aims at the `<tbody>` even when handed the table.
+
+**Ten loaders never called a helper at all**: their `catch` held a `console.error` and nothing else. Sync reports, lots awaiting approval, batch campaigns, whitelist, anti-false-positive rules, the four KPI tables, accounts, sources and their schedule, learned equivalences, client quality — and the alert queue itself, which stayed on its skeleton rows, looking like a table loading for ever.
+
+Re-measured after the fix: **fourteen screens out of fourteen announce the failure**, and with the API working again, none announces an error that is not there, with zero JavaScript errors.
+
+### Fixed — a fallback that called itself, on every date in the product
+`uiLocale` read: return the i18n locale if available, otherwise **`uiLocale()`**. With `window.fiskrI18n` absent — i18n.js missing, slow, or blocked — the recursion ran to `RangeError: Maximum call stack size exceeded`. And that function is crossed by every date displayed anywhere: one missing resource would have taken down every date on every screen. A fallback that cannot fall back is not a fallback. Confirmed in the browser, then fixed; a guard now forbids the shape — a function whose ternary fallback calls itself with no argument changing — and the sweep found no other instance.
+
+The i18n guard that should have caught it had an exemption quoting `? window.fiskrI18n.locale() : "fr-FR"` — a piece of text that never existed in the file. It passed by accident, and the real fallback slept underneath. The fallback locale is now a single named constant, and that guard counts it: written once, nowhere else.
+
+Two existing guards earned their keep on this batch: one measured that ten of my new error rows announced the wrong number of columns, giving the real count from the markup for each; the other rejected a hard-coded locale.
+
 ### Added — "have all your clients been screened?", and the button that answers it
 That is the first question an inspection asks. The product could not answer it.
 

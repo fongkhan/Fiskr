@@ -259,7 +259,12 @@ async function chargerCouvertureDuCriblage() {
  }
  constat.textContent = data.phrase || "";
  constat.style.color = "var(--color-warning, #b8860b)";
- } catch (e) { console.error("Couverture fetch error:", e); }
+ } catch (e) {
+ // Un « Mesure en cours… » qui ne finit jamais laisse croire au calcul.
+ console.error("Couverture fetch error:", e);
+ constat.textContent = "Couverture indisponible : le serveur n'a pas répondu.";
+ constat.style.color = "var(--color-alert, #c62828)";
+ }
 }
 
 function remplirTypesDeListePourLookback() {
@@ -480,9 +485,23 @@ async function apiFetch(url, options = {}) {
 
 // ------------------ FORMATAGE DES DATES (fr-FR) ------------------
 
-// Locale d'affichage suivant la langue active (i18n), repli francais
+// Locale d'affichage suivant la langue active (i18n), repli français.
+//
+// Le repli s'appelait LUI-MÊME : sans `window.fiskrI18n` — i18n.js absent,
+// lent ou bloqué — la récursion partait jusqu'à « Maximum call stack size
+// exceeded ». Et `uiLocale` est traversée par tout affichage de date : une
+// seule ressource manquante faisait donc tomber chaque date de chaque écran.
+// Un repli qui ne peut pas replier n'est pas un repli.
+const LOCALE_DE_REPLI = "fr-FR";
+
 function uiLocale() {
- return (window.fiskrI18n && window.fiskrI18n.locale) ? window.fiskrI18n.locale() : uiLocale();
+ const i18n = window.fiskrI18n;
+ if (i18n && typeof i18n.locale === "function") {
+ try {
+ return i18n.locale() || LOCALE_DE_REPLI;
+ } catch (e) { /* i18n en cours de chargement : le repli suffit */ }
+ }
+ return LOCALE_DE_REPLI;
 }
 
 function formatDateTime(value) {
@@ -517,7 +536,22 @@ function relativeTime(value) {
 // ------------------ ÉTATS DE TABLES (chargement / vide) ------------------
 
 function _tbodyOf(target) {
- return typeof target === "string" ? document.getElementById(target) : target;
+ if (!target) return null;
+ if (typeof target !== "string") return target;
+ // Les appelants passent indifféremment un SÉLECTEUR (« #ma-table »), un
+ // identifiant nu, ou directement le <tbody>. `getElementById` ne comprend
+ // que le deuxième : sur les sept appels écrits en « # », il rendait `null`,
+ // et les trois secours sortaient sans un mot. Autrement dit, la fonction
+ // écrite CONTRE le tableau vide silencieux produisait, elle-même, un
+ // tableau vide silencieux — mesuré dans un navigateur, API coupée : douze
+ // écrans sur quatorze se taisaient.
+ const el = (target.startsWith("#") || target.includes(" "))
+  ? document.querySelector(target)
+  : document.getElementById(target);
+ if (!el) return null;
+ // Viser le <tbody> même quand on nous donne la table : c'est là que les
+ // lignes vont, et c'est ce que le nom de la variable promet.
+ return el.tagName === "TABLE" ? (el.tBodies[0] || el.createTBody()) : el;
 }
 
 // Lignes squelettes pendant un fetch
@@ -2365,6 +2399,7 @@ async function fetchSyncReports() {
  renderSyncReportsTable(reports);
  } catch (e) {
  console.error("Error fetching sync reports:", e);
+ tableError("#sync-reports-table", 5, "Historique des synchronisations indisponible.");
  }
 }
 
@@ -2464,7 +2499,11 @@ const CRON_SOURCE_KEYS = Object.fromEntries(
 async function fetchSyncConfig() {
  try {
  const response = await apiFetch("/api/sync/config");
- if (!response.ok) return;
+ if (!response.ok) {
+ tableError("#sources-table", 4, "Sources indisponibles.");
+ tableError("#cron-schedules-table", 5, "Planification indisponible.");
+ return;
+ }
  const cfg = await response.json();
  const info = document.getElementById("sync-schedule-info");
  const autoTxt = cfg.auto_enabled
@@ -2478,6 +2517,10 @@ async function fetchSyncConfig() {
  renderCronSchedules(cfg);
  } catch (e) {
  console.error("Error fetching sync config:", e);
+ // Un tableau de sources vide se lit « aucune source configurée » : sur un
+ // produit de conformité, c'est une conclusion, pas un écran de chargement.
+ tableError("#sources-table", 4, "Sources indisponibles.");
+ tableError("#cron-schedules-table", 5, "Planification indisponible.");
  }
 }
 
@@ -4340,6 +4383,7 @@ async function fetchUsersList() {
  renderUsersTable(registeredUsers);
  } catch (err) {
  console.error("Failed to fetch users list:", err);
+ tableError("#users-table", 8, "Liste des comptes indisponible.");
  }
 }
 
@@ -4986,6 +5030,7 @@ async function fetchPendingReviews() {
  }
  } catch (e) {
  console.error("Error fetching pending reviews:", e);
+ tableError("#review-pending-table", 9, "Lots en attente d'homologation indisponibles.");
  }
 }
 
@@ -6143,6 +6188,10 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  );
  } catch (e) {
  console.error("Error fetching alerts:", e);
+ // Sans cela, la file restait sur ses lignes squelettes : un tableau qui
+ // paraît charger pour toujours. Sur une file d'alertes, la lecture
+ // « rien à instruire » est la plus coûteuse de toutes.
+ tableError(`#${conf.table}`, 10, "File d'alertes indisponible.");
  }
 }
 
@@ -6434,6 +6483,7 @@ async function fetchWhitelist(page = null) {
  renderQueuePagination("whitelist-pagination", data.page, data.total, data.page_size, "fetchWhitelist");
  } catch (e) {
  console.error("Error fetching whitelist:", e);
+ tableError("#whitelist-table", 8, "Liste blanche indisponible.");
  }
 }
 
@@ -6609,6 +6659,10 @@ async function fetchKpis() {
  }
  } catch (e) {
  console.error("Error fetching KPIs:", e);
+ tableError("#kpi-lists-table", 2, "Indicateurs indisponibles.");
+ tableError("#kpi-syncs-table", 4, "Indicateurs indisponibles.");
+ tableError("#kpi-analysts-table", 3, "Indicateurs indisponibles.");
+ tableError("#kpi-fprules-table", 3, "Indicateurs indisponibles.");
  }
 }
 
@@ -7839,11 +7893,12 @@ async function fetchLearnedEquivalences() {
  try {
  const url = "/api/resources/learned" + (status ? `?status=${status}` : "");
  const response = await apiFetch(url);
- if (!response.ok) return;
+ if (!response.ok) { tableError("#mining-table", 8, "Équivalences indisponibles."); return; }
  miningState = await response.json();
  renderMining();
  } catch (e) {
  console.error("Error fetching learned equivalences:", e);
+ tableError("#mining-table", 8, "Équivalences indisponibles.");
  }
 }
 
@@ -8027,6 +8082,7 @@ async function fetchFpRules() {
  renderFpRulesTable();
  } catch (e) {
  console.error("Error fetching FP rules:", e);
+ tableError("#fprules-table", 6, "Règles anti-faux positifs indisponibles.");
  }
 }
 
@@ -9090,7 +9146,7 @@ async function fetchBatchCampaigns() {
  if (!tbody) return;
  try {
  const response = await apiFetch("/api/batch/campaigns", { silent: true });
- if (!response.ok) return;
+ if (!response.ok) { tableError(tbody, 10, "Campagnes indisponibles."); return; }
  const data = await response.json();
  const items = data.items || [];
  if (!items.length) {
@@ -9120,7 +9176,8 @@ async function fetchBatchCampaigns() {
  if (anyRunning && batchVisible) {
  _batchPollTimer = setTimeout(fetchBatchCampaigns, 4000);
  }
- } catch (e) { /* silencieux */ }
+ } catch (e) { console.error("Error fetching batch campaigns:", e);
+ tableError(tbody, 10, "Campagnes indisponibles."); }
 }
 
 async function launchBatchCampaign() {
@@ -10739,7 +10796,13 @@ async function fetchClientQuality() {
  fieldsEl.innerHTML = '<small style="color: var(--text-muted);">Analyse du référentiel…</small>';
  try {
  const response = await apiFetch("/api/quality/clients");
- if (!response.ok) { fieldsEl.innerHTML = ""; return; }
+ if (!response.ok) {
+ // Vider la carte laissait « Analyse du référentiel… » disparaître sans
+ // rien à la place : l'écran semblait avoir fini, et n'avoir rien trouvé.
+ fieldsEl.innerHTML = '<small style="color: var(--color-alert);">Contrôle qualité indisponible : le serveur n\'a pas répondu.</small>';
+ tableError("#quality-segments-table", 3, "Segments indisponibles.");
+ return;
+ }
  const data = await response.json();
  renderQualityThreshold(thresholdEl, data);
  if (!data.snapshot) {
@@ -10783,7 +10846,8 @@ async function fetchClientQuality() {
  }
  } catch (e) {
  console.error("Quality error:", e);
- fieldsEl.innerHTML = "";
+ fieldsEl.innerHTML = '<small style="color: var(--color-alert);">Contrôle qualité indisponible : le serveur n\'a pas répondu.</small>';
+ tableError("#quality-segments-table", 3, "Segments indisponibles.");
  }
 }
 
