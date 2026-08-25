@@ -154,11 +154,31 @@ existait donc, mais il ne portait que 12 % des cas : les tables ne connaissent
 qu'une part des noms de famille (« LOPEZ » oui, « GARCIA » non), là où la clé
 phonétique ne demande rien à personne.
 
-**Coût, mesuré sur 2 200 fiches réelles** : les clés émises passent de 1,19 à
-2,30 par fiche, mais elles se répartissent sur des seaux **plus nombreux et non
-plus gros** — le plus gros seau ne bouge pas (60 fiches). Les candidats à
-comparer par client passent de 2,5 à 4,3. Réglable (`blocking.phonetic_last`)
-pour un référentiel aux noms de famille très concentrés.
+**Coût, mesuré à l'échelle** — 300 000 fiches tirées *avec remise* de la
+distribution de noms réellement observée en production, donc à concentration
+réelle :
+
+| | sans la clé | avec la clé | écart |
+|---|---:|---:|---:|
+| clés par fiche | 1,15 | 2,25 | ×1,96 |
+| seaux distincts | 55 768 | 116 604 | ×2,09 |
+| **plus gros seau** | 1 754 | 1 907 | **+8,7 %** |
+| candidats par client | 134,9 | 177,5 | **+32 %** |
+| scoring par client | 8,75 ms | 11,51 ms | **+32 %** |
+| indexation | 22,5 µs/fiche | 33,7 µs/fiche | +50 % |
+
+Les clés supplémentaires se répartissent sur **deux fois plus de seaux** au lieu
+de grossir les existants : c'est pourquoi le plus gros seau ne bouge presque
+pas. Le coût réel est donc le scoring, linéaire dans le nombre de candidats —
++32 %. L'indexation, elle, ne se paie qu'au chargement du cache (28 s au lieu
+de 19 s sur 830 000 fiches).
+
+Une raison de fond à cette bonne tenue : dans le référentiel réel, les **noms
+de famille sont MOINS concentrés que les prénoms** — le 1 % le plus fréquent
+pèse 6,0 % des noms contre 13,4 % des prénoms. La clé ajoutée discrimine donc
+mieux que celle qui existait.
+
+Réglable (`blocking.phonetic_last`) si le criblage devenait trop lourd.
 
 **Conséquence sur les tables linguistiques** : elles apportaient une partie de
 ce pont, la clé phonétique l'absorbe. Ce qu'elles apportent encore se voit là

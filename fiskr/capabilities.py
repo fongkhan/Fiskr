@@ -225,11 +225,14 @@ CAPABILITY_CATALOG: Dict[str, Capability] = {
              "la rencontre tombe à 0,8 % avec une initiale et à 0 % sans "
              "prénom, tables linguistiques inactives ; à 12,7 % et 12,0 % "
              "avec les tables de prénoms ET de noms activées — elles ne "
-             "couvrent qu'une part des noms de famille. À l'inverse, "
-             "couper cette clé divise par deux le nombre de clés émises et "
-             "réduit d'autant le travail de comparaison — c'est le réglage à "
-             "regarder si un référentiel aux noms de famille très concentrés "
-             "rendait le criblage trop lourd.",
+             "couvrent qu'une part des noms de famille. À l'inverse, la clé "
+             "coûte : mesuré sur 300 000 fiches tirées de la distribution de "
+             "noms réellement observée en production, les candidats à comparer "
+             "par client passent de 135 à 178 (+32 %), et le scoring de 8,8 à "
+             "11,5 ms par client. Le plus gros seau, lui, ne bouge presque pas "
+             "(+8,7 %) : les clés supplémentaires se répartissent sur deux fois "
+             "plus de seaux au lieu de grossir les existants. C'est le réglage "
+             "à regarder si le criblage devenait trop lourd.",
         depends_on=(CAP_BLOCKING_PHONETIC,),
     ),
     CAP_BLOCKING_EQUIVALENCES: Capability(

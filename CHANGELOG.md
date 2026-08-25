@@ -24,7 +24,18 @@ The last case is the *ordinary* shape of a payment message, and a KYC base holds
 
 The reasoning was already written a few lines below, about the equivalence keys: *"looking only at the first word, a surname equivalence could never bridge to a listed record"*. The fix had been applied there and not to the neighbouring phonetic key. That bridge therefore existed — but it carried only 12 % of cases, because the tables know only a fraction of surnames ("LOPEZ" yes, "GARCIA" no), where a phonetic key asks nothing of anyone.
 
-**Cost, measured on 2 200 real records**: keys emitted go from 1,19 to 2,30 per record, but they spread over **more buckets rather than bigger ones** — the largest bucket does not move (60 records). Candidates to compare per client go from 2,5 to 4,3. It is a capability (`blocking.phonetic_last`), on by default, whose declared loss carries both measured figures: not comparing a pair is a compliance failure, comparing too much is a cost, and an operator with a heavily concentrated set of surnames can cut it knowing exactly what they lose.
+**Cost, measured at scale** — 300 000 records drawn *with replacement* from the name distribution actually observed in production, so at real concentration:
+
+| | without the key | with the key | change |
+|---|---:|---:|---:|
+| keys per record | 1,15 | 2,25 | ×1,96 |
+| distinct buckets | 55 768 | 116 604 | ×2,09 |
+| **largest bucket** | 1 754 | 1 907 | **+8,7 %** |
+| candidates per client | 134,9 | 177,5 | **+32 %** |
+| scoring per client | 8,75 ms | 11,51 ms | **+32 %** |
+| indexing | 22,5 µs/record | 33,7 µs/record | +50 % |
+
+The extra keys spread over **twice as many buckets** instead of enlarging the existing ones, which is why the largest bucket barely moves — and the largest bucket is what dictates a screening's worst case. The real cost is therefore the scoring, linear in the number of candidates: +32 %. Indexing is paid only when the cache loads (28 s instead of 19 s on 830 000 records). There is a reason this holds: in the real reference list, **surnames are LESS concentrated than given names** — the most frequent 1 % accounts for 6,0 % of surnames against 13,4 % of given names, so the added key discriminates better than the one already there. A test pins the structural property rather than the timings: the keys must spread, never concentrate. It is a capability (`blocking.phonetic_last`), on by default, whose declared loss carries both measured figures: not comparing a pair is a compliance failure, comparing too much is a cost, and an operator with a heavily concentrated set of surnames can cut it knowing exactly what they lose.
 
 **Two consequences worth stating.** First, the abjad limit moves: Arabic and Hebrew records now *meet* their Latin client, because the surname transliterates close enough to share a key — "سلمان" gives `slmn`, "Salman" gives SLMN. They still do not *score* above the cut-off (59 to 74, measured), so no alert comes out; but the pair is now compared, and visible in a backtest or a near-miss review. Second, the linguistic tables lose part of what they contributed: the surname bridge they used to provide is now provided by the key. What they still add shows where two spellings of one name do not sound alike — Chinese romanisations are the type case, "ZHANG" giving XNK and "TEOH" giving TH: 60,4 without the tables, 100,0 with. Four existing tests measured the tables' value through pairs that shared a surname; they now use pairs that do not, so they keep measuring what they claim to.
 

@@ -27,11 +27,14 @@ donc déjà, mais il ne portait que 12 % des cas : les tables ne connaissent
 qu'une part des noms de famille (« LOPEZ » oui, « GARCIA » non), là où la clé
 phonétique ne demande rien à personne.
 
-Coût, mesuré sur 2 200 fiches réelles : les clés émises passent de 1,19 à 2,30
-par fiche, mais elles se répartissent sur des seaux PLUS NOMBREUX et non plus
-gros — le plus gros seau ne bouge pas (60 fiches). Les candidats à comparer
-par client passent de 2,5 à 4,3. C'est réglable (`blocking.phonetic_last`)
-pour un référentiel aux noms de famille très concentrés.
+Coût, mesuré à l'échelle sur 300 000 fiches tirées de la distribution de noms
+réellement observée en production : les candidats à comparer par client passent
+de 135 à 178 (+32 %) et le scoring de 8,75 à 11,51 ms par client. Le plus gros
+seau, lui, ne bouge presque pas (+8,7 %) : les clés supplémentaires se
+répartissent sur deux fois plus de seaux au lieu de grossir les existants — les
+noms de famille sont moins concentrés que les prénoms dans le référentiel réel
+(6,0 % contre 13,4 % pour le 1 % le plus fréquent). Réglable
+(`blocking.phonetic_last`) si le criblage devenait trop lourd.
 """
 import pytest
 
@@ -109,6 +112,62 @@ def test_la_cle_du_dernier_mot_est_reglable():
         assert not _se_rencontrent(fiche, cli)
 
 
+def test_les_cles_ajoutees_se_repartissent_au_lieu_de_concentrer():
+    """
+    C'est la propriété qui rend le coût acceptable, et elle mérite d'être
+    tenue : la clé du nom de famille DOUBLE le nombre de clés émises, mais
+    elles se répartissent sur deux fois plus de seaux au lieu de grossir les
+    existants. Le plus gros seau — celui qui dicte le pire cas d'un criblage —
+    ne doit pas enfler.
+
+    Mesuré à l'échelle (300 000 fiches, distribution de noms réelle) : seaux
+    ×2,09, plus gros seau +8,7 %, candidats par client +32 %. Si une évolution
+    future faisait CONCENTRER ces clés au lieu de les répartir, le pire cas
+    exploserait sans que le nombre moyen de candidats ne bouge beaucoup — ce
+    test est là pour que cela ne passe pas inaperçu.
+    """
+    import collections
+    import random
+
+    prenoms = ["JEAN", "MARIA", "JOSE", "VLADIMIR", "ANN", "UWE", "MOHAMMAD",
+               "ELENA", "CARLOS", "PEDRO"]
+    familles = ["PLANT", "BOUSQUET", "NILSSON", "GARCIA", "LOPEZ", "SOTO",
+                "MARTIN", "DUPONT", "IVANOV", "SMITH"]
+
+    def mesure(couper):
+        alea = random.Random(3)
+        seaux = collections.Counter()
+        total = 0
+        # Les clés d'ÉQUIVALENCE sont coupées dans les deux mesures : elles
+        # portent déjà sur le dernier mot, et leur présence brouillerait ce que
+        # ce test isole — la répartition des clés PHONÉTIQUES.
+        actifs = {c for c, on in
+                  caps.defaults_for_channel(caps.CHANNEL_SCREENING).items() if on}
+        actifs = actifs - {caps.CAP_BLOCKING_EQUIVALENCES}
+        if couper:
+            actifs = actifs - {caps.CAP_BLOCKING_PHONETIC_LAST}
+        contexte = caps.use_context(caps.CHANNEL_SCREENING, actifs)
+        contexte.__enter__()
+        try:
+            for _ in range(4000):
+                fiche = _listee(f"{alea.choice(prenoms)} {alea.choice(familles)}")
+                cles = generate_blocking_keys(fiche, LAYOUT)
+                total += len(cles)
+                seaux.update(cles)
+        finally:
+            contexte.__exit__(None, None, None)
+        return total / 4000, len(seaux), max(seaux.values())
+
+    cles_sans, seaux_sans, gros_sans = mesure(couper=True)
+    cles_avec, seaux_avec, gros_avec = mesure(couper=False)
+
+    assert cles_avec > 1.8 * cles_sans, "la clé doit bien être émise"
+    assert seaux_avec >= 1.8 * seaux_sans, (
+        f"les clés doivent se RÉPARTIR : {seaux_sans} → {seaux_avec} seaux")
+    assert gros_avec <= 1.25 * gros_sans, (
+        f"le plus gros seau enfle trop : {gros_sans} → {gros_avec}")
+
+
 def test_la_capacite_annonce_ce_qu_elle_coute_et_ce_qu_elle_rapporte():
     """
     Une capacité dont la perte n'est pas décrite est un interrupteur qu'on
@@ -118,6 +177,9 @@ def test_la_capacite_annonce_ce_qu_elle_coute_et_ce_qu_elle_rapporte():
     assert "0,8 %" in perte and "12,7 %" in perte, (
         "la perte doit citer les DEUX configurations mesurées : sans les "
         "tables linguistiques, et avec")
+    assert "+32 %" in perte and "8,7 %" in perte, (
+        "elle doit aussi citer ce qu'elle COÛTE, mesuré à l'échelle : sans "
+        "cela l'exploitant n'a qu'un seul plateau de la balance")
     assert caps.CAPABILITY_CATALOG[caps.CAP_BLOCKING_PHONETIC_LAST].depends_on == (
         caps.CAP_BLOCKING_PHONETIC,)
 
