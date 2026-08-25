@@ -223,8 +223,12 @@ def _keys(entity):
     return generate_blocking_keys(entity, layout)
 
 
+# Noms de famille DIFFÉRENTS à dessein. Depuis qu'une fiche listée émet aussi
+# une clé phonétique sur son DERNIER mot, un « Dupont » commun les rapprocherait
+# de toute façon — et ces tests, dont le sujet est l'équivalence de PRÉNOM, ne
+# prouveraient plus rien.
 HENRI = {"entity_type": "I", "primary_name": "Henri DUPONT"}
-HARRY = {"client_type": "PP", "client_first_name": "Harry", "client_last_name": "Dupont"}
+HARRY = {"client_type": "PP", "client_first_name": "Harry", "client_last_name": "Lefevre"}
 
 
 def test_blocking_without_resources_never_pairs_henri_and_harry():
@@ -252,12 +256,23 @@ def test_blocking_bridges_on_the_surname_of_a_listed_record():
     listed = {"entity_type": "I", "primary_name": "Bashar Al-Assad"}
     client = {"client_type": "PP", "client_first_name": "Bachar",
               "client_last_name": "El Assad"}
+    # Depuis que la clé phonétique porte aussi sur le DERNIER mot, ces deux-là
+    # se rencontrent déjà sans aucune table : « Al-Assad » et « El Assad »
+    # partagent leur métaphone. C'est un gain, et il déplace ce que la table
+    # apporte ENCORE — elle reste indispensable là où les graphies ne se
+    # ressemblent pas à l'oreille.
     _activate(set())
-    assert not (_keys(listed) & _keys(client))
+    assert _keys(listed) & _keys(client)
+
     _activate({resources.FIELD_SURNAME})
     shared = _keys(listed) & _keys(client)
     assert shared, "le nom de famille doit rendre les deux fiches candidates"
-    assert all(k.endswith("_EQALASSAD") for k in shared)
+    assert any(k.endswith("_EQALASSAD") for k in shared), (
+        "la table doit ajouter SA clé, en plus de la clé phonétique")
+
+    # Ce que la table apporte ENCORE se lit dans les tests Henri/Harry
+    # ci-dessus : « Henri » et « Harry » ne se ressemblent pas à l'oreille
+    # (HNR contre HR), le métaphone ne les rapproche pas, la table si.
 
 
 def test_blocking_keys_are_additive():

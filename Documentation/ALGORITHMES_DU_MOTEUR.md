@@ -96,19 +96,114 @@ Le périmètre de translittération, lui, **n'a pas bougé d'un caractère** : l
 critère historique reste le seul juge de « faut-il translittérer ce
 caractère », le nommage d'écriture vient après.
 
-### Limite connue, mesurée, et consignée en test
-Le **han**, le **hangul** et l'**arabe** ne franchissent pas le blocking, et
-c'est indépendant du réglage :
+### Les écritures sans espace : frontières rétablies
 
-- la translittération d'une écriture syllabique rend **un seul mot** —
-  « 习近平 » → « XiJinPing », « 김정은 » → « GimJeongEun » — alors que la clé
-  phonétique est bâtie sur le premier mot, et que la liste porte « Xi
-  Jinping », premier mot « Xi » ;
-- l'arabe n'écrit pas les voyelles brèves : « محمد » rend « mhmd » là où la
-  liste porte « Mohammed ».
+Le **han** et le **hangul** ne franchissaient pas le blocking. La cause n'était
+pas la translittération elle-même, mais ce qu'elle laissait de côté : anyascii
+rend un fragment **capitalisé par signe** — « 习近平 » → `XiJinPing`, « 김정은 » →
+`GimJeongEun`. Les frontières de mots, absentes de la source, étaient donc bien
+présentes dans le résultat, mais **sous forme de majuscules et non d'espaces**.
+La clé phonétique étant bâtie sur le premier mot, `XIJINPING` ne pouvait pas
+rencontrer `XI`.
+
+Ce que cela coûtait, mesuré avant correction : « 习近平 » face au client
+« Xi Jinping » obtenait **89,5** de score, largement au-dessus du seuil de 75 —
+mais la paire n'était **jamais rapprochée**, donc jamais scorée. Un listé
+déclaré non listé sur un nom que le moteur aurait reconnu s'il avait pu le
+regarder.
+
+Les espaces sont désormais rétablis **à la translittération, signe par signe**,
+et seulement pour les écritures qui n'en écrivent pas (`han`, `hangul`). La
+décision se prend sur la **source** : un « McDonald » latin ou un « Vladimir »
+cyrillique, qui sortent aussi capitalisés, ne passent jamais par cette branche.
+Après correction, la même paire obtient **94,3** et se rencontre.
+
+La règle est partagée par la voie inconditionnelle (`strip_accents`, qui bat
+l'index des équivalences) et par la voie réglable
+(`strip_accents_for_matching`, qui compare) : les deux rendent la même chose
+toutes capacités actives — sans quoi une équivalence déclarée en han cesserait
+d'être trouvée. Coût : néant sur la voie rapide ASCII (0,08 µs/appel, 98,3 %
+du réel), 0,74 µs cache froid sur un nom han.
+
+### Une fiche listée se laisse rejoindre par son nom de famille
+
+Le blocking décide qui sera comparé à qui. Côté client les champs sont
+séparés : le criblage émet une clé phonétique pour le prénom **et** une pour le
+nom de famille. Côté liste, le nom complet tient dans **une seule chaîne**
+(« JOSE GARCIA LOPEZ ») et la clé n'était bâtie que sur le **premier mot** —
+c'est-à-dire, dans la quasi-totalité des cas, le prénom.
+
+Mesuré sur **393 fiches réelles** du référentiel en production, en fabriquant
+pour chacune le client correspondant :
+
+| écriture du client                  | tables inactives | tables actives |
+|-------------------------------------|------------------|----------------|
+| prénom + nom, identiques            | 100 %            | 100 %          |
+| prénom réduit à l'initiale (« J. ») | **0,8 %**        | **12,7 %**     |
+| prénom absent (nom de famille seul) | **0 %**          | **12,0 %**     |
+
+Le dernier cas est le cas **ordinaire** d'un message de paiement, et une base
+KYC en contient sa part. Le criblage rendait « aucune correspondance » sans
+avoir comparé quoi que ce soit.
+
+Le raisonnement était déjà écrit dans le même fichier, à propos des clés
+d'équivalence : *« en ne regardant que le premier mot, une équivalence de nom
+de famille ne pouvait jamais créer de pont vers une fiche listée »*. Le
+correctif y avait été appliqué, et pas à la clé phonétique voisine. Ce pont-là
+existait donc, mais il ne portait que 12 % des cas : les tables ne connaissent
+qu'une part des noms de famille (« LOPEZ » oui, « GARCIA » non), là où la clé
+phonétique ne demande rien à personne.
+
+**Coût, mesuré à l'échelle** — 300 000 fiches tirées *avec remise* de la
+distribution de noms réellement observée en production, donc à concentration
+réelle :
+
+| | sans la clé | avec la clé | écart |
+|---|---:|---:|---:|
+| clés par fiche | 1,15 | 2,25 | ×1,96 |
+| seaux distincts | 55 768 | 116 604 | ×2,09 |
+| **plus gros seau** | 1 754 | 1 907 | **+8,7 %** |
+| candidats par client | 134,9 | 177,5 | **+32 %** |
+| scoring par client | 8,75 ms | 11,51 ms | **+32 %** |
+| indexation | 22,5 µs/fiche | 33,7 µs/fiche | +50 % |
+
+Les clés supplémentaires se répartissent sur **deux fois plus de seaux** au lieu
+de grossir les existants : c'est pourquoi le plus gros seau ne bouge presque
+pas. Le coût réel est donc le scoring, linéaire dans le nombre de candidats —
++32 %. L'indexation, elle, ne se paie qu'au chargement du cache (28 s au lieu
+de 19 s sur 830 000 fiches).
+
+Une raison de fond à cette bonne tenue : dans le référentiel réel, les **noms
+de famille sont MOINS concentrés que les prénoms** — le 1 % le plus fréquent
+pèse 6,0 % des noms contre 13,4 % des prénoms. La clé ajoutée discrimine donc
+mieux que celle qui existait.
+
+Réglable (`blocking.phonetic_last`) si le criblage devenait trop lourd.
+
+**Conséquence sur les tables linguistiques** : elles apportaient une partie de
+ce pont, la clé phonétique l'absorbe. Ce qu'elles apportent encore se voit là
+où deux graphies d'un même nom **ne se ressemblent pas à l'oreille** — les
+romanisations chinoises en sont le cas type : « ZHANG » rend le métaphone XNK,
+« TEOH » rend TH. Mesuré sur cette paire : 60,4 sans les tables, 100,0 avec.
+
+### Limite connue, mesurée, et consignée en test
+
+L'**arabe** et l'**hébreu** ne franchissent toujours pas, et pour une raison
+d'une autre nature : les abjades n'écrivent pas les voyelles brèves. « محمد »
+rend `mhmd` là où la liste porte « Mohammed ». Il n'y a **aucune frontière à
+rétablir** — il manque des lettres, et un translittérateur caractère par
+caractère ne peut pas les inventer. Mesuré : 59 à 63 de score contre un client
+en latin, sous le seuil de 75, et les clés de blocage ne se croisent pas non
+plus. Corriger ce cas demanderait une romanisation propre à la langue, pas un
+réglage.
+
+Le **kanji japonais** échoue encore autrement : anyascii rend la lecture
+**chinoise** des signes — « 安倍晋三 » donne `An Bei Jin San` et non
+« Abe Shinzo ». Là encore, il faudrait un dictionnaire de lectures, pas une
+règle typographique.
 
 Le cyrillique et le grec, alphabétiques, franchissent sans difficulté. Le
-scoring rattrape une partie de ces cas quand les noms arrivent en champs
+scoring rattrape une partie des cas restants quand les noms arrivent en champs
 séparés ; le blocking, non.
 
 ### Voie rapide ASCII

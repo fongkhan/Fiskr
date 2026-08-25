@@ -48,7 +48,11 @@ def test_blocking_key_generation_watchlist():
     # Expected: FR_PP_JN, DE_PP_JN, FR_PP_AN, DE_PP_AN
     assert "FR_PP_JN" in keys
     assert "DE_PP_JN" in keys
-    assert len(phonetic_keys(keys)) == 4
+    # 6 et non 4 : une fiche listée émet désormais une clé phonétique sur son
+    # PREMIER et son DERNIER mot. Sans la seconde, un client dont le prénom est
+    # réduit à une initiale — ou absent — ne rencontrait jamais sa fiche
+    # (mesuré sur la production : 0,8 % et 0 % de rencontres).
+    assert len(phonetic_keys(keys)) == 6
 
 def test_blocking_key_generation_client():
     # Test generating standard blocking key for Client entity
@@ -73,7 +77,7 @@ def test_blocking_key_generation_client():
     # Expected combinations with PP, FR/DE and JN/AN/MLR phonetics
     assert "FR_PP_JN" in keys
     assert "DE_PP_JN" in keys
-    assert len(phonetic_keys(keys)) == 6
+    assert len(phonetic_keys(keys)) == 8
 
 def test_blocking_key_fallback():
     config = {
