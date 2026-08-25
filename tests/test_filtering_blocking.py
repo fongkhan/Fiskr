@@ -106,22 +106,42 @@ def test_les_ecritures_sans_espace_franchissent_desormais():
     assert _atteint(_partie("毛泽东"), _fiche("Mao Zedong"))
 
 
-def test_ce_qui_ne_franchit_toujours_pas_et_pourquoi():
+def test_les_abjades_se_rencontrent_mais_ne_marquent_pas():
     """
-    Limite RÉELLE qui subsiste, et qui n'a pas la même nature : les abjades
-    n'écrivent pas les voyelles brèves. « محمد » rend « mhmd » là où la liste
-    porte « Mohammed » — aucune frontière à rétablir, il manque des lettres.
-    Un translittérateur caractère par caractère ne peut pas les inventer :
-    corriger ce cas demanderait une romanisation propre à la langue, pas un
-    réglage.
+    La limite des abjades s'est DÉPLACÉE, et il faut dire où.
 
-    Même intention que la version précédente de ce test : que la limite soit
-    CONNUE plutôt que découverte en production, et qu'elle échoue bruyamment
-    si un futur lot la corrige.
+    Elles ne franchissaient pas le blocking. Depuis qu'une fiche listée émet
+    aussi une clé phonétique sur son dernier mot, elles le franchissent : le
+    nom de famille arabe se translittère assez près pour partager sa clé —
+    « سلمان » rend « slmn », « Salman » rend SLMN. La paire est donc désormais
+    RAPPROCHÉE, donc comparée, donc visible dans un cahier de tests ou une
+    revue de quasi-correspondances.
+
+    Ce qui subsiste est d'une autre nature, et c'est le SCORE : les abjades
+    n'écrivent pas les voyelles brèves, « محمد » rend « mhmd » là où la liste
+    porte « Mohammed ». Il n'y a aucune frontière à rétablir — il manque des
+    lettres, et un translittérateur caractère par caractère ne peut pas les
+    inventer. Mesuré : 59 à 74 selon les cas, sous le seuil de 75. Corriger
+    demanderait une romanisation propre à la langue, pas un réglage.
+
+    Même intention qu'avant : que la limite soit CONNUE plutôt que découverte
+    en production, et qu'elle échoue bruyamment si un futur lot la corrige.
     """
+    from fiskr.config import config as cfg_actif
+    from fiskr.quality import strip_accents_for_matching
+    from fiskr.scoring import compute_base_score
+
     sans_ressources()
-    assert not _atteint(_partie("محمد بن سلمان"), _fiche("Mohammed bin Salman"))
-    assert not _atteint(_partie("בנימין נתניהו"), _fiche("Benjamin Netanyahu"))
+    # Le rapprochement, lui, se fait maintenant.
+    assert _atteint(_partie("محمد بن سلمان"), _fiche("Mohammed bin Salman"))
+
+    # Mais le score reste sous le seuil : aucune alerte n'en sortira.
+    for arabe, latin in (("محمد بن سلمان", "Mohammed bin Salman"),
+                         ("أسامة بن لادن", "Oussama Ben Laden"),
+                         ("بנימין נתניהו", "Benjamin Netanyahu")):
+        score = compute_base_score(strip_accents_for_matching(arabe).upper(),
+                                   strip_accents_for_matching(latin).upper(), cfg_actif)
+        assert score < 75.0, f"{arabe} marque {score}"
 
 
 def test_the_engine_capabilities_now_reach_this_channel():
@@ -147,10 +167,13 @@ def test_the_equivalence_tables_now_bite_on_this_channel_too():
         {resources.FIELD_GIVEN_NAME: {"HENRY": ["Henri", "Harry"]}})
     resources.set_index(index)
     resources._context_cache = {"index": index, "fields": {resources.FIELD_GIVEN_NAME}}
-    assert _atteint(_partie("HARRY DUPONT"), _fiche("Henri Dupont"))
+    # Noms de famille DIFFÉRENTS : depuis qu'une fiche listée émet aussi une
+    # clé sur son dernier mot, un « Dupont » commun les rapprocherait de toute
+    # façon, et le test ne dirait plus rien des équivalences.
+    assert _atteint(_partie("HARRY LEFEVRE"), _fiche("Henri Dupont"))
     actifs = {c for c, on in defaults_for_channel(CHANNEL_FILTERING).items() if on}
     with use_context(CHANNEL_FILTERING, actifs - {caps.CAP_BLOCKING_EQUIVALENCES}):
-        assert not _atteint(_partie("HARRY DUPONT"), _fiche("Henri Dupont"))
+        assert not _atteint(_partie("HARRY LEFEVRE"), _fiche("Henri Dupont"))
 
 
 # ------------------ CE QUI EXISTAIT DOIT SURVIVRE ------------------

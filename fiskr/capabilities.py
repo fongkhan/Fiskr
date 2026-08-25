@@ -118,6 +118,7 @@ CAP_DIACRITICS = "diacritics"
 CAP_NOISE_WORDS = "noise_words"
 
 CAP_BLOCKING_PHONETIC = "blocking.phonetic"
+CAP_BLOCKING_PHONETIC_LAST = "blocking.phonetic_last"
 CAP_BLOCKING_EQUIVALENCES = "blocking.equivalences"
 CAP_BLOCKING_COUNTRY_WILDCARD = "blocking.country_wildcard"
 
@@ -211,6 +212,25 @@ CAPABILITY_CATALOG: Dict[str, Capability] = {
         loss="Deux graphies proches à l'oreille — « Shmit » et « Schmidt » — "
              "ne tombent plus dans le même seau et ne sont donc JAMAIS "
              "comparées : le scoring ne les voit même pas.",
+    ),
+    CAP_BLOCKING_PHONETIC_LAST: Capability(
+        label="Clé phonétique sur le DERNIER mot d'une fiche listée",
+        family=FAMILY_CANDIDATES,
+        loss="Une fiche listée ne se laisse plus rejoindre que par son PREMIER "
+             "mot — presque toujours le prénom. Un client dont le prénom est "
+             "réduit à une initiale, ou absent (nom de famille seul : le cas "
+             "ordinaire d'un message de paiement), ne rencontre plus sa fiche "
+             "et le criblage rend « aucune correspondance » sans avoir comparé "
+             "quoi que ce soit. Mesuré sur 393 fiches réelles de production : "
+             "la rencontre tombe à 0,8 % avec une initiale et à 0 % sans "
+             "prénom, tables linguistiques inactives ; à 12,7 % et 12,0 % "
+             "avec les tables de prénoms ET de noms activées — elles ne "
+             "couvrent qu'une part des noms de famille. À l'inverse, "
+             "couper cette clé divise par deux le nombre de clés émises et "
+             "réduit d'autant le travail de comparaison — c'est le réglage à "
+             "regarder si un référentiel aux noms de famille très concentrés "
+             "rendait le criblage trop lourd.",
+        depends_on=(CAP_BLOCKING_PHONETIC,),
     ),
     CAP_BLOCKING_EQUIVALENCES: Capability(
         label="Clés d'équivalence linguistique au blocking",

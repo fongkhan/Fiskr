@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a listed record could only be reached by its first name
+Blocking decides who gets compared to whom. On the client side the fields are separate: screening emits a phonetic key for the given name **and** one for the surname. On the list side, the full name sits in **one string** — "JOSE GARCIA LOPEZ" — and the key was built on the **first word** only, which is almost always the given name.
+
+Measured on **393 real records** from the production reference list, building the matching client for each:
+
+| how the client is written | tables off | tables on |
+|---|---|---|
+| given name + surname, identical | 100 % | 100 % |
+| given name as an initial ("J.") | **0,8 %** | **12,7 %** |
+| no given name (surname alone) | **0 %** | **12,0 %** |
+
+The last case is the *ordinary* shape of a payment message, and a KYC base holds its share. Screening answered "no match" without having compared anything — the worst state the product can be in, because it does not announce itself.
+
+The reasoning was already written a few lines below, about the equivalence keys: *"looking only at the first word, a surname equivalence could never bridge to a listed record"*. The fix had been applied there and not to the neighbouring phonetic key. That bridge therefore existed — but it carried only 12 % of cases, because the tables know only a fraction of surnames ("LOPEZ" yes, "GARCIA" no), where a phonetic key asks nothing of anyone.
+
+**Cost, measured on 2 200 real records**: keys emitted go from 1,19 to 2,30 per record, but they spread over **more buckets rather than bigger ones** — the largest bucket does not move (60 records). Candidates to compare per client go from 2,5 to 4,3. It is a capability (`blocking.phonetic_last`), on by default, whose declared loss carries both measured figures: not comparing a pair is a compliance failure, comparing too much is a cost, and an operator with a heavily concentrated set of surnames can cut it knowing exactly what they lose.
+
+**Two consequences worth stating.** First, the abjad limit moves: Arabic and Hebrew records now *meet* their Latin client, because the surname transliterates close enough to share a key — "سلمان" gives `slmn`, "Salman" gives SLMN. They still do not *score* above the cut-off (59 to 74, measured), so no alert comes out; but the pair is now compared, and visible in a backtest or a near-miss review. Second, the linguistic tables lose part of what they contributed: the surname bridge they used to provide is now provided by the key. What they still add shows where two spellings of one name do not sound alike — Chinese romanisations are the type case, "ZHANG" giving XNK and "TEOH" giving TH: 60,4 without the tables, 100,0 with. Four existing tests measured the tables' value through pairs that shared a surname; they now use pairs that do not, so they keep measuring what they claim to.
+
 ### Fixed — a listed person written in Han or Hangul never met their Latin client
 This was a **known** limit: the documentation described it, and a test pinned it, asking to be turned around the day a batch fixed it. This is that batch.
 

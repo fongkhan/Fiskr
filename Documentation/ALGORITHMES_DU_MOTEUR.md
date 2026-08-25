@@ -125,6 +125,47 @@ toutes capacités actives — sans quoi une équivalence déclarée en han cesse
 d'être trouvée. Coût : néant sur la voie rapide ASCII (0,08 µs/appel, 98,3 %
 du réel), 0,74 µs cache froid sur un nom han.
 
+### Une fiche listée se laisse rejoindre par son nom de famille
+
+Le blocking décide qui sera comparé à qui. Côté client les champs sont
+séparés : le criblage émet une clé phonétique pour le prénom **et** une pour le
+nom de famille. Côté liste, le nom complet tient dans **une seule chaîne**
+(« JOSE GARCIA LOPEZ ») et la clé n'était bâtie que sur le **premier mot** —
+c'est-à-dire, dans la quasi-totalité des cas, le prénom.
+
+Mesuré sur **393 fiches réelles** du référentiel en production, en fabriquant
+pour chacune le client correspondant :
+
+| écriture du client                  | tables inactives | tables actives |
+|-------------------------------------|------------------|----------------|
+| prénom + nom, identiques            | 100 %            | 100 %          |
+| prénom réduit à l'initiale (« J. ») | **0,8 %**        | **12,7 %**     |
+| prénom absent (nom de famille seul) | **0 %**          | **12,0 %**     |
+
+Le dernier cas est le cas **ordinaire** d'un message de paiement, et une base
+KYC en contient sa part. Le criblage rendait « aucune correspondance » sans
+avoir comparé quoi que ce soit.
+
+Le raisonnement était déjà écrit dans le même fichier, à propos des clés
+d'équivalence : *« en ne regardant que le premier mot, une équivalence de nom
+de famille ne pouvait jamais créer de pont vers une fiche listée »*. Le
+correctif y avait été appliqué, et pas à la clé phonétique voisine. Ce pont-là
+existait donc, mais il ne portait que 12 % des cas : les tables ne connaissent
+qu'une part des noms de famille (« LOPEZ » oui, « GARCIA » non), là où la clé
+phonétique ne demande rien à personne.
+
+**Coût, mesuré sur 2 200 fiches réelles** : les clés émises passent de 1,19 à
+2,30 par fiche, mais elles se répartissent sur des seaux **plus nombreux et non
+plus gros** — le plus gros seau ne bouge pas (60 fiches). Les candidats à
+comparer par client passent de 2,5 à 4,3. Réglable (`blocking.phonetic_last`)
+pour un référentiel aux noms de famille très concentrés.
+
+**Conséquence sur les tables linguistiques** : elles apportaient une partie de
+ce pont, la clé phonétique l'absorbe. Ce qu'elles apportent encore se voit là
+où deux graphies d'un même nom **ne se ressemblent pas à l'oreille** — les
+romanisations chinoises en sont le cas type : « ZHANG » rend le métaphone XNK,
+« TEOH » rend TH. Mesuré sur cette paire : 60,4 sans les tables, 100,0 avec.
+
 ### Limite connue, mesurée, et consignée en test
 
 L'**arabe** et l'**hébreu** ne franchissent toujours pas, et pour une raison

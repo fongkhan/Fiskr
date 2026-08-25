@@ -110,9 +110,13 @@ def test_cutting_the_blocking_key_makes_the_resource_tables_inert():
     """
     _index_henri()
     assert resources.current_context()["fields"]   # la table est bien active
+    # Noms de famille DIFFÉRENTS à dessein : depuis qu'une fiche listée émet
+    # aussi une clé phonétique sur son dernier mot, un « Dupont » commun
+    # suffirait à les rapprocher — et le test ne prouverait plus rien sur les
+    # équivalences, qui sont son sujet.
     with coupe(caps.CAP_BLOCKING_EQUIVALENCES):
         a = generate_blocking_keys({"entity_type": "I", "primary_name": "Henri Dupont"}, LAYOUT)
-        b = generate_blocking_keys({"entity_type": "I", "primary_name": "Harry Dupont"}, LAYOUT)
+        b = generate_blocking_keys({"entity_type": "I", "primary_name": "Harry Lefevre"}, LAYOUT)
         assert not (set(a) & set(b))
 
 

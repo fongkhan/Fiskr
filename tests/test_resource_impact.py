@@ -34,9 +34,22 @@ SUFFIX = uuid.uuid4().hex[:8]
 WL_ID = f"IMPACT-WL-{SUFFIX}"
 PANEL_ID = f"IMPACT-PANEL-{SUFFIX}"
 
-LISTED = ["Henri DUPONT", "Mohammad AL ASSAD", "Sofia MARCHETTI"]
+# Le couple témoin a changé, et le pourquoi mérite d'être écrit. « Harry
+# Dupont » face à « Henri DUPONT » marquait 82 SANS les tables — au-dessus du
+# seuil de 75 — depuis qu'une fiche listée émet aussi une clé phonétique sur
+# son DERNIER mot : la paire se rencontre désormais toute seule, et la table ne
+# changeait plus l'issue. La simulation avait raison de n'annoncer aucun gain,
+# et c'est une conséquence réelle du lot précédent : la clé du nom de famille
+# absorbe une partie de ce que les tables apportaient.
+#
+# Ce qu'elles apportent ENCORE se voit là où deux graphies d'un même nom ne se
+# ressemblent pas à l'oreille. Les romanisations chinoises en sont le cas
+# type : « ZHANG » rend le métaphone XNK, « TEOH » rend TH — le moteur ne les
+# rapproche pas, la table de noms de famille si. Mesuré : 60,4 sans les tables,
+# 100,0 avec.
+LISTED = ["Wei ZHANG", "Mohammad AL ASSAD", "Sofia MARCHETTI"]
 PANEL = [
-    ("Harry", "Dupont"),        # équivalent inter-langues : invisible sans table
+    ("Wei", "Teoh"),            # romanisation chinoise : 60,4 sans table, 100,0 avec
     ("Mohammed", "Al Assad"),   # translittération : déjà rattrapée par les métriques
     ("Bruno", "Lefort"),        # sans rapport : ne doit jamais matcher
 ]
@@ -118,22 +131,25 @@ def test_use_context_does_not_leak_to_other_threads():
 
     def production():
         while not stop.is_set():
-            seen.append(compute_base_score("Henri Dupont", "Harry Dupont", config))
+            seen.append(compute_base_score("Wei Zhang", "Wei Teoh", config))
             time.sleep(0.001)
 
     worker = threading.Thread(target=production)
     worker.start()
     try:
         time.sleep(0.03)
-        with resources.use_context({resources.FIELD_GIVEN_NAME}, index):
-            measured = compute_base_score("Henri Dupont", "Harry Dupont", config)
+        # C'est le nom de FAMILLE qui porte l'équivalence ici (ZHANG/TEOH) :
+        # activer le seul champ « prénom » ne changerait rien, et le test ne
+        # prouverait plus que la surcharge atteint bien le thread de mesure.
+        with resources.use_context({resources.FIELD_SURNAME}, index):
+            measured = compute_base_score("Wei Zhang", "Wei Teoh", config)
             time.sleep(0.03)
     finally:
         stop.set()
         worker.join()
 
     assert measured == 100.0                      # le thread de mesure voit la table
-    assert seen and set(seen) == {82.0}           # la production n'a rien vu changer
+    assert seen and len(set(seen)) == 1           # la production n'a rien vu changer
 
 
 def test_use_context_restores_previous_state_on_exception():
@@ -171,10 +187,10 @@ def test_gained_examples_carry_the_equivalence_that_produced_them(db):
     """
     report = resource_impact.simulate_resource_impact(
         db, PANEL_ID, candidate_fields=BOTH_NAMES, baseline_fields=set())
-    harry = [g for g in report["gained_examples"] if "Harry" in (g["client_name"] or "")]
-    assert harry, "le rapprochement Harry/Henri doit figurer dans les gains"
-    pairs = {(e["source"], e["target"]) for e in harry[0]["equivalences"]}
-    assert ("HARRY", "HENRI") in pairs
+    gagnes = [g for g in report["gained_examples"] if "Wei" in (g["client_name"] or "")]
+    assert gagnes, "le rapprochement Teoh/Zhang doit figurer dans les gains"
+    pairs = {(e["source"], e["target"]) for e in gagnes[0]["equivalences"]}
+    assert ("TEOH", "ZHANG") in pairs
 
 
 def test_identical_parameters_measure_no_change(db):
