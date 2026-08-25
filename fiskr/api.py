@@ -128,6 +128,7 @@ from fiskr.settings import (
     SETTING_WHITELIST_EXPIRY_NOTIFIED, get_setting,
     quality_min_score_pct, SETTING_QUALITY_MIN_SCORE, SETTING_QUALITY_LAST,
     retention_policy, SETTING_RETENTION, RETENTION_FAMILIES, RETENTION_MIN_DAYS,
+    DUREE_LEGALE_JOURS, retention_sous_la_duree_legale,
     score_thresholds, scoring_config_with_thresholds, SETTING_SCORE_THRESHOLDS,
     investigation_checklist, SETTING_CHECKLIST, DEFAULT_CHECKLIST,
     resource_fields, resources_active, SETTING_RESOURCE_FIELDS, DEFAULT_RESOURCE_FIELDS,
@@ -1935,8 +1936,13 @@ async def get_retention(
     """Politique de retention effective + volumes qui seraient purges
     aujourd'hui (previsualisation sans aucune ecriture). Le journal des
     actions d'administration n'est jamais purge."""
-    return {"policy": retention_policy(db), "preview": preview_retention(db),
-            "min_days": RETENTION_MIN_DAYS}
+    politique = retention_policy(db)
+    return {"policy": politique, "preview": preview_retention(db),
+            "min_days": RETENTION_MIN_DAYS,
+            # Le minimum technique et le plancher legal ne se ressemblent pas :
+            # l'ecran doit pouvoir montrer les deux, et dire lequel est franchi.
+            "duree_legale_jours": DUREE_LEGALE_JOURS,
+            "sous_la_duree_legale": retention_sous_la_duree_legale(politique)}
 
 @app.put("/api/settings/retention")
 async def update_retention_settings(
@@ -1978,13 +1984,26 @@ async def update_retention_settings(
     if not provided:
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     set_setting(db, SETTING_RETENTION, merged, updated_by=admin_user["username"])
+    # Ce que la loi impose n'est pas ce que le garde-fou technique verifie. Un
+    # reglage sous le plancher de L561-12 reste ACCEPTE — une installation hors
+    # de France peut relever d'une autre regle, et c'est la decision de
+    # l'exploitant — mais il ne peut plus se prendre sans le savoir : il est
+    # annonce dans la reponse et trace au journal d'administration, ou un
+    # controle le retrouvera avec sa date et son auteur.
+    ecarts = retention_sous_la_duree_legale(merged)
     delta = {k: v for k, v in merged.items() if before.get(k) != v}
     if delta:
         log_admin_action(db, admin_user["username"], "SETTINGS_UPDATED", target="retention",
-                         before={k: before.get(k) for k in delta}, after=delta)
+                         before={k: before.get(k) for k in delta}, after=delta,
+                         detail=(" ; ".join(e["message"] for e in ecarts) or None))
         db.commit()
+    if ecarts:
+        logger.warning("Rétention sous la durée légale (%s) : %s",
+                       admin_user["username"], " ; ".join(e["message"] for e in ecarts))
     return {"message": "Politique de rétention mise à jour.",
-            "policy": retention_policy(db), "preview": preview_retention(db)}
+            "policy": retention_policy(db), "preview": preview_retention(db),
+            "duree_legale_jours": DUREE_LEGALE_JOURS,
+            "avertissements": [e["message"] for e in ecarts]}
 
 # ------------------ DELEGATION D'ABSENCE ------------------
 
@@ -12550,6 +12569,28 @@ async def download_whitelist_evidence(
     if not file_path.exists() or WHITELIST_EVIDENCE_DIR.resolve() not in file_path.resolve().parents:
         raise HTTPException(status_code=404, detail="Pièce justificative introuvable.")
     return FileResponse(str(file_path), filename=pair.evidence_file_name or file_path.name)
+
+@app.get("/api/screening/couverture")
+async def couverture_du_criblage_endpoint(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Combien de clients du referentiel n'ont JAMAIS ete cribles.
+
+    « Tous vos clients ont-ils ete cribles ? » est la premiere question d'un
+    controle, et le produit ne savait pas y repondre : importer un referentiel
+    clients declenche un controle de completude, pas un criblage, et le
+    re-criblage automatique se declenche quand une LISTE change — jamais quand
+    des CLIENTS arrivent. Un referentiel fraichement importe restait donc
+    entier hors du criblage sans que rien ne le signale.
+
+    Lu en base a chaque appel : c'est un fait, pas un compteur a entretenir.
+    """
+    from fiskr.couverture import couverture_du_criblage, phrase_de_couverture
+    mesure = couverture_du_criblage(db)
+    return {**mesure, "phrase": phrase_de_couverture(mesure)}
+
 
 @app.post("/api/rescreen/run")
 async def run_manual_rescreen(

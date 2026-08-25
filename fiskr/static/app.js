@@ -225,6 +225,91 @@ function onWatchlistFieldChange() {
 }
 
 // Options des selects de filtre « Liste » (valeur UNKNOWN = enregistrements sans type)
+// ------------------ COUVERTURE DU CRIBLAGE & LOOKBACK ------------------
+
+// « Tous vos clients ont-ils été criblés ? » est la première question d'un
+// contrôle. Le produit ne savait pas y répondre : importer un référentiel
+// clients déclenche un contrôle de complétude, pas un criblage, et le
+// re-criblage automatique se déclenche quand une LISTE change — jamais quand
+// des CLIENTS arrivent.
+//
+// L'action qui répare, le lookback, existait dans l'API (POST
+// /api/rescreen/run) sans le moindre bouton : la seule opération capable de
+// cribler un référentiel fraîchement importé n'était atteignable qu'en
+// appelant l'API à la main. La mesure et l'action sont ici au même endroit —
+// constater sans pouvoir agir n'aide personne.
+
+async function chargerCouvertureDuCriblage() {
+ const constat = document.getElementById("couverture-constat");
+ if (!constat) return;
+ remplirTypesDeListePourLookback();
+ try {
+ const response = await apiFetch("/api/screening/couverture", { silent: true });
+ if (!response.ok) { constat.textContent = "Couverture indisponible."; return; }
+ const data = await response.json();
+ if (data.sans_referentiel) {
+  constat.textContent = "Aucun référentiel clients en production : rien à cribler pour l'instant.";
+  constat.style.color = "var(--text-muted)";
+  return;
+ }
+ if (!data.jamais_cribles) {
+  constat.textContent = `Les ${data.clients} clients du référentiel ont tous été criblés au moins une fois.`;
+  constat.style.color = "var(--color-success, #2e7d32)";
+  return;
+ }
+ constat.textContent = data.phrase || "";
+ constat.style.color = "var(--color-warning, #b8860b)";
+ } catch (e) {
+ // Un « Mesure en cours… » qui ne finit jamais laisse croire au calcul.
+ console.error("Couverture fetch error:", e);
+ constat.textContent = "Couverture indisponible : le serveur n'a pas répondu.";
+ constat.style.color = "var(--color-alert, #c62828)";
+ }
+}
+
+function remplirTypesDeListePourLookback() {
+ const select = document.getElementById("lookback-file-type");
+ // Une seule fois : le contenu ne dépend pas de l'état, seulement du
+ // vocabulaire partagé des types de liste.
+ if (!select || select.options.length > 1) return;
+ for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
+ if (value === "CLIENT_BASE") continue;
+ const option = document.createElement("option");
+ option.value = value;
+ option.textContent = label;
+ select.appendChild(option);
+ }
+}
+
+async function lancerLookback() {
+ const fileType = document.getElementById("lookback-file-type")?.value || "";
+ const portee = fileType ? listTypeLabel(fileType) : "toutes les listes en production";
+ const ok = await confirmDialog(
+ `Lancer un lookback sur ${portee} ? Tout le référentiel clients sera confronté `
+ + `aux fiches listées : c'est l'opération la plus lourde du produit. Elle part en `
+ + `tâche de fond — vous pouvez continuer à travailler.`);
+ if (!ok) return;
+ try {
+ const response = await apiFetch("/api/rescreen/run", {
+ method: "POST", headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ file_type: fileType || null }),
+ });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "lookback refusé."), "error");
+ return;
+ }
+ showToast(data.message || "Lookback lancé.", "success");
+ // Même chemin que les autres travaux lourds : la pastille suit la
+ // progression, et la couverture se relit quand le job se termine —
+ // c'est précisément le chiffre que le lookback vient de changer.
+ onOperationDone(data.job_token, () => chargerCouvertureDuCriblage());
+ } catch (e) {
+ console.error("Lookback error:", e);
+ showToast("Erreur réseau au lancement du lookback.", "error");
+ }
+}
+
 function listTypeFilterOptions(withUnknown) {
  let html = '<option value="">Toutes les listes</option>';
  for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
@@ -400,9 +485,23 @@ async function apiFetch(url, options = {}) {
 
 // ------------------ FORMATAGE DES DATES (fr-FR) ------------------
 
-// Locale d'affichage suivant la langue active (i18n), repli francais
+// Locale d'affichage suivant la langue active (i18n), repli français.
+//
+// Le repli s'appelait LUI-MÊME : sans `window.fiskrI18n` — i18n.js absent,
+// lent ou bloqué — la récursion partait jusqu'à « Maximum call stack size
+// exceeded ». Et `uiLocale` est traversée par tout affichage de date : une
+// seule ressource manquante faisait donc tomber chaque date de chaque écran.
+// Un repli qui ne peut pas replier n'est pas un repli.
+const LOCALE_DE_REPLI = "fr-FR";
+
 function uiLocale() {
- return (window.fiskrI18n && window.fiskrI18n.locale) ? window.fiskrI18n.locale() : uiLocale();
+ const i18n = window.fiskrI18n;
+ if (i18n && typeof i18n.locale === "function") {
+ try {
+ return i18n.locale() || LOCALE_DE_REPLI;
+ } catch (e) { /* i18n en cours de chargement : le repli suffit */ }
+ }
+ return LOCALE_DE_REPLI;
 }
 
 function formatDateTime(value) {
@@ -437,7 +536,22 @@ function relativeTime(value) {
 // ------------------ ÉTATS DE TABLES (chargement / vide) ------------------
 
 function _tbodyOf(target) {
- return typeof target === "string" ? document.getElementById(target) : target;
+ if (!target) return null;
+ if (typeof target !== "string") return target;
+ // Les appelants passent indifféremment un SÉLECTEUR (« #ma-table »), un
+ // identifiant nu, ou directement le <tbody>. `getElementById` ne comprend
+ // que le deuxième : sur les sept appels écrits en « # », il rendait `null`,
+ // et les trois secours sortaient sans un mot. Autrement dit, la fonction
+ // écrite CONTRE le tableau vide silencieux produisait, elle-même, un
+ // tableau vide silencieux — mesuré dans un navigateur, API coupée : douze
+ // écrans sur quatorze se taisaient.
+ const el = (target.startsWith("#") || target.includes(" "))
+  ? document.querySelector(target)
+  : document.getElementById(target);
+ if (!el) return null;
+ // Viser le <tbody> même quand on nous donne la table : c'est là que les
+ // lignes vont, et c'est ce que le nom de la variable promet.
+ return el.tagName === "TABLE" ? (el.tBodies[0] || el.createTBody()) : el;
 }
 
 // Lignes squelettes pendant un fetch
@@ -1524,6 +1638,7 @@ function switchSubTab(sectionId, subTabId) {
  initActivityReportDates();
  } else if (subTabId === "screening-batch") {
  fetchBatchCampaigns();
+ chargerCouvertureDuCriblage();
  } else if (subTabId === "audit-screening") {
  fetchAuditHistory(1);
  } else if (subTabId === "audit-admin") {
@@ -2284,6 +2399,7 @@ async function fetchSyncReports() {
  renderSyncReportsTable(reports);
  } catch (e) {
  console.error("Error fetching sync reports:", e);
+ tableError("#sync-reports-table", 5, "Historique des synchronisations indisponible.");
  }
 }
 
@@ -2383,7 +2499,11 @@ const CRON_SOURCE_KEYS = Object.fromEntries(
 async function fetchSyncConfig() {
  try {
  const response = await apiFetch("/api/sync/config");
- if (!response.ok) return;
+ if (!response.ok) {
+ tableError("#sources-table", 4, "Sources indisponibles.");
+ tableError("#cron-schedules-table", 5, "Planification indisponible.");
+ return;
+ }
  const cfg = await response.json();
  const info = document.getElementById("sync-schedule-info");
  const autoTxt = cfg.auto_enabled
@@ -2397,6 +2517,10 @@ async function fetchSyncConfig() {
  renderCronSchedules(cfg);
  } catch (e) {
  console.error("Error fetching sync config:", e);
+ // Un tableau de sources vide se lit « aucune source configurée » : sur un
+ // produit de conformité, c'est une conclusion, pas un écran de chargement.
+ tableError("#sources-table", 4, "Sources indisponibles.");
+ tableError("#cron-schedules-table", 5, "Planification indisponible.");
  }
 }
 
@@ -4259,6 +4383,7 @@ async function fetchUsersList() {
  renderUsersTable(registeredUsers);
  } catch (err) {
  console.error("Failed to fetch users list:", err);
+ tableError("#users-table", 8, "Liste des comptes indisponible.");
  }
 }
 
@@ -4905,6 +5030,7 @@ async function fetchPendingReviews() {
  }
  } catch (e) {
  console.error("Error fetching pending reviews:", e);
+ tableError("#review-pending-table", 9, "Lots en attente d'homologation indisponibles.");
  }
 }
 
@@ -6062,6 +6188,10 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  );
  } catch (e) {
  console.error("Error fetching alerts:", e);
+ // Sans cela, la file restait sur ses lignes squelettes : un tableau qui
+ // paraît charger pour toujours. Sur une file d'alertes, la lecture
+ // « rien à instruire » est la plus coûteuse de toutes.
+ tableError(`#${conf.table}`, 10, "File d'alertes indisponible.");
  }
 }
 
@@ -6353,6 +6483,7 @@ async function fetchWhitelist(page = null) {
  renderQueuePagination("whitelist-pagination", data.page, data.total, data.page_size, "fetchWhitelist");
  } catch (e) {
  console.error("Error fetching whitelist:", e);
+ tableError("#whitelist-table", 8, "Liste blanche indisponible.");
  }
 }
 
@@ -6528,6 +6659,10 @@ async function fetchKpis() {
  }
  } catch (e) {
  console.error("Error fetching KPIs:", e);
+ tableError("#kpi-lists-table", 2, "Indicateurs indisponibles.");
+ tableError("#kpi-syncs-table", 4, "Indicateurs indisponibles.");
+ tableError("#kpi-analysts-table", 3, "Indicateurs indisponibles.");
+ tableError("#kpi-fprules-table", 3, "Indicateurs indisponibles.");
  }
 }
 
@@ -7758,11 +7893,12 @@ async function fetchLearnedEquivalences() {
  try {
  const url = "/api/resources/learned" + (status ? `?status=${status}` : "");
  const response = await apiFetch(url);
- if (!response.ok) return;
+ if (!response.ok) { tableError("#mining-table", 8, "Équivalences indisponibles."); return; }
  miningState = await response.json();
  renderMining();
  } catch (e) {
  console.error("Error fetching learned equivalences:", e);
+ tableError("#mining-table", 8, "Équivalences indisponibles.");
  }
 }
 
@@ -7946,6 +8082,7 @@ async function fetchFpRules() {
  renderFpRulesTable();
  } catch (e) {
  console.error("Error fetching FP rules:", e);
+ tableError("#fprules-table", 6, "Règles anti-faux positifs indisponibles.");
  }
 }
 
@@ -9009,7 +9146,7 @@ async function fetchBatchCampaigns() {
  if (!tbody) return;
  try {
  const response = await apiFetch("/api/batch/campaigns", { silent: true });
- if (!response.ok) return;
+ if (!response.ok) { tableError(tbody, 10, "Campagnes indisponibles."); return; }
  const data = await response.json();
  const items = data.items || [];
  if (!items.length) {
@@ -9039,7 +9176,8 @@ async function fetchBatchCampaigns() {
  if (anyRunning && batchVisible) {
  _batchPollTimer = setTimeout(fetchBatchCampaigns, 4000);
  }
- } catch (e) { /* silencieux */ }
+ } catch (e) { console.error("Error fetching batch campaigns:", e);
+ tableError(tbody, 10, "Campagnes indisponibles."); }
 }
 
 async function launchBatchCampaign() {
@@ -10363,7 +10501,29 @@ async function fetchRetentionSettings() {
  const archiveEl = document.getElementById("retention-archive");
  if (archiveEl) archiveEl.checked = policy.archive !== false;
  renderRetentionPreview(data.preview || {});
+ renderRetentionLegal(data.sous_la_duree_legale, data.duree_legale_jours);
  } catch (e) { console.error("Retention fetch error:", e); }
+}
+
+// Le minimum technique (30 jours) et le plancher légal (cinq ans, L561-12 du
+// Code monétaire et financier) ne se ressemblent pas : le premier empêche de
+// vider la base par mégarde, le second dit combien de temps la preuve doit
+// exister. Régler le journal de criblage sur 31 jours était accepté sans un
+// mot — et un mois plus tard la preuve n'existait plus. On ne l'interdit pas :
+// on refuse seulement que le choix se fasse sans le savoir.
+function renderRetentionLegal(ecarts, planchers) {
+ const el = document.getElementById("retention-legal");
+ if (!el) return;
+ const liste = Array.isArray(ecarts) ? ecarts : [];
+ if (!liste.length) {
+ el.classList.add("hidden");
+ el.textContent = "";
+ return;
+ }
+ el.classList.remove("hidden");
+ el.textContent = "Conservation sous la durée légale — "
+  + liste.map(e => e.message || `${e.famille} : ${e.jours} j`).join(" ")
+  + ` Le réglage reste possible, mais il est tracé au journal d'administration.`;
 }
 
 function renderRetentionPreview(preview) {
@@ -10398,8 +10558,14 @@ async function saveRetentionSettings() {
  showToast("Erreur : " + (data.detail || "Réglage refusé."), "error");
  return;
  }
+ const alertes = data.avertissements || [];
+ if (alertes.length) {
+ showToast(alertes.join(" ") + " Réglage enregistré et tracé au journal.", "warning");
+ } else {
  showToast(data.message || "Politique de rétention mise à jour.", "success");
+ }
  renderRetentionPreview(data.preview || {});
+ fetchRetentionSettings();
  } catch (e) { console.error("Retention save error:", e); }
 }
 
@@ -10630,7 +10796,13 @@ async function fetchClientQuality() {
  fieldsEl.innerHTML = '<small style="color: var(--text-muted);">Analyse du référentiel…</small>';
  try {
  const response = await apiFetch("/api/quality/clients");
- if (!response.ok) { fieldsEl.innerHTML = ""; return; }
+ if (!response.ok) {
+ // Vider la carte laissait « Analyse du référentiel… » disparaître sans
+ // rien à la place : l'écran semblait avoir fini, et n'avoir rien trouvé.
+ fieldsEl.innerHTML = '<small style="color: var(--color-alert);">Contrôle qualité indisponible : le serveur n\'a pas répondu.</small>';
+ tableError("#quality-segments-table", 3, "Segments indisponibles.");
+ return;
+ }
  const data = await response.json();
  renderQualityThreshold(thresholdEl, data);
  if (!data.snapshot) {
@@ -10674,7 +10846,8 @@ async function fetchClientQuality() {
  }
  } catch (e) {
  console.error("Quality error:", e);
- fieldsEl.innerHTML = "";
+ fieldsEl.innerHTML = '<small style="color: var(--color-alert);">Contrôle qualité indisponible : le serveur n\'a pas répondu.</small>';
+ tableError("#quality-segments-table", 3, "Segments indisponibles.");
  }
 }
 

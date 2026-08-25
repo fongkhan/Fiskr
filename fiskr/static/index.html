@@ -1329,6 +1329,23 @@
  </div>
 
  <div id="sub-sec-screening-batch" class="sub-tab-content hidden">
+ <!-- Couverture + lookback : la mesure et l'action au même endroit. Le
+      lookback existait dans l'API (POST /api/rescreen/run) sans le moindre
+      bouton — la seule opération qui crible un référentiel fraîchement
+      importé n'était atteignable qu'en appelant l'API à la main. -->
+ <div class="card">
+ <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-shield"></use></svg> Couverture du criblage</h2>
+ <p class="section-desc">Importer un référentiel clients ne les crible pas : c'est une mise à jour de liste (re-criblage delta, automatique) ou un lookback qui le fait. Cette carte dit combien de clients n'ont encore aucune décision à leur nom au journal de criblage.</p>
+ <p id="couverture-constat" class="section-desc" role="status" style="margin-bottom: 0.75rem;">Mesure en cours…</p>
+ <div class="filter-bar">
+ <select id="lookback-file-type" aria-label="Restreindre le lookback à un type de liste" style="flex: 0 1 260px;">
+ <option value="">Toutes les listes en production</option>
+ </select>
+ <button class="btn btn-sm btn-primary" onclick="lancerLookback()"><svg class="ui-icon" aria-hidden="true"><use href="#i-clock"></use></svg> Lancer un lookback</button>
+ <button class="btn btn-sm btn-secondary" onclick="chargerCouvertureDuCriblage()">Recalculer</button>
+ </div>
+ <small style="color: var(--text-muted); display: block; margin-top: 0.5rem;">Le lookback confronte tout le référentiel clients aux listes en production. C'est l'opération la plus lourde du produit : elle part en tâche de fond et se suit dans les opérations en cours.</small>
+ </div>
  <div class="card">
  <h2>Campagnes de Criblage Batch (serveur)</h2>
  <p class="section-desc">Un fichier CSV de clients (colonnes <code>CLIENT_BASE</code>) est criblé côté serveur en tâche de fond, avec les <strong>mêmes garanties que le temps réel</strong> : quality gate, liste blanche, règles anti-faux positifs, journal d'audit immuable et alertes. Les fichiers déposés par un moniteur de transfert (CFT/SFTP) dans l'inbox surveillée (<code>batch.inbox_dir</code>) apparaissent ici automatiquement.</p>
@@ -2474,7 +2491,8 @@
  Archiver avant purge (JSON Lines dans <code>retention_archive/</code>, à externaliser par l'exploitation)
  </label>
  </div>
- <p id="retention-preview" class="section-desc" style="margin: 0.5rem 0 1rem;"></p>
+ <p id="retention-preview" class="section-desc" style="margin: 0.5rem 0 0.5rem;"></p>
+ <p id="retention-legal" class="section-desc hidden" role="status" style="margin: 0 0 1rem; color: var(--color-warning, #b8860b);"></p>
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
  <button class="btn btn-primary" onclick="saveRetentionSettings()">Enregistrer la politique</button>
  <button class="btn btn-secondary" onclick="runRetentionNow()"><svg class="ui-icon" aria-hidden="true"><use href="#i-trash"></use></svg> Purger maintenant…</button>

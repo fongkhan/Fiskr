@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the helper written against silent empty tables was itself producing one
+On a compliance product, "no alert to handle" and "the server did not answer" must never look alike: read the second as the first and an analyst concludes there is nothing to do. The product knew this — a helper existed, `tableError`, with that reasoning written above it.
+
+Measured in a real browser with the API cut off **before the first byte**, so every loader genuinely ran against a dead network: **twelve screens out of fourteen said nothing at all.** Two causes, and the first is the instructive one.
+
+**`_tbodyOf` resolved its target with `getElementById`.** Callers pass a *selector* — `"#my-table"`. `getElementById("#my-table")` returns `null`, and all three helpers then returned without a word. So the function written *against* the silent empty table produced, itself, a silent empty table. Seven of the nine `tableError` calls were in that state, on the highest-traffic tables: snapshots, the reference list, the screening journal, the alert queues, the commissioning checks. It now accepts what callers actually pass — a selector, a bare id, or the element — and aims at the `<tbody>` even when handed the table.
+
+**Ten loaders never called a helper at all**: their `catch` held a `console.error` and nothing else. Sync reports, lots awaiting approval, batch campaigns, whitelist, anti-false-positive rules, the four KPI tables, accounts, sources and their schedule, learned equivalences, client quality — and the alert queue itself, which stayed on its skeleton rows, looking like a table loading for ever.
+
+Re-measured after the fix: **fourteen screens out of fourteen announce the failure**, and with the API working again, none announces an error that is not there, with zero JavaScript errors.
+
+### Fixed — a fallback that called itself, on every date in the product
+`uiLocale` read: return the i18n locale if available, otherwise **`uiLocale()`**. With `window.fiskrI18n` absent — i18n.js missing, slow, or blocked — the recursion ran to `RangeError: Maximum call stack size exceeded`. And that function is crossed by every date displayed anywhere: one missing resource would have taken down every date on every screen. A fallback that cannot fall back is not a fallback. Confirmed in the browser, then fixed; a guard now forbids the shape — a function whose ternary fallback calls itself with no argument changing — and the sweep found no other instance.
+
+The i18n guard that should have caught it had an exemption quoting `? window.fiskrI18n.locale() : "fr-FR"` — a piece of text that never existed in the file. It passed by accident, and the real fallback slept underneath. The fallback locale is now a single named constant, and that guard counts it: written once, nowhere else.
+
+Two existing guards earned their keep on this batch: one measured that ten of my new error rows announced the wrong number of columns, giving the real count from the markup for each; the other rejected a hard-coded locale.
+
+### Added — "have all your clients been screened?", and the button that answers it
+That is the first question an inspection asks. The product could not answer it.
+
+Importing a client base triggers a **completeness check**, not a screening. Automatic re-screening fires when a **list** changes (`rescreen_after_snapshot_change`) — never when **clients** arrive. A freshly imported client base therefore sat entirely outside screening until a list moved or someone ran a lookback, and nothing anywhere said so: no screen, no counter, no message on import.
+
+Worse: the action that repairs it — the lookback — existed in the API (`POST /api/rescreen/run`) **with no button at all**. The only operation capable of screening a freshly imported client base was reachable only by calling the API by hand. Measuring without being able to act helps nobody, so the measurement and the action now live on the same card, in Screening → Batch: how many clients still have no decision in their name, a list-type selector, and a **Launch a lookback** button. It follows the same path as every other heavy job — the pill tracks it, and when it ends the coverage figure is re-read, since that is exactly the number the lookback just changed.
+
+**What the measure says, and what it does not.** It answers "has this client ever been screened?", by looking for a trace in the immutable screening journal — a plain question the database can answer plainly. It does *not* claim to answer "has this client been screened against the list in production today". After a promotion, re-screening compares the client base only to **new or modified** records — that is what makes it tenable — and writes an audit row only for matches. A clean client leaves no dated trace of that pass. Counting traces carrying today's hash would report "nobody is covered" the day after every promotion: that would be false, and a false indicator is worse than none.
+
+Measured cost: 20 000 clients, 10 000 of them without a trace — **0,01 s**. The planner resolves the correlated subquery as an anti-join rather than probing the index client by client. The cap stays as a net, not a necessity, and when it bites the measure *says so* instead of returning a number that would look exact.
+
+The commissioning screen carries the same figure, through the same function — one wording, not two that would drift.
+
+### Fixed — four commissioning links pointed at screens that do not exist
+`#clients` twice, `settings-retention`, `screening-rescreen`: all four added by me in the last two batches, all pointing nowhere. A commissioning point that links into the void is worse than one with no link — it promises a remedy and opens a blank page.
+
+The new guard derives from the **output** rather than the source text: it walks the real report and checks each link against the ids actually present in the markup. A link can be passed by keyword or by position, and a guard reading the source misses half the cases — which is precisely how these four got through.
+
+### Fixed — thirty days is not five years, and only the thirty was written down
+`RETENTION_MIN_DAYS` is 30. That is a **technical** guard: it stops someone emptying the database by accident. Article **L561-12 of the French Code monétaire et financier** requires **five years** of retention for the documents and information relating to transactions and the business relationship — which, in Fiskr, means the proof that screening happened and what it decided (the screening journal), and the handling of an alert with its justification (closed alerts).
+
+The two do not resemble each other, and only the first existed anywhere in the code. An administrator could therefore set the screening journal to 31 days: accepted without a word, and a month later the proof was gone. That is a defect nobody sees on the day it is made — only on the day an inspector asks — and it does not repair: destroyed evidence cannot be reconstituted.
+
+The floor is now **named**, and derived rather than repeated — one function answers "is this policy below the legal floor?", and settings, commissioning and purge all ask it. The distinction between evidential families (screening journal, closed alerts) and operational ones (sync reports, batch campaigns) is explicit: imposing five years on the latter would be an invented requirement.
+
+What this is **not** is a prohibition. An installation outside France may fall under a different rule, and that is the operator's decision. What is refused is the choice being made *without knowing*:
+
+- the settings API returns the legal floor alongside the technical minimum, and the specific gaps, so the screen shows both and says which one is crossed;
+- the setting is accepted and **recorded in the administration journal with the article named** — an inspection two years later can find who shortened retention, when, and by how much;
+- the commissioning screen carries the point as a **Warning**, because a policy is changed one day and lived with for years: the warning at the moment of setting is not enough on its own;
+- and the purge itself writes into the journal that what it destroyed was below the legal floor. It does not interrupt — that would be deciding for the operator without giving them any way to act — but it no longer passes unnoticed.
+
 ### Fixed — the complete map of the API was public, and the health probe cried wolf permanently
 An inventory of every route in the application, following each one's full dependency chain — a guard can be posted by a closure, so the check descends the whole tree rather than reading the first level. Of 189 routes, six answer an anonymous visitor, and all six should: the login page and its POST (you cannot require being logged in to log in), the root redirect, the favicon, and the supervision probe. That inventory is now a test: a route added without a guard fails it by name.
 

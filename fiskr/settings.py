@@ -131,7 +131,62 @@ DEFAULT_CHECKLIST = [
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
 RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_campaigns")
-RETENTION_MIN_DAYS = 30  # garde-fou : jamais moins de 30 jours quand une purge est activee
+RETENTION_MIN_DAYS = 30  # garde-fou TECHNIQUE : jamais moins de 30 jours quand une purge est activee
+
+# Le garde-fou de 30 jours est technique — il empeche de vider la base par
+# inadvertance. Il ne dit RIEN de l'obligation, et les deux ne se ressemblent
+# pas : l'article L561-12 du Code monetaire et financier impose de conserver
+# CINQ ANS les documents et informations relatifs aux operations et a la
+# relation d'affaires. Pour Fiskr, cela couvre la preuve que le criblage a eu
+# lieu et ce qu'il a decide (journal de criblage) et le traitement des alertes
+# avec sa justification (alertes cloturees).
+#
+# Un administrateur pouvait donc regler le journal de criblage sur 31 jours :
+# accepte sans un mot, et un mois plus tard la preuve n'existe plus. Ce
+# plancher-la est desormais NOMME. Il n'interdit pas — une installation hors
+# de France peut relever d'une autre regle, et c'est la decision de
+# l'exploitant — mais il ne laisse plus le choix se faire sans le savoir :
+# l'API l'annonce, le journal d'administration le trace, l'ecran de mise en
+# service le rappelle et chaque purge concernee le redit.
+DUREE_LEGALE_JOURS = 5 * 365  # 1825 — L561-12 CMF
+
+# Familles qui portent la preuve opposable. Les deux autres (rapports de
+# synchronisation, campagnes batch) sont de l'exploitation : utiles, non
+# probantes.
+RETENTION_FAMILLES_PROBANTES = ("audit_trail", "closed_alerts")
+
+_LIBELLE_FAMILLE = {
+    "audit_trail": "journal de criblage",
+    "closed_alerts": "alertes cloturees",
+}
+
+
+def retention_sous_la_duree_legale(policy: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Familles probantes dont la purge est activee EN DESSOUS du plancher legal.
+
+    Derive de la politique, jamais recopie : une famille ajoutee a
+    RETENTION_FAMILLES_PROBANTES est couverte partout ou cette fonction est
+    appelee (reglages, mise en service, purge).
+    """
+    ecarts = []
+    for famille in RETENTION_FAMILLES_PROBANTES:
+        try:
+            jours = int(policy.get(famille) or 0)
+        except (TypeError, ValueError):
+            continue
+        if 0 < jours < DUREE_LEGALE_JOURS:
+            ecarts.append({
+                "famille": famille,
+                "libelle": _LIBELLE_FAMILLE.get(famille, famille),
+                "jours": jours,
+                "plancher_legal": DUREE_LEGALE_JOURS,
+                "message": (
+                    f"{_LIBELLE_FAMILLE.get(famille, famille)} : purge à {jours} jours, "
+                    f"alors que l'article L561-12 du Code monétaire et financier "
+                    f"impose {DUREE_LEGALE_JOURS} jours (cinq ans) de conservation."),
+            })
+    return ecarts
 DEFAULT_RETENTION = {"audit_trail": 0, "closed_alerts": 0, "sync_reports": 0,
                      "batch_campaigns": 0, "cron": "30 2 * * *", "archive": True}
 # Activation par defaut de CHAQUE etape notifiable, derivee du catalogue
