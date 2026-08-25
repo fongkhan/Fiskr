@@ -94,7 +94,7 @@ from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
     require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
     validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN,
-    generate_totp_secret, verify_totp, totp_provisioning_uri
+    generate_totp_secret, verify_totp, totp_provisioning_uri, require_admin_or_auditor
 )
 from fiskr.settings import (
     require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
@@ -1863,7 +1863,7 @@ async def update_own_profile(
 @app.get("/api/users")
 async def list_users(
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """Lists all user accounts (Admin only)."""
     users = db.query(User).order_by(User.id.asc()).all()
@@ -1896,7 +1896,7 @@ async def get_admin_log(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """Journal des actions d'administration (utilisateurs, reglages, purges,
     revocations) — append-only, admin uniquement."""
@@ -1931,7 +1931,7 @@ class RetentionSettingsUpdate(BaseModel):
 @app.get("/api/admin/retention")
 async def get_retention(
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """Politique de retention effective + volumes qui seraient purges
     aujourd'hui (previsualisation sans aucune ecriture). Le journal des
@@ -2323,7 +2323,7 @@ class ConfigImportRequest(BaseModel):
 @app.get("/api/admin/config/export")
 async def export_app_config(
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """
     Export JSON des reglages a chaud (portabilite entre environnements :
@@ -2590,7 +2590,7 @@ async def create_api_key(
 @app.get("/api/apikeys")
 async def list_api_keys(
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """Liste des cles d'API (prefixes seulement, jamais les cles completes)."""
     rows = db.query(ApiKey).order_by(ApiKey.created_at.desc()).all()
@@ -10430,7 +10430,7 @@ async def list_notification_log(
     status_filter: Optional[str] = Query(None, alias="status"),
     event_key: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """Journal des envois : repond a « le mail est-il parti ? » sans fouiller
     les logs serveur. Filtrable par statut et par evenement — le filtre porte
@@ -10589,7 +10589,7 @@ async def flush_notification_digest(
 @app.get("/api/setup/status")
 async def get_setup_status(
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """
     Ce que CETTE installation a encore a regler, constate a l'instant.
@@ -11470,7 +11470,7 @@ async def hook_client_upsert(
 @app.get("/api/hooks/stats")
 async def get_hook_stats(
     db: Session = Depends(get_db),
-    admin_user: Dict[str, Any] = Depends(require_admin)
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
 ):
     """
     Supervision des webhooks entrants : volumes par endpoint et par appelant,

@@ -1321,6 +1321,11 @@ async function checkAuthUser() {
  const roles = userRoles(currentUser);
  const isAdmin = roles.includes("admin");
  const isReviewer = isAdmin || roles.includes("reviewer");
+ // « auditor » : lecture seule intégrale (contrôleur externe). Le serveur lui
+ // ouvre les pièces d'audit en LECTURE et lui refuse toute écriture. Ici, on
+ // n'ouvre donc que les surfaces sans commande : montrer une carte de réglages
+ // à qui ne peut rien enregistrer serait offrir un bouton qui ne fait rien.
+ const isAuditor = roles.includes("auditor");
  const userEl = document.getElementById("sidebar-username");
  const roleEl = document.getElementById("sidebar-role");
  const navUsersItem = document.getElementById("nav-item-users");
@@ -1330,7 +1335,7 @@ async function checkAuthUser() {
  userEl.title = `Connecté en tant que @${data.user.username}`;
  }
  if (roleEl) {
- const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité", blocking: "Paramétrage Blocking", rules: "Règles Faux Positifs" };
+ const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité", blocking: "Paramétrage Blocking", rules: "Règles Faux Positifs", auditor: "Auditeur (lecture seule)" };
  roleEl.textContent = roles.map(r => labels[r] || r).join(" / ") || "Analyste Conformité";
  }
  if (navUsersItem) {
@@ -1340,8 +1345,11 @@ async function checkAuthUser() {
  const navSettingsItem = document.getElementById("nav-item-settings");
  if (navSettingsItem) navSettingsItem.classList.toggle("hidden", !isAdmin);
  // Journal des actions d'administration (sous-onglet Audit, admin)
+ // Le journal d'administration est la première pièce qu'un contrôleur
+ // demande — qui a changé quoi, quand. C'est une lecture pure : aucune
+ // commande dans cet écran.
  const adminLogBtn = document.getElementById("sub-btn-audit-admin");
- if (adminLogBtn) adminLogBtn.classList.toggle("hidden", !isAdmin);
+ if (adminLogBtn) adminLogBtn.classList.toggle("hidden", !(isAdmin || isAuditor));
  // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
  const settingsCard = document.getElementById("review-settings-card");
  if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);

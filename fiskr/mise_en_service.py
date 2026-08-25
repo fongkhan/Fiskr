@@ -226,7 +226,25 @@ def _seuils(db) -> Dict[str, Any]:
 
 # ------------------------------------------------------------ Exploitation
 
-def _smtp() -> Dict[str, Any]:
+# Nombre d'envois récents examinés. Assez pour distinguer un incident isolé
+# d'une panne installée, assez peu pour que la requête reste une lecture d'index.
+_DERNIERS_ENVOIS_EXAMINES = 20
+
+
+def _smtp(db) -> Dict[str, Any]:
+    """
+    Trois états se ressemblent et n'ont pas les mêmes conséquences : SMTP
+    **configuré**, SMTP **joignable**, courriels **réellement partis**.
+
+    Ce contrôle disait le premier et s'arrêtait là, en signalant honnêtement
+    que « configuré ne veut pas dire joignable » — mais le produit CONNAÎT la
+    réponse au troisième : chaque notification laisse une ligne dans son
+    journal, avec son statut et son erreur. Elle n'était lue par personne.
+
+    Constaté sur une installation réelle : toutes les notifications échouaient
+    depuis des jours (« Connection unexpectedly closed: timed out »), l'écran
+    affichait « Serveur configuré », et l'exploitant l'a appris autrement.
+    """
     hote = (os.getenv("SMTP_HOST") or "").strip()
     if not hote:
         return _controle(
@@ -236,11 +254,44 @@ def _smtp() -> Dict[str, Any]:
             "synchronisation d'une source ».",
             "Renseignez SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD et "
             "SMTP_FROM dans .env. Le suivi dans l'application continue de "
-            "fonctionner sans, mais personne n'est prévenu.")
+            "fonctionner sans, mais personne n'est prévenu.",
+            "#settings/settings-integrations")
+
+    from fiskr.database import NotificationDelivery
+    recents = db.query(NotificationDelivery).order_by(
+        NotificationDelivery.created_at.desc(),
+        NotificationDelivery.id.desc()).limit(_DERNIERS_ENVOIS_EXAMINES).all()
+    tentatives = [r for r in recents if r.status in ("SENT", "FAILED")]
+    echecs = [r for r in tentatives if r.status == "FAILED"]
+
+    if not tentatives:
+        return _controle(
+            "smtp", "Exploitation", "Envoi des courriels", OK,
+            f"Serveur configuré ({hote}). Aucun envoi encore tenté : configuré "
+            f"ne veut pas dire joignable — utilisez la sonde pour ouvrir une "
+            f"vraie connexion.",
+            lien="#settings/settings-integrations")
+
+    if not echecs:
+        return _controle(
+            "smtp", "Exploitation", "Envoi des courriels", OK,
+            f"Serveur configuré ({hote}) et {len(tentatives)} envoi(s) récent(s) "
+            f"aboutis.",
+            lien="#settings/settings-integrations")
+
+    motif = (echecs[0].error or "").strip().splitlines()[0][:160] if echecs[0].error else "sans détail"
+    tous = len(echecs) == len(tentatives)
     return _controle(
-        "smtp", "Exploitation", "Envoi des courriels", OK,
-        f"Serveur configuré ({hote}). Configuré ne veut pas dire joignable : "
-        f"utilisez la sonde pour ouvrir une vraie connexion.")
+        "smtp", "Exploitation", "Envoi des courriels", ATTENTION,
+        f"{len(echecs)} échec(s) sur les {len(tentatives)} derniers envois"
+        + (" — AUCUN ne part" if tous else "") + f". Dernière erreur : {motif}. "
+        f"Le criblage et les alertes continuent ; ce qui manque, c'est le fait "
+        f"que quelqu'un soit prévenu — y compris pour un échec de "
+        f"synchronisation de source.",
+        "Vérifiez SMTP_HOST/PORT/USER/PASSWORD dans .env, puis lancez la sonde "
+        "pour ouvrir une vraie connexion. Le journal des envois donne l'erreur "
+        "exacte de chaque tentative.",
+        "#settings/settings-integrations")
 
 
 def _comptes(db) -> Dict[str, Any]:
@@ -315,7 +366,10 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
         return _controle(
             "couverture", "Criblage", "Couverture du criblage", A_FAIRE,
             "Aucun référentiel clients en production : rien à cribler pour "
-            "l'instant.", lien="#watchlist-mgmt/watchlist-import")
+            "l'instant.",
+            "Importez une base clients (CLIENT_BASE) depuis l'écran Imports. "
+            "Le criblage n'a rien à comparer tant qu'elle manque.",
+            "#watchlist-mgmt/watchlist-import")
     if not mesure["jamais_cribles"]:
         return _controle(
             "couverture", "Criblage", "Couverture du criblage", OK,
@@ -332,8 +386,9 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
 
 _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
                    _sources_automatiques, _homologation, _referentiel_clients,
-                   _seuils, _comptes, _conservation, _couverture_du_criblage)
-_CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _smtp, _url_publique)
+                   _seuils, _comptes, _conservation, _couverture_du_criblage,
+                   _smtp)
+_CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
 
 
 def etat_de_mise_en_service(db) -> Dict[str, Any]:

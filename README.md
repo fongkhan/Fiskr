@@ -299,7 +299,15 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Interface en 6 langues** (français, anglais, allemand, espagnol, chinois, arabe) : moteur i18n maison sans dépendance (`i18n.js`), sélecteur de langue dans le header et sur la page de connexion, persistance locale, traduction du contenu dynamique en continu (MutationObserver) et **passage complet en RTL pour l'arabe**. Couverture : libellés, tableaux, formulaires, **tous les paragraphes descriptifs**, chaînes composées (pagination, compteurs) et **dates/nombres localisés** selon la langue active. Toute chaîne non traduite retombe sur le français.
 * **Délégation d'absence** : pendant une absence déclarée (carte 🌴 des Paramètres ou admin), les assignations d'alertes sont redirigées vers le délégué et les alertes ouvertes peuvent lui être réassignées immédiatement — chaque mouvement tracé.
 * **Seuils de score à chaud** (`PUT /api/settings/scoring`, admin) : cut-off global et surcharges par liste modifiables sans redémarrage, appliqués au criblage et au filtrage transactionnel.
-* **Rôle auditeur lecture seule** (`auditor`, exclusif) : accès intégral en consultation, toute écriture refusée (403) — pour un contrôleur externe, en session comme par clé d'API.
+* **Rôle auditeur lecture seule** (`auditor`, exclusif) : accès intégral en
+  consultation, toute écriture refusée (403) — pour un contrôleur externe, en
+  session comme par clé d'API. « Intégral » inclut les pièces du dossier de
+  contrôle : **journal d'administration**, journal des notifications, politique
+  de rétention, comptes, clés d'API (préfixes seuls), statistiques de webhooks,
+  export des réglages et écran de mise en service. Huit de ces lectures
+  exigeaient l'administrateur ; elles sont ouvertes à l'auditeur, l'écriture
+  restant fermée par deux verrous indépendants (la garde de chaque route, et le
+  refus général de toute méthode mutante).
 * **Messages d'API multilingues** : les champs `detail`/`message` des réponses JSON sont traduits selon l'en-tête `Accept-Language` (EN/DE/ES/ZH/AR, catalogue + gabarits pour les messages à variables, repli français) — les toasts d'erreur suivent la langue de l'interface de bout en bout.
 * **Dossier d'investigation** (`GET /api/alerts/{id}/casefile`, bouton 📁 de la modale d'alerte) : alerte, arbre de décision, historique, pièces jointes, contexte client, relations et règle des 50 % — avec une **checklist d'instruction paramétrable** (chaque coche tracée dans l'historique append-only) et un **dossier imprimable** (→ PDF) à remettre au régulateur.
 * **Simulation d'impact des seuils** (`POST /api/settings/scoring/simulate`) : rejeu du journal d'audit des N derniers jours avec les seuils candidats — alertes en plus/en moins par liste, sans aucune écriture — le réglage des cut-offs devient piloté par les données.
@@ -711,7 +719,7 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète — **1 499 fonctions de test** réparties sur 152
+Exécutez la suite complète — **1 511 fonctions de test** réparties sur 153
 fichiers — avec pytest :
 ```bash
 python -m pytest

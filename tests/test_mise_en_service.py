@@ -148,12 +148,95 @@ def test_le_premier_demarrage_est_une_base_vide(client):
 
 # ------------------------------------------------ configuré n'est pas joignable
 
-def test_un_smtp_declare_n_est_pas_annonce_comme_joignable(monkeypatch):
+def test_un_smtp_declare_n_est_pas_annonce_comme_joignable(monkeypatch, journal_vide):
+    """Sans le moindre envoi tenté, il n'y a rien d'autre à dire que « configuré »."""
     monkeypatch.setenv("SMTP_HOST", "smtp.exemple.test")
-    controle = mes._smtp()
+    controle = mes._smtp(journal_vide)
     assert controle["etat"] == mes.OK
     assert "joignable" in controle["constat"], (
         "le relevé doit dire qu'il constate une CONFIGURATION, pas une capacité")
+
+
+@pytest.fixture
+def journal_vide(db):
+    """
+    Le relevé lit les DERNIERS envois : un test qui laisse ses lignes derrière
+    lui décide du verdict du suivant. On part et on repart d'un journal vide.
+    """
+    from fiskr.database import NotificationDelivery
+
+    def _purge():
+        db.query(NotificationDelivery).delete(synchronize_session=False)
+        db.commit()
+
+    _purge()
+    yield db
+    _purge()
+
+
+def _envoi(db, statut, erreur=None):
+    from datetime import datetime
+
+    from fiskr.database import NotificationDelivery
+    db.add(NotificationDelivery(event_key="test_smtp", urgency="immediate",
+                                status=statut, error=erreur,
+                                recipients="a@b.c", created_at=datetime.utcnow()))
+    db.commit()
+
+
+def test_des_envois_qui_echouent_ne_se_lisent_plus_comme_un_serveur_configure(monkeypatch, journal_vide):
+    """
+    Le défaut que ce contrôle ferme : trois états se ressemblent — configuré,
+    joignable, réellement parti — et l'écran n'affichait que le premier. Sur
+    une installation réelle, toutes les notifications échouaient depuis des
+    jours pendant que l'écran affichait « Serveur configuré ».
+    """
+    monkeypatch.setenv("SMTP_HOST", "smtp.exemple.test")
+    for _ in range(3):
+        _envoi(journal_vide, "FAILED", "Connection unexpectedly closed: timed out")
+
+    controle = mes._smtp(journal_vide)
+    assert controle["etat"] == mes.ATTENTION
+    assert "3 échec(s) sur les 3 derniers envois" in controle["constat"]
+    assert "AUCUN ne part" in controle["constat"]
+    assert "timed out" in controle["constat"], "l'erreur exacte doit être rendue"
+    assert controle["remede"]
+
+
+def test_des_envois_qui_aboutissent_se_disent_aussi(monkeypatch, journal_vide):
+    monkeypatch.setenv("SMTP_HOST", "smtp.exemple.test")
+    for _ in range(2):
+        _envoi(journal_vide, "SENT")
+
+    controle = mes._smtp(journal_vide)
+    assert controle["etat"] == mes.OK
+    assert "2 envoi(s) récent(s) aboutis" in controle["constat"]
+
+
+def test_un_echec_isole_ne_se_lit_pas_comme_une_panne_installee(monkeypatch, journal_vide):
+    """Un incident passager et une panne installée n'appellent pas la même
+    réaction : le relevé doit les distinguer."""
+    monkeypatch.setenv("SMTP_HOST", "smtp.exemple.test")
+    _envoi(journal_vide, "FAILED", "greylisting")
+    for _ in range(4):
+        _envoi(journal_vide, "SENT")
+
+    controle = mes._smtp(journal_vide)
+    assert controle["etat"] == mes.ATTENTION
+    assert "1 échec(s) sur les 5 derniers envois" in controle["constat"]
+    assert "AUCUN ne part" not in controle["constat"]
+
+
+def test_les_envois_en_file_ne_comptent_pas_comme_des_tentatives(monkeypatch, journal_vide):
+    """Un récapitulatif QUEUED n'a pas encore été tenté : le compter en
+    échec — ou en succès — dirait n'importe quoi."""
+    monkeypatch.setenv("SMTP_HOST", "smtp.exemple.test")
+    for _ in range(3):
+        _envoi(journal_vide, "QUEUED")
+
+    controle = mes._smtp(journal_vide)
+    assert controle["etat"] == mes.OK
+    assert "Aucun envoi encore tenté" in controle["constat"]
 
 
 def test_la_sonde_smtp_est_bornee_et_dit_ce_qui_a_echoue(monkeypatch):
