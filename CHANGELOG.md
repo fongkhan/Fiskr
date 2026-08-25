@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a listed person written in Han or Hangul never met their Latin client
+This was a **known** limit: the documentation described it, and a test pinned it, asking to be turned around the day a batch fixed it. This is that batch.
+
+The cause was not transliteration itself but what it left behind. anyascii returns one **capitalised fragment per sign** — 习近平 gives `XiJinPing`, 김정은 gives `GimJeongEun`. The word boundaries, absent from the source, were therefore present in the result — as capitals rather than spaces. The phonetic blocking key is built on the first word, so `XIJINPING` could never meet `XI`.
+
+What it cost, measured before the fix: 习近平 against the client "Xi Jinping" scores **89,5** — comfortably above the cut-off of 75. But the pair was **never brought together**, so never scored at all. A listed person declared not listed, on a name the engine would have recognised had it been allowed to look.
+
+Spaces are now restored **during transliteration, sign by sign**, and only for scripts that do not write them (`han`, `hangul`). The decision is taken on the **source**: a Latin "McDonald" or a Cyrillic "Vladimir", which also come out capitalised, never go through that branch. After the fix the same pair scores **94,3** and meets; 毛泽东/Mao Zedong and 李克强/Li Keqiang likewise; 김정은 against "Kim Jong Un" scores 80 and meets.
+
+One rule, shared by the unconditional path (`strip_accents`, which builds the equivalences index) and the adjustable one (`strip_accents_for_matching`, which compares) — the two must agree with every capability on, or an equivalence declared in Han would stop being found by a screening that delimits. Cost: none on the ASCII fast path (0,08 µs per call, 98,3 % of real names), 0,74 µs cold on a Han name.
+
+**The trade-off, stated plainly.** One boundary is inserted per sign, so a source that already carried its own boundary — 习 近平, written with a space — now scores 94,3 where it scored 100. An existing test pinned that exact 100; it has been restated in terms of what it actually guards (transliteration happens before uppercasing) rather than a figure this change legitimately moves. Going from *never compared* to 94,3 against a threshold of 75 is a net gain; splitting only after the surname would score 100 but would be wrong on two-character surnames and on company names — a name-structure guess, not a typographic rule.
+
+### Measured, and deliberately not changed — the abjads and Japanese kanji
+Arabic and Hebrew still do not cross, and for a different kind of reason: abjads do not write short vowels. محمد gives `mhmd` where the list carries "Mohammed". There is **no boundary to restore** — letters are missing, and a character-by-character transliterator cannot invent them. Measured: 59 to 63 against a Latin client, below the cut-off, and the blocking keys do not meet either.
+
+Japanese kanji fail differently again: anyascii returns the **Chinese** reading — 安倍晋三 gives `An Bei Jin San`, not "Abe Shinzo". Both would need language-specific romanisation, not a setting. The limit is documented and pinned by a test, so that it stays known rather than being rediscovered in production.
+
 ### Fixed — the helper written against silent empty tables was itself producing one
 On a compliance product, "no alert to handle" and "the server did not answer" must never look alike: read the second as the first and an analyst concludes there is nothing to do. The product knew this — a helper existed, `tableError`, with that reasoning written above it.
 

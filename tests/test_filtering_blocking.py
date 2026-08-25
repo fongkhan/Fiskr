@@ -81,26 +81,47 @@ def test_an_alphabetic_script_crosses_over():
     assert _atteint(_partie("ΓΕΩΡΓΙΟΣ"), _fiche("Georgios"))
 
 
-def test_what_still_does_not_cross_and_why():
+def test_les_ecritures_sans_espace_franchissent_desormais():
     """
-    Limite RÉELLE, mesurée, et qui n'est pas propre au filtrage — elle vaut
-    aussi pour le blocking du criblage.
+    Ce test était l'inverse : il consignait que le han et le hangul ne
+    franchissaient pas le blocking, en demandant qu'on le retourne le jour où
+    un lot corrigerait la limite. Ce jour est venu.
 
-    La translittération d'une écriture syllabique rend UN SEUL mot :
-    « 习近平 » → « XiJinPing », « 김정은 » → « GimJeongEun ». La clé phonétique
-    étant bâtie sur le premier mot, elle ne peut pas rencontrer celle de
-    « Xi Jinping », dont le premier mot est « Xi ». L'arabe échoue pour une
-    autre raison : les voyelles brèves ne s'écrivent pas, « محمد » rend
-    « mhmd » là où la liste porte « Mohammed ».
+    Le mécanisme : anyascii rend un fragment CAPITALISÉ par signe — « 习近平 »
+    donnait « XiJinPing » — de sorte que les frontières de mots, absentes de la
+    source, étaient bien présentes dans le résultat, mais sous forme de
+    majuscules et non d'espaces. La clé phonétique étant bâtie sur le premier
+    mot, « XIJINPING » ne pouvait pas rencontrer « XI ». Les espaces sont
+    maintenant rétablis à la translittération, signe par signe, et seulement
+    pour les écritures qui n'en écrivent pas.
 
-    Ce test existe pour que la limite soit CONNUE plutôt que découverte en
-    production, et pour qu'elle échoue bruyamment si un futur lot la corrige
-    — auquel cas c'est ce test qu'il faudra retourner.
+    Ce que cela valait, mesuré avant correction : « 习近平 » face au client
+    « Xi Jinping » obtenait 89,5 de score, largement au-dessus du seuil de 75 —
+    mais la paire n'était jamais rapprochée, donc jamais scorée. Un listé
+    déclaré non listé sur un nom que le moteur aurait reconnu.
     """
     sans_ressources()
-    assert not _atteint(_partie("习近平"), _fiche("Xi Jinping"))
-    assert not _atteint(_partie("김정은"), _fiche("Kim Jong Un"))
+    assert _atteint(_partie("习近平"), _fiche("Xi Jinping"))
+    assert _atteint(_partie("김정은"), _fiche("Kim Jong Un"))
+    assert _atteint(_partie("毛泽东"), _fiche("Mao Zedong"))
+
+
+def test_ce_qui_ne_franchit_toujours_pas_et_pourquoi():
+    """
+    Limite RÉELLE qui subsiste, et qui n'a pas la même nature : les abjades
+    n'écrivent pas les voyelles brèves. « محمد » rend « mhmd » là où la liste
+    porte « Mohammed » — aucune frontière à rétablir, il manque des lettres.
+    Un translittérateur caractère par caractère ne peut pas les inventer :
+    corriger ce cas demanderait une romanisation propre à la langue, pas un
+    réglage.
+
+    Même intention que la version précédente de ce test : que la limite soit
+    CONNUE plutôt que découverte en production, et qu'elle échoue bruyamment
+    si un futur lot la corrige.
+    """
+    sans_ressources()
     assert not _atteint(_partie("محمد بن سلمان"), _fiche("Mohammed bin Salman"))
+    assert not _atteint(_partie("בנימין נתניהו"), _fiche("Benjamin Netanyahu"))
 
 
 def test_the_engine_capabilities_now_reach_this_channel():

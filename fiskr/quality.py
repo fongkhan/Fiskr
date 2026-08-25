@@ -134,7 +134,7 @@ def strip_accents(text: str) -> str:
     if text.isascii():
         return text
     if TRANSLIT_AVAILABLE and text and has_non_latin_chars(text):
-        text = _transliterate(text)
+        text = _translitterer(text)
     return _strip_combining(text)
 
 
@@ -152,6 +152,62 @@ def _transliterate_selected(text: str, scripts) -> str:
             out.append(_transliterate(char))
         else:
             out.append(char)
+    return "".join(out)
+
+
+# Écritures qui n'écrivent pas les espaces : un nom entier y tient en quelques
+# signes collés. anyascii rend un fragment CAPITALISÉ par signe — 习近平 devient
+# « XiJinPing », 김정은 « GimJeongEun » — de sorte que les frontières de mots,
+# absentes de la source, sont bel et bien présentes dans le résultat… sous forme
+# de majuscules, et non d'espaces. Sans les rétablir, le moteur ne voit qu'UN
+# jeton là où le client en écrit deux.
+#
+# Ce que cela coûtait, mesuré : « 习近平 » face au client « Xi Jinping » obtient
+# 89,5 de score — franchement au-dessus du seuil de 75. Mais leurs clés de
+# blocage ne se croisent jamais (SJNP d'un côté, S et JNPN de l'autre) : la
+# paire n'est JAMAIS rapprochée, donc jamais scorée. Un listé déclaré non listé,
+# sur un nom que le moteur aurait reconnu s'il avait pu le regarder.
+_ECRITURES_SANS_ESPACE = frozenset({caps.SCRIPT_HAN, caps.SCRIPT_HANGUL})
+
+
+def _translitterer(text: str) -> str:
+    """
+    Translittération COMPLÈTE, frontières de mots rétablies.
+
+    Partagée par la voie inconditionnelle (`strip_accents`, qui bat l'index des
+    équivalences) et par la voie réglable (`strip_accents_for_matching`, qui
+    compare) : les deux doivent rendre la même chose quand toutes les capacités
+    sont actives — c'est le critère de non-régression posé par le lot qui a
+    introduit le réglage par écriture, et une équivalence déclarée en han
+    cesserait d'être trouvée si les deux divergeaient.
+    """
+    ecritures = detect_scripts(text)
+    if ecritures & _ECRITURES_SANS_ESPACE:
+        return _translitterer_en_delimitant(text, ecritures)
+    return _transliterate(text)
+
+
+def _translitterer_en_delimitant(text: str, scripts) -> str:
+    """
+    Translittère les écritures citées, en RÉTABLISSANT la frontière de mot que
+    les écritures sans espace perdent.
+
+    La coupure se décide signe par signe, sur la SOURCE : seul un fragment issu
+    d'une écriture sans espace peut en provoquer une. Un « McDonald » latin, un
+    « Vladimir » cyrillique — qui sortent aussi capitalisés — ne sont jamais
+    touchés, puisqu'ils ne passent pas par cette branche.
+    """
+    out = []
+    for char in text:
+        if not _is_non_latin(char) or script_of(char) not in scripts:
+            out.append(char)
+            continue
+        fragment = _transliterate(char)
+        if (script_of(char) in _ECRITURES_SANS_ESPACE
+                and fragment[:1].isupper()
+                and out and out[-1][-1:].isalnum()):
+            out.append(" ")
+        out.append(fragment)
     return "".join(out)
 
 
@@ -201,8 +257,12 @@ def _strip_accents_for_matching_cached(text, channel, _active):
         if scripts:
             actives = {s for s in scripts
                        if caps.is_active(caps.script_capability(s), channel)}
-            if actives == scripts:
-                text = _transliterate(text)
+            if actives & _ECRITURES_SANS_ESPACE:
+                # Une écriture sans espace est en jeu : la translittération se
+                # fait signe par signe pour rétablir les frontières de mots.
+                text = _translitterer_en_delimitant(text, actives)
+            elif actives == scripts:
+                text = _translitterer(text)
             elif actives:
                 text = _transliterate_selected(text, actives)
     if not caps.is_active(caps.CAP_DIACRITICS, channel):

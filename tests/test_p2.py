@@ -54,11 +54,33 @@ def test_uppercase_is_applied_after_transliteration():
     `upper()` est sans effet sur une ecriture non latine : « 习 近平 ».upper()
     reste « 习 近平 ». Passer en majuscules AVANT de translitterer produisait
     « Xi JinPing » en casse mixte face a « XI JINPING » — les metriques de
-    chaine sont sensibles a la casse, deux graphies identiques apres
+    chaine etaient sensibles a la casse, et deux graphies identiques apres
     translitteration ne marquaient que 64,40.
+
+    Ce test tenait cette garantie par un score EXACT de 100. Il ne le peut
+    plus, et pour une bonne raison : la translittération rétablit désormais les
+    frontières de mots que le han n'écrit pas — « 习近平 » rend « Xi Jin Ping »
+    et non « XiJinPing ». Un signe han donne donc un mot, là où le client en
+    écrit deux (« Xi Jinping ») : 94,28 au lieu de 100.
+
+    Le change vaut largement la peine. Avant, « 习近平 » et son client latin ne
+    se RENCONTRAIENT jamais dans le blocking — la paire n'était donc jamais
+    scorée, quel qu'eût été son score. Passer de « jamais comparé » à 94,28,
+    contre un seuil de 75, est un gain net (cf. tests/test_ecritures_sans_espace.py).
+
+    Ce qui est vérifié ici reste ce que le test a toujours voulu dire : la
+    translittération vient AVANT la mise en majuscules, donc le résultat est de
+    l'ASCII majuscule, et le score reste franchement au-dessus du seuil.
     """
-    assert compute_base_score("习 近平", "Xi Jinping", config) == 100.0
-    assert compute_base_score("陈 全国", "Chen Quanguo", config) == 100.0
+    from fiskr.quality import strip_accents_for_matching
+
+    for source in ("习 近平", "陈 全国"):
+        rendu = strip_accents_for_matching(source).upper()
+        assert rendu.isascii(), rendu
+        assert rendu == rendu.upper()
+
+    assert compute_base_score("习 近平", "Xi Jinping", config) > 90.0
+    assert compute_base_score("陈 全国", "Chen Quanguo", config) > 90.0
 
 
 # ------------------ SEUILS DE CUT-OFF PAR LISTE ------------------

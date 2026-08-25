@@ -96,19 +96,53 @@ Le périmètre de translittération, lui, **n'a pas bougé d'un caractère** : l
 critère historique reste le seul juge de « faut-il translittérer ce
 caractère », le nommage d'écriture vient après.
 
-### Limite connue, mesurée, et consignée en test
-Le **han**, le **hangul** et l'**arabe** ne franchissent pas le blocking, et
-c'est indépendant du réglage :
+### Les écritures sans espace : frontières rétablies
 
-- la translittération d'une écriture syllabique rend **un seul mot** —
-  « 习近平 » → « XiJinPing », « 김정은 » → « GimJeongEun » — alors que la clé
-  phonétique est bâtie sur le premier mot, et que la liste porte « Xi
-  Jinping », premier mot « Xi » ;
-- l'arabe n'écrit pas les voyelles brèves : « محمد » rend « mhmd » là où la
-  liste porte « Mohammed ».
+Le **han** et le **hangul** ne franchissaient pas le blocking. La cause n'était
+pas la translittération elle-même, mais ce qu'elle laissait de côté : anyascii
+rend un fragment **capitalisé par signe** — « 习近平 » → `XiJinPing`, « 김정은 » →
+`GimJeongEun`. Les frontières de mots, absentes de la source, étaient donc bien
+présentes dans le résultat, mais **sous forme de majuscules et non d'espaces**.
+La clé phonétique étant bâtie sur le premier mot, `XIJINPING` ne pouvait pas
+rencontrer `XI`.
+
+Ce que cela coûtait, mesuré avant correction : « 习近平 » face au client
+« Xi Jinping » obtenait **89,5** de score, largement au-dessus du seuil de 75 —
+mais la paire n'était **jamais rapprochée**, donc jamais scorée. Un listé
+déclaré non listé sur un nom que le moteur aurait reconnu s'il avait pu le
+regarder.
+
+Les espaces sont désormais rétablis **à la translittération, signe par signe**,
+et seulement pour les écritures qui n'en écrivent pas (`han`, `hangul`). La
+décision se prend sur la **source** : un « McDonald » latin ou un « Vladimir »
+cyrillique, qui sortent aussi capitalisés, ne passent jamais par cette branche.
+Après correction, la même paire obtient **94,3** et se rencontre.
+
+La règle est partagée par la voie inconditionnelle (`strip_accents`, qui bat
+l'index des équivalences) et par la voie réglable
+(`strip_accents_for_matching`, qui compare) : les deux rendent la même chose
+toutes capacités actives — sans quoi une équivalence déclarée en han cesserait
+d'être trouvée. Coût : néant sur la voie rapide ASCII (0,08 µs/appel, 98,3 %
+du réel), 0,74 µs cache froid sur un nom han.
+
+### Limite connue, mesurée, et consignée en test
+
+L'**arabe** et l'**hébreu** ne franchissent toujours pas, et pour une raison
+d'une autre nature : les abjades n'écrivent pas les voyelles brèves. « محمد »
+rend `mhmd` là où la liste porte « Mohammed ». Il n'y a **aucune frontière à
+rétablir** — il manque des lettres, et un translittérateur caractère par
+caractère ne peut pas les inventer. Mesuré : 59 à 63 de score contre un client
+en latin, sous le seuil de 75, et les clés de blocage ne se croisent pas non
+plus. Corriger ce cas demanderait une romanisation propre à la langue, pas un
+réglage.
+
+Le **kanji japonais** échoue encore autrement : anyascii rend la lecture
+**chinoise** des signes — « 安倍晋三 » donne `An Bei Jin San` et non
+« Abe Shinzo ». Là encore, il faudrait un dictionnaire de lectures, pas une
+règle typographique.
 
 Le cyrillique et le grec, alphabétiques, franchissent sans difficulté. Le
-scoring rattrape une partie de ces cas quand les noms arrivent en champs
+scoring rattrape une partie des cas restants quand les noms arrivent en champs
 séparés ; le blocking, non.
 
 ### Voie rapide ASCII
