@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — "auditor: full read-only" could not read the administration journal
+The `auditor` role is described in `fiskr/auth.py` as an external controller's **integral read-only** access: exclusive, never combined with another role, every write refused. Eight **read** endpoints nonetheless required `require_admin` — among them the **administration journal**, which is the first thing a controller asks for: who changed what, and when.
+
+The defect showed itself in real conditions. An `auditor` API key, created to diagnose production remotely, could not read the notification delivery log — the one place where you see whether alert emails are going out or failing. On that installation every email has been timing out for days.
+
+The eight are exactly the pieces of a control file, and none of them returns a secret: the administration journal, the notification log, the retention policy, the accounts, the API keys (prefixes only, never the key), webhook statistics, the settings export (declared "no secrets", and it holds only known portable keys), and the commissioning screen. They now answer an auditor.
+
+Writing stays closed by **two independent locks**, and the distinction matters because this batch is exactly the kind that could weaken one: each route keeps its own guard, and `enforce_auditor_readonly` refuses every mutating method from `get_current_user` onward, whatever the route's guard says. The second is what protects a route opened by inadvertence — so it now has its own test, separate from the route-by-route one. An earlier version of that test credited the general lock while actually exercising the per-route guard; the fixture replaces `get_current_user`, so the general lock never ran. Both are now tested for what they really do.
+
+In the interface, only what is **purely read-only** opens: the administration journal sub-tab, plus a label for a role that had none — a controller was reading "auditor" in the sidebar. The settings, retention, API-key and portability cards stay admin-only on purpose: they carry write controls, and showing a button the server will refuse is the very defect this project keeps removing.
+
+A guard derived from the routes holds the line: no `GET` may require the administrator alone. If one should — a read that would expose a secret — it goes in an explicit list with its reason. The list is empty today.
+
 ### Fixed — a listed record could only be reached by its first name
 Blocking decides who gets compared to whom. On the client side the fields are separate: screening emits a phonetic key for the given name **and** one for the surname. On the list side, the full name sits in **one string** — "JOSE GARCIA LOPEZ" — and the key was built on the **first word** only, which is almost always the given name.
 

@@ -305,6 +305,32 @@ async def require_admin(
         )
     return current_user
 
+async def require_admin_or_auditor(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    LECTURE d'une piece d'audit : administrateur, ou auditeur.
+
+    Le role `auditor` est decrit ici meme comme « lecture seule integrale
+    (controleur externe) ». Huit lectures lui restaient pourtant fermees, dont
+    le JOURNAL D'ADMINISTRATION — c'est-a-dire la premiere chose qu'un
+    controleur demande : qui a change quoi, quand. Un role dont le nom promet
+    la lecture integrale et qui bute sur la piece maitresse est une promesse
+    qui ne tient pas.
+
+    A n'employer que sur des lectures. L'ecriture reste hors de portee d'un
+    auditeur quoi qu'il arrive : `enforce_auditor_readonly` refuse toute
+    methode mutante des `get_current_user`, avant meme d'arriver ici.
+    """
+    roles = parse_roles(current_user.get("role"))
+    if "admin" not in roles and "auditor" not in roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès refusé. Privilèges d'administrateur ou d'auditeur requis."
+        )
+    return current_user
+
+
 # Validation humaine des snapshots en homologation (reviewer ou admin)
 require_reviewer = require_roles("reviewer")
 
