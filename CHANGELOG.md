@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — "SMTP configured" was displayed while every message was failing
+Three states resemble each other and do not have the same consequences: SMTP **configured**, SMTP **reachable**, and messages **actually delivered**. The commissioning screen reported the first and stopped there — honestly, saying in as many words that "configured does not mean reachable" and offering a probe for the second. The third it left alone, although the product *holds the answer*: every notification writes a row with its status and its error.
+
+Observed on a real installation: every notification had been failing for days (`Connection unexpectedly closed: timed out`), the screen showed "Server configured", and the operator learned about it from somewhere else entirely.
+
+The check now reads the last twenty deliveries and distinguishes what deserves distinguishing:
+
+- nothing attempted yet → "configured", with the same caveat as before, because there is genuinely nothing else to say;
+- recent sends all succeeded → said so, with the count;
+- some failed → **Warning**, naming how many out of how many, and the exact error of the most recent one;
+- all failed → the same, plus **"NONE is getting out"** — an isolated incident and an installed outage do not call for the same reaction.
+
+The wording says what is actually at stake: screening and alerts carry on; what is missing is that *anyone is told* — including about a source's synchronisation failure.
+
+Queued digest rows are excluded from the count. They have not been attempted, so counting them as either a success or a failure would say something untrue.
+
+Fixed alongside: the commissioning point for screening coverage had no remedy on one of its branches — "no client base in production" told the operator the state without telling them what to do about it. The guard that requires every actionable point to carry a remedy caught it.
+
 ### Fixed — "auditor: full read-only" could not read the administration journal
 The `auditor` role is described in `fiskr/auth.py` as an external controller's **integral read-only** access: exclusive, never combined with another role, every write refused. Eight **read** endpoints nonetheless required `require_admin` — among them the **administration journal**, which is the first thing a controller asks for: who changed what, and when.
 
