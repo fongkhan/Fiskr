@@ -11,7 +11,7 @@ import secrets
 import logging
 import shutil
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -10301,6 +10301,13 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
             alert.due_at and alert.due_at < datetime.utcnow()
             and alert.status in ALERT_OPEN_STATUSES
         ),
+        "snoozed_until": alert.snoozed_until.isoformat() if alert.snoozed_until else None,
+        # En attente = echeance de report future ET alerte ouverte : un report
+        # expire s'eteint tout seul, sans geste et sans ecriture en base
+        "snoozed": bool(
+            alert.snoozed_until and alert.snoozed_until > datetime.utcnow()
+            and alert.status in ALERT_OPEN_STATUSES
+        ),
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -11784,7 +11791,15 @@ async def list_alerts(
         {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
         value=Alert.priority, else_=2
     )
-    rows = query.order_by(priority_rank.asc(), Alert.due_at.asc().nullslast(),
+    # Les mises en attente descendent en bas de la file — visibles (jamais
+    # masquees : un produit de conformite ne cache pas du travail), mais
+    # apres les alertes actives. Un report expire redevient actif tout seul.
+    from sqlalchemy import and_
+    en_attente = case(
+        (and_(Alert.snoozed_until.isnot(None), Alert.snoozed_until > datetime.utcnow()), 1),
+        else_=0,
+    )
+    rows = query.order_by(en_attente.asc(), priority_rank.asc(), Alert.due_at.asc().nullslast(),
                           Alert.final_score.desc(), Alert.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
     return {
@@ -11935,6 +11950,10 @@ async def propose_alert_decision(
         raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
 
     username = current_user["username"]
+    # Proposer une decision, c'est instruire : une mise en attente encore
+    # active n'a plus de sens et fausserait le classement de la file.
+    if alert.snoozed_until:
+        alert.snoozed_until = None
     alert.proposed_decision = decision
     alert.proposed_by = username
     alert.proposed_at = datetime.utcnow()
@@ -12042,6 +12061,70 @@ async def set_alert_priority(
                      f"Priorité {old_priority} → {new_priority}.")
     db.commit()
     return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
+
+class AlertSnoozeRequest(BaseModel):
+    until: Optional[str] = None   # ISO 8601 ; None = réveiller maintenant
+    reason: Optional[str] = None  # requis pour reporter, ignoré au réveil
+
+_SNOOZE_MAX_JOURS = 30
+
+@app.post("/api/alerts/{alert_id}/snooze")
+async def snooze_alert(
+    alert_id: int,
+    payload: AlertSnoozeRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Reporte une alerte ouverte (« attente de pièces, revoir dans 3 jours ») ou
+    la réveille (until: null). Le report classe l'alerte en bas de la file mais
+    ne la masque jamais, et ne suspend PAS l'échéance SLA : due_at continue de
+    courir — reporter son travail ne reporte pas l'obligation. Chaque report et
+    chaque réveil s'inscrivent dans l'historique immuable de l'alerte, motif
+    compris : un dossier qui dort doit pouvoir dire pourquoi.
+    """
+    alert = _get_open_alert(db, alert_id)
+    now = datetime.utcnow()
+    if payload.until is None:
+        if not (alert.snoozed_until and alert.snoozed_until > now):
+            raise HTTPException(status_code=400, detail="Cette alerte n'est pas en attente.")
+        alert.snoozed_until = None
+        _log_alert_event(db, alert.id, current_user["username"], "WOKEN",
+                         "Réveillée avant l'échéance de mise en attente.")
+        db.commit()
+        return {"message": "Alerte réveillée : elle reprend sa place dans la file.",
+                **_alert_summary(alert)}
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400,
+                            detail="Un motif est requis pour reporter (il est inscrit au journal de l'alerte).")
+    try:
+        until = datetime.fromisoformat(payload.until.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Échéance de report illisible (ISO 8601 attendu).")
+    if until.tzinfo is not None:
+        until = until.astimezone(timezone.utc).replace(tzinfo=None)
+    if until <= now:
+        raise HTTPException(status_code=400, detail="L'échéance de report doit être dans le futur.")
+    if until > now + timedelta(days=_SNOOZE_MAX_JOURS):
+        # Litteral (pas de f-string) : la chaine rendue doit exister telle
+        # quelle dans la source pour le dictionnaire de traduction ; un test
+        # verifie qu'elle reste accordee a _SNOOZE_MAX_JOURS.
+        raise HTTPException(status_code=400,
+                            detail="Report limité à 30 jours : au-delà, c'est une décision qui s'instruit, pas une attente.")
+    # Le SLA n'attend pas : si l'echeance reglementaire tombe pendant le
+    # report, on reporte quand meme (l'attente de pieces peut etre reelle)
+    # mais on le DIT — l'analyste choisit en connaissance de cause.
+    warning = None
+    if alert.due_at and until > alert.due_at:
+        warning = (f"L'échéance SLA ({alert.due_at.strftime('%d/%m/%Y %H:%M')} UTC) tombe "
+                   "pendant la mise en attente : elle continue de courir, l'alerte passera en retard.")
+    alert.snoozed_until = until
+    _log_alert_event(db, alert.id, current_user["username"], "SNOOZED",
+                     f"Mise en attente jusqu'au {until.strftime('%d/%m/%Y %H:%M')} UTC — {reason}")
+    db.commit()
+    return {"message": f"Alerte mise en attente jusqu'au {until.strftime('%d/%m/%Y %H:%M')} UTC.",
+            "warning": warning, **_alert_summary(alert)}
 
 class AlertBulkRequest(BaseModel):
     ids: List[int]

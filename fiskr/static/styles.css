@@ -1017,6 +1017,14 @@ th {
 }
 #raccourcis-modal td { padding: 0.4rem 0.6rem; }
 
+/* Ligne visée au clavier (triage j/k des files d'alertes). L'outline plutôt
+   qu'un fond : elle reste lisible par-dessus les fonds de survol et de zébrage
+   sans définir une couleur de plus par thème. */
+tr.ligne-visee {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+}
+
 /* ------------------ Nouveautés (panneau + point sur le bouton) ------------------ */
 /* Le point signale du nouveau depuis la dernière ouverture du panneau. Il vit
    DANS le bouton (position: relative) pour suivre le bouton partout. */

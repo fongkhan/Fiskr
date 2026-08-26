@@ -427,6 +427,11 @@ class Alert(Base):
     # et echeance SLA (due_at = created_at + delai du reglage par priorite)
     priority = Column(String(12), nullable=True, index=True)  # LOW|MEDIUM|HIGH|CRITICAL
     due_at = Column(DateTime, nullable=True)
+    # Mise en attente (« attente de pieces, revoir le 12 ») : la file classe
+    # l'alerte APRES les actives tant que l'echeance n'est pas passee — jamais
+    # masquee, et le SLA (due_at) continue de courir : reporter son travail ne
+    # reporte pas l'obligation. Chaque report est trace dans alert_events.
+    snoozed_until = Column(DateTime, nullable=True)
     # Checklist d'instruction (dossier) : {"0": {done, by, at}, ...}
     checklist_state = Column(JSON, nullable=True)
 

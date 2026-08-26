@@ -1191,6 +1191,15 @@ function initAideRaccourcis() {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-08-26-lot-5", date: "2026-08-26",
+ titre: "Triage au clavier et mise en attente",
+ points: [
+ "j/k parcourent la file d'alertes, o instruit, r reporte — le motif des clients mail.",
+ "Reporter une alerte : elle descend en bas de la file sans jamais disparaître, motif au journal.",
+ "Le SLA continue de courir pendant l'attente — et le serveur prévient si l'échéance tombe dedans.",
+ ],
+ },
+ {
  id: "2026-08-26-lot-4", date: "2026-08-26",
  titre: "Confort visuel : thème, nouveautés, états vides",
  points: [
@@ -1536,6 +1545,7 @@ document.addEventListener("DOMContentLoaded", () => {
  initCopierEnUnClic();
  initAideRaccourcis();
  initNouveautes();
+ initTriageClavier();
  initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();
@@ -6535,6 +6545,15 @@ function alertPriorityBadge(a) {
  return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>${echeance}`;
 }
 
+// Pastille « EN ATTENTE » d'une alerte reportée. Deux nœuds texte séparés :
+// le libellé (traduisible tel quel) et l'échéance (donnée, jamais traduite).
+// Le drapeau `snoozed` vient du serveur, qui l'éteint seul à l'expiration.
+function alertSnoozeChip(a) {
+ if (!a.snoozed) return "";
+ const quand = formatDateTime(a.snoozed_until);
+ return `<br><span title="Mise en attente — reprend sa place dans la file à cette échéance" style="color: var(--text-muted); font-size: 0.7rem; font-weight: 700;"><span>EN ATTENTE</span><span> → ${escapeHtml(quand)}</span></span>`;
+}
+
 // Export CSV de la file d'alertes avec les filtres actifs de l'écran
 function exportAlertsCsv(channel) {
  const conf = ALERT_CHANNEL_CONF[channel];
@@ -6693,7 +6712,7 @@ function renderAlertsTable(channel, items) {
  : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
  const selectable = !a.status.startsWith("CLOSED");
  return `
- <tr>
+ <tr data-alert-id="${a.id}">
  <td>${selectable ? `<input type="checkbox" class="alert-select" data-alert-id="${a.id}" onchange="toggleAlertSelection('${channel}', ${a.id}, this.checked)" aria-label="Sélectionner l'alerte ${a.id}">` : ""}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${formatDateTime(a.created_at)}</td>
@@ -6701,11 +6720,16 @@ function renderAlertsTable(channel, items) {
  <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(a.list_type)}</td>
  <td><strong style="color: ${a.final_score >= 90 ? 'var(--color-alert)' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
- <td>${alertStatusBadge(a.status)}</td>
+ <td>${alertStatusBadge(a.status)}${alertSnoozeChip(a)}</td>
  <td>${escapeHtml(a.assigned_to || "—")}</td>
  <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})"> Instruire</button></td>
  </tr>`;
  }).join("");
+ // La visée clavier (j/k) survit au re-rendu : on la repose par identifiant.
+ if (_viseAlerteId !== null) {
+ const ligne = tbody.querySelector(`tr[data-alert-id="${_viseAlerteId}"]`);
+ if (ligne) ligne.classList.add("ligne-visee");
+ }
 }
 
 async function openAlertModal(alertId) {
@@ -6746,6 +6770,9 @@ async function openAlertModal(alertId) {
  if (a.status !== "PENDING_VALIDATION") {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
+ actionsHtml += a.snoozed
+ ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="reveillerAlerte(${a.id})"> Réveiller maintenant</button>`
+ : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="reporterAlerte(${a.id})"> Reporter…</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')"> Escalader</button>`;
  actionsHtml += `<button class="btn btn-sm btn-primary" onclick="proposeAlertDecision('FALSE_POSITIVE')"> Proposer : Faux positif</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposeAlertDecision('CONFIRMED')"> Proposer : Vrai positif</button>`;
@@ -6846,6 +6873,127 @@ async function alertAction(action) {
 async function changeAlertPriority(priority) {
  const data = await _postAlertAction("priority", { priority });
  if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
+}
+
+// ------------------ REPORT D'UNE ALERTE (mise en attente) ------------------
+// « Attente de pièces, revoir dans 3 jours » : l'alerte descend en bas de la
+// file — visible, jamais masquée — et le SLA continue de courir. Le motif est
+// obligatoire et part au journal immuable de l'alerte.
+
+const _MOTIFS_DE_REPORT = [
+ "Attente de pièces du client.",
+ "Attente d'un retour du correspondant.",
+ "À revoir après la prochaine mise à jour de listes.",
+];
+
+async function _posterReport(alertId, corps) {
+ const response = await apiFetch(`/api/alerts/${alertId}/snooze`, {
+ method: "POST",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify(corps),
+ });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "Action refusée."), "error");
+ return null;
+ }
+ showToast(data.message, "success");
+ // L'avertissement SLA n'est pas un détail : l'échéance réglementaire
+ // tombera pendant l'attente. Plus long à l'écran, et en avertissement.
+ if (data.warning) showToast(data.warning, "warning", 9000);
+ refreshAlertQueues();
+ const modale = document.getElementById("alert-modal");
+ if (modale && _modaleVisible(modale) && currentAlertId === alertId) openAlertModal(alertId);
+ return data;
+}
+
+async function reporterAlerte(alertId) {
+ const jours = await promptDialog("Reporter l'alerte", {
+ message: "Revoir dans combien de jours ? (1 à 30) L'échéance SLA continue de courir pendant l'attente.",
+ placeholder: "3",
+ suggestions: ["1", "3", "7"],
+ });
+ if (jours === null) return;
+ const n = parseInt(String(jours).trim(), 10);
+ if (!Number.isInteger(n) || n < 1 || n > 30) {
+ showToast("Durée invalide : entre 1 et 30 jours.", "error");
+ return;
+ }
+ const motif = await promptDialog("Motif du report", {
+ message: "Le motif est inscrit au journal de l'alerte.",
+ textarea: true,
+ placeholder: "Ex. attente de pièces du client…",
+ suggestions: _MOTIFS_DE_REPORT,
+ });
+ if (motif === null) return;
+ const until = new Date(Date.now() + n * 86400000).toISOString();
+ await _posterReport(alertId, { until, reason: motif });
+}
+
+async function reveillerAlerte(alertId) {
+ await _posterReport(alertId, { until: null });
+}
+
+// ------------------ TRIAGE AU CLAVIER DES FILES (j / k / o / r) ------------------
+// Le motif des clients mail : j/k parcourent la file affichée, o (ou Entrée)
+// instruit la ligne visée, r la reporte, Échap relâche la visée. Inactif dès
+// qu'un champ a le focus ou qu'une modale est ouverte — le clavier appartient
+// alors à quelqu'un d'autre.
+
+let _viseAlerteId = null;
+
+function _fileAffichee() {
+ for (const conf of Object.values(ALERT_CHANNEL_CONF)) {
+ const section = document.getElementById(`sub-sec-${conf.section}`);
+ if (!section || section.classList.contains("hidden")) continue;
+ const onglet = section.closest(".tab-content");
+ if (onglet && onglet.classList.contains("hidden")) continue;
+ return conf;
+ }
+ return null;
+}
+
+function _viserLigne(ligne) {
+ document.querySelectorAll("tr.ligne-visee").forEach((tr) => tr.classList.remove("ligne-visee"));
+ _viseAlerteId = null;
+ if (!ligne) return;
+ ligne.classList.add("ligne-visee");
+ _viseAlerteId = parseInt(ligne.dataset.alertId, 10);
+ ligne.scrollIntoView({ block: "nearest" });
+}
+
+function initTriageClavier() {
+ document.addEventListener("keydown", (e) => {
+ if (e.ctrlKey || e.metaKey || e.altKey) return;
+ if (!["j", "k", "o", "r", "Enter", "Escape"].includes(e.key)) return;
+ const cible = e.target;
+ if (cible && (cible.tagName === "INPUT" || cible.tagName === "TEXTAREA"
+  || cible.tagName === "SELECT" || cible.isContentEditable)) return;
+ // Entrée active déjà l'élément focalisé (tri des colonnes, boutons) : on
+ // ne la prend que quand le focus est au corps de page, à personne.
+ if (e.key === "Enter" && cible !== document.body && cible !== document.documentElement) return;
+ if (document.querySelector(".modal:not(.hidden)")) return;
+ const conf = _fileAffichee();
+ if (!conf) return;
+ const tbody = document.querySelector(`#${conf.table} tbody`);
+ const lignes = tbody ? Array.from(tbody.querySelectorAll("tr[data-alert-id]")) : [];
+ if (!lignes.length) return;
+ const idx = lignes.findIndex((tr) => tr.classList.contains("ligne-visee"));
+ if (e.key === "j" || e.key === "k") {
+ e.preventDefault();
+ let prochaine;
+ if (idx === -1) prochaine = e.key === "j" ? 0 : lignes.length - 1;
+ else prochaine = e.key === "j" ? Math.min(idx + 1, lignes.length - 1) : Math.max(idx - 1, 0);
+ _viserLigne(lignes[prochaine]);
+ } else if (e.key === "Escape") {
+ if (idx !== -1) _viserLigne(null);
+ } else if (idx !== -1) {
+ e.preventDefault();
+ const id = parseInt(lignes[idx].dataset.alertId, 10);
+ if (e.key === "r") reporterAlerte(id);
+ else openAlertModal(id);
+ }
+ });
 }
 
 async function uploadAlertAttachment() {

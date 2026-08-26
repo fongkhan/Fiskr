@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — keyboard triage and honest postponing (quality-of-life 5/N)
+Fifth batch of the programme, verified in a real browser (sixteen checks, dialogs driven key by key).
+
+**Postpone an alert — on hold, never hidden** (n° 11). "Awaiting documents, review in 3 days" is a legitimate state the product had no word for; analysts parked such alerts in their heads. `POST /api/alerts/{id}/snooze` gives it three non-negotiable properties. *Never hidden*: a postponed alert drops to the bottom of the queue but stays in it — hiding work is the exact defect class this product spends its life hunting. *The SLA keeps running*: `due_at` does not move, and when the regulatory deadline falls inside the hold, the server says so at the moment of postponing — the analyst chooses knowingly. *Journaled*: the reason is mandatory and lands in the alert's immutable history (SNOOZED, WOKEN) — a sleeping file must be able to say why. An expired hold switches itself off at read time, no write, no gesture; proposing a decision clears it, since deciding *is* the review the hold was waiting for. The chip on the row says "ON HOLD → date"; the modal offers "Wake now".
+
+**Keyboard triage of the queues** (n° 8). The mail-client pattern: `j`/`k` walk the displayed queue, `o` (or Enter) opens the highlighted alert, `r` postpones it, Escape releases the highlight. The handler stands down whenever the keyboard belongs to someone else — a focused field, an open modal — and Enter is only taken when focus rests on the page body, because Enter already activates sort headers and buttons. The highlight survives the queue's re-render (it is re-applied by alert id), and the `?` help announces the new keys — a shortcut nothing announces is a shortcut nobody uses.
+
+13 tests pin the batch: the three snooze properties (including "due_at never moves" and the warning), the bottom-of-queue-but-present ordering, the self-extinguishing expiry, and the guards that keep the triage keys away from form fields and open modals.
+
 ### Added — visual comfort: system theme, in-app news, empty states that point somewhere (quality-of-life 4/N)
 Fourth batch of the programme, verified in a real browser (fifteen checks, including OS theme emulation).
 
