@@ -1010,6 +1010,59 @@ function initFocusDesModales() {
  });
 }
 
+// ------------------ EXPORTS CSV MANQUANTS ------------------
+// Cinq tableaux d'exploitation n'avaient pas d'export. Deux passent par le
+// serveur — le journal d'administration est paginé côté serveur, un export de
+// « ce qui est affiché » n'en montrerait qu'une page, et c'est précisément la
+// pièce qu'un contrôle demande entière. Les trois autres s'exportent tels
+// qu'affichés, filtres appliqués — c'est ce que l'utilisateur regarde.
+
+function exportAdminLogCsv() {
+ // L'écran du journal n'a pas de filtre d'action : l'export porte tout le
+ // journal (borné serveur à 50 000 lignes, les plus récentes d'abord).
+ window.open("/api/export/admin-log.csv", "_blank");
+}
+
+function exportNotificationsCsv() {
+ const params = new URLSearchParams();
+ const statutEl = document.getElementById("notif-log-status");
+ if (statutEl && statutEl.value) params.set("status", statutEl.value);
+ window.open(`/api/export/notifications.csv?${params.toString()}`, "_blank");
+}
+
+// Neutralisation d'injection de formules : MÊME règle que le serveur
+// (fiskr/api.py, _csv_neutralise). Une cellule qui commence par = + - @ est
+// préfixée d'une apostrophe — sinon un nom forgé s'exécute dans le tableur
+// de l'analyste qui ouvre l'export.
+function _csvNeutralise(valeur) {
+ const texte = String(valeur ?? "");
+ return /^[=+\-@]/.test(texte) ? "'" + texte : texte;
+}
+
+function exporterTableAffichee(tableId, nomFichier) {
+ const table = document.getElementById(tableId);
+ if (!table) return;
+ const lignes = [];
+ const entetes = [...table.querySelectorAll("thead th")].map(th => th.textContent.trim());
+ lignes.push(entetes);
+ for (const tr of table.querySelectorAll("tbody tr")) {
+ // Exactement ce que l'utilisateur voit : les lignes filtrées et les
+ // en-têtes de groupe restent dehors.
+ if (tr.classList.contains("filtered-out") || tr.classList.contains("table-group-row")) continue;
+ if (tr.querySelector(".empty-state")) continue;
+ lignes.push([...tr.children].map(td => td.textContent.replace(/\s+/g, " ").trim()));
+ }
+ const csv = lignes.map(l => l.map(c => `"${_csvNeutralise(c).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+ const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+ const lien = document.createElement("a");
+ lien.href = URL.createObjectURL(blob);
+ lien.download = `${nomFichier}_${new Date().toISOString().slice(0, 10)}.csv`;
+ document.body.appendChild(lien);
+ lien.click();
+ lien.remove();
+ URL.revokeObjectURL(lien.href);
+}
+
 // ------------------ COPIER EN UN CLIC ------------------
 // Identifiants d'entité, hash de snapshot, lien d'une alerte : jusqu'ici,
 // sélection manuelle dans une modale. Un bouton discret par valeur technique,
@@ -9332,6 +9385,34 @@ async function runPaletteSearch(term) {
  groups.push({ title: "Navigation", items: navMatches.map(n => ({
  html: escapeHtml(n.label), action: n.action })) });
  }
+ // Réglages : l'index est DÉRIVÉ du balisage (titres de cartes des
+ // panneaux de réglages), jamais recopié — une carte ajoutée est trouvable
+ // sans toucher la palette. Les cartes masquées (rôle insuffisant) sont
+ // exclues : proposer un écran que le serveur refusera n'aide personne.
+ if (needle.length >= 2) {
+ const entrees = [];
+ document.querySelectorAll(
+ '[id^="sub-sec-settings-"] .card h2, [id^="sub-sec-settings-"] .card h3, ' +
+ '#sec-account .card h2, #sec-account .card h3').forEach(titre => {
+ const carte = titre.closest(".card");
+ if (!carte || carte.classList.contains("hidden")) return;
+ const texte = titre.textContent.trim();
+ if (!texte.toLowerCase().includes(needle)) return;
+ const panneau = titre.closest(".sub-tab-content");
+ entrees.push({ texte, panneauId: panneau ? panneau.id.replace(/^sub-sec-/, "") : null, titre });
+ });
+ if (entrees.length) {
+ groups.push({ title: "Réglages", items: entrees.slice(0, 5).map(r => ({
+ html: `${escapeHtml(r.texte)} <small style="color: var(--text-muted);">Paramètres</small>`,
+ action: () => {
+ if (r.panneauId) { switchTab("settings"); switchSubTab("settings", r.panneauId); }
+ else { switchTab("account"); }
+ r.titre.scrollIntoView({ block: "start", behavior: "smooth" });
+ },
+ })) });
+ }
+ }
+
  // Palette vide : les derniers dossiers ouverts, avant la première frappe
  if (!needle) {
  const recents = _recentsMemorises();
@@ -9365,6 +9446,13 @@ async function runPaletteSearch(term) {
  groups.push({ title: `Alertes (${al.total})`, items: al.items.map(a => ({
  html: `<strong>#${a.id} ${escapeHtml(a.client_name)}</strong> × ${escapeHtml(a.watchlist_name)} <small style="color: var(--text-muted);">${escapeHtml(statusLabel(a.status))}</small>`,
  action: () => { const sp = a.channel === "FILTERING" ? "filtering" : "screening"; switchTab(sp); switchSubTab(sp, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
+ })) });
+ }
+ const cl = data.clients || {};
+ if ((cl.items || []).length) {
+ groups.push({ title: `Clients (${cl.total})`, items: cl.items.map(c2 => ({
+ html: `<strong>${escapeHtml(c2.name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(c2.client_id)} · ${c2.client_type === "PM" ? "Personne morale" : "Personne physique"}</small>`,
+ action: () => openClient360(c2.client_id),
  })) });
  }
  renderPaletteResults(groups);

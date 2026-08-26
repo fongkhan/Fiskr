@@ -696,6 +696,9 @@
  <option value="disabled">Désactivées seulement</option>
  </select>
  </div>
+ <div style="margin-bottom: 0.5rem; text-align: right;">
+ <button class="btn btn-sm btn-secondary" onclick="exporterTableAffichee('sources-table', 'fiskr_sources')" title="Exporter les lignes affichées (filtres appliqués) en CSV">⬇ CSV</button>
+ </div>
  <div class="table-container">
  <table id="sources-table" class="table-compact">
  <thead><tr>
@@ -1607,6 +1610,9 @@
  </div>
  <div id="mining-sim-result"></div>
  <div id="mining-settings-editor"></div>
+ <div style="margin-bottom: 0.5rem; text-align: right;">
+ <button class="btn btn-sm btn-secondary" onclick="exporterTableAffichee('mining-table', 'fiskr_equivalences')" title="Exporter les lignes affichées (filtres appliqués) en CSV">⬇ CSV</button>
+ </div>
  <div class="table-container" style="max-height: 420px; overflow-y: auto; margin-top: 1rem;">
  <table id="mining-table">
  <thead>
@@ -1977,6 +1983,9 @@
  <div class="card">
  <h2>Journal des Actions d'Administration</h2>
  <p class="section-desc">Trace immuable (append-only) des actions d'administration : création/modification/suppression de comptes, changements de réglages (avant → après), purges de snapshots et révocations de liste blanche. Attendu en contrôle ACPR/FED.</p>
+ <div style="margin-bottom: 0.75rem;">
+ <button class="btn btn-sm btn-secondary" onclick="exportAdminLogCsv()" title="Exporter tout le journal en CSV (borné à 50 000 lignes)">⬇ CSV</button>
+ </div>
  <div class="table-container max-height-table">
  <table id="admin-log-table">
  <thead>
@@ -2540,6 +2549,7 @@
  <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="sendNotificationTest()"> Envoyer un mail de test</button>
  <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="flushNotificationDigest()"> Envoyer le récapitulatif maintenant</button>
  <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchNotificationLog()"> Journal des envois</button>
+ <button type="button" class="btn btn-sm btn-secondary" onclick="exportNotificationsCsv()" title="Exporter le journal des envois en CSV">⬇ CSV</button>
  </div>
  <div id="notif-log"></div>
  <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);"><svg class="ui-icon" aria-hidden="true"><use href="#i-radio"></use></svg> Webhooks sortants</h3>
@@ -2852,6 +2862,9 @@
  </button>
  </div>
 
+ <div style="margin-bottom: 0.5rem; text-align: right;">
+ <button class="btn btn-sm btn-secondary" onclick="exporterTableAffichee('users-table', 'fiskr_comptes')" title="Exporter les lignes affichées (filtres appliqués) en CSV">⬇ CSV</button>
+ </div>
  <div class="table-container">
  <table class="data-table" id="users-table">
  <thead>

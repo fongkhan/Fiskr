@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — search that reaches everything, and the missing exports (quality-of-life 3/N)
+Third batch of the programme, verified in a real browser.
+
+**The palette finds clients** (n° 17). Ctrl+K searched the lists and the alerts — never the client base: typing "Dupont" would not return *your* clients. The global search now carries a third section, bounded like the others, restricted to the client base **in production** — a base awaiting approval has no business in it, and a test pins that. The result opens the client 360 view.
+
+**The palette finds the settings** (n° 18). "seuil", "email", "SLA", "rétention" now lead to the settings card in question. The index is **derived from the markup** — the palette reads the card headings (h2 *and* h3: the SLA block, business notifications and outgoing webhooks live under h3) at the moment of typing. No list to maintain: a card added tomorrow is findable tomorrow. Cards hidden from the current role are excluded — offering a screen the server will refuse helps nobody. "SMTP" deliberately finds nothing: it is configured in `.env`, and the palette cannot navigate there.
+
+**The five missing CSV exports** (n° 20). Two go through the server, because the distinction matters: the **administration journal** is paginated server-side — an export of "what is displayed" would show one page, and it is precisely the piece an inspection asks for whole. It follows the same guard as its reading (admin *or auditor*), the same 50 000-row bound and the same formula-injection neutralisation as every other export. The **delivery journal** exports with its status filter, and rejects an unknown status rather than ignoring it. The other three — accounts, sources, learned equivalences — export **exactly what is displayed**: filtered rows stay out, group headers stay out, and the client-side neutralisation applies the *same rule* as the server (`= + - @` prefixed with an apostrophe), because a forged name executing in the analyst's spreadsheet does not care which side built the file.
+
 ### Added — the analyst's day (quality-of-life 2/N)
 Second batch of the programme, all four verified in a real browser.
 

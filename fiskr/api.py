@@ -1929,6 +1929,62 @@ async def get_admin_log(
         ],
     }
 
+@app.get("/api/export/admin-log.csv")
+async def export_admin_log_csv(
+    action: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
+):
+    """
+    Export CSV du journal d'administration — la piece que le controleur
+    demande, et le seul des cinq tableaux d'exploitation qui soit pagine cote
+    serveur : un export « ce qui est affiche » n'en montrerait qu'une page.
+    Meme garde que la lecture (admin ou auditeur), memes bornes et meme
+    neutralisation d'injection de formules que les autres exports.
+    """
+    query = db.query(AdminAuditLog)
+    if action:
+        query = query.filter(AdminAuditLog.action == action.strip().upper())
+    rows = query.order_by(AdminAuditLog.at.desc(), AdminAuditLog.id.desc())                 .limit(_EXPORT_MAX_ROWS).all()
+    header = ["id", "horodatage", "utilisateur", "action", "cible", "avant", "apres", "detail"]
+    data = [
+        [r.id, r.at.isoformat() if r.at else "", r.username or "", r.action or "",
+         r.target or "", json.dumps(r.before, ensure_ascii=False) if r.before else "",
+         json.dumps(r.after, ensure_ascii=False) if r.after else "", r.detail or ""]
+        for r in rows
+    ]
+    return _csv_response(f"fiskr_journal_admin_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
+
+
+@app.get("/api/export/notifications.csv")
+async def export_notifications_csv(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
+):
+    """Export CSV du journal des envois : la preuve que les notifications
+    partent (ou pas), filtrable par statut comme l'ecran."""
+    query = db.query(NotificationDelivery)
+    if status_filter:
+        wanted = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        bad = [s for s in wanted if s not in _NOTIFICATION_STATUSES]
+        if bad:
+            raise HTTPException(status_code=400,
+                                detail=f"Statut(s) inconnu(s) : {', '.join(bad)}.")
+        query = query.filter(NotificationDelivery.status.in_(wanted))
+    rows = query.order_by(NotificationDelivery.created_at.desc(),
+                          NotificationDelivery.id.desc()).limit(_EXPORT_MAX_ROWS).all()
+    header = ["id", "cree_le", "evenement", "urgence", "destinataires", "statut",
+              "envoye_le", "erreur"]
+    data = [
+        [r.id, r.created_at.isoformat() if r.created_at else "", r.event_key or "",
+         r.urgency or "", r.recipients or "", r.status or "",
+         r.sent_at.isoformat() if r.sent_at else "", r.error or ""]
+        for r in rows
+    ]
+    return _csv_response(f"fiskr_notifications_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
+
+
 # ------------------ RETENTION DES DONNEES (RGPD / ARCHIVAGE) ------------------
 
 class RetentionSettingsUpdate(BaseModel):
@@ -5656,9 +5712,32 @@ async def quick_search(
         "status": a.status, "channel": a.channel,
     } for a in al_rows]
 
+    # --- Clients : la palette cherchait les listes et les alertes, pas la
+    # base clients — « Dupont » ne rendait jamais SES clients. Une requete
+    # bornee sur le referentiel en production (memes bornes que les alertes).
+    cl_total, cl_items = 0, []
+    client_snaps = [row.snapshot_id for row in db.query(Snapshot.snapshot_id).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
+    if client_snaps:
+        cl_query = db.query(ClientEntity).filter(
+            ClientEntity.snapshot_id.in_(client_snaps),
+            or_(ClientEntity.client_first_name.ilike(like),
+                ClientEntity.client_last_name.ilike(like),
+                ClientEntity.client_company_name.ilike(like),
+                ClientEntity.client_id.ilike(like)))
+        cl_total = cl_query.count()
+        cl_items = [{
+            "client_id": c.client_id,
+            "name": (c.client_company_name
+                     or f"{c.client_first_name or ''} {c.client_last_name or ''}".strip()
+                     or c.client_id),
+            "client_type": c.client_type,
+        } for c in cl_query.order_by(ClientEntity.id.desc()).limit(limit).all()]
+
     return {
         "watchlist": {"total": wl_total, "items": wl_items},
         "alerts": {"total": al_total, "items": al_items},
+        "clients": {"total": cl_total, "items": cl_items},
     }
 
 
