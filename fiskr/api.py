@@ -45,7 +45,7 @@ from fiskr.database import (
     AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     safe_upload_filename,
-    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
+    SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
@@ -10340,6 +10340,67 @@ def _get_open_alert(db: Session, alert_id: int) -> Alert:
 def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
     db.add(AlertEvent(alert_id=alert_id, username=username, action=action, detail=detail or None))
 
+def _notifier_les_suiveurs(db: Session, alert: Alert, action: str, actor: str) -> None:
+    """
+    Notifie les suiveurs du dossier d'une action qui vient d'etre commise —
+    a appeler APRES le commit, comme tout emit. L'auteur de l'action est
+    exclu (il la connait), et sans suiveur on n'emet RIEN : avec une audience
+    vide, le repli « destinataires globaux » du routeur arroserait tout le
+    monde — exactement l'inondation que le suivi individuel evite.
+    """
+    try:
+        from fiskr.notifier import _email_of
+        suiveurs = [r.username for r in
+                    db.query(AlertFollower).filter(AlertFollower.alert_id == alert.id).all()
+                    if r.username != actor]
+        if not suiveurs:
+            return
+        emails: List[str] = []
+        for username in suiveurs:
+            emails += _email_of(db, username)
+        if not emails:
+            return
+        emit(db, "alert_followed_activity", {
+            "Alerte": f"#{alert.id}",
+            "Client": alert.client_name,
+            "Liste": alert.watchlist_name,
+            "Action": action,
+            "Par": actor,
+        }, recipients_override=emails)
+    except Exception as e:  # le suivi n'a pas le droit de casser l'action suivie
+        logger.error(f"Notification des suiveurs impossible (alerte {alert.id}) : {e}")
+
+@app.post("/api/alerts/{alert_id}/follow")
+async def follow_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Suit ou cesse de suivre un dossier d'alerte (bascule), sans se l'assigner :
+    le suiveur est notifie des actions des autres sur le dossier. Geste
+    personnel et reversible — il ne s'inscrit PAS au journal immuable de
+    l'alerte, qui ne trace que l'instruction.
+    """
+    alert = _get_open_alert(db, alert_id)
+    username = current_user["username"]
+    existant = db.query(AlertFollower).filter(
+        AlertFollower.alert_id == alert.id, AlertFollower.username == username).first()
+    if existant:
+        db.delete(existant)
+        db.commit()
+        message = "Vous ne suivez plus ce dossier."
+        following = False
+    else:
+        db.add(AlertFollower(alert_id=alert.id, username=username))
+        db.commit()
+        message = "Vous suivez ce dossier : les actions des autres vous seront notifiées."
+        following = True
+    followers = [r.username for r in
+                 db.query(AlertFollower).filter(AlertFollower.alert_id == alert.id)
+                   .order_by(AlertFollower.created_at.asc()).all()]
+    return {"message": message, "following": following, "followers": followers}
+
 # ------------------ DOSSIER D'INVESTIGATION ------------------
 
 class ChecklistToggleRequest(BaseModel):
@@ -11802,12 +11863,19 @@ async def list_alerts(
     rows = query.order_by(en_attente.asc(), priority_rank.asc(), Alert.due_at.asc().nullslast(),
                           Alert.final_score.desc(), Alert.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
+    # Dossiers que CE lecteur suit, en une requete sur la page affichee : le
+    # marqueur de la file est personnel, il ne peut pas vivre dans le resume.
+    suivis = set()
+    if rows:
+        suivis = {r.alert_id for r in db.query(AlertFollower).filter(
+            AlertFollower.username == current_user["username"],
+            AlertFollower.alert_id.in_([a.id for a in rows])).all()}
     return {
         "total": total,
         "open_count": open_count,
         "page": page,
         "page_size": page_size,
-        "items": [_alert_summary(a) for a in rows],
+        "items": [{**_alert_summary(a), "following_me": a.id in suivis} for a in rows],
     }
 
 @app.get("/api/alerts/{alert_id}")
@@ -11825,8 +11893,13 @@ async def get_alert_detail(
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
     attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id) \
                     .order_by(AlertAttachment.uploaded_at.asc()).all()
+    followers = [r.username for r in
+                 db.query(AlertFollower).filter(AlertFollower.alert_id == alert_id)
+                   .order_by(AlertFollower.created_at.asc()).all()]
     return {
         **_alert_summary(alert),
+        "followers": followers,
+        "following_me": current_user["username"] in followers,
         "attachments": [
             {
                 "id": att.id, "file_name": att.file_name, "comment": att.comment,
@@ -11878,6 +11951,7 @@ async def assign_alert(
         "Délégation": f"au lieu de @{redirected_from} (absent)" if redirected_from else "—",
         "Échéance": alert.due_at.isoformat() if alert.due_at else "—",
     })
+    _notifier_les_suiveurs(db, alert, f"Assignée à @{assignee}", current_user["username"])
     return {"message": f"Alerte assignée à {assignee}"
                        + (f" (délégué de @{redirected_from}, absent)." if redirected_from else "."),
             **_alert_summary(alert)}
@@ -11896,6 +11970,7 @@ async def comment_alert(
         raise HTTPException(status_code=400, detail="Le commentaire ne peut pas être vide.")
     _log_alert_event(db, alert.id, current_user["username"], "COMMENT", comment)
     db.commit()
+    _notifier_les_suiveurs(db, alert, "Commentaire ajouté", current_user["username"])
     return {"message": "Commentaire ajouté."}
 
 @app.post("/api/alerts/{alert_id}/escalate")
@@ -11919,6 +11994,7 @@ async def escalate_alert(
         "Score": alert.final_score, "Priorité": alert.priority,
         "Escaladée par": current_user["username"], "Motif": comment,
     })
+    _notifier_les_suiveurs(db, alert, "Escaladée", current_user["username"])
     return {"message": "Alerte escaladée.", **_alert_summary(alert)}
 
 def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
@@ -11981,6 +12057,7 @@ async def propose_alert_decision(
     else:
         emit(db, "alert_closed_direct", {**common, "Clôturée par": username,
                                          "Statut": alert.status})
+    _notifier_les_suiveurs(db, alert, f"Décision proposée : {label}", username)
     return {"message": message, **_alert_summary(alert)}
 
 @app.post("/api/alerts/{alert_id}/validate")
@@ -12036,6 +12113,9 @@ async def validate_alert_decision(
         }
     db.commit()
     emit(db, event_key, {**common, **extra})
+    _notifier_les_suiveurs(db, alert,
+                           "Décision validée, dossier clos" if payload.approve
+                           else "Décision refusée, renvoyée en analyse", username)
     return {"message": message, **_alert_summary(alert)}
 
 class AlertPriorityRequest(BaseModel):
@@ -12060,6 +12140,7 @@ async def set_alert_priority(
     _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
                      f"Priorité {old_priority} → {new_priority}.")
     db.commit()
+    _notifier_les_suiveurs(db, alert, f"Priorité passée à {new_priority}", current_user["username"])
     return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
 
 class AlertSnoozeRequest(BaseModel):
@@ -12092,6 +12173,7 @@ async def snooze_alert(
         _log_alert_event(db, alert.id, current_user["username"], "WOKEN",
                          "Réveillée avant l'échéance de mise en attente.")
         db.commit()
+        _notifier_les_suiveurs(db, alert, "Réveillée (fin de mise en attente)", current_user["username"])
         return {"message": "Alerte réveillée : elle reprend sa place dans la file.",
                 **_alert_summary(alert)}
     reason = (payload.reason or "").strip()
@@ -12123,6 +12205,7 @@ async def snooze_alert(
     _log_alert_event(db, alert.id, current_user["username"], "SNOOZED",
                      f"Mise en attente jusqu'au {until.strftime('%d/%m/%Y %H:%M')} UTC — {reason}")
     db.commit()
+    _notifier_les_suiveurs(db, alert, "Mise en attente", current_user["username"])
     return {"message": f"Alerte mise en attente jusqu'au {until.strftime('%d/%m/%Y %H:%M')} UTC.",
             "warning": warning, **_alert_summary(alert)}
 

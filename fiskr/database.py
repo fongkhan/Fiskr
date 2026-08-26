@@ -2,7 +2,7 @@ import json
 import hashlib
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from fiskr.config import config
 
@@ -913,6 +913,21 @@ class FpRuleTest(Base):
     last_error = Column(Text, nullable=True)
     last_run_at = Column(DateTime, nullable=True)
     created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class AlertFollower(Base):
+    """
+    Suivi d'un dossier d'alerte sans se l'assigner : le suiveur est notifie
+    des actions des autres (categorie criblage, recapitulatif periodique).
+    Personnel et reversible — ce n'est PAS un acte d'instruction, donc rien
+    n'en va au journal immuable de l'alerte.
+    """
+    __tablename__ = "alert_followers"
+    __table_args__ = (UniqueConstraint("alert_id", "username", name="uq_alert_follower"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    username = Column(String(100), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class AlertEvent(Base):

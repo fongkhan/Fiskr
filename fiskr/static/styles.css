@@ -1025,6 +1025,9 @@ tr.ligne-visee {
     outline-offset: -2px;
 }
 
+/* Étoile des dossiers suivis (suivre sans s'assigner) */
+.etoile-suivi { color: var(--color-warning); }
+
 /* ------------------ Nouveautés (panneau + point sur le bouton) ------------------ */
 /* Le point signale du nouveau depuis la dernière ouverture du panneau. Il vit
    DANS le bouton (position: relative) pour suivre le bouton partout. */

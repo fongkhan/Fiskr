@@ -1191,6 +1191,15 @@ function initAideRaccourcis() {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-08-26-lot-6", date: "2026-08-26",
+ titre: "Suivre un dossier sans se l'assigner",
+ points: [
+ "Un bouton « Suivre » dans le dossier d'alerte : les actions des autres vous sont notifiées.",
+ "Une étoile marque vos dossiers suivis dans la file ; la fiche liste les suiveurs.",
+ "Geste personnel et réversible : rien n'en va au journal immuable de l'alerte.",
+ ],
+ },
+ {
  id: "2026-08-26-lot-5", date: "2026-08-26",
  titre: "Triage au clavier et mise en attente",
  points: [
@@ -6710,13 +6719,15 @@ function renderAlertsTable(channel, items) {
  const subject = channel === "FILTERING"
  ? describeFilteringSubject(a)
  : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+ const etoile = a.following_me
+ ? `<span class="etoile-suivi" title="Vous suivez ce dossier" aria-hidden="true">★</span> ` : "";
  const selectable = !a.status.startsWith("CLOSED");
  return `
  <tr data-alert-id="${a.id}">
  <td>${selectable ? `<input type="checkbox" class="alert-select" data-alert-id="${a.id}" onchange="toggleAlertSelection('${channel}', ${a.id}, this.checked)" aria-label="Sélectionner l'alerte ${a.id}">` : ""}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${formatDateTime(a.created_at)}</td>
- <td>${subject}</td>
+ <td>${etoile}${subject}</td>
  <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(a.list_type)}</td>
  <td><strong style="color: ${a.final_score >= 90 ? 'var(--color-alert)' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
@@ -6767,6 +6778,11 @@ async function openAlertModal(alertId) {
  let actionsHtml = "";
  if (!isClosed) {
  actionsHtml += `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">`;
+ // Suivre sans s'assigner : disponible quel que soit l'état ouvert — y
+ // compris en attente de validation, où c'est précisément le besoin.
+ actionsHtml += a.following_me
+ ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">★ Suivi — ne plus suivre</button>`
+ : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">☆ Suivre ce dossier</button>`;
  if (a.status !== "PENDING_VALIDATION") {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
@@ -6784,6 +6800,9 @@ async function openAlertModal(alertId) {
  actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Décision proposée par @${escapeHtml(a.proposed_by)} — en attente d'un validateur différent (rôle réviseur).</span>`;
  }
  actionsHtml += `</div>`;
+ if ((a.followers || []).length) {
+ actionsHtml += `<div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;"><span>Suivi par :</span> ${a.followers.map((u) => "@" + escapeHtml(u)).join(", ")}</div>`;
+ }
  } else {
  actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
  // Faux positif avere : proposer la mise en liste blanche (reviseurs)
@@ -6932,6 +6951,28 @@ async function reporterAlerte(alertId) {
 
 async function reveillerAlerte(alertId) {
  await _posterReport(alertId, { until: null });
+}
+
+// ------------------ SUIVI D'UN DOSSIER (sans se l'assigner) ------------------
+// Le validateur attend l'issue d'un dossier qu'il n'instruit pas ; l'analyste
+// veut savoir ce que devient l'alerte escaladée. Suivre = être notifié des
+// actions des autres. Geste personnel : rien au journal immuable de l'alerte.
+
+async function suivreAlerte(alertId) {
+ try {
+ const response = await apiFetch(`/api/alerts/${alertId}/follow`, { method: "POST" });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "Action refusée."), "error");
+ return;
+ }
+ showToast(data.message, "success");
+ const modale = document.getElementById("alert-modal");
+ if (modale && _modaleVisible(modale) && currentAlertId === alertId) openAlertModal(alertId);
+ refreshAlertQueues();
+ } catch (e) {
+ showToast("Erreur réseau pendant le changement de suivi.", "error");
+ }
 }
 
 // ------------------ TRIAGE AU CLAVIER DES FILES (j / k / o / r) ------------------

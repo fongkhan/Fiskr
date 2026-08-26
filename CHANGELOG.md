@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — follow a case without assigning it to yourself (quality-of-life 6/N)
+Sixth batch of the programme, verified in a real browser.
+
+**Follow a case** (n° 12). The validator waits for the outcome of a case they do not review; the analyst wants to know what becomes of the alert they escalated. Until now the only way to stay informed was to *assign yourself* — which distorts the workload screens. Following is a **personal, reversible** gesture: a button in the alert case, a star on your followed rows in the queue, the list of followers on the case — and **nothing in the alert's immutable journal**, which records instruction, not curiosity.
+
+**The notification rides the existing rails.** One new catalog event ("activity on a followed case", digest urgency — never a flood), one new pseudo-audience: `followers`. Every lifecycle action — assign, comment, escalate, propose, validate, priority, hold, wake — notifies the case's followers through the same channels, opt-outs and delivery journal as everything else. The author of an action is never notified of their own gesture.
+
+**The router trap this batch had to disarm**: an event with no resolvable recipients falls back to the global addresses — the deployment-without-accounts behaviour, kept. For a followers-routed event that fallback would turn "nobody follows this case" into "everybody gets mail". Two guards now hold: the emitter stays silent when there is no follower left after excluding the actor, and `resolve_recipients` never falls back to global addresses for a followers-routed event. A test pins each.
+
+Also in this batch: the development database turned out corrupted (a `cp` of the SQLite file taken while its WAL was live — the copy misses the unflushed pages). Rebuilt from the readable pages; the session's backup discipline now goes through SQLite's backup API, which includes the WAL.
+
+10 tests pin the batch.
+
 ### Added — keyboard triage and honest postponing (quality-of-life 5/N)
 Fifth batch of the programme, verified in a real browser (sixteen checks, dialogs driven key by key).
 
