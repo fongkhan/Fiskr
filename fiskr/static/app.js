@@ -477,6 +477,7 @@ async function apiFetch(url, options = {}) {
  throw e;
  }
  if (response.status === 401) {
+ sauverBrouillonDeSession();
  window.location.href = "/login";
  throw new Error("Session expirée");
  }
@@ -593,6 +594,32 @@ function tableError(target, cols, message = "Chargement impossible.") {
 // attachTableFilters("ma-table", { search: true, columns: [{ index: 2, label: "Statut" }] })
 const _tableFilterSpecs = {};
 
+// Filtres retenus d'une visite à l'autre (par navigateur, par tableau) : un
+// analyste qui travaille « CRITICAL, non assignées » les reposait à chaque
+// visite — les 13 barres de filtres repartaient de zéro. Le repère visuel
+// (« filtre-actif ») évite l'envers du décor : un filtre d'hier oublié qui
+// ferait lire un tableau plein comme un tableau presque vide.
+const _FILTRES_CLE = "fiskr_filtres_tables";
+
+function _filtresMemorises() {
+ try { return JSON.parse(localStorage.getItem(_FILTRES_CLE) || "{}") || {}; }
+ catch (e) { return {}; }
+}
+
+function _memoriserFiltres(tableId) {
+ try {
+ const etat = { recherche: document.getElementById(`${tableId}-filter-search`)?.value || "", colonnes: {} };
+ for (const col of ((_tableFilterSpecs[tableId] || {}).columns || [])) {
+ const v = document.getElementById(`${tableId}-filter-col-${col.index}`)?.value || "";
+ if (v) etat.colonnes[col.index] = v;
+ }
+ const tous = _filtresMemorises();
+ if (etat.recherche || Object.keys(etat.colonnes).length) tous[tableId] = etat;
+ else delete tous[tableId];
+ localStorage.setItem(_FILTRES_CLE, JSON.stringify(tous));
+ } catch (e) { /* stockage indisponible : le filtre s'applique, il n'est juste pas retenu */ }
+}
+
 function attachTableFilters(tableId, spec) {
  const table = document.getElementById(tableId);
  if (!table) return;
@@ -619,11 +646,24 @@ function attachTableFilters(tableId, spec) {
  const anchor = table.closest(".table-container") || table;
  anchor.parentNode.insertBefore(bar, anchor);
 
+ // Restauration du filtre retenu. Les menus se remplissent avec les DONNÉES :
+ // si l'option voulue n'existe pas encore, le souhait est retenu sur le
+ // select (dataset) et refreshTableFilters le posera dès qu'elle apparaît.
+ const memorise = _filtresMemorises()[tableId];
+ if (memorise) {
+ const rechercheEl = document.getElementById(`${tableId}-filter-search`);
+ if (rechercheEl && memorise.recherche) rechercheEl.value = memorise.recherche;
+ for (const [index, valeur] of Object.entries(memorise.colonnes || {})) {
+ const select = document.getElementById(`${tableId}-filter-col-${index}`);
+ if (select) select.dataset.souhaite = valeur;
+ }
+ }
+
  // Débouncé : une frappe rapide ne déclenche qu'une passe sur les lignes
  let filterTimer = null;
  bar.addEventListener("input", () => {
  clearTimeout(filterTimer);
- filterTimer = setTimeout(() => applyTableFilter(tableId), 120);
+ filterTimer = setTimeout(() => { applyTableFilter(tableId); _memoriserFiltres(tableId); }, 120);
  });
 
  // Tout re-rendu du tableau rafraîchit les menus et réapplique le filtre.
@@ -648,10 +688,11 @@ function refreshTableFilters(tableId) {
  for (const col of (spec.columns || [])) {
  const select = document.getElementById(`${tableId}-filter-col-${col.index}`);
  if (!select) continue;
- const current = select.value;
+ const current = select.value || select.dataset.souhaite || "";
  const values = [...new Set(rows.map(tr => (tr.children[col.index]?.textContent || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "fr"));
  select.innerHTML = `<option value="">${escapeHtml(col.label || "Tous")} : tous</option>`
  + values.map(v => `<option value="${escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(v.length > 40 ? v.slice(0, 40) + "…" : v)}</option>`).join("");
+ if (select.dataset.souhaite && select.value === select.dataset.souhaite) delete select.dataset.souhaite;
  }
  applyTableFilter(tableId);
 }
@@ -665,6 +706,9 @@ function applyTableFilter(tableId) {
  index: col.index,
  value: document.getElementById(`${tableId}-filter-col-${col.index}`)?.value || "",
  })).filter(f => f.value);
+
+ const barre = document.getElementById(`${tableId}-filterbar`);
+ if (barre) barre.classList.toggle("filtre-actif", !!(search || colFilters.length));
 
  let shown = 0, total = 0;
  for (const tr of table.querySelectorAll("tbody tr")) {
@@ -945,6 +989,51 @@ function initFocusDesModales() {
  });
 }
 
+// ------------------ COPIER EN UN CLIC ------------------
+// Identifiants d'entité, hash de snapshot, lien d'une alerte : jusqu'ici,
+// sélection manuelle dans une modale. Un bouton discret par valeur technique,
+// UNE délégation pour toute la page.
+
+function boutonCopier(valeur, titre = "Copier") {
+ return `<button type="button" class="btn-copier" data-copier="${escapeHtml(valeur)}" title="${escapeHtml(titre)}" aria-label="${escapeHtml(titre)}">⧉</button>`;
+}
+
+function initCopierEnUnClic() {
+ document.addEventListener("click", async (e) => {
+ const bouton = e.target.closest("[data-copier]");
+ if (!bouton) return;
+ const valeur = bouton.dataset.copier || "";
+ try {
+ await navigator.clipboard.writeText(valeur);
+ } catch (err) {
+ // Contexte non sécurisé ou permission refusée : repli par sélection
+ const zone = document.createElement("textarea");
+ zone.value = valeur;
+ document.body.appendChild(zone);
+ zone.select();
+ document.execCommand("copy");
+ zone.remove();
+ }
+ showToast("Copié dans le presse-papiers.", "success", 2000);
+ });
+}
+
+// ------------------ AIDE DES RACCOURCIS (touche ?) ------------------
+// Ctrl+K, Échap, Entrée sur les tris existaient — et rien ne les annonçait :
+// un raccourci que rien n'annonce est un raccourci que personne n'emploie.
+
+function initAideRaccourcis() {
+ document.addEventListener("keydown", (e) => {
+ if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
+ const cible = e.target;
+ if (cible && (cible.tagName === "INPUT" || cible.tagName === "TEXTAREA"
+  || cible.tagName === "SELECT" || cible.isContentEditable)) return;
+ e.preventDefault();
+ const modale = document.getElementById("raccourcis-modal");
+ if (modale) modale.classList.toggle("hidden");
+ });
+}
+
 function initA11y() {
  // Échap ferme la modale visible la plus haute (la modale générique gère déjà le sien)
  document.addEventListener("keydown", (e) => {
@@ -984,6 +1073,11 @@ async function refreshSidebarCounters() {
  const c = await response.json();
  // Un badge par espace : le criblage et le filtrage portent chacun leurs
  // alertes ouvertes dans la navigation (l'onglet Alertes unique a disparu)
+ // Badge d'onglet : « (3) Fiskr… » — un onglet en arrière-plan dit s'il y a
+ // du travail sans qu'on l'ouvre. Le titre de base est retenu une fois.
+ const ouvertes = (c.open_alerts_screening || 0) + (c.open_alerts_filtering || 0);
+ if (!window._titreDeBase) window._titreDeBase = document.title.replace(/^\(\d+\)\s*/, "");
+ document.title = ouvertes ? `(${ouvertes}) ${window._titreDeBase}` : window._titreDeBase;
  const scrNavBadge = document.getElementById("screening-open-badge");
  if (scrNavBadge) {
  scrNavBadge.textContent = c.open_alerts_screening ?? 0;
@@ -1213,10 +1307,13 @@ document.addEventListener("DOMContentLoaded", () => {
  applyTheme(currentTheme());
  initA11y();
  initFocusDesModales();
+ initCopierEnUnClic();
+ initAideRaccourcis();
  initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();
  initHashRouting();
+ restaurerBrouillonDeSession();
  initDropZones();
  // Check authentication and load user info
  checkAuthUser();
@@ -1308,6 +1405,73 @@ function auRetourDeLOnglet() {
 }
 
 // Check current logged-in user profile
+// ------------------ VEILLE DE SESSION & BROUILLON DE SECOURS ------------------
+// Le jeton vit huit heures et le cookie est HttpOnly : le client ne peut pas
+// lire son échéance — c'est /api/auth/me qui la donne. Sans elle, le premier
+// appel après l'expiration recevait un 401 et repartait vers la connexion en
+// emportant le commentaire ou le formulaire en cours de saisie.
+
+let _sessionEcheance = null;
+let _sessionVeilleTimer = null;
+
+function armerVeilleDeSession(isoEcheance) {
+ _sessionEcheance = isoEcheance ? new Date(isoEcheance) : null;
+ if (_sessionVeilleTimer) clearInterval(_sessionVeilleTimer);
+ if (!_sessionEcheance || isNaN(_sessionEcheance.getTime())) return;
+ _sessionVeilleTimer = setInterval(rafraichirBandeauDeSession, 30 * 1000);
+ rafraichirBandeauDeSession();
+}
+
+function rafraichirBandeauDeSession() {
+ const bandeau = document.getElementById("session-banner");
+ if (!bandeau || !_sessionEcheance) return;
+ const restant = _sessionEcheance.getTime() - Date.now();
+ // Bandeau, pas modale : l'analyste finit sa phrase, il n'est pas interrompu.
+ const proche = restant <= 10 * 60 * 1000;
+ bandeau.classList.toggle("hidden", !proche);
+ if (proche) {
+ const minutes = Math.max(0, Math.round(restant / 60000));
+ const compteur = document.getElementById("session-banner-minutes");
+ if (compteur) compteur.textContent = minutes >= 1 ? `${minutes} min` : "< 1 min";
+ }
+}
+
+// Quand le 401 tombe malgré tout, la saisie ne disparaît plus : les champs
+// remplis sont photographiés AVANT la redirection (sessionStorage — même
+// onglet, jamais envoyé au serveur) et reposés après reconnexion, uniquement
+// dans les champs encore vides.
+const _BROUILLON_CLE = "fiskr_brouillon_session";
+const _BROUILLON_TTL_MS = 60 * 60 * 1000;
+
+function sauverBrouillonDeSession() {
+ try {
+ const valeurs = {};
+ document.querySelectorAll("textarea[id], input[type=text][id]").forEach(el => {
+ if (el.value && el.value.trim()) valeurs[el.id] = el.value;
+ });
+ if (!Object.keys(valeurs).length) return;
+ sessionStorage.setItem(_BROUILLON_CLE, JSON.stringify({
+ at: Date.now(), hash: location.hash || "", valeurs }));
+ } catch (e) { /* stockage indisponible : comme avant, rien à sauver */ }
+}
+
+function restaurerBrouillonDeSession() {
+ try {
+ const brut = sessionStorage.getItem(_BROUILLON_CLE);
+ if (!brut) return;
+ sessionStorage.removeItem(_BROUILLON_CLE);
+ const brouillon = JSON.parse(brut) || {};
+ if (!brouillon.at || (Date.now() - brouillon.at) > _BROUILLON_TTL_MS) return;
+ if (brouillon.hash && !location.hash) location.hash = brouillon.hash;
+ let reposes = 0;
+ for (const [id, valeur] of Object.entries(brouillon.valeurs || {})) {
+ const el = document.getElementById(id);
+ if (el && "value" in el && !el.value) { el.value = valeur; reposes++; }
+ }
+ if (reposes) showToast("Saisie restaurée après l'expiration de session.", "info", 8000);
+ } catch (e) { /* brouillon illisible : rien à restaurer */ }
+}
+
 async function checkAuthUser() {
  try {
  const response = await apiFetch("/api/auth/me");
@@ -1316,6 +1480,7 @@ async function checkAuthUser() {
  return;
  }
  const data = await response.json();
+ armerVeilleDeSession(data.session_expires_at);
  if (data.user) {
  currentUser = data.user;
  const roles = userRoles(currentUser);
@@ -2044,7 +2209,7 @@ function renderSnapshotsTable(snaps) {
 
  tr.innerHTML = `
  <td>${escapeHtml(dateStr)}</td>
- <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}...</small></td>
+ <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}… ${boutonCopier(snap.file_hash, "Copier le hash complet")}</small></td>
  <td>${listTypeBadge(snap.file_type)}</td>
  <td>${snap.status === "PROCESSING" && snap.processed_count
  ? `${snap.processed_count.toLocaleString(uiLocale())}…` : snap.record_count}</td>
@@ -3086,7 +3251,7 @@ function renderWatchlistTable(items, page = 1, total = 0) {
  const excludedBadge = item.excluded ? ' <span class="status-badge alert" title="Entité exclue de la production lors de l\'homologation">EXCLUE</span>' : "";
 
  tr.innerHTML = `
- <td><code>${escapeHtml(item.entity_id)}</code></td>
+ <td><code>${escapeHtml(item.entity_id)}</code> ${boutonCopier(item.entity_id, "Copier")}</td>
  <td>${listTypeBadge(item._list_type)}</td>
  <td>${snapshotStatusBadge(item.snapshot_status)}${excludedBadge}</td>
  <td>${typeBadge}</td>
@@ -5095,7 +5260,7 @@ function renderPendingTable(pending) {
  <tr>
  <td><input type="checkbox" class="review-pick" value="${id}" onchange="refreshBulkSelection()"></td>
  <td>${escapeHtml(dateStr)}</td>
- <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}...</small></td>
+ <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}… ${boutonCopier(snap.file_hash || "", "Copier le hash complet")}</small></td>
  <td>${listTypeBadge(snap.file_type)}</td>
  <td>${snap.record_count}</td>
  <td>${pendingDeltaCell(snap)}</td>
@@ -5915,7 +6080,7 @@ function renderReviewEntitiesTable(data) {
  return `
  <tr ${item.excluded ? 'style="opacity: 0.65;"' : ""}>
  <td><input type="checkbox" ${checked} onchange="toggleReviewSelection(${item.id}, this.checked)"></td>
- <td><code>${escapeHtml(item.entity_id)}</code></td>
+ <td><code>${escapeHtml(item.entity_id)}</code> ${boutonCopier(item.entity_id, "Copier")}</td>
  <td>${escapeHtml(item.entity_type)}</td>
  <td><strong>${escapeHtml(item.primary_name)}</strong></td>
  <td>${exclusionCell}</td>
@@ -6289,8 +6454,10 @@ async function openAlertModal(alertId) {
  showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
  return;
  }
+ const sousOnglet = (a.channel === "FILTERING") ? "filtering/alerts-filtering" : "screening/alerts-screening";
+ const lienDossier = `${location.origin}${location.pathname}#${sousOnglet}/alerte-${a.id}`;
  document.getElementById("alert-modal-title").innerHTML =
- `Alerte #${a.id} — ${escapeHtml(a.client_name)} × ${escapeHtml(a.watchlist_name)} ${alertStatusBadge(a.status)}`;
+ `Alerte #${a.id} — ${escapeHtml(a.client_name)} × ${escapeHtml(a.watchlist_name)} ${alertStatusBadge(a.status)} ${boutonCopier(lienDossier, "Copier le lien de cette alerte")}`;
 
  const roles = userRoles(currentUser);
  const isReviewer = roles.includes("admin") || roles.includes("reviewer");
@@ -9513,7 +9680,7 @@ function updateLocationHash(tabId, subTabId) {
 function applyHashRoute() {
  const raw = (location.hash || "").replace(/^#/, "");
  if (!raw) return false;
- let [tabId, subTabId] = raw.split("/");
+ let [tabId, subTabId, extra] = raw.split("/");
  // Vieux liens profonds #alerts/... : l'onglet a été scindé — le sous-onglet
  // décide de l'espace (filtrage pour alerts-filtering, criblage sinon).
  if (tabId === "alerts") {
@@ -9526,6 +9693,13 @@ function applyHashRoute() {
  switchTab(tabId);
  if (subTabId && document.getElementById(`sub-sec-${subTabId}`)) {
  switchSubTab(tabId, subTabId);
+ }
+ // Troisième segment : le dossier lui-même. « #…/alerte-123 » rouvre
+ // l'alerte — c'est ce qui rend « copier le lien » utile : le destinataire
+ // arrive SUR le dossier, pas sur la file.
+ const dossierAlerte = extra && extra.match(/^alerte-(\d+)$/);
+ if (dossierAlerte && typeof openAlertModal === "function") {
+ openAlertModal(parseInt(dossierAlerte[1], 10));
  }
  } finally {
  _applyingHashRoute = false;

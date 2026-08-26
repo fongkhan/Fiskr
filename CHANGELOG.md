@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — six everyday frictions, removed in one batch (quality-of-life 1/N)
+First batch of the quality-of-life programme, chosen for effort-to-value. Each item was verified in a real browser before shipping.
+
+**The session no longer takes your work with it.** The token lives eight hours and the cookie is HttpOnly, so the client could not know the expiry — the first call past it got a 401 and a hard redirect to the login page, taking whatever was being typed. `/api/auth/me` now returns the expiry (the server is the only party who can read it); a banner — not a modal, nobody gets interrupted mid-sentence — appears at T-10 min with a live countdown. And if the 401 lands anyway, every filled field is photographed *before* the redirect (sessionStorage: same tab, never sent anywhere) and put back after reconnection — only into fields still empty, then a toast says so.
+
+**Table headers stay put.** Zero `position: sticky` in the stylesheet: on the reference list or the screening journal, the header scrolled away at row thirty and you sorted blind. The `th` background was already opaque; a shadow replaces the border that `border-collapse` scrolls away.
+
+**One click to copy — and the link opens the case.** Entity ids, full snapshot hashes (the screen truncates to eight characters; the *full* hash is the citable reference, so that is what the button copies), and the link to an alert. A link that lands on the *queue* would be useless: the hash route accepts a third segment (`#…/alerte-123`) that reopens the alert itself. One delegation for the whole page, clipboard API with a fallback.
+
+**Filters are remembered.** The thirteen generic filter bars restarted empty on every visit; "CRITICAL, unassigned" was re-set ten times a day. Persisted per table (localStorage), restored on return — with a subtlety: the dropdowns fill from the *data*, so at restore time the wanted option may not exist yet; the wish is kept on the select and applied the moment the option appears. The flip side is guarded too: a filter forgotten from yesterday would read as an almost-empty table, so an active bar carries a visible marker.
+
+**`?` shows the shortcuts.** Ctrl+K, Escape, Enter-to-sort all existed — and nothing announced them. A shortcut nothing announces is a shortcut nobody uses. The `?` key (ignored while typing in a field) opens a small help dialog; it rides the existing modal machinery — focus trap, Escape, backdrop — for free.
+
+**The tab title counts the work.** `(3) Fiskr — …` when alerts are open: a background tab now says whether coming back is worth it. The base title is captured once, so refreshes cannot stack `(3) (3) (3)`.
+
+One proposal from the inventory died on contact with the code, and honestly: "resend a failed notification" already existed, endpoint *and* button. The published roadmap marks it as such.
+
+All new visible strings are translated in the six languages — the i18n guards insisted. 15 tests pin the batch, including the ordering that matters (photograph *before* redirect), the wish mechanism for restored filters, and the guard that `?` typed in a search field stays a question mark.
+
 ### Fixed — "SMTP configured" was displayed while every message was failing
 Three states resemble each other and do not have the same consequences: SMTP **configured**, SMTP **reachable**, and messages **actually delivered**. The commissioning screen reported the first and stopped there — honestly, saying in as many words that "configured does not mean reachable" and offering a probe for the second. The third it left alone, although the product *holds the answer*: every notification writes a row with its status and its error.
 

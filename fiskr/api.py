@@ -1775,9 +1775,19 @@ class UpdateUserAdminRequest(BaseModel):
     role: Optional[str] = None
 
 @app.get("/api/auth/me")
-async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Returns profile info of the currently logged-in user."""
-    return {"user": current_user}
+async def get_me(request: Request,
+                 current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Profil de l'utilisateur connecte, et echeance de sa session.
+
+    L'echeance est rendue ICI parce que le client ne peut pas la lire : le
+    cookie est HttpOnly. Sans elle, l'interface ne peut pas prevenir avant
+    l'expiration — le premier appel apres 8 h recevait un 401 et redirigeait
+    brutalement vers la connexion, en emportant le commentaire ou le
+    formulaire en cours de saisie.
+    """
+    from fiskr.auth import session_expires_at
+    return {"user": current_user, "session_expires_at": session_expires_at(request)}
 
 # ------------------ USER MANAGEMENT ENDPOINTS ------------------
 

@@ -953,6 +953,70 @@ th {
     font-weight: 600;
 }
 
+/* En-têtes collants : sur la base des listés ou le journal de criblage,
+   l'en-tête disparaissait dès la trentième ligne et l'on triait à l'aveugle.
+   Le fond du th est déjà opaque (--surface-1) ; l'ombre remplace la bordure
+   basse, que border-collapse fait défiler avec le contenu. */
+.table-container thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    box-shadow: 0 1px 0 var(--border-color);
+}
+
+/* Barre de filtres active : « 3 / 120 » se lit, mais un filtre oublié se
+   voit encore mieux avec un repère — sinon un tableau filtré d'hier se lit
+   comme un tableau presque vide aujourd'hui. */
+.table-filter-bar.filtre-actif {
+    border-left: 3px solid var(--color-primary);
+    padding-left: 0.6rem;
+}
+
+/* Copier en un clic : identifiants, hash, liens — discret, aligné au texte */
+.btn-copier {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 0.3rem;
+    font-size: 0.85rem;
+    vertical-align: baseline;
+}
+.btn-copier:hover { color: var(--color-primary); }
+
+/* Bandeau d'échéance de session : visible sans être une modale — l'analyste
+   doit pouvoir finir sa phrase, pas être interrompu. */
+#session-banner {
+    position: fixed;
+    top: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1300;
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    background: var(--color-warning, #b8860b);
+    color: #fff;
+    font-size: 0.85rem;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+#session-banner.hidden { display: none; }
+
+/* Aide des raccourcis (touche ?) */
+#raccourcis-modal kbd {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid var(--border-color);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--surface-1);
+    font-family: inherit;
+    font-size: 0.8rem;
+}
+#raccourcis-modal td { padding: 0.4rem 0.6rem; }
+
 tr:last-child td {
     border-bottom: none;
 }

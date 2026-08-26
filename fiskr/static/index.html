@@ -3020,6 +3020,34 @@
  <!-- Notifications intégrées (remplacent les popups natifs du navigateur) -->
  <div id="toast-container" aria-live="polite"></div>
 
+ <!-- Échéance de session : le jeton vit huit heures et le cookie est HttpOnly,
+      c'est /api/auth/me qui donne l'échéance. Bandeau, pas modale : on prévient,
+      on n'interrompt pas. -->
+ <div id="session-banner" class="hidden" role="alert">
+ <span>Session : expiration dans</span> <strong id="session-banner-minutes">—</strong>
+ <span>— enregistrez votre travail, puis reconnectez-vous.</span>
+ </div>
+
+ <!-- Aide des raccourcis clavier (touche ?) : des raccourcis que rien
+      n'annonce sont des raccourcis que personne n'emploie. -->
+ <div id="raccourcis-modal" class="modal hidden">
+ <div class="modal-content" style="max-width: 500px;">
+ <button type="button" class="close-modal" aria-label="Fermer" onclick="document.getElementById('raccourcis-modal').classList.add('hidden')">&times;</button>
+ <h2>Raccourcis clavier</h2>
+ <div class="table-container" style="margin-top: 0.75rem;">
+ <table>
+ <tbody>
+ <tr><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>Recherche et navigation rapides</td></tr>
+ <tr><td><kbd>?</kbd></td><td>Cette aide</td></tr>
+ <tr><td><kbd>Échap</kbd></td><td>Fermer la fenêtre ouverte</td></tr>
+ <tr><td><kbd>Entrée</kbd> / <kbd>Espace</kbd></td><td>Activer l'élément ciblé — tri des colonnes compris</td></tr>
+ <tr><td><kbd>Tab</kbd> / <kbd>Maj</kbd> + <kbd>Tab</kbd></td><td>Parcourir les commandes de l'écran</td></tr>
+ </tbody>
+ </table>
+ </div>
+ </div>
+ </div>
+
  <div id="app-dialog" class="modal hidden" style="z-index: 1200;">
  <div class="modal-content" style="max-width: 480px;">
  <h2 id="app-dialog-title" style="margin-bottom: 0.75rem;">Confirmation</h2>
