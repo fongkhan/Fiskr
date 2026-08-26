@@ -1028,6 +1028,87 @@ tr.ligne-visee {
 /* Étoile des dossiers suivis (suivre sans s'assigner) */
 .etoile-suivi { color: var(--color-warning); }
 
+/* ------------------ Confort des tableaux : colonnes & densité ------------------ */
+/* Bouton « Colonnes » : discret, dans la barre de filtres (ou seul devant le
+   tableau) ; le panneau est ancré à lui. */
+.table-filter-bar, .barre-colonnes { position: relative; }
+.barre-colonnes { display: flex; justify-content: flex-end; margin-bottom: 0.4rem; }
+.btn-colonnes {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    padding: 0.35rem 0.7rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+.btn-colonnes:hover { background: var(--surface-3); color: var(--text-primary); }
+.panneau-colonnes {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 220px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 0.6rem 0.75rem;
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.panneau-colonnes label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* Densité compacte : mêmes valeurs que .table-compact, appliquées partout. */
+body.densite-compacte th, body.densite-compacte td { padding: 0.35rem 0.6rem; font-size: 0.85rem; }
+body.densite-compacte .table-group-row td { padding-top: 0.55rem; }
+.icon-btn.actif { border-color: var(--color-primary); color: var(--color-primary); }
+
+/* ------------------ Combobox cherchable ------------------ */
+/* Le select d'origine reste la source de vérité, masqué ; le champ filtre. */
+select.combobox-source { display: none; }
+.combobox { position: relative; display: inline-block; }
+.combobox-champ { min-width: 170px; }
+.combobox-liste {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    z-index: 40;
+    margin: 0;
+    padding: 0.3rem;
+    list-style: none;
+    min-width: 100%;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.combobox-liste li {
+    padding: 0.35rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.combobox-liste li:hover, .combobox-liste li.actif { background: var(--surface-3); }
+.combobox-liste li[aria-selected="true"] { color: var(--color-primary); font-weight: 600; }
+.combobox-liste .combobox-vide { color: var(--text-muted); cursor: default; }
+
 /* ------------------ Nouveautés (panneau + point sur le bouton) ------------------ */
 /* Le point signale du nouveau depuis la dernière ouverture du panneau. Il vit
    DANS le bouton (position: relative) pour suivre le bouton partout. */

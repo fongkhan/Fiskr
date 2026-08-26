@@ -742,6 +742,8 @@ function attachTableFilters(tableId, spec) {
  .observe(tbody, { childList: true });
  }
  refreshTableFilters(tableId);
+ // Toute table filtrable gagne le choix de ses colonnes, au même endroit.
+ attacherChoixDesColonnes(tableId);
 }
 
 // Repeuple les menus (valeurs distinctes des colonnes) et réapplique le
@@ -1089,14 +1091,17 @@ function exporterTableAffichee(tableId, nomFichier) {
  const table = document.getElementById(tableId);
  if (!table) return;
  const lignes = [];
- const entetes = [...table.querySelectorAll("thead th")].map(th => th.textContent.trim());
+ // Exactement ce que l'utilisateur voit : les colonnes masquées par le
+ // choix de colonnes sortent du fichier comme elles sont sorties de l'écran.
+ const cachees = new Set(_colonnesMemorisees()[tableId] || []);
+ const garder = (cellules) => cellules.filter((c, i) => !cachees.has(i));
+ const entetes = garder([...table.querySelectorAll("thead th")]).map(th => th.textContent.trim());
  lignes.push(entetes);
  for (const tr of table.querySelectorAll("tbody tr")) {
- // Exactement ce que l'utilisateur voit : les lignes filtrées et les
- // en-têtes de groupe restent dehors.
+ // Les lignes filtrées et les en-têtes de groupe restent dehors aussi.
  if (tr.classList.contains("filtered-out") || tr.classList.contains("table-group-row")) continue;
  if (tr.querySelector(".empty-state")) continue;
- lignes.push([...tr.children].map(td => td.textContent.replace(/\s+/g, " ").trim()));
+ lignes.push(garder([...tr.children]).map(td => td.textContent.replace(/\s+/g, " ").trim()));
  }
  const csv = lignes.map(l => l.map(c => `"${_csvNeutralise(c).replace(/"/g, '""')}"`).join(";")).join("\r\n");
  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
@@ -1107,6 +1112,248 @@ function exporterTableAffichee(tableId, nomFichier) {
  lien.click();
  lien.remove();
  URL.revokeObjectURL(lien.href);
+}
+
+// ------------------ CONFORT DES TABLEAUX : COLONNES & DENSITÉ ------------------
+// Choix des colonnes affichées, par tableau, persisté par poste. Le masquage
+// passe par UNE feuille de style régénérée (« #table tr > *:nth-child(n) ») :
+// les règles survivent à tous les re-rendus sans visiter une seule ligne.
+
+const _COLONNES_CLE = "fiskr_colonnes";
+
+function _colonnesMemorisees() {
+ try { return JSON.parse(localStorage.getItem(_COLONNES_CLE)) || {}; }
+ catch (e) { return {}; }
+}
+
+function _appliquerColonnes() {
+ let feuille = document.getElementById("regles-colonnes");
+ if (!feuille) {
+ feuille = document.createElement("style");
+ feuille.id = "regles-colonnes";
+ document.head.appendChild(feuille);
+ }
+ const regles = [];
+ for (const [tableId, indices] of Object.entries(_colonnesMemorisees())) {
+ // Le stockage local est modifiable par n'importe quel script du poste :
+ // un identifiant qui ne ressemble pas à un id de tableau n'entre pas
+ // dans la feuille de style.
+ if (!/^[-\w]+$/.test(tableId) || !Array.isArray(indices)) continue;
+ for (const idx of indices) {
+ if (Number.isInteger(idx) && idx >= 0) {
+ regles.push(`#${tableId} tr > *:nth-child(${idx + 1}) { display: none; }`);
+ }
+ }
+ }
+ feuille.textContent = regles.join("\n");
+}
+
+function _entetesDeTable(tableId) {
+ const table = document.getElementById(tableId);
+ if (!table || !table.tHead || !table.tHead.rows.length) return [];
+ return Array.from(table.tHead.rows[0].cells).map((th, i) =>
+ (th.textContent || "").trim() || `Colonne ${i + 1}`);
+}
+
+function attacherChoixDesColonnes(tableId) {
+ const table = document.getElementById(tableId);
+ if (!table || document.getElementById(`${tableId}-colonnes-btn`)) return;
+ if (!_entetesDeTable(tableId).length) return;
+ const btn = document.createElement("button");
+ btn.id = `${tableId}-colonnes-btn`;
+ btn.type = "button";
+ btn.className = "btn-colonnes";
+ btn.innerHTML = `${uiIcon("sliders")}<span>Colonnes</span>`;
+ btn.title = "Choisir les colonnes affichées";
+ btn.setAttribute("aria-label", "Choisir les colonnes affichées");
+ btn.setAttribute("aria-haspopup", "true");
+ btn.setAttribute("aria-expanded", "false");
+ btn.onclick = () => _basculerPanneauColonnes(tableId, btn);
+ const barre = document.getElementById(`${tableId}-filterbar`);
+ if (barre) {
+ barre.appendChild(btn);
+ } else {
+ const porte = document.createElement("div");
+ porte.className = "barre-colonnes";
+ const anchor = table.closest(".table-container") || table;
+ anchor.parentNode.insertBefore(porte, anchor);
+ porte.appendChild(btn);
+ }
+}
+
+function _basculerPanneauColonnes(tableId, btn) {
+ const existant = document.getElementById(`${tableId}-colonnes-panneau`);
+ document.querySelectorAll(".panneau-colonnes").forEach((p) => p.remove());
+ document.querySelectorAll("[id$='-colonnes-btn']").forEach((b) => b.setAttribute("aria-expanded", "false"));
+ if (existant) return;
+ const panneau = document.createElement("div");
+ panneau.id = `${tableId}-colonnes-panneau`;
+ panneau.className = "panneau-colonnes";
+ const caches = new Set(_colonnesMemorisees()[tableId] || []);
+ panneau.innerHTML = _entetesDeTable(tableId).map((titre, i) =>
+ `<label><input type="checkbox" data-col="${i}"${caches.has(i) ? "" : " checked"}> ${escapeHtml(titre)}</label>`).join("");
+ panneau.addEventListener("change", (e) => {
+ const idx = parseInt(e.target.dataset.col, 10);
+ const memo = _colonnesMemorisees();
+ const liste = new Set(memo[tableId] || []);
+ if (e.target.checked) liste.delete(idx); else liste.add(idx);
+ // Au moins une colonne visible : tout masquer rendrait le tableau
+ // introuvable, sans message et sans chemin de retour évident.
+ if (liste.size >= _entetesDeTable(tableId).length) {
+ e.target.checked = true;
+ return;
+ }
+ if (liste.size) memo[tableId] = [...liste].sort((a, b) => a - b);
+ else delete memo[tableId];
+ try { localStorage.setItem(_COLONNES_CLE, JSON.stringify(memo)); } catch (err) { /* stockage indisponible */ }
+ _appliquerColonnes();
+ });
+ btn.setAttribute("aria-expanded", "true");
+ btn.insertAdjacentElement("afterend", panneau);
+ setTimeout(() => {
+ const fermer = (e) => {
+ if (e.type === "keydown" && e.key !== "Escape") return;
+ if (e.type === "click" && (panneau.contains(e.target) || btn.contains(e.target))) return;
+ panneau.remove();
+ btn.setAttribute("aria-expanded", "false");
+ document.removeEventListener("click", fermer);
+ document.removeEventListener("keydown", fermer);
+ };
+ document.addEventListener("click", fermer);
+ document.addEventListener("keydown", fermer);
+ }, 0);
+}
+
+// Densité d'affichage globale (confortable / compacte), persistée par poste.
+const _DENSITE_CLE = "fiskr_densite";
+
+function appliquerDensite(mode) {
+ const compacte = mode === "compacte";
+ document.body.classList.toggle("densite-compacte", compacte);
+ try { localStorage.setItem(_DENSITE_CLE, compacte ? "compacte" : "confortable"); } catch (e) { /* stockage indisponible */ }
+ const btn = document.getElementById("densite-btn");
+ if (btn) {
+ const titre = compacte
+ ? "Densité compacte — cliquer pour l'affichage confortable"
+ : "Densité confortable — cliquer pour l'affichage compact";
+ btn.title = titre;
+ btn.setAttribute("aria-label", titre);
+ btn.classList.toggle("actif", compacte);
+ }
+}
+
+function basculerDensite() {
+ appliquerDensite(document.body.classList.contains("densite-compacte") ? "confortable" : "compacte");
+}
+
+function initDensite() {
+ let memo = null;
+ try { memo = localStorage.getItem(_DENSITE_CLE); } catch (e) { /* stockage indisponible */ }
+ appliquerDensite(memo === "compacte" ? "compacte" : "confortable");
+}
+
+// ------------------ COMBOBOX CHERCHABLE (selects longs) ------------------
+// Le select natif ne se filtre pas : dans un annuaire de quarante analystes
+// ou quinze types de listes, on descend la roulette. Tout select marqué
+// `data-combobox` gagne un champ de recherche : les options restent celles
+// du select (dérivées à l'ouverture, jamais recopiées), la sélection repasse
+// par select.value + un évènement change — les onchange existants s'exécutent.
+
+function _texteSimplifie(s) {
+ return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function activerCombobox(select) {
+ if (!select || select.dataset.comboboxActif) return;
+ select.dataset.comboboxActif = "1";
+ const listeId = `${select.id || "cb" + Math.random().toString(36).slice(2, 8)}-liste`;
+ const enveloppe = document.createElement("span");
+ enveloppe.className = "combobox";
+ const champ = document.createElement("input");
+ champ.type = "text";
+ champ.className = "combobox-champ";
+ champ.setAttribute("role", "combobox");
+ champ.setAttribute("aria-autocomplete", "list");
+ champ.setAttribute("aria-expanded", "false");
+ champ.setAttribute("aria-controls", listeId);
+ champ.setAttribute("aria-label", select.getAttribute("aria-label") || select.title || "Filtrer les choix");
+ champ.autocomplete = "off";
+ const liste = document.createElement("ul");
+ liste.id = listeId;
+ liste.className = "combobox-liste hidden";
+ liste.setAttribute("role", "listbox");
+ select.parentNode.insertBefore(enveloppe, select);
+ enveloppe.appendChild(champ);
+ enveloppe.appendChild(liste);
+ select.classList.add("combobox-source");
+
+ const libelleCourant = () =>
+ (select.selectedIndex >= 0 && select.options[select.selectedIndex])
+ ? select.options[select.selectedIndex].textContent.trim() : "";
+ champ.value = libelleCourant();
+ select.addEventListener("change", () => { champ.value = libelleCourant(); });
+
+ let actif = -1;
+ const fermer = () => {
+ liste.classList.add("hidden");
+ champ.setAttribute("aria-expanded", "false");
+ champ.removeAttribute("aria-activedescendant");
+ actif = -1;
+ };
+ const options = () => Array.from(liste.querySelectorAll("[role='option']"));
+ const choisir = (li) => {
+ select.value = li.dataset.valeur;
+ select.dispatchEvent(new Event("change"));
+ champ.value = li.textContent.trim();
+ fermer();
+ };
+ const construire = (aiguille) => {
+ // Dérivé du select à CHAQUE ouverture : un annuaire repeuplé après coup
+ // est visible sans rien re-brancher.
+ const simple = _texteSimplifie(aiguille);
+ const items = Array.from(select.options)
+ .filter((o) => !simple || _texteSimplifie(o.textContent).includes(simple));
+ liste.innerHTML = items.length
+ ? items.map((o, i) =>
+ `<li role="option" id="${listeId}-opt-${i}" data-valeur="${escapeHtml(o.value)}"${o.value === select.value ? ' aria-selected="true"' : ""}>${escapeHtml(o.textContent.trim())}</li>`).join("")
+ : `<li class="combobox-vide">Aucun choix ne correspond.</li>`;
+ liste.classList.remove("hidden");
+ champ.setAttribute("aria-expanded", "true");
+ actif = -1;
+ };
+ champ.addEventListener("focus", () => { champ.select(); construire(""); });
+ champ.addEventListener("input", () => construire(champ.value));
+ champ.addEventListener("keydown", (e) => {
+ const opts = options();
+ if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+ e.preventDefault();
+ if (liste.classList.contains("hidden")) { construire(champ.value); return; }
+ if (!opts.length) return;
+ actif = e.key === "ArrowDown" ? Math.min(actif + 1, opts.length - 1) : Math.max(actif - 1, 0);
+ opts.forEach((o, i) => o.classList.toggle("actif", i === actif));
+ champ.setAttribute("aria-activedescendant", opts[actif].id);
+ opts[actif].scrollIntoView({ block: "nearest" });
+ } else if (e.key === "Enter") {
+ if (actif >= 0 && opts[actif]) { e.preventDefault(); choisir(opts[actif]); }
+ else if (opts.length === 1) { e.preventDefault(); choisir(opts[0]); }
+ } else if (e.key === "Escape") {
+ fermer();
+ champ.value = libelleCourant();
+ }
+ });
+ // mousedown avant blur : le clic choisit, PUIS le champ perd le focus
+ liste.addEventListener("mousedown", (e) => {
+ const li = e.target.closest("[role='option']");
+ if (li) { e.preventDefault(); choisir(li); }
+ });
+ champ.addEventListener("blur", () => {
+ // Un texte tapé qui n'est pas un choix ne vaut rien : on réaffiche le réel
+ setTimeout(() => { fermer(); champ.value = libelleCourant(); }, 120);
+ });
+}
+
+function initComboboxes() {
+ document.querySelectorAll("select[data-combobox]").forEach(activerCombobox);
 }
 
 // ------------------ COPIER EN UN CLIC ------------------
@@ -1190,6 +1437,15 @@ function initAideRaccourcis() {
 // chacun découvre les nouveautés une fois, puis le point s'éteint.
 
 const FISKR_NOUVEAUTES = [
+ {
+ id: "2026-08-26-lot-7", date: "2026-08-26",
+ titre: "Le confort des tableaux",
+ points: [
+ "Choisissez les colonnes de chaque tableau — l'export « tel qu'affiché » les respecte.",
+ "Une densité compacte pour voir plus de lignes, d'un clic dans la barre.",
+ "Les longs menus déroulants se filtrent au clavier : analystes, types de listes.",
+ ],
+ },
  {
  id: "2026-08-26-lot-6", date: "2026-08-26",
  titre: "Suivre un dossier sans se l'assigner",
@@ -1555,6 +1811,15 @@ document.addEventListener("DOMContentLoaded", () => {
  initAideRaccourcis();
  initNouveautes();
  initTriageClavier();
+ // Confort des tableaux : colonnes masquées reposées, densité, combobox.
+ _appliquerColonnes();
+ initDensite();
+ initComboboxes();
+ // Les grands tableaux sans barre de filtres générique (files d'alertes,
+ // base des listés, journal de criblage : paginés côté serveur) reçoivent
+ // aussi le choix des colonnes.
+ ["screening-alerts-table", "filtering-alerts-table", "watchlist-table", "audit-table"]
+ .forEach(attacherChoixDesColonnes);
  initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();

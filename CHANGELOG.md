@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — table comfort: column choice, density, searchable comboboxes (quality-of-life 7/N)
+Seventh batch of the programme, verified in a real browser (sixteen checks).
+
+**Choose each table's columns** (n° 21). Every filterable table — and the four big server-paginated ones (both alert queues, the listed-parties base, the screening journal) — gains a "Columns" button. The panel derives its checkboxes from the real `thead` at the moment it opens: a column added tomorrow is choosable tomorrow, nothing to maintain. Hiding goes through **one regenerated stylesheet** (`#table tr > *:nth-child(n)`), so the choice survives every re-render without visiting a single row. Three edges are guarded: you cannot hide the last visible column (an unfindable table with no way back), a forged table id in localStorage cannot enter the stylesheet (form-checked before any rule is written), and the **"as displayed" CSV export drops hidden columns from the file exactly as they left the screen** — otherwise its name would lie.
+
+**Display density** (n° 21, second half). One toolbar button toggles comfortable/compact globally — the compact values already existed as a per-table class; they are now a per-workstation preference, persisted and announced on the button.
+
+**Searchable comboboxes for long selects** (n° 19). One reusable component: any select marked `data-combobox` gains a filter-as-you-type field — the analyst directory in both queues, list types in the whitelist filter and the two manual-add forms. The original select stays in the DOM as the **source of truth**: options are derived from it at every opening (a directory repopulated later is visible with nothing re-wired), and selection goes back through `select.value` plus a dispatched `change` event, so every existing `onchange` keeps firing. Filtering is accent- and case-insensitive (same rule as the global search), the keyboard walks the list (arrows, Enter, Escape restores the real selection), screen readers get the full combobox pattern (`role`, `aria-expanded`, `aria-activedescendant`), and selection binds on `mousedown` because `click` lands after `blur` has already closed the list.
+
+13 tests pin the batch.
+
 ### Added — follow a case without assigning it to yourself (quality-of-life 6/N)
 Sixth batch of the programme, verified in a real browser.
 

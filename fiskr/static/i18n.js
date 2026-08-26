@@ -517,6 +517,18 @@
         "Motifs de clôture proposés aux analystes": { en: "Closure reasons offered to analysts", de: "Den Analysten vorgeschlagene Schließungsgründe", es: "Motivos de cierre propuestos a los analistas", zh: "向分析员提供的关闭理由", ar: "أسباب الإغلاق المقترحة للمحللين" },
         "Un motif par ligne. Proposés au moment de la décision : le clic remplit le commentaire, qui reste éditable. Vider la liste retire les suggestions.": { en: "One reason per line. Offered at decision time: clicking fills the comment, which stays editable. Emptying the list removes the suggestions.", de: "Ein Grund pro Zeile. Beim Entscheiden angeboten: Ein Klick füllt den Kommentar, der editierbar bleibt. Eine leere Liste entfernt die Vorschläge.", es: "Un motivo por línea. Se ofrecen al decidir: el clic rellena el comentario, que sigue siendo editable. Vaciar la lista quita las sugerencias.", zh: "每行一个理由。在做决定时提供：点击即可填入评论，且仍可编辑。清空列表将移除建议。", ar: "سبب واحد في كل سطر. تُقترح عند اتخاذ القرار: النقر يملأ التعليق ويبقى قابلاً للتحرير. إفراغ القائمة يزيل الاقتراحات." },
         "Recribler ce client maintenant": { en: "Re-screen this client now", de: "Diesen Kunden jetzt neu screenen", es: "Recribar este cliente ahora", zh: "立即重新筛查该客户", ar: "أعد فحص هذا العميل الآن" },
+        // Confort des tableaux : colonnes, densité, combobox
+        "Colonnes": { en: "Columns", de: "Spalten", es: "Columnas", zh: "列", ar: "الأعمدة" },
+        "Choisir les colonnes affichées": { en: "Choose displayed columns", de: "Angezeigte Spalten wählen", es: "Elegir las columnas mostradas", zh: "选择显示的列", ar: "اختيار الأعمدة المعروضة" },
+        "Densité confortable — cliquer pour l'affichage compact": { en: "Comfortable density — click for the compact display", de: "Komfortable Dichte — klicken für die kompakte Ansicht", es: "Densidad cómoda — clic para la vista compacta", zh: "宽松密度——点击切换到紧凑显示", ar: "كثافة مريحة — انقر للعرض المضغوط" },
+        "Densité compacte — cliquer pour l'affichage confortable": { en: "Compact density — click for the comfortable display", de: "Kompakte Dichte — klicken für die komfortable Ansicht", es: "Densidad compacta — clic para la vista cómoda", zh: "紧凑密度——点击切换到宽松显示", ar: "كثافة مضغوطة — انقر للعرض المريح" },
+        "Filtrer les choix": { en: "Filter the choices", de: "Auswahl filtern", es: "Filtrar las opciones", zh: "筛选选项", ar: "تصفية الخيارات" },
+        "Aucun choix ne correspond.": { en: "No choice matches.", de: "Keine Auswahl passt.", es: "Ninguna opción coincide.", zh: "没有匹配的选项。", ar: "لا خيار مطابقًا." },
+        // Nouveautés du lot 7
+        "Le confort des tableaux": { en: "Table comfort", de: "Tabellenkomfort", es: "El confort de las tablas", zh: "表格的舒适性", ar: "راحة الجداول" },
+        "Choisissez les colonnes de chaque tableau — l'export « tel qu'affiché » les respecte.": { en: "Choose each table's columns — the “as displayed” export honours them.", de: "Wählen Sie die Spalten jeder Tabelle — der Export „wie angezeigt“ hält sich daran.", es: "Elija las columnas de cada tabla — la exportación «tal como se muestra» las respeta.", zh: "为每个表格选择列——“所见即所得”导出会遵循该选择。", ar: "اختر أعمدة كل جدول — والتصدير «كما هو معروض» يحترمها." },
+        "Une densité compacte pour voir plus de lignes, d'un clic dans la barre.": { en: "A compact density to see more rows, one click in the toolbar.", de: "Eine kompakte Dichte für mehr Zeilen, ein Klick in der Leiste.", es: "Una densidad compacta para ver más filas, con un clic en la barra.", zh: "紧凑密度可显示更多行，工具栏一键切换。", ar: "كثافة مضغوطة لرؤية مزيد من الصفوف بنقرة واحدة في الشريط." },
+        "Les longs menus déroulants se filtrent au clavier : analystes, types de listes.": { en: "Long drop-down menus filter as you type: analysts, list types.", de: "Lange Auswahlmenüs filtern beim Tippen: Analysten, Listentypen.", es: "Los menús largos se filtran al teclear: analistas, tipos de listas.", zh: "长下拉菜单支持键入筛选：分析师、名单类型。", ar: "القوائم المنسدلة الطويلة تُرشَّح أثناء الكتابة: المحلّلون وأنواع القوائم." },
         // Suivi d'un dossier (sans se l'assigner)
         "☆ Suivre ce dossier": { en: "☆ Follow this case", de: "☆ Diesen Vorgang folgen", es: "☆ Seguir este expediente", zh: "☆ 关注此案卷", ar: "☆ متابعة هذا الملف" },
         "★ Suivi — ne plus suivre": { en: "★ Following — unfollow", de: "★ Gefolgt — nicht mehr folgen", es: "★ Siguiendo — dejar de seguir", zh: "★ 已关注——取消关注", ar: "★ متابَع — إلغاء المتابعة" },
@@ -875,6 +887,9 @@
 
     // ---- Chaines composees (nombres variables) : regles regex ----
     const R = [
+        [/^Colonne (\d+)$/, {
+            en: "Column $1", de: "Spalte $1", es: "Columna $1",
+            zh: "第 $1 列", ar: "العمود $1" }],
         [/^(\d+) élément\(s\) — page (\d+) \/ (\d+)$/, {
             en: "$1 item(s) — page $2 / $3", de: "$1 Element(e) — Seite $2 / $3",
             es: "$1 elemento(s) — página $2 / $3", zh: "$1 项 — 第 $2 / $3 页",

@@ -160,6 +160,7 @@
  <option value="ar">عربي</option>
  </select>
  <button id="theme-toggle-btn" class="icon-btn" onclick="toggleTheme()" aria-label="Thème sombre — cliquer pour le thème clair" title="Thème sombre — cliquer pour le thème clair"><svg class="ui-icon" aria-hidden="true"><use href="#i-moon"></use></svg></button>
+ <button id="densite-btn" class="icon-btn" onclick="basculerDensite()" aria-label="Densité confortable — cliquer pour l'affichage compact" title="Densité confortable — cliquer pour l'affichage compact"><svg class="ui-icon" aria-hidden="true"><use href="#i-list"></use></svg></button>
  <button id="nouveautes-btn" class="icon-btn" onclick="ouvrirNouveautes()" aria-label="Nouveautés de l'outil" title="Nouveautés de l'outil"><svg class="ui-icon" aria-hidden="true"><use href="#i-gift"></use></svg><span id="nouveautes-point" class="nouveautes-point hidden" aria-hidden="true"></span></button>
  <div class="system-status">
  <span class="status-indicator online"></span>
@@ -483,7 +484,7 @@
  <div class="form-row">
  <div class="form-group">
  <label for="manual-list-type">Liste de rattachement</label>
- <select id="manual-list-type" class="manual-list-select"
+ <select id="manual-list-type" data-combobox class="manual-list-select"
  title="Liste dans laquelle l'entité comptera (filtres, seuils par liste, libellés d'alertes). Les ajouts vivent dans un snapshot « Ajouts manuels » propre à la liste, jamais écrasé par les synchronisations."></select>
  </div>
  <div class="form-group">
@@ -664,7 +665,7 @@
  <p class="section-desc">Ajoutez plusieurs listés d'un coup dans la même liste de rattachement : une ligne par entité, champs séparés par des points-virgules — <code>Type;Nom principal;Alias1,Alias2;Pays</code>. Type : <code>I</code> (individu), <code>E</code> (personne morale), <code>V</code> (navire), <code>O</code> (autre) ; alias et pays optionnels. Chaque ligne passe le Quality Gate individuellement : les refus sont restitués ligne par ligne sans bloquer les autres.</p>
  <div class="form-group" style="max-width: 360px;">
  <label for="manual-batch-list-type">Liste de rattachement</label>
- <select id="manual-batch-list-type" class="manual-list-select"></select>
+ <select id="manual-batch-list-type" data-combobox class="manual-list-select"></select>
  </div>
  <div class="form-group">
  <label for="manual-batch-lines">Entités (une par ligne)</label>
@@ -1443,7 +1444,7 @@
  <option value="LOW">Basse</option>
  </select>
  <select id="screening-list-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par type de liste"></select>
- <select id="screening-assignee-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
+ <select id="screening-assignee-filter" data-combobox onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
  <select id="screening-views" onchange="applySavedView('SCREENING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('SCREENING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
  <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
@@ -1487,7 +1488,7 @@
  <h2>Liste Blanche (paires client × listé)</h2>
  <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
  <div class="form-group" style="max-width: 260px;">
- <select id="whitelist-list-filter" onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
+ <select id="whitelist-list-filter" data-combobox onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
  </div>
  <div class="table-container max-height-table">
  <table id="whitelist-table">
@@ -1748,7 +1749,7 @@
  <option value="LOW">Basse</option>
  </select>
  <select id="filtering-list-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par type de liste"></select>
- <select id="filtering-assignee-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
+ <select id="filtering-assignee-filter" data-combobox onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par analyste assigné"><option value="">Tous analystes</option></select>
  <select id="filtering-views" onchange="applySavedView('FILTERING', this.value)" title="Vues sauvegardées"><option value="">Vues…</option></select>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
  <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
