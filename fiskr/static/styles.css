@@ -1017,6 +1017,27 @@ th {
 }
 #raccourcis-modal td { padding: 0.4rem 0.6rem; }
 
+/* Motifs de clôture : une bibliothèque cliquable au-dessus du commentaire */
+.dialog-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-bottom: 0.6rem;
+}
+.suggestion-chip {
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.74rem;
+    padding: 0.25rem 0.7rem;
+}
+.suggestion-chip:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
 tr:last-child td {
     border-bottom: none;
 }

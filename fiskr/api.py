@@ -109,7 +109,8 @@ from fiskr.settings import (
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     BLOCKING_COMPONENTS, BLOCKING_FIELD_COMPONENTS, MAX_BLOCKING_FIELDS,
     blocking_layout, blocking_layout_with_source, blocking_config_for,
-    alert_sla_hours, notification_events,
+    alert_sla_hours, notification_events, alert_close_reasons,
+    SETTING_ALERT_CLOSE_REASONS,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     sync_auto_enabled, sync_sources_enabled, sync_automation_sources,
@@ -6053,6 +6054,43 @@ async def get_audit_history_detail(
 
 # ------------------ VUE CLIENT 360° ------------------
 
+@app.post("/api/clients/{client_id}/screen")
+async def screen_existing_client(
+    client_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Re-crible UN client du referentiel en production, a la demande.
+
+    Le geste manquait : depuis la vue client 360 ou une alerte, « recribler ce
+    client maintenant » n'existait pas — les seuls chemins etaient le
+    re-criblage declenche par une mise a jour de LISTE, ou le lookback du
+    referentiel entier. Or c'est un geste d'instruction ordinaire : le dossier
+    KYC vient d'etre corrige (date de naissance, pays), l'analyste veut la
+    reponse du moteur maintenant, pour CE client.
+
+    Memes garanties que le criblage temps reel : quality gate, liste blanche,
+    regles anti-FP, journal d'audit immuable, alertes. C'est le meme
+    `screen_client_profile`, alimente par la fiche du referentiel plutot que
+    par un formulaire.
+    """
+    snap_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
+    row = None
+    if snap_ids:
+        row = db.query(ClientEntity).filter(
+            ClientEntity.client_id == client_id,
+            ClientEntity.snapshot_id.in_(snap_ids)).first()
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="Client introuvable dans le référentiel en production.")
+    client_dict = {c.name: getattr(row, c.name) for c in row.__table__.columns
+                   if c.name not in ("id", "snapshot_id", "entity_checksum")}
+    _ensure_watchlist_cache(db)
+    return screen_client_profile(db, client_dict, current_user["username"], None)
+
+
 @app.get("/api/clients/{client_id}/overview")
 async def get_client_overview(
     client_id: str,
@@ -7566,6 +7604,8 @@ class IngestionSettingsUpdate(BaseModel):
     quality_min_score_pct: Optional[float] = None
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
     alert_sla_hours: Optional[Dict[str, int]] = None
+    # Motifs de cloture proposes aux analystes ([] = aucune suggestion)
+    alert_close_reasons: Optional[List[str]] = None
     notification_events: Optional[Dict[str, bool]] = None
     # Digest KPI periodique : {"enabled": bool, "cron": "0 8 * * 1-5"}
     digest: Optional[Dict[str, Any]] = None
@@ -7621,6 +7661,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_backtest_panel": str(auto_bt_panel["value"]) if auto_bt_panel["value"] else None,
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
+        "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
         "resource_fields": resource_fields(db),
@@ -7678,6 +7719,7 @@ async def update_ingestion_settings(
     changed = {k: v for k, v in updates.items() if v is not None}
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
+              payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
               payload.institution, payload.adverse_media, payload.narrative_llm,
@@ -7726,6 +7768,15 @@ async def update_ingestion_settings(
         merged = dict(alert_sla_hours(db))
         merged.update(sla)
         set_setting(db, SETTING_ALERT_SLA_HOURS, merged, updated_by=admin_user["username"])
+    if payload.alert_close_reasons is not None:
+        motifs = [str(m).strip() for m in payload.alert_close_reasons if str(m).strip()]
+        if len(motifs) > 50:
+            raise HTTPException(status_code=400, detail="Au plus 50 motifs de clôture.")
+        if any(len(m) > 300 for m in motifs):
+            raise HTTPException(status_code=400, detail="Un motif de clôture tient en 300 caractères.")
+        # [] est un choix valable : « pas de suggestions » — distinct de None
+        # (non fourni), qui laisse la bibliothèque par défaut.
+        set_setting(db, SETTING_ALERT_CLOSE_REASONS, motifs, updated_by=admin_user["username"])
     if payload.notification_events is not None:
         unknown = [e for e in payload.notification_events if e not in DEFAULT_NOTIFICATION_EVENTS]
         if unknown:

@@ -129,6 +129,33 @@ DEFAULT_CHECKLIST = [
 ]
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
+
+# Motifs de cloture proposes a la saisie d'une decision d'alerte. Une
+# bibliotheque, pas un carcan : le motif choisi s'insere dans le commentaire
+# et reste editable — la motivation reglementaire finale appartient a
+# l'analyste. L'interet est double : moins de re-frappe, et des statistiques
+# de cloture qui parlent le meme vocabulaire d'un analyste a l'autre.
+SETTING_ALERT_CLOSE_REASONS = "alerts.close_reasons"
+DEFAULT_ALERT_CLOSE_REASONS = [
+    "Homonymie : date de naissance incompatible avec la fiche listée.",
+    "Homonymie : nationalité et pays de résidence incompatibles.",
+    "Personne morale distincte : n° d'immatriculation différent.",
+    "Client déjà instruit : correspondance couverte par la liste blanche.",
+    "Correspondance confirmée : identité alignée sur la fiche listée (pièces au dossier).",
+]
+_MAX_MOTIFS = 50
+_MAX_MOTIF_LONGUEUR = 300
+
+
+def alert_close_reasons(db) -> list:
+    """Motifs actifs, nettoyes et bornes. Le defaut sert tant que l'admin n'a
+    rien ecrit ; une liste VIDE enregistree signifie « pas de suggestions »."""
+    value = get_setting_with_source(db, SETTING_ALERT_CLOSE_REASONS, None)["value"]
+    if value is None:
+        return list(DEFAULT_ALERT_CLOSE_REASONS)
+    if not isinstance(value, list):
+        return list(DEFAULT_ALERT_CLOSE_REASONS)
+    return [str(m).strip()[:_MAX_MOTIF_LONGUEUR] for m in value[:_MAX_MOTIFS] if str(m).strip()]
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
 RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_campaigns")
 RETENTION_MIN_DAYS = 30  # garde-fou TECHNIQUE : jamais moins de 30 jours quand une purge est activee

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the analyst's day (quality-of-life 2/N)
+Second batch of the programme, all four verified in a real browser.
+
+**The deadline shows while there is still time** (n° 9). The lateness already showed — "EN RETARD" — but the *approach* did not: you learned about the deadline by missing it. Under twelve hours, an amber chip announces "ÉCHÉANCE 6 h", only on alerts still open — a closed one has no deadline left to keep. Honest inventory note: the queue was *already* sorted by priority then due date; the sorting was never the gap, the visibility was.
+
+**Closure reason library** (n° 10). Every decision requires a comment, and analysts retyped the same sentences. The reasons live in the settings (one per line, admin-set, five sensible defaults shipped), and appear as clickable chips above the comment field at decision time. A library, not a straitjacket: the click *fills* the field, the text stays editable, and a second click appends rather than replaces. An empty list is a valid choice — "no suggestions" — distinct from "not provided", which keeps the defaults; without that distinction an admin could never remove them. Analysts never open the settings screen, so the reasons load lazily on the first decision.
+
+**Recently opened, before the first keystroke** (n° 13). The last ten dossiers opened — alerts and client 360 views — appear in the Ctrl+K palette *ahead of navigation*: returning to the dossier from ten minutes ago beats reaching the menu. Deduplicated, capped at ten, localStorage only.
+
+**Re-screen one client, now** (n° 16). The gesture was missing: the only screening paths were a list update (automatic delta) or the full-base lookback. Yet it is an ordinary act of instruction — the KYC record was just corrected, the analyst wants the engine's answer for *this* client. `POST /api/clients/{id}/screen` feeds the production record through the same `screen_client_profile` as real-time screening: quality gate, whitelist, anti-FP rules, immutable audit journal, alerts. A button in the client 360 view carries it; the toast says what came out, and the queues refresh when an alert opens.
+
+One bug caught by this batch's own test before it shipped: the re-screen button interpolated the client id with `JSON.stringify`, whose double quotes would have broken the double-quoted `onclick` attribute at runtime — the exact "affordance that renders and does nothing" class this project keeps hunting.
+
 ### Added — six everyday frictions, removed in one batch (quality-of-life 1/N)
 First batch of the quality-of-life programme, chosen for effort-to-value. Each item was verified in a real browser before shipping.
 

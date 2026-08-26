@@ -338,7 +338,7 @@ function showToast(message, type = "info", durationMs = 4500) {
 }
 
 // Modale générique : résout une Promise (bouton, Escape = annulation)
-function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password }) {
+function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password, suggestions }) {
  return new Promise((resolve) => {
  const overlay = document.getElementById("app-dialog");
  const titleEl = document.getElementById("app-dialog-title");
@@ -363,6 +363,26 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
  if (!textarea && password) inputEl.type = "password";
  inputEl.placeholder = placeholder || "";
  inputEl.id = "app-dialog-input";
+ // Suggestions cliquables (motifs de clôture) : une bibliothèque, pas un
+ // carcan — le clic REMPLIT le champ, le texte reste éditable. Champ vide :
+ // le motif remplace ; champ déjà entamé : il s'ajoute à la suite.
+ if (suggestions && suggestions.length) {
+ const rangee = document.createElement("div");
+ rangee.className = "dialog-suggestions";
+ for (const motif of suggestions) {
+ const puce = document.createElement("button");
+ puce.type = "button";
+ puce.className = "suggestion-chip";
+ puce.textContent = motif.length > 60 ? motif.slice(0, 60) + "…" : motif;
+ puce.title = motif;
+ puce.addEventListener("click", () => {
+ inputEl.value = inputEl.value.trim() ? inputEl.value.trim() + " " + motif : motif;
+ inputEl.focus();
+ });
+ rangee.appendChild(puce);
+ }
+ fieldWrap.appendChild(rangee);
+ }
  fieldWrap.appendChild(inputEl);
  }
 
@@ -405,6 +425,7 @@ function promptDialog(title, options = {}) {
  return _openAppDialog({ title, message: options.message || "", input: !options.textarea,
  textarea: options.textarea, placeholder: options.placeholder,
  required: options.required !== false, password: options.password,
+ suggestions: options.suggestions,
  confirmLabel: options.confirmLabel || "Valider" });
 }
 
@@ -996,6 +1017,34 @@ function initFocusDesModales() {
 
 function boutonCopier(valeur, titre = "Copier") {
  return `<button type="button" class="btn-copier" data-copier="${escapeHtml(valeur)}" title="${escapeHtml(titre)}" aria-label="${escapeHtml(titre)}">⧉</button>`;
+}
+
+// ------------------ RÉCEMMENT CONSULTÉS ------------------
+// Rouvrir le dossier d'il y a dix minutes = repasser par la file et ses
+// filtres. Les dix derniers dossiers ouverts (alertes, clients 360) vivent
+// dans la palette Ctrl+K, AVANT la première frappe — l'endroit où la main va
+// déjà. localStorage : par navigateur, jamais envoyé au serveur.
+const _RECENTS_CLE = "fiskr_recents";
+const _RECENTS_MAX = 10;
+
+function _memoriserRecent(type, id, libelle) {
+ try {
+ const liste = JSON.parse(localStorage.getItem(_RECENTS_CLE) || "[]");
+ const filtree = liste.filter(r => !(r.type === type && r.id === id));
+ filtree.unshift({ type, id, libelle, at: Date.now() });
+ localStorage.setItem(_RECENTS_CLE, JSON.stringify(filtree.slice(0, _RECENTS_MAX)));
+ } catch (e) { /* stockage indisponible */ }
+}
+
+function _recentsMemorises() {
+ try { return JSON.parse(localStorage.getItem(_RECENTS_CLE) || "[]"); }
+ catch (e) { return []; }
+}
+
+function ouvrirRecent(type, id) {
+ closeCommandPalette();
+ if (type === "alerte") openAlertModal(id);
+ else if (type === "client") openClient360(id);
 }
 
 function initCopierEnUnClic() {
@@ -4758,6 +4807,7 @@ async function fetchIngestionSettings() {
  const response = await apiFetch("/api/settings/ingestion");
  if (!response.ok) return;
  ingestionSettings = await response.json();
+ _motifsDeCloture = null; // le prochain dialogue relira les motifs à jour
  const approvalEl = document.getElementById("setting-require-approval");
  const justifEl = document.getElementById("setting-exclusion-justification");
  const fileEl = document.getElementById("setting-exclusion-file");
@@ -4806,6 +4856,8 @@ async function fetchIngestionSettings() {
  const qualityMinEl = document.getElementById("setting-quality-min");
  if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
  // SLA par priorité + notifications métier
+ const motifsEl = document.getElementById("setting-close-reasons");
+ if (motifsEl) motifsEl.value = (ingestionSettings.alert_close_reasons || []).join("\n");
  const sla = ingestionSettings.alert_sla_hours || {};
  for (const [prio, id] of [["CRITICAL", "setting-sla-critical"], ["HIGH", "setting-sla-high"],
  ["MEDIUM", "setting-sla-medium"], ["LOW", "setting-sla-low"]]) {
@@ -4927,6 +4979,8 @@ async function saveIngestionSettings() {
  auto_backtest_panel: document.getElementById("setting-auto-backtest-panel")?.value ?? "",
  // 0 = pas de seuil : `|| 0` conserve bien la desactivation
  quality_min_score_pct: parseFloat(document.getElementById("setting-quality-min")?.value) || 0,
+ alert_close_reasons: (document.getElementById("setting-close-reasons")?.value || "")
+ .split("\n").map(m => m.trim()).filter(Boolean),
  alert_sla_hours: {
  CRITICAL: parseInt(document.getElementById("setting-sla-critical")?.value, 10) || 0,
  HIGH: parseInt(document.getElementById("setting-sla-high")?.value, 10) || 0,
@@ -6282,10 +6336,21 @@ const ALERT_PRIORITY_CONF = {
 
 function alertPriorityBadge(a) {
  const [color, label] = ALERT_PRIORITY_CONF[a.priority] || ["var(--text-muted)", a.priority || "—"];
- const overdue = a.overdue
- ? `<br><span title="Échéance SLA dépassée (${formatDateTime(a.due_at)})" style="color: var(--color-alert); font-size: 0.7rem; font-weight: 700;"> EN RETARD</span>`
- : "";
- return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>${overdue}`;
+ // Le retard s'affichait déjà ; l'APPROCHE, non — on apprenait l'échéance en
+ // la dépassant. Sous douze heures, l'échéance se voit pendant qu'il est
+ // encore temps d'agir. Uniquement sur une alerte encore ouverte : une
+ // clôturée n'a plus d'échéance à tenir.
+ let echeance = "";
+ if (a.overdue) {
+ echeance = `<br><span title="Échéance SLA dépassée (${formatDateTime(a.due_at)})" style="color: var(--color-alert); font-size: 0.7rem; font-weight: 700;"> EN RETARD</span>`;
+ } else if (a.due_at && a.status && !a.status.startsWith("CLOSED")) {
+ const restant = new Date(a.due_at).getTime() - Date.now();
+ if (restant > 0 && restant <= 12 * 3600 * 1000) {
+ const heures = Math.max(1, Math.round(restant / 3600000));
+ echeance = `<br><span title="Échéance SLA : ${formatDateTime(a.due_at)}" style="color: var(--color-warning); font-size: 0.7rem; font-weight: 700;">ÉCHÉANCE ${heures} h</span>`;
+ }
+ }
+ return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>${echeance}`;
 }
 
 // Export CSV de la file d'alertes avec les filtres actifs de l'écran
@@ -6454,6 +6519,7 @@ async function openAlertModal(alertId) {
  showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
  return;
  }
+ _memoriserRecent("alerte", a.id, `${a.client_name} × ${a.watchlist_name}`);
  const sousOnglet = (a.channel === "FILTERING") ? "filtering/alerts-filtering" : "screening/alerts-screening";
  const lienDossier = `${location.origin}${location.pathname}#${sousOnglet}/alerte-${a.id}`;
  document.getElementById("alert-modal-title").innerHTML =
@@ -6619,11 +6685,32 @@ async function alertActionWithComment(action, promptLabel) {
  if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
+// Les motifs vivent dans les réglages, mais un analyste n'ouvre jamais
+// l'écran Paramètres : ils se chargent à la première décision, puis restent.
+let _motifsDeCloture = null;
+
+async function chargerMotifsDeCloture() {
+ if (_motifsDeCloture !== null) return _motifsDeCloture;
+ if (ingestionSettings && ingestionSettings.alert_close_reasons) {
+ _motifsDeCloture = ingestionSettings.alert_close_reasons;
+ return _motifsDeCloture;
+ }
+ try {
+ const response = await apiFetch("/api/settings/ingestion", { silent: true });
+ if (response.ok) {
+ _motifsDeCloture = (await response.json()).alert_close_reasons || [];
+ return _motifsDeCloture;
+ }
+ } catch (e) { /* sans motifs, le dialogue reste ce qu'il était */ }
+ return [];
+}
+
 async function proposeAlertDecision(decision) {
  const label = decision === "CONFIRMED" ? "vrai positif" : "faux positif";
  const comment = await promptDialog(`Proposer « ${label} »`, {
  message: "Commentaire obligatoire motivant la décision proposée (validation 4-yeux ensuite).",
- textarea: true, placeholder: "Motivation réglementaire de la décision..."
+ textarea: true, placeholder: "Motivation réglementaire de la décision...",
+ suggestions: await chargerMotifsDeCloture()
  });
  if (comment === null) return;
  const data = await _postAlertAction("propose", { decision, comment });
@@ -9245,6 +9332,16 @@ async function runPaletteSearch(term) {
  groups.push({ title: "Navigation", items: navMatches.map(n => ({
  html: escapeHtml(n.label), action: n.action })) });
  }
+ // Palette vide : les derniers dossiers ouverts, avant la première frappe
+ if (!needle) {
+ const recents = _recentsMemorises();
+ if (recents.length) {
+ // En tête de liste : le retour au dossier prime sur le menu de navigation
+ groups.unshift({ title: "Récents", items: recents.map(r => ({
+ html: `${r.type === "alerte" ? "Alerte #" + r.id : "Client"} — ${escapeHtml(r.libelle || r.id)}`,
+ action: () => ouvrirRecent(r.type, r.id) })) });
+ }
+ }
  renderPaletteResults(groups);
  if (needle.length < 2) { _paletteSetSearching(false); return; }
  _paletteSetSearching(true);
@@ -10257,6 +10354,36 @@ function initDropZones() {
 
 // ------------------ VUE CLIENT 360° ------------------
 
+// Re-criblage d'UN client, a la demande : le dossier KYC vient d'etre
+// corrige, l'analyste veut la reponse du moteur maintenant — sans attendre
+// une mise a jour de liste ni lancer le lookback du referentiel entier.
+// Memes garanties que le temps reel (journal d'audit, alertes).
+async function recriblerClient(clientId) {
+ const ok = await confirmDialog(
+ `Recribler « ${clientId} » contre les listes en production ? La décision sera `
+ + `journalisée et une alerte ouvrira si une correspondance dépasse le seuil.`);
+ if (!ok) return;
+ try {
+ const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/screen`, { method: "POST" });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "criblage impossible."), "error");
+ return;
+ }
+ const statut = data.status || (data.best_match || {}).status || "—";
+ if (statut === "ALERT") {
+ showToast(`Criblage terminé : correspondance au-dessus du seuil${data.alert_id ? ` — alerte #${data.alert_id}` : ""}.`, "warning", 7000);
+ refreshAlertQueues?.();
+ } else {
+ showToast("Criblage terminé : aucune correspondance au-dessus du seuil.", "success", 5000);
+ }
+ refreshSidebarCounters?.();
+ } catch (e) {
+ console.error("Rescreen client error:", e);
+ showToast("Erreur réseau pendant le criblage.", "error");
+ }
+}
+
 async function openClient360(clientId) {
  if (!clientId) return;
  const modal = document.getElementById("client360-modal");
@@ -10270,9 +10397,14 @@ async function openClient360(clientId) {
  if (!response.ok) { body.innerHTML = '<p class="section-desc">Client introuvable.</p>'; return; }
  const d = await response.json();
  const k = d.kyc;
- if (title) title.textContent = ` Vue client 360° — ${k ? (k.company_name || `${k.first_name || ""} ${k.last_name || ""}`.trim()) : clientId}`;
+ const nomClient = k ? (k.company_name || `${k.first_name || ""} ${k.last_name || ""}`.trim()) : clientId;
+ _memoriserRecent("client", clientId, nomClient || clientId);
+ if (title) title.textContent = ` Vue client 360° — ${nomClient || clientId}`;
 
  const kycHtml = k ? `
+ <div style="display: flex; justify-content: flex-end; margin-bottom: 0.5rem;">
+ <button class="btn btn-sm btn-secondary" onclick="recriblerClient('${escapeHtml(clientId)}')">Recribler ce client maintenant</button>
+ </div>
  <div class="details-grid" style="margin-bottom: 1rem;">
  <div class="details-item"><strong>Identifiant</strong><span>${escapeHtml(clientId)}</span></div>
  <div class="details-item"><strong>Type</strong><span>${k.client_type === "PP" ? "Personne physique" : "Personne morale"}</span></div>
