@@ -429,25 +429,67 @@ function promptDialog(title, options = {}) {
  confirmLabel: options.confirmLabel || "Valider" });
 }
 
-// ------------------ THÈME (clair / sombre) & NAVIGATION RESPONSIVE ------------------
+// ------------------ THÈME (sombre / clair / système) & NAVIGATION RESPONSIVE ------------------
+//
+// Trois préférences pour deux rendus : « système » suit le réglage de l'OS,
+// en direct — l'analyste dont la machine bascule en sombre à la tombée du
+// jour n'a plus à répéter le geste dans chaque application. L'attribut
+// data-theme ne dit donc plus la préférence (un rendu clair peut venir du
+// choix « clair » ou du choix « système ») : la préférence vit dans le
+// stockage, le rendu s'en déduit.
 
-function currentTheme() {
- return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+const _THEME_PREFERENCES = ["dark", "light", "system"];
+const _mediaClair = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+
+function themePreference() {
+ try {
+ const memo = localStorage.getItem("fiskr_theme");
+ if (_THEME_PREFERENCES.includes(memo)) return memo;
+ } catch (e) { /* stockage indisponible */ }
+ return "dark";
 }
 
-function applyTheme(theme) {
- if (theme === "light") {
+function _themeRendu(pref) {
+ if (pref === "system") return _mediaClair && _mediaClair.matches ? "light" : "dark";
+ return pref;
+}
+
+function applyTheme(pref) {
+ if (!_THEME_PREFERENCES.includes(pref)) pref = "dark";
+ if (_themeRendu(pref) === "light") {
  document.documentElement.setAttribute("data-theme", "light");
  } else {
  document.documentElement.removeAttribute("data-theme");
  }
- try { localStorage.setItem("fiskr_theme", theme); } catch (e) { /* stockage indisponible */ }
+ try { localStorage.setItem("fiskr_theme", pref); } catch (e) { /* stockage indisponible */ }
  const btn = document.getElementById("theme-toggle-btn");
- if (btn) btn.innerHTML = theme === "light" ? uiIcon("sun") : uiIcon("moon");
+ if (btn) {
+ const icones = { dark: "moon", light: "sun", system: "monitor" };
+ const titres = {
+ dark: "Thème sombre — cliquer pour le thème clair",
+ light: "Thème clair — cliquer pour suivre le réglage du système",
+ system: "Thème du système — cliquer pour le thème sombre",
+ };
+ btn.innerHTML = uiIcon(icones[pref]);
+ btn.title = titres[pref];
+ btn.setAttribute("aria-label", titres[pref]);
+ }
 }
 
 function toggleTheme() {
- applyTheme(currentTheme() === "light" ? "dark" : "light");
+ const suivant = { dark: "light", light: "system", system: "dark" };
+ const pref = suivant[themePreference()];
+ applyTheme(pref);
+ const annonces = { dark: "Thème sombre.", light: "Thème clair.", system: "Thème : celui du système." };
+ showToast(annonces[pref], "info", 2500);
+}
+
+// En préférence « système », le changement de réglage de l'OS s'applique
+// sans recharger la page.
+if (_mediaClair && _mediaClair.addEventListener) {
+ _mediaClair.addEventListener("change", () => {
+ if (themePreference() === "system") applyTheme("system");
+ });
 }
 
 // Sidebar rétractable (bureau) : mode icônes seules, état persisté.
@@ -584,11 +626,15 @@ function tableLoading(target, cols, rows = 3) {
  tbody.innerHTML = Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join("");
 }
 
-// État vide homogène
-function tableEmpty(target, cols, message, icon = "") {
+// État vide homogène. Le constat seul (« Aucune alerte ») laisse le lecteur
+// devant une question : est-ce bon signe, ou ai-je mal filtré ? Le `conseil`
+// optionnel dit le geste qui remplit ce tableau — c'est la différence entre
+// un cul-de-sac et un panneau indicateur.
+function tableEmpty(target, cols, message, icon = "", conseil = "") {
  const tbody = _tbodyOf(target);
  if (!tbody) return;
- tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
+ const aide = conseil ? `<span class="empty-hint">${escapeHtml(conseil)}</span>` : "";
+ tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}${aide}</td></tr>`;
 }
 
 // État d'ERREUR homogène — volontairement distinct de l'état vide.
@@ -1136,6 +1182,84 @@ function initAideRaccourcis() {
  });
 }
 
+// ------------------ NOUVEAUTÉS (ce qui a changé, annoncé dans l'outil) ------------------
+// Le journal des modifications vit dans le dépôt ; personne en agence n'ira
+// l'y lire. Ces entrées sont rédigées à chaque lot livré, du plus récent au
+// plus ancien. Un point sur le bouton de la barre signale ce qui est arrivé
+// depuis la dernière ouverture du panneau — mémorisée localement, par poste :
+// chacun découvre les nouveautés une fois, puis le point s'éteint.
+
+const FISKR_NOUVEAUTES = [
+ {
+ id: "2026-08-26-lot-4", date: "2026-08-26",
+ titre: "Confort visuel : thème, nouveautés, états vides",
+ points: [
+ "Le bouton de thème propose un troisième état : suivre le réglage du système, en direct.",
+ "Ce panneau des nouveautés : un point sur le bouton signale ce qui est arrivé depuis votre dernière visite.",
+ "Les tableaux vides expliquent quoi faire, au lieu d'une ligne muette.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-3", date: "2026-08-26",
+ titre: "La recherche atteint tout",
+ points: [
+ "Ctrl+K trouve aussi vos clients en production et ouvre leur fiche 360°.",
+ "La palette mène aux cartes de réglages : tapez « seuil », « SLA », « rétention ».",
+ "Nouveaux exports CSV : journal d'administration, journal de notifications, et tout tableau tel qu'affiché.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-2", date: "2026-08-26",
+ titre: "Le quotidien de l'analyste",
+ points: [
+ "Une pastille ambre annonce l'échéance SLA sous douze heures, avant le retard.",
+ "Des motifs de clôture suggérés à la décision — réglables par l'administrateur.",
+ "Les dix derniers dossiers ouverts en tête de la palette, et le re-criblage d'un client en un bouton.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-1", date: "2026-08-26",
+ titre: "Six frictions quotidiennes en moins",
+ points: [
+ "La session prévient avant d'expirer et votre saisie est restaurée après reconnexion.",
+ "En-têtes de tableaux collants, filtres mémorisés, copie en un clic, lien direct vers une alerte.",
+ "La touche ? affiche les raccourcis ; l'onglet compte les alertes ouvertes.",
+ ],
+ },
+];
+const _NOUVEAUTES_CLE = "fiskr_nouveautes_vu";
+
+function _nouveautesNonVues() {
+ if (!FISKR_NOUVEAUTES.length) return false;
+ try { return localStorage.getItem(_NOUVEAUTES_CLE) !== FISKR_NOUVEAUTES[0].id; }
+ catch (e) { return false; }
+}
+
+function initNouveautes() {
+ const point = document.getElementById("nouveautes-point");
+ if (point && _nouveautesNonVues()) point.classList.remove("hidden");
+}
+
+function ouvrirNouveautes() {
+ const conteneur = document.getElementById("nouveautes-liste");
+ const modale = document.getElementById("nouveautes-modal");
+ if (!conteneur || !modale) return;
+ conteneur.innerHTML = FISKR_NOUVEAUTES.map((n) => {
+ const quand = new Date(`${n.date}T12:00:00`).toLocaleDateString(uiLocale(),
+ { day: "numeric", month: "long", year: "numeric" });
+ return `<article class="nouveaute">
+ <h3>${escapeHtml(n.titre)}</h3>
+ <time datetime="${escapeHtml(n.date)}">${escapeHtml(quand)}</time>
+ <ul>${n.points.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ul>
+ </article>`;
+ }).join("");
+ // Ouvrir, c'est avoir vu : le point s'éteint et ne revient qu'au prochain lot.
+ try { localStorage.setItem(_NOUVEAUTES_CLE, FISKR_NOUVEAUTES[0].id); } catch (e) { /* stockage indisponible */ }
+ const point = document.getElementById("nouveautes-point");
+ if (point) point.classList.add("hidden");
+ modale.classList.remove("hidden");
+}
+
 function initA11y() {
  // Échap ferme la modale visible la plus haute (la modale générique gère déjà le sien)
  document.addEventListener("keydown", (e) => {
@@ -1406,11 +1530,12 @@ function selectedScreeningLists(containerId) {
 
 document.addEventListener("DOMContentLoaded", () => {
  // Thème (icône du bouton), accessibilité et tri des tables
- applyTheme(currentTheme());
+ applyTheme(themePreference());
  initA11y();
  initFocusDesModales();
  initCopierEnUnClic();
  initAideRaccourcis();
+ initNouveautes();
  initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();
@@ -2301,7 +2426,8 @@ function renderSnapshotsTable(snaps) {
  tbody.innerHTML = "";
 
  if (snaps.length === 0) {
- tableEmpty(tbody, 5, "Aucun snapshot importé");
+ tableEmpty(tbody, 5, "Aucun snapshot importé", uiIcon("package"),
+ "Synchronisez une source (écran Sources) ou importez un fichier : chaque réception crée un instantané à homologuer.");
  return;
  }
 
@@ -3320,7 +3446,8 @@ function renderWatchlistTable(items, page = 1, total = 0) {
  tbody.innerHTML = "";
 
  if (items.length === 0) {
- tableEmpty(tbody, 7, "Aucune entité en base pour ce périmètre");
+ tableEmpty(tbody, 7, "Aucune entité en base pour ce périmètre", uiIcon("database"),
+ "Changez de périmètre ci-dessus, ou mettez une liste en production : la base des listés se remplit à l'homologation.");
  updatePaginationControls(0, 0);
  return;
  }
@@ -3931,7 +4058,8 @@ function renderAuditHistoryTable(logs) {
  tbody.innerHTML = "";
 
  if (logs.length === 0) {
- tableEmpty(tbody, 7, "Aucune décision pour ce filtre");
+ tableEmpty(tbody, 7, "Aucune décision pour ce filtre", uiIcon("file-text"),
+ "Le journal conserve toutes les décisions de criblage : élargissez le filtre ou la période pour les revoir.");
  return;
  }
 
@@ -5355,7 +5483,8 @@ function renderPendingTable(pending) {
  if (!tbody) return;
  const bulkBar = document.getElementById("review-bulk-bar");
  if (!pending || pending.length === 0) {
- tableEmpty(tbody, 9, "Aucun snapshot en attente d'homologation.", "");
+ tableEmpty(tbody, 9, "Aucun snapshot en attente d'homologation.", uiIcon("check-circle"),
+ "Tout est traité. Les lots à homologuer apparaissent ici après chaque synchronisation ou import.");
  if (bulkBar) bulkBar.classList.add("hidden");
  return;
  }
@@ -6539,7 +6668,23 @@ function renderAlertsTable(channel, items) {
  // Nouvelle page = nouvelle sélection (les cases ne survivent pas au rendu)
  clearAlertSelection(channel, false);
  if (!items.length) {
- tableEmpty(tbody, 10, "Aucune alerte pour ce filtre.", "");
+ // Deux vides que rien ne doit faire se ressembler : la file à jour
+ // (bonne nouvelle) et le filtre trop étroit (fausse bonne nouvelle —
+ // des alertes existent, l'écran les cache). On regarde les filtres
+ // réellement posés avant de choisir la phrase.
+ const conf = ALERT_CHANNEL_CONF[channel];
+ const restreint = alertsFilterByChannel[channel] !== DEFAULT_ALERT_FILTER
+  || ["listFilter", "priorityFilter", "assigneeFilter"].some((f) => {
+  const el = document.getElementById(conf[f]);
+  return el && el.value;
+  });
+ if (restreint) {
+ tableEmpty(tbody, 10, "Aucune alerte pour ce filtre.", uiIcon("filter"),
+  "Des alertes peuvent exister hors de ce périmètre : élargissez ou effacez les filtres au-dessus de la file.");
+ } else {
+ tableEmpty(tbody, 10, "File à jour : aucune alerte à instruire.", uiIcon("check-circle"),
+  "Les alertes naissent du criblage temps réel, des mises à jour de listes et des lookbacks.");
+ }
  return;
  }
  tbody.innerHTML = items.map(a => {
@@ -6806,7 +6951,8 @@ function renderWhitelistTable(items) {
  const tbody = document.querySelector("#whitelist-table tbody");
  if (!tbody) return;
  if (!items.length) {
- tableEmpty(tbody, 8, "Aucune paire en liste blanche.");
+ tableEmpty(tbody, 8, "Aucune paire en liste blanche.", uiIcon("shield"),
+ "Une paire s'ajoute depuis une alerte, en la clôturant en faux positif : cette correspondance précise ne redéclenchera plus.");
  return;
  }
  const stateBadge = (state) => {

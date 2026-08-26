@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — visual comfort: system theme, in-app news, empty states that point somewhere (quality-of-life 4/N)
+Fourth batch of the programme, verified in a real browser (fifteen checks, including OS theme emulation).
+
+**The theme can follow the system** (n° 6). Two preferences — dark, light — served machines whose own setting changes at dusk: the analyst repeated in Fiskr the choice the OS had already made. A third state follows `prefers-color-scheme`, **live** (a media-query listener, no reload), and the boot script in both pages' heads knows it too — otherwise every visit would flash dark before switching. The button cycles dark → light → system with its own icon and label per state; a corrupt stored preference falls back to dark, and a test walks the cycle table looking for dead ends: a state no click can leave, or none can reach.
+
+**What's new, announced where people work** (n° 27). The changelog lives in the repository; nobody in an agency will read it there. A panel in the tool carries entries written in French at each delivered batch, newest first; a dot on the toolbar button signals what arrived since this workstation last opened the panel — and *opening* is what marks it seen, not loading the page, or the dot would never show anywhere. The entries are ordinary visible strings, so the translation guards apply to them in full: a batch added without its five translations fails the build. The newest entry announces this very batch.
+
+**Empty states that point somewhere** (n° 28). « Aucune alerte pour ce filtre » covered two opposite realities: the queue genuinely clear (good news) and a filter narrow enough to hide work (news that only *looks* good — the costliest misreading a compliance product can offer). The queue's empty state now inspects the filters actually set and says which case it is, each with its own icon and its own advice. Six more large tables gained the gesture that fills them — snapshots point to the Sources screen, the whitelist explains that pairs are born from false-positive closures, the pending-review table says when batches will appear. The hint renders escaped, is styled quieter than the message, and every hint string is checked against the dictionary **derived from the calls themselves** — no list to maintain.
+
+14 tests pin the batch: the succession table of the theme cycle, the boot scripts of both pages, the well-formedness and translation of every news entry, and the two queue emptinesses that must never look alike again.
+
 ### Added — search that reaches everything, and the missing exports (quality-of-life 3/N)
 Third batch of the programme, verified in a real browser.
 

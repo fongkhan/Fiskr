@@ -1017,6 +1017,32 @@ th {
 }
 #raccourcis-modal td { padding: 0.4rem 0.6rem; }
 
+/* ------------------ Nouveautés (panneau + point sur le bouton) ------------------ */
+/* Le point signale du nouveau depuis la dernière ouverture du panneau. Il vit
+   DANS le bouton (position: relative) pour suivre le bouton partout. */
+#nouveautes-btn { position: relative; }
+.nouveautes-point {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    box-shadow: 0 0 0 2px var(--surface-2);
+}
+.nouveaute { padding: 0.65rem 0; }
+.nouveaute + .nouveaute { border-top: 1px solid var(--border-color); }
+.nouveaute h3 { font-size: 0.95rem; margin: 0; }
+.nouveaute time {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 0.15rem 0 0.35rem;
+}
+.nouveaute ul { margin: 0; padding-left: 1.1rem; }
+.nouveaute li { font-size: 0.85rem; line-height: 1.5; margin: 0.15rem 0; color: var(--text-secondary); }
+
 /* Motifs de clôture : une bibliothèque cliquable au-dessus du commentaire */
 .dialog-suggestions {
     display: flex;
@@ -1104,6 +1130,18 @@ th.sortable.sort-desc::after {
     font-size: 1.6rem;
     margin-bottom: 0.4rem;
     opacity: 0.55;
+}
+
+/* Le conseil sous le constat : le geste qui remplit ce tableau. Plus discret
+   que le message — c'est une aide, pas une seconde annonce. */
+.empty-state .empty-hint {
+    display: block;
+    margin: 0.45rem auto 0;
+    max-width: 46ch;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    opacity: 0.85;
+    line-height: 1.45;
 }
 
 /* Etat d'ERREUR d'un tableau. Volontairement distinct de l'etat vide : sur un
