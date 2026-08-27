@@ -46,7 +46,11 @@ URGENCIES = (IMMEDIATE, DIGEST)
 # Pseudo-audiences resolues dynamiquement depuis la charge utile
 AUDIENCE_ASSIGNEE = "assignee"   # analyste assigne (+ delegue si absent)
 AUDIENCE_ACTOR = "actor"         # auteur de l'action (proposeur, auteur de regle...)
-PSEUDO_AUDIENCES = (AUDIENCE_ASSIGNEE, AUDIENCE_ACTOR)
+# Suiveurs du dossier concerne : TOUJOURS fournis par l'emetteur
+# (recipients_override) — le routeur ne sait pas les resoudre, et surtout ne
+# doit PAS replier sur les destinataires globaux quand il n'y en a aucun.
+AUDIENCE_FOLLOWERS = "followers"
+PSEUDO_AUDIENCES = (AUDIENCE_ASSIGNEE, AUDIENCE_ACTOR, AUDIENCE_FOLLOWERS)
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,11 @@ EVENT_CATALOG: Dict[str, Event] = {
     "alert_overdue_sla": Event(
         label="Échéance SLA dépassée sur une alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_ASSIGNEE,),
+        urgency=DIGEST, link="#alerts/alerts-screening",
+    ),
+    "alert_followed_activity": Event(
+        label="Activité sur un dossier suivi",
+        category=CATEGORY_SCREENING, audience=(AUDIENCE_FOLLOWERS,),
         urgency=DIGEST, link="#alerts/alerts-screening",
     ),
     "whitelist_changed": Event(

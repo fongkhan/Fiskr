@@ -953,6 +953,252 @@ th {
     font-weight: 600;
 }
 
+/* En-têtes collants : sur la base des listés ou le journal de criblage,
+   l'en-tête disparaissait dès la trentième ligne et l'on triait à l'aveugle.
+   Le fond du th est déjà opaque (--surface-1) ; l'ombre remplace la bordure
+   basse, que border-collapse fait défiler avec le contenu. */
+.table-container thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    box-shadow: 0 1px 0 var(--border-color);
+}
+
+/* Barre de filtres active : « 3 / 120 » se lit, mais un filtre oublié se
+   voit encore mieux avec un repère — sinon un tableau filtré d'hier se lit
+   comme un tableau presque vide aujourd'hui. */
+.table-filter-bar.filtre-actif {
+    border-left: 3px solid var(--color-primary);
+    padding-left: 0.6rem;
+}
+
+/* Copier en un clic : identifiants, hash, liens — discret, aligné au texte */
+.btn-copier {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 0.3rem;
+    font-size: 0.85rem;
+    vertical-align: baseline;
+}
+.btn-copier:hover { color: var(--color-primary); }
+
+/* Bandeau d'échéance de session : visible sans être une modale — l'analyste
+   doit pouvoir finir sa phrase, pas être interrompu. */
+#session-banner {
+    position: fixed;
+    top: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1300;
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    background: var(--color-warning, #b8860b);
+    color: #fff;
+    font-size: 0.85rem;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+#session-banner.hidden { display: none; }
+
+/* Aide des raccourcis (touche ?) */
+#raccourcis-modal kbd {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid var(--border-color);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--surface-1);
+    font-family: inherit;
+    font-size: 0.8rem;
+}
+#raccourcis-modal td { padding: 0.4rem 0.6rem; }
+
+/* Ligne visée au clavier (triage j/k des files d'alertes). L'outline plutôt
+   qu'un fond : elle reste lisible par-dessus les fonds de survol et de zébrage
+   sans définir une couleur de plus par thème. */
+tr.ligne-visee {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+}
+
+/* Étoile des dossiers suivis (suivre sans s'assigner) */
+.etoile-suivi { color: var(--color-warning); }
+
+/* ------------------ Confort des tableaux : colonnes & densité ------------------ */
+/* Bouton « Colonnes » : discret, dans la barre de filtres (ou seul devant le
+   tableau) ; le panneau est ancré à lui. */
+.table-filter-bar, .barre-colonnes { position: relative; }
+.barre-colonnes { display: flex; justify-content: flex-end; margin-bottom: 0.4rem; }
+.btn-colonnes {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    padding: 0.35rem 0.7rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+.btn-colonnes:hover { background: var(--surface-3); color: var(--text-primary); }
+.panneau-colonnes {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 220px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 0.6rem 0.75rem;
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.panneau-colonnes label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* Densité compacte : mêmes valeurs que .table-compact, appliquées partout. */
+body.densite-compacte th, body.densite-compacte td { padding: 0.35rem 0.6rem; font-size: 0.85rem; }
+body.densite-compacte .table-group-row td { padding-top: 0.55rem; }
+.icon-btn.actif { border-color: var(--color-primary); color: var(--color-primary); }
+
+/* ------------------ Diff d'une fiche listée (homologation) ------------------ */
+/* Ce qui entre et ce qui sort ne doivent pas se distinguer par la seule
+   couleur : le signe (+ / −) porte l'information pour qui ne la perçoit pas. */
+.diff-champ {
+    margin: 0.9rem 0 0.35rem;
+    font-size: 0.85rem;
+    font-family: monospace;
+    color: var(--text-secondary);
+}
+.diff-compte, .diff-vide { margin: 0 0 0.35rem; font-size: 0.78rem; color: var(--text-muted); }
+.diff-liste { list-style: none; margin: 0; padding: 0; }
+.diff-liste li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+.diff-signe { font-weight: 700; width: 1em; flex: none; text-align: center; }
+.diff-liste li.entree { background: rgba(34, 197, 94, 0.12); color: var(--success-soft-text); }
+.diff-liste li.sortie { background: rgba(239, 68, 68, 0.12); color: var(--danger-soft-text); }
+.diff-cote-a-cote { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.diff-cote-a-cote > div {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow-wrap: anywhere;
+}
+.diff-avant { background: rgba(239, 68, 68, 0.08); }
+.diff-apres { background: rgba(34, 197, 94, 0.08); }
+.diff-etiquette {
+    display: block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 0.2rem;
+}
+@media (max-width: 640px) {
+    .diff-cote-a-cote { grid-template-columns: 1fr; }
+}
+
+/* ------------------ Combobox cherchable ------------------ */
+/* Le select d'origine reste la source de vérité, masqué ; le champ filtre. */
+select.combobox-source { display: none; }
+.combobox { position: relative; display: inline-block; }
+.combobox-champ { min-width: 170px; }
+.combobox-liste {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    z-index: 40;
+    margin: 0;
+    padding: 0.3rem;
+    list-style: none;
+    min-width: 100%;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.combobox-liste li {
+    padding: 0.35rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.combobox-liste li:hover, .combobox-liste li.actif { background: var(--surface-3); }
+.combobox-liste li[aria-selected="true"] { color: var(--color-primary); font-weight: 600; }
+.combobox-liste .combobox-vide { color: var(--text-muted); cursor: default; }
+
+/* ------------------ Nouveautés (panneau + point sur le bouton) ------------------ */
+/* Le point signale du nouveau depuis la dernière ouverture du panneau. Il vit
+   DANS le bouton (position: relative) pour suivre le bouton partout. */
+#nouveautes-btn { position: relative; }
+.nouveautes-point {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    box-shadow: 0 0 0 2px var(--surface-2);
+}
+.nouveaute { padding: 0.65rem 0; }
+.nouveaute + .nouveaute { border-top: 1px solid var(--border-color); }
+.nouveaute h3 { font-size: 0.95rem; margin: 0; }
+.nouveaute time {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 0.15rem 0 0.35rem;
+}
+.nouveaute ul { margin: 0; padding-left: 1.1rem; }
+.nouveaute li { font-size: 0.85rem; line-height: 1.5; margin: 0.15rem 0; color: var(--text-secondary); }
+
+/* Motifs de clôture : une bibliothèque cliquable au-dessus du commentaire */
+.dialog-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-bottom: 0.6rem;
+}
+.suggestion-chip {
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.74rem;
+    padding: 0.25rem 0.7rem;
+}
+.suggestion-chip:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
 tr:last-child td {
     border-bottom: none;
 }
@@ -1019,6 +1265,18 @@ th.sortable.sort-desc::after {
     font-size: 1.6rem;
     margin-bottom: 0.4rem;
     opacity: 0.55;
+}
+
+/* Le conseil sous le constat : le geste qui remplit ce tableau. Plus discret
+   que le message — c'est une aide, pas une seconde annonce. */
+.empty-state .empty-hint {
+    display: block;
+    margin: 0.45rem auto 0;
+    max-width: 46ch;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    opacity: 0.85;
+    line-height: 1.45;
 }
 
 /* Etat d'ERREUR d'un tableau. Volontairement distinct de l'etat vide : sur un

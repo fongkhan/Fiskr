@@ -338,7 +338,7 @@ function showToast(message, type = "info", durationMs = 4500) {
 }
 
 // Modale générique : résout une Promise (bouton, Escape = annulation)
-function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password }) {
+function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password, suggestions }) {
  return new Promise((resolve) => {
  const overlay = document.getElementById("app-dialog");
  const titleEl = document.getElementById("app-dialog-title");
@@ -363,6 +363,26 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
  if (!textarea && password) inputEl.type = "password";
  inputEl.placeholder = placeholder || "";
  inputEl.id = "app-dialog-input";
+ // Suggestions cliquables (motifs de clôture) : une bibliothèque, pas un
+ // carcan — le clic REMPLIT le champ, le texte reste éditable. Champ vide :
+ // le motif remplace ; champ déjà entamé : il s'ajoute à la suite.
+ if (suggestions && suggestions.length) {
+ const rangee = document.createElement("div");
+ rangee.className = "dialog-suggestions";
+ for (const motif of suggestions) {
+ const puce = document.createElement("button");
+ puce.type = "button";
+ puce.className = "suggestion-chip";
+ puce.textContent = motif.length > 60 ? motif.slice(0, 60) + "…" : motif;
+ puce.title = motif;
+ puce.addEventListener("click", () => {
+ inputEl.value = inputEl.value.trim() ? inputEl.value.trim() + " " + motif : motif;
+ inputEl.focus();
+ });
+ rangee.appendChild(puce);
+ }
+ fieldWrap.appendChild(rangee);
+ }
  fieldWrap.appendChild(inputEl);
  }
 
@@ -405,28 +425,71 @@ function promptDialog(title, options = {}) {
  return _openAppDialog({ title, message: options.message || "", input: !options.textarea,
  textarea: options.textarea, placeholder: options.placeholder,
  required: options.required !== false, password: options.password,
+ suggestions: options.suggestions,
  confirmLabel: options.confirmLabel || "Valider" });
 }
 
-// ------------------ THÈME (clair / sombre) & NAVIGATION RESPONSIVE ------------------
+// ------------------ THÈME (sombre / clair / système) & NAVIGATION RESPONSIVE ------------------
+//
+// Trois préférences pour deux rendus : « système » suit le réglage de l'OS,
+// en direct — l'analyste dont la machine bascule en sombre à la tombée du
+// jour n'a plus à répéter le geste dans chaque application. L'attribut
+// data-theme ne dit donc plus la préférence (un rendu clair peut venir du
+// choix « clair » ou du choix « système ») : la préférence vit dans le
+// stockage, le rendu s'en déduit.
 
-function currentTheme() {
- return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+const _THEME_PREFERENCES = ["dark", "light", "system"];
+const _mediaClair = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+
+function themePreference() {
+ try {
+ const memo = localStorage.getItem("fiskr_theme");
+ if (_THEME_PREFERENCES.includes(memo)) return memo;
+ } catch (e) { /* stockage indisponible */ }
+ return "dark";
 }
 
-function applyTheme(theme) {
- if (theme === "light") {
+function _themeRendu(pref) {
+ if (pref === "system") return _mediaClair && _mediaClair.matches ? "light" : "dark";
+ return pref;
+}
+
+function applyTheme(pref) {
+ if (!_THEME_PREFERENCES.includes(pref)) pref = "dark";
+ if (_themeRendu(pref) === "light") {
  document.documentElement.setAttribute("data-theme", "light");
  } else {
  document.documentElement.removeAttribute("data-theme");
  }
- try { localStorage.setItem("fiskr_theme", theme); } catch (e) { /* stockage indisponible */ }
+ try { localStorage.setItem("fiskr_theme", pref); } catch (e) { /* stockage indisponible */ }
  const btn = document.getElementById("theme-toggle-btn");
- if (btn) btn.innerHTML = theme === "light" ? uiIcon("sun") : uiIcon("moon");
+ if (btn) {
+ const icones = { dark: "moon", light: "sun", system: "monitor" };
+ const titres = {
+ dark: "Thème sombre — cliquer pour le thème clair",
+ light: "Thème clair — cliquer pour suivre le réglage du système",
+ system: "Thème du système — cliquer pour le thème sombre",
+ };
+ btn.innerHTML = uiIcon(icones[pref]);
+ btn.title = titres[pref];
+ btn.setAttribute("aria-label", titres[pref]);
+ }
 }
 
 function toggleTheme() {
- applyTheme(currentTheme() === "light" ? "dark" : "light");
+ const suivant = { dark: "light", light: "system", system: "dark" };
+ const pref = suivant[themePreference()];
+ applyTheme(pref);
+ const annonces = { dark: "Thème sombre.", light: "Thème clair.", system: "Thème : celui du système." };
+ showToast(annonces[pref], "info", 2500);
+}
+
+// En préférence « système », le changement de réglage de l'OS s'applique
+// sans recharger la page.
+if (_mediaClair && _mediaClair.addEventListener) {
+ _mediaClair.addEventListener("change", () => {
+ if (themePreference() === "system") applyTheme("system");
+ });
 }
 
 // Sidebar rétractable (bureau) : mode icônes seules, état persisté.
@@ -477,6 +540,7 @@ async function apiFetch(url, options = {}) {
  throw e;
  }
  if (response.status === 401) {
+ sauverBrouillonDeSession();
  window.location.href = "/login";
  throw new Error("Session expirée");
  }
@@ -562,11 +626,15 @@ function tableLoading(target, cols, rows = 3) {
  tbody.innerHTML = Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join("");
 }
 
-// État vide homogène
-function tableEmpty(target, cols, message, icon = "") {
+// État vide homogène. Le constat seul (« Aucune alerte ») laisse le lecteur
+// devant une question : est-ce bon signe, ou ai-je mal filtré ? Le `conseil`
+// optionnel dit le geste qui remplit ce tableau — c'est la différence entre
+// un cul-de-sac et un panneau indicateur.
+function tableEmpty(target, cols, message, icon = "", conseil = "") {
  const tbody = _tbodyOf(target);
  if (!tbody) return;
- tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}</td></tr>`;
+ const aide = conseil ? `<span class="empty-hint">${escapeHtml(conseil)}</span>` : "";
+ tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-state"><span class="empty-icon">${icon}</span>${escapeHtml(message)}${aide}</td></tr>`;
 }
 
 // État d'ERREUR homogène — volontairement distinct de l'état vide.
@@ -592,6 +660,32 @@ function tableError(target, cols, message = "Chargement impossible.") {
 //
 // attachTableFilters("ma-table", { search: true, columns: [{ index: 2, label: "Statut" }] })
 const _tableFilterSpecs = {};
+
+// Filtres retenus d'une visite à l'autre (par navigateur, par tableau) : un
+// analyste qui travaille « CRITICAL, non assignées » les reposait à chaque
+// visite — les 13 barres de filtres repartaient de zéro. Le repère visuel
+// (« filtre-actif ») évite l'envers du décor : un filtre d'hier oublié qui
+// ferait lire un tableau plein comme un tableau presque vide.
+const _FILTRES_CLE = "fiskr_filtres_tables";
+
+function _filtresMemorises() {
+ try { return JSON.parse(localStorage.getItem(_FILTRES_CLE) || "{}") || {}; }
+ catch (e) { return {}; }
+}
+
+function _memoriserFiltres(tableId) {
+ try {
+ const etat = { recherche: document.getElementById(`${tableId}-filter-search`)?.value || "", colonnes: {} };
+ for (const col of ((_tableFilterSpecs[tableId] || {}).columns || [])) {
+ const v = document.getElementById(`${tableId}-filter-col-${col.index}`)?.value || "";
+ if (v) etat.colonnes[col.index] = v;
+ }
+ const tous = _filtresMemorises();
+ if (etat.recherche || Object.keys(etat.colonnes).length) tous[tableId] = etat;
+ else delete tous[tableId];
+ localStorage.setItem(_FILTRES_CLE, JSON.stringify(tous));
+ } catch (e) { /* stockage indisponible : le filtre s'applique, il n'est juste pas retenu */ }
+}
 
 function attachTableFilters(tableId, spec) {
  const table = document.getElementById(tableId);
@@ -619,11 +713,24 @@ function attachTableFilters(tableId, spec) {
  const anchor = table.closest(".table-container") || table;
  anchor.parentNode.insertBefore(bar, anchor);
 
+ // Restauration du filtre retenu. Les menus se remplissent avec les DONNÉES :
+ // si l'option voulue n'existe pas encore, le souhait est retenu sur le
+ // select (dataset) et refreshTableFilters le posera dès qu'elle apparaît.
+ const memorise = _filtresMemorises()[tableId];
+ if (memorise) {
+ const rechercheEl = document.getElementById(`${tableId}-filter-search`);
+ if (rechercheEl && memorise.recherche) rechercheEl.value = memorise.recherche;
+ for (const [index, valeur] of Object.entries(memorise.colonnes || {})) {
+ const select = document.getElementById(`${tableId}-filter-col-${index}`);
+ if (select) select.dataset.souhaite = valeur;
+ }
+ }
+
  // Débouncé : une frappe rapide ne déclenche qu'une passe sur les lignes
  let filterTimer = null;
  bar.addEventListener("input", () => {
  clearTimeout(filterTimer);
- filterTimer = setTimeout(() => applyTableFilter(tableId), 120);
+ filterTimer = setTimeout(() => { applyTableFilter(tableId); _memoriserFiltres(tableId); }, 120);
  });
 
  // Tout re-rendu du tableau rafraîchit les menus et réapplique le filtre.
@@ -635,6 +742,8 @@ function attachTableFilters(tableId, spec) {
  .observe(tbody, { childList: true });
  }
  refreshTableFilters(tableId);
+ // Toute table filtrable gagne le choix de ses colonnes, au même endroit.
+ attacherChoixDesColonnes(tableId);
 }
 
 // Repeuple les menus (valeurs distinctes des colonnes) et réapplique le
@@ -648,10 +757,11 @@ function refreshTableFilters(tableId) {
  for (const col of (spec.columns || [])) {
  const select = document.getElementById(`${tableId}-filter-col-${col.index}`);
  if (!select) continue;
- const current = select.value;
+ const current = select.value || select.dataset.souhaite || "";
  const values = [...new Set(rows.map(tr => (tr.children[col.index]?.textContent || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "fr"));
  select.innerHTML = `<option value="">${escapeHtml(col.label || "Tous")} : tous</option>`
  + values.map(v => `<option value="${escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(v.length > 40 ? v.slice(0, 40) + "…" : v)}</option>`).join("");
+ if (select.dataset.souhaite && select.value === select.dataset.souhaite) delete select.dataset.souhaite;
  }
  applyTableFilter(tableId);
 }
@@ -665,6 +775,9 @@ function applyTableFilter(tableId) {
  index: col.index,
  value: document.getElementById(`${tableId}-filter-col-${col.index}`)?.value || "",
  })).filter(f => f.value);
+
+ const barre = document.getElementById(`${tableId}-filterbar`);
+ if (barre) barre.classList.toggle("filtre-actif", !!(search || colFilters.length));
 
  let shown = 0, total = 0;
  for (const tr of table.querySelectorAll("tbody tr")) {
@@ -945,6 +1058,491 @@ function initFocusDesModales() {
  });
 }
 
+// ------------------ EXPORTS CSV MANQUANTS ------------------
+// Cinq tableaux d'exploitation n'avaient pas d'export. Deux passent par le
+// serveur — le journal d'administration est paginé côté serveur, un export de
+// « ce qui est affiché » n'en montrerait qu'une page, et c'est précisément la
+// pièce qu'un contrôle demande entière. Les trois autres s'exportent tels
+// qu'affichés, filtres appliqués — c'est ce que l'utilisateur regarde.
+
+function exportAdminLogCsv() {
+ // L'écran du journal n'a pas de filtre d'action : l'export porte tout le
+ // journal (borné serveur à 50 000 lignes, les plus récentes d'abord).
+ window.open("/api/export/admin-log.csv", "_blank");
+}
+
+function exportNotificationsCsv() {
+ const params = new URLSearchParams();
+ const statutEl = document.getElementById("notif-log-status");
+ if (statutEl && statutEl.value) params.set("status", statutEl.value);
+ window.open(`/api/export/notifications.csv?${params.toString()}`, "_blank");
+}
+
+// Neutralisation d'injection de formules : MÊME règle que le serveur
+// (fiskr/api.py, _csv_neutralise). Une cellule qui commence par = + - @ est
+// préfixée d'une apostrophe — sinon un nom forgé s'exécute dans le tableur
+// de l'analyste qui ouvre l'export.
+function _csvNeutralise(valeur) {
+ const texte = String(valeur ?? "");
+ return /^[=+\-@]/.test(texte) ? "'" + texte : texte;
+}
+
+function exporterTableAffichee(tableId, nomFichier) {
+ const table = document.getElementById(tableId);
+ if (!table) return;
+ const lignes = [];
+ // Exactement ce que l'utilisateur voit : les colonnes masquées par le
+ // choix de colonnes sortent du fichier comme elles sont sorties de l'écran.
+ const cachees = new Set(_colonnesMemorisees()[tableId] || []);
+ const garder = (cellules) => cellules.filter((c, i) => !cachees.has(i));
+ const entetes = garder([...table.querySelectorAll("thead th")]).map(th => th.textContent.trim());
+ lignes.push(entetes);
+ for (const tr of table.querySelectorAll("tbody tr")) {
+ // Les lignes filtrées et les en-têtes de groupe restent dehors aussi.
+ if (tr.classList.contains("filtered-out") || tr.classList.contains("table-group-row")) continue;
+ if (tr.querySelector(".empty-state")) continue;
+ lignes.push(garder([...tr.children]).map(td => td.textContent.replace(/\s+/g, " ").trim()));
+ }
+ const csv = lignes.map(l => l.map(c => `"${_csvNeutralise(c).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+ const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+ const lien = document.createElement("a");
+ lien.href = URL.createObjectURL(blob);
+ lien.download = `${nomFichier}_${new Date().toISOString().slice(0, 10)}.csv`;
+ document.body.appendChild(lien);
+ lien.click();
+ lien.remove();
+ URL.revokeObjectURL(lien.href);
+}
+
+// ------------------ CONFORT DES TABLEAUX : COLONNES & DENSITÉ ------------------
+// Choix des colonnes affichées, par tableau, persisté par poste. Le masquage
+// passe par UNE feuille de style régénérée (« #table tr > *:nth-child(n) ») :
+// les règles survivent à tous les re-rendus sans visiter une seule ligne.
+
+const _COLONNES_CLE = "fiskr_colonnes";
+
+function _colonnesMemorisees() {
+ try { return JSON.parse(localStorage.getItem(_COLONNES_CLE)) || {}; }
+ catch (e) { return {}; }
+}
+
+function _appliquerColonnes() {
+ let feuille = document.getElementById("regles-colonnes");
+ if (!feuille) {
+ feuille = document.createElement("style");
+ feuille.id = "regles-colonnes";
+ document.head.appendChild(feuille);
+ }
+ const regles = [];
+ for (const [tableId, indices] of Object.entries(_colonnesMemorisees())) {
+ // Le stockage local est modifiable par n'importe quel script du poste :
+ // un identifiant qui ne ressemble pas à un id de tableau n'entre pas
+ // dans la feuille de style.
+ if (!/^[-\w]+$/.test(tableId) || !Array.isArray(indices)) continue;
+ for (const idx of indices) {
+ if (Number.isInteger(idx) && idx >= 0) {
+ regles.push(`#${tableId} tr > *:nth-child(${idx + 1}) { display: none; }`);
+ }
+ }
+ }
+ feuille.textContent = regles.join("\n");
+}
+
+function _entetesDeTable(tableId) {
+ const table = document.getElementById(tableId);
+ if (!table || !table.tHead || !table.tHead.rows.length) return [];
+ return Array.from(table.tHead.rows[0].cells).map((th, i) =>
+ (th.textContent || "").trim() || `Colonne ${i + 1}`);
+}
+
+function attacherChoixDesColonnes(tableId) {
+ const table = document.getElementById(tableId);
+ if (!table || document.getElementById(`${tableId}-colonnes-btn`)) return;
+ if (!_entetesDeTable(tableId).length) return;
+ const btn = document.createElement("button");
+ btn.id = `${tableId}-colonnes-btn`;
+ btn.type = "button";
+ btn.className = "btn-colonnes";
+ btn.innerHTML = `${uiIcon("sliders")}<span>Colonnes</span>`;
+ btn.title = "Choisir les colonnes affichées";
+ btn.setAttribute("aria-label", "Choisir les colonnes affichées");
+ btn.setAttribute("aria-haspopup", "true");
+ btn.setAttribute("aria-expanded", "false");
+ btn.onclick = () => _basculerPanneauColonnes(tableId, btn);
+ const barre = document.getElementById(`${tableId}-filterbar`);
+ if (barre) {
+ barre.appendChild(btn);
+ } else {
+ const porte = document.createElement("div");
+ porte.className = "barre-colonnes";
+ const anchor = table.closest(".table-container") || table;
+ anchor.parentNode.insertBefore(porte, anchor);
+ porte.appendChild(btn);
+ }
+}
+
+function _basculerPanneauColonnes(tableId, btn) {
+ const existant = document.getElementById(`${tableId}-colonnes-panneau`);
+ document.querySelectorAll(".panneau-colonnes").forEach((p) => p.remove());
+ document.querySelectorAll("[id$='-colonnes-btn']").forEach((b) => b.setAttribute("aria-expanded", "false"));
+ if (existant) return;
+ const panneau = document.createElement("div");
+ panneau.id = `${tableId}-colonnes-panneau`;
+ panneau.className = "panneau-colonnes";
+ const caches = new Set(_colonnesMemorisees()[tableId] || []);
+ panneau.innerHTML = _entetesDeTable(tableId).map((titre, i) =>
+ `<label><input type="checkbox" data-col="${i}"${caches.has(i) ? "" : " checked"}> ${escapeHtml(titre)}</label>`).join("");
+ panneau.addEventListener("change", (e) => {
+ const idx = parseInt(e.target.dataset.col, 10);
+ const memo = _colonnesMemorisees();
+ const liste = new Set(memo[tableId] || []);
+ if (e.target.checked) liste.delete(idx); else liste.add(idx);
+ // Au moins une colonne visible : tout masquer rendrait le tableau
+ // introuvable, sans message et sans chemin de retour évident.
+ if (liste.size >= _entetesDeTable(tableId).length) {
+ e.target.checked = true;
+ return;
+ }
+ if (liste.size) memo[tableId] = [...liste].sort((a, b) => a - b);
+ else delete memo[tableId];
+ try { localStorage.setItem(_COLONNES_CLE, JSON.stringify(memo)); } catch (err) { /* stockage indisponible */ }
+ _appliquerColonnes();
+ });
+ btn.setAttribute("aria-expanded", "true");
+ btn.insertAdjacentElement("afterend", panneau);
+ setTimeout(() => {
+ const fermer = (e) => {
+ if (e.type === "keydown" && e.key !== "Escape") return;
+ if (e.type === "click" && (panneau.contains(e.target) || btn.contains(e.target))) return;
+ panneau.remove();
+ btn.setAttribute("aria-expanded", "false");
+ document.removeEventListener("click", fermer);
+ document.removeEventListener("keydown", fermer);
+ };
+ document.addEventListener("click", fermer);
+ document.addEventListener("keydown", fermer);
+ }, 0);
+}
+
+// Densité d'affichage globale (confortable / compacte), persistée par poste.
+const _DENSITE_CLE = "fiskr_densite";
+
+function appliquerDensite(mode) {
+ const compacte = mode === "compacte";
+ document.body.classList.toggle("densite-compacte", compacte);
+ try { localStorage.setItem(_DENSITE_CLE, compacte ? "compacte" : "confortable"); } catch (e) { /* stockage indisponible */ }
+ const btn = document.getElementById("densite-btn");
+ if (btn) {
+ const titre = compacte
+ ? "Densité compacte — cliquer pour l'affichage confortable"
+ : "Densité confortable — cliquer pour l'affichage compact";
+ btn.title = titre;
+ btn.setAttribute("aria-label", titre);
+ btn.classList.toggle("actif", compacte);
+ }
+}
+
+function basculerDensite() {
+ appliquerDensite(document.body.classList.contains("densite-compacte") ? "confortable" : "compacte");
+}
+
+function initDensite() {
+ let memo = null;
+ try { memo = localStorage.getItem(_DENSITE_CLE); } catch (e) { /* stockage indisponible */ }
+ appliquerDensite(memo === "compacte" ? "compacte" : "confortable");
+}
+
+// ------------------ COMBOBOX CHERCHABLE (selects longs) ------------------
+// Le select natif ne se filtre pas : dans un annuaire de quarante analystes
+// ou quinze types de listes, on descend la roulette. Tout select marqué
+// `data-combobox` gagne un champ de recherche : les options restent celles
+// du select (dérivées à l'ouverture, jamais recopiées), la sélection repasse
+// par select.value + un évènement change — les onchange existants s'exécutent.
+
+function _texteSimplifie(s) {
+ return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function activerCombobox(select) {
+ if (!select || select.dataset.comboboxActif) return;
+ select.dataset.comboboxActif = "1";
+ const listeId = `${select.id || "cb" + Math.random().toString(36).slice(2, 8)}-liste`;
+ const enveloppe = document.createElement("span");
+ enveloppe.className = "combobox";
+ const champ = document.createElement("input");
+ champ.type = "text";
+ champ.className = "combobox-champ";
+ champ.setAttribute("role", "combobox");
+ champ.setAttribute("aria-autocomplete", "list");
+ champ.setAttribute("aria-expanded", "false");
+ champ.setAttribute("aria-controls", listeId);
+ champ.setAttribute("aria-label", select.getAttribute("aria-label") || select.title || "Filtrer les choix");
+ champ.autocomplete = "off";
+ const liste = document.createElement("ul");
+ liste.id = listeId;
+ liste.className = "combobox-liste hidden";
+ liste.setAttribute("role", "listbox");
+ select.parentNode.insertBefore(enveloppe, select);
+ enveloppe.appendChild(champ);
+ enveloppe.appendChild(liste);
+ select.classList.add("combobox-source");
+
+ const libelleCourant = () =>
+ (select.selectedIndex >= 0 && select.options[select.selectedIndex])
+ ? select.options[select.selectedIndex].textContent.trim() : "";
+ champ.value = libelleCourant();
+ select.addEventListener("change", () => { champ.value = libelleCourant(); });
+
+ let actif = -1;
+ const fermer = () => {
+ liste.classList.add("hidden");
+ champ.setAttribute("aria-expanded", "false");
+ champ.removeAttribute("aria-activedescendant");
+ actif = -1;
+ };
+ const options = () => Array.from(liste.querySelectorAll("[role='option']"));
+ const choisir = (li) => {
+ select.value = li.dataset.valeur;
+ select.dispatchEvent(new Event("change"));
+ champ.value = li.textContent.trim();
+ fermer();
+ };
+ const construire = (aiguille) => {
+ // Dérivé du select à CHAQUE ouverture : un annuaire repeuplé après coup
+ // est visible sans rien re-brancher.
+ const simple = _texteSimplifie(aiguille);
+ const items = Array.from(select.options)
+ .filter((o) => !simple || _texteSimplifie(o.textContent).includes(simple));
+ liste.innerHTML = items.length
+ ? items.map((o, i) =>
+ `<li role="option" id="${listeId}-opt-${i}" data-valeur="${escapeHtml(o.value)}"${o.value === select.value ? ' aria-selected="true"' : ""}>${escapeHtml(o.textContent.trim())}</li>`).join("")
+ : `<li class="combobox-vide">Aucun choix ne correspond.</li>`;
+ liste.classList.remove("hidden");
+ champ.setAttribute("aria-expanded", "true");
+ actif = -1;
+ };
+ champ.addEventListener("focus", () => { champ.select(); construire(""); });
+ champ.addEventListener("input", () => construire(champ.value));
+ champ.addEventListener("keydown", (e) => {
+ const opts = options();
+ if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+ e.preventDefault();
+ if (liste.classList.contains("hidden")) { construire(champ.value); return; }
+ if (!opts.length) return;
+ actif = e.key === "ArrowDown" ? Math.min(actif + 1, opts.length - 1) : Math.max(actif - 1, 0);
+ opts.forEach((o, i) => o.classList.toggle("actif", i === actif));
+ champ.setAttribute("aria-activedescendant", opts[actif].id);
+ opts[actif].scrollIntoView({ block: "nearest" });
+ } else if (e.key === "Enter") {
+ if (actif >= 0 && opts[actif]) { e.preventDefault(); choisir(opts[actif]); }
+ else if (opts.length === 1) { e.preventDefault(); choisir(opts[0]); }
+ } else if (e.key === "Escape") {
+ fermer();
+ champ.value = libelleCourant();
+ }
+ });
+ // mousedown avant blur : le clic choisit, PUIS le champ perd le focus
+ liste.addEventListener("mousedown", (e) => {
+ const li = e.target.closest("[role='option']");
+ if (li) { e.preventDefault(); choisir(li); }
+ });
+ champ.addEventListener("blur", () => {
+ // Un texte tapé qui n'est pas un choix ne vaut rien : on réaffiche le réel
+ setTimeout(() => { fermer(); champ.value = libelleCourant(); }, 120);
+ });
+}
+
+function initComboboxes() {
+ document.querySelectorAll("select[data-combobox]").forEach(activerCombobox);
+}
+
+// ------------------ COPIER EN UN CLIC ------------------
+// Identifiants d'entité, hash de snapshot, lien d'une alerte : jusqu'ici,
+// sélection manuelle dans une modale. Un bouton discret par valeur technique,
+// UNE délégation pour toute la page.
+
+function boutonCopier(valeur, titre = "Copier") {
+ return `<button type="button" class="btn-copier" data-copier="${escapeHtml(valeur)}" title="${escapeHtml(titre)}" aria-label="${escapeHtml(titre)}">⧉</button>`;
+}
+
+// ------------------ RÉCEMMENT CONSULTÉS ------------------
+// Rouvrir le dossier d'il y a dix minutes = repasser par la file et ses
+// filtres. Les dix derniers dossiers ouverts (alertes, clients 360) vivent
+// dans la palette Ctrl+K, AVANT la première frappe — l'endroit où la main va
+// déjà. localStorage : par navigateur, jamais envoyé au serveur.
+const _RECENTS_CLE = "fiskr_recents";
+const _RECENTS_MAX = 10;
+
+function _memoriserRecent(type, id, libelle) {
+ try {
+ const liste = JSON.parse(localStorage.getItem(_RECENTS_CLE) || "[]");
+ const filtree = liste.filter(r => !(r.type === type && r.id === id));
+ filtree.unshift({ type, id, libelle, at: Date.now() });
+ localStorage.setItem(_RECENTS_CLE, JSON.stringify(filtree.slice(0, _RECENTS_MAX)));
+ } catch (e) { /* stockage indisponible */ }
+}
+
+function _recentsMemorises() {
+ try { return JSON.parse(localStorage.getItem(_RECENTS_CLE) || "[]"); }
+ catch (e) { return []; }
+}
+
+function ouvrirRecent(type, id) {
+ closeCommandPalette();
+ if (type === "alerte") openAlertModal(id);
+ else if (type === "client") openClient360(id);
+}
+
+function initCopierEnUnClic() {
+ document.addEventListener("click", async (e) => {
+ const bouton = e.target.closest("[data-copier]");
+ if (!bouton) return;
+ const valeur = bouton.dataset.copier || "";
+ try {
+ await navigator.clipboard.writeText(valeur);
+ } catch (err) {
+ // Contexte non sécurisé ou permission refusée : repli par sélection
+ const zone = document.createElement("textarea");
+ zone.value = valeur;
+ document.body.appendChild(zone);
+ zone.select();
+ document.execCommand("copy");
+ zone.remove();
+ }
+ showToast("Copié dans le presse-papiers.", "success", 2000);
+ });
+}
+
+// ------------------ AIDE DES RACCOURCIS (touche ?) ------------------
+// Ctrl+K, Échap, Entrée sur les tris existaient — et rien ne les annonçait :
+// un raccourci que rien n'annonce est un raccourci que personne n'emploie.
+
+function initAideRaccourcis() {
+ document.addEventListener("keydown", (e) => {
+ if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
+ const cible = e.target;
+ if (cible && (cible.tagName === "INPUT" || cible.tagName === "TEXTAREA"
+  || cible.tagName === "SELECT" || cible.isContentEditable)) return;
+ e.preventDefault();
+ const modale = document.getElementById("raccourcis-modal");
+ if (modale) modale.classList.toggle("hidden");
+ });
+}
+
+// ------------------ NOUVEAUTÉS (ce qui a changé, annoncé dans l'outil) ------------------
+// Le journal des modifications vit dans le dépôt ; personne en agence n'ira
+// l'y lire. Ces entrées sont rédigées à chaque lot livré, du plus récent au
+// plus ancien. Un point sur le bouton de la barre signale ce qui est arrivé
+// depuis la dernière ouverture du panneau — mémorisée localement, par poste :
+// chacun découvre les nouveautés une fois, puis le point s'éteint.
+
+const FISKR_NOUVEAUTES = [
+ {
+ id: "2026-08-26-lot-8", date: "2026-08-26",
+ titre: "Comparer deux versions d'une fiche listée",
+ points: [
+ "À l'homologation, un bouton « Comparer » montre ce qui entre et ce qui sort, champ par champ.",
+ "Les alias ajoutés ou retirés se lisent d'un coup d'œil, au lieu de deux blocs JSON.",
+ "Le dossier d'homologation figé montre désormais la même comparaison.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-7", date: "2026-08-26",
+ titre: "Le confort des tableaux",
+ points: [
+ "Choisissez les colonnes de chaque tableau — l'export « tel qu'affiché » les respecte.",
+ "Une densité compacte pour voir plus de lignes, d'un clic dans la barre.",
+ "Les longs menus déroulants se filtrent au clavier : analystes, types de listes.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-6", date: "2026-08-26",
+ titre: "Suivre un dossier sans se l'assigner",
+ points: [
+ "Un bouton « Suivre » dans le dossier d'alerte : les actions des autres vous sont notifiées.",
+ "Une étoile marque vos dossiers suivis dans la file ; la fiche liste les suiveurs.",
+ "Geste personnel et réversible : rien n'en va au journal immuable de l'alerte.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-5", date: "2026-08-26",
+ titre: "Triage au clavier et mise en attente",
+ points: [
+ "j/k parcourent la file d'alertes, o instruit, r reporte — le motif des clients mail.",
+ "Reporter une alerte : elle descend en bas de la file sans jamais disparaître, motif au journal.",
+ "Le SLA continue de courir pendant l'attente — et le serveur prévient si l'échéance tombe dedans.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-4", date: "2026-08-26",
+ titre: "Confort visuel : thème, nouveautés, états vides",
+ points: [
+ "Le bouton de thème propose un troisième état : suivre le réglage du système, en direct.",
+ "Ce panneau des nouveautés : un point sur le bouton signale ce qui est arrivé depuis votre dernière visite.",
+ "Les tableaux vides expliquent quoi faire, au lieu d'une ligne muette.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-3", date: "2026-08-26",
+ titre: "La recherche atteint tout",
+ points: [
+ "Ctrl+K trouve aussi vos clients en production et ouvre leur fiche 360°.",
+ "La palette mène aux cartes de réglages : tapez « seuil », « SLA », « rétention ».",
+ "Nouveaux exports CSV : journal d'administration, journal de notifications, et tout tableau tel qu'affiché.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-2", date: "2026-08-26",
+ titre: "Le quotidien de l'analyste",
+ points: [
+ "Une pastille ambre annonce l'échéance SLA sous douze heures, avant le retard.",
+ "Des motifs de clôture suggérés à la décision — réglables par l'administrateur.",
+ "Les dix derniers dossiers ouverts en tête de la palette, et le re-criblage d'un client en un bouton.",
+ ],
+ },
+ {
+ id: "2026-08-26-lot-1", date: "2026-08-26",
+ titre: "Six frictions quotidiennes en moins",
+ points: [
+ "La session prévient avant d'expirer et votre saisie est restaurée après reconnexion.",
+ "En-têtes de tableaux collants, filtres mémorisés, copie en un clic, lien direct vers une alerte.",
+ "La touche ? affiche les raccourcis ; l'onglet compte les alertes ouvertes.",
+ ],
+ },
+];
+const _NOUVEAUTES_CLE = "fiskr_nouveautes_vu";
+
+function _nouveautesNonVues() {
+ if (!FISKR_NOUVEAUTES.length) return false;
+ try { return localStorage.getItem(_NOUVEAUTES_CLE) !== FISKR_NOUVEAUTES[0].id; }
+ catch (e) { return false; }
+}
+
+function initNouveautes() {
+ const point = document.getElementById("nouveautes-point");
+ if (point && _nouveautesNonVues()) point.classList.remove("hidden");
+}
+
+function ouvrirNouveautes() {
+ const conteneur = document.getElementById("nouveautes-liste");
+ const modale = document.getElementById("nouveautes-modal");
+ if (!conteneur || !modale) return;
+ conteneur.innerHTML = FISKR_NOUVEAUTES.map((n) => {
+ const quand = new Date(`${n.date}T12:00:00`).toLocaleDateString(uiLocale(),
+ { day: "numeric", month: "long", year: "numeric" });
+ return `<article class="nouveaute">
+ <h3>${escapeHtml(n.titre)}</h3>
+ <time datetime="${escapeHtml(n.date)}">${escapeHtml(quand)}</time>
+ <ul>${n.points.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ul>
+ </article>`;
+ }).join("");
+ // Ouvrir, c'est avoir vu : le point s'éteint et ne revient qu'au prochain lot.
+ try { localStorage.setItem(_NOUVEAUTES_CLE, FISKR_NOUVEAUTES[0].id); } catch (e) { /* stockage indisponible */ }
+ const point = document.getElementById("nouveautes-point");
+ if (point) point.classList.add("hidden");
+ modale.classList.remove("hidden");
+}
+
 function initA11y() {
  // Échap ferme la modale visible la plus haute (la modale générique gère déjà le sien)
  document.addEventListener("keydown", (e) => {
@@ -984,6 +1582,11 @@ async function refreshSidebarCounters() {
  const c = await response.json();
  // Un badge par espace : le criblage et le filtrage portent chacun leurs
  // alertes ouvertes dans la navigation (l'onglet Alertes unique a disparu)
+ // Badge d'onglet : « (3) Fiskr… » — un onglet en arrière-plan dit s'il y a
+ // du travail sans qu'on l'ouvre. Le titre de base est retenu une fois.
+ const ouvertes = (c.open_alerts_screening || 0) + (c.open_alerts_filtering || 0);
+ if (!window._titreDeBase) window._titreDeBase = document.title.replace(/^\(\d+\)\s*/, "");
+ document.title = ouvertes ? `(${ouvertes}) ${window._titreDeBase}` : window._titreDeBase;
  const scrNavBadge = document.getElementById("screening-open-badge");
  if (scrNavBadge) {
  scrNavBadge.textContent = c.open_alerts_screening ?? 0;
@@ -1210,13 +1813,27 @@ function selectedScreeningLists(containerId) {
 
 document.addEventListener("DOMContentLoaded", () => {
  // Thème (icône du bouton), accessibilité et tri des tables
- applyTheme(currentTheme());
+ applyTheme(themePreference());
  initA11y();
  initFocusDesModales();
+ initCopierEnUnClic();
+ initAideRaccourcis();
+ initNouveautes();
+ initTriageClavier();
+ // Confort des tableaux : colonnes masquées reposées, densité, combobox.
+ _appliquerColonnes();
+ initDensite();
+ initComboboxes();
+ // Les grands tableaux sans barre de filtres générique (files d'alertes,
+ // base des listés, journal de criblage : paginés côté serveur) reçoivent
+ // aussi le choix des colonnes.
+ ["screening-alerts-table", "filtering-alerts-table", "watchlist-table", "audit-table"]
+ .forEach(attacherChoixDesColonnes);
  initClavierSurCliquables();
  initSortableTables();
  initCommandPalette();
  initHashRouting();
+ restaurerBrouillonDeSession();
  initDropZones();
  // Check authentication and load user info
  checkAuthUser();
@@ -1308,6 +1925,73 @@ function auRetourDeLOnglet() {
 }
 
 // Check current logged-in user profile
+// ------------------ VEILLE DE SESSION & BROUILLON DE SECOURS ------------------
+// Le jeton vit huit heures et le cookie est HttpOnly : le client ne peut pas
+// lire son échéance — c'est /api/auth/me qui la donne. Sans elle, le premier
+// appel après l'expiration recevait un 401 et repartait vers la connexion en
+// emportant le commentaire ou le formulaire en cours de saisie.
+
+let _sessionEcheance = null;
+let _sessionVeilleTimer = null;
+
+function armerVeilleDeSession(isoEcheance) {
+ _sessionEcheance = isoEcheance ? new Date(isoEcheance) : null;
+ if (_sessionVeilleTimer) clearInterval(_sessionVeilleTimer);
+ if (!_sessionEcheance || isNaN(_sessionEcheance.getTime())) return;
+ _sessionVeilleTimer = setInterval(rafraichirBandeauDeSession, 30 * 1000);
+ rafraichirBandeauDeSession();
+}
+
+function rafraichirBandeauDeSession() {
+ const bandeau = document.getElementById("session-banner");
+ if (!bandeau || !_sessionEcheance) return;
+ const restant = _sessionEcheance.getTime() - Date.now();
+ // Bandeau, pas modale : l'analyste finit sa phrase, il n'est pas interrompu.
+ const proche = restant <= 10 * 60 * 1000;
+ bandeau.classList.toggle("hidden", !proche);
+ if (proche) {
+ const minutes = Math.max(0, Math.round(restant / 60000));
+ const compteur = document.getElementById("session-banner-minutes");
+ if (compteur) compteur.textContent = minutes >= 1 ? `${minutes} min` : "< 1 min";
+ }
+}
+
+// Quand le 401 tombe malgré tout, la saisie ne disparaît plus : les champs
+// remplis sont photographiés AVANT la redirection (sessionStorage — même
+// onglet, jamais envoyé au serveur) et reposés après reconnexion, uniquement
+// dans les champs encore vides.
+const _BROUILLON_CLE = "fiskr_brouillon_session";
+const _BROUILLON_TTL_MS = 60 * 60 * 1000;
+
+function sauverBrouillonDeSession() {
+ try {
+ const valeurs = {};
+ document.querySelectorAll("textarea[id], input[type=text][id]").forEach(el => {
+ if (el.value && el.value.trim()) valeurs[el.id] = el.value;
+ });
+ if (!Object.keys(valeurs).length) return;
+ sessionStorage.setItem(_BROUILLON_CLE, JSON.stringify({
+ at: Date.now(), hash: location.hash || "", valeurs }));
+ } catch (e) { /* stockage indisponible : comme avant, rien à sauver */ }
+}
+
+function restaurerBrouillonDeSession() {
+ try {
+ const brut = sessionStorage.getItem(_BROUILLON_CLE);
+ if (!brut) return;
+ sessionStorage.removeItem(_BROUILLON_CLE);
+ const brouillon = JSON.parse(brut) || {};
+ if (!brouillon.at || (Date.now() - brouillon.at) > _BROUILLON_TTL_MS) return;
+ if (brouillon.hash && !location.hash) location.hash = brouillon.hash;
+ let reposes = 0;
+ for (const [id, valeur] of Object.entries(brouillon.valeurs || {})) {
+ const el = document.getElementById(id);
+ if (el && "value" in el && !el.value) { el.value = valeur; reposes++; }
+ }
+ if (reposes) showToast("Saisie restaurée après l'expiration de session.", "info", 8000);
+ } catch (e) { /* brouillon illisible : rien à restaurer */ }
+}
+
 async function checkAuthUser() {
  try {
  const response = await apiFetch("/api/auth/me");
@@ -1316,6 +2000,7 @@ async function checkAuthUser() {
  return;
  }
  const data = await response.json();
+ armerVeilleDeSession(data.session_expires_at);
  if (data.user) {
  currentUser = data.user;
  const roles = userRoles(currentUser);
@@ -2034,7 +2719,8 @@ function renderSnapshotsTable(snaps) {
  tbody.innerHTML = "";
 
  if (snaps.length === 0) {
- tableEmpty(tbody, 5, "Aucun snapshot importé");
+ tableEmpty(tbody, 5, "Aucun snapshot importé", uiIcon("package"),
+ "Synchronisez une source (écran Sources) ou importez un fichier : chaque réception crée un instantané à homologuer.");
  return;
  }
 
@@ -2044,7 +2730,7 @@ function renderSnapshotsTable(snaps) {
 
  tr.innerHTML = `
  <td>${escapeHtml(dateStr)}</td>
- <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}...</small></td>
+ <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${snap.file_hash.substring(0,8)}… ${boutonCopier(snap.file_hash, "Copier le hash complet")}</small></td>
  <td>${listTypeBadge(snap.file_type)}</td>
  <td>${snap.status === "PROCESSING" && snap.processed_count
  ? `${snap.processed_count.toLocaleString(uiLocale())}…` : snap.record_count}</td>
@@ -3053,7 +3739,8 @@ function renderWatchlistTable(items, page = 1, total = 0) {
  tbody.innerHTML = "";
 
  if (items.length === 0) {
- tableEmpty(tbody, 7, "Aucune entité en base pour ce périmètre");
+ tableEmpty(tbody, 7, "Aucune entité en base pour ce périmètre", uiIcon("database"),
+ "Changez de périmètre ci-dessus, ou mettez une liste en production : la base des listés se remplit à l'homologation.");
  updatePaginationControls(0, 0);
  return;
  }
@@ -3086,7 +3773,7 @@ function renderWatchlistTable(items, page = 1, total = 0) {
  const excludedBadge = item.excluded ? ' <span class="status-badge alert" title="Entité exclue de la production lors de l\'homologation">EXCLUE</span>' : "";
 
  tr.innerHTML = `
- <td><code>${escapeHtml(item.entity_id)}</code></td>
+ <td><code>${escapeHtml(item.entity_id)}</code> ${boutonCopier(item.entity_id, "Copier")}</td>
  <td>${listTypeBadge(item._list_type)}</td>
  <td>${snapshotStatusBadge(item.snapshot_status)}${excludedBadge}</td>
  <td>${typeBadge}</td>
@@ -3664,7 +4351,8 @@ function renderAuditHistoryTable(logs) {
  tbody.innerHTML = "";
 
  if (logs.length === 0) {
- tableEmpty(tbody, 7, "Aucune décision pour ce filtre");
+ tableEmpty(tbody, 7, "Aucune décision pour ce filtre", uiIcon("file-text"),
+ "Le journal conserve toutes les décisions de criblage : élargissez le filtre ou la période pour les revoir.");
  return;
  }
 
@@ -4593,6 +5281,7 @@ async function fetchIngestionSettings() {
  const response = await apiFetch("/api/settings/ingestion");
  if (!response.ok) return;
  ingestionSettings = await response.json();
+ _motifsDeCloture = null; // le prochain dialogue relira les motifs à jour
  const approvalEl = document.getElementById("setting-require-approval");
  const justifEl = document.getElementById("setting-exclusion-justification");
  const fileEl = document.getElementById("setting-exclusion-file");
@@ -4641,6 +5330,8 @@ async function fetchIngestionSettings() {
  const qualityMinEl = document.getElementById("setting-quality-min");
  if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
  // SLA par priorité + notifications métier
+ const motifsEl = document.getElementById("setting-close-reasons");
+ if (motifsEl) motifsEl.value = (ingestionSettings.alert_close_reasons || []).join("\n");
  const sla = ingestionSettings.alert_sla_hours || {};
  for (const [prio, id] of [["CRITICAL", "setting-sla-critical"], ["HIGH", "setting-sla-high"],
  ["MEDIUM", "setting-sla-medium"], ["LOW", "setting-sla-low"]]) {
@@ -4762,6 +5453,8 @@ async function saveIngestionSettings() {
  auto_backtest_panel: document.getElementById("setting-auto-backtest-panel")?.value ?? "",
  // 0 = pas de seuil : `|| 0` conserve bien la desactivation
  quality_min_score_pct: parseFloat(document.getElementById("setting-quality-min")?.value) || 0,
+ alert_close_reasons: (document.getElementById("setting-close-reasons")?.value || "")
+ .split("\n").map(m => m.trim()).filter(Boolean),
  alert_sla_hours: {
  CRITICAL: parseInt(document.getElementById("setting-sla-critical")?.value, 10) || 0,
  HIGH: parseInt(document.getElementById("setting-sla-high")?.value, 10) || 0,
@@ -5083,7 +5776,8 @@ function renderPendingTable(pending) {
  if (!tbody) return;
  const bulkBar = document.getElementById("review-bulk-bar");
  if (!pending || pending.length === 0) {
- tableEmpty(tbody, 9, "Aucun snapshot en attente d'homologation.", "");
+ tableEmpty(tbody, 9, "Aucun snapshot en attente d'homologation.", uiIcon("check-circle"),
+ "Tout est traité. Les lots à homologuer apparaissent ici après chaque synchronisation ou import.");
  if (bulkBar) bulkBar.classList.add("hidden");
  return;
  }
@@ -5095,7 +5789,7 @@ function renderPendingTable(pending) {
  <tr>
  <td><input type="checkbox" class="review-pick" value="${id}" onchange="refreshBulkSelection()"></td>
  <td>${escapeHtml(dateStr)}</td>
- <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}...</small></td>
+ <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}… ${boutonCopier(snap.file_hash || "", "Copier le hash complet")}</small></td>
  <td>${listTypeBadge(snap.file_type)}</td>
  <td>${snap.record_count}</td>
  <td>${pendingDeltaCell(snap)}</td>
@@ -5247,6 +5941,111 @@ async function openReviewDetail(snapshotId) {
  }
 }
 
+// ------------------ DIFF D'UNE FICHE LISTÉE (homologation) ------------------
+//
+// Le delta disait « aliases.high_priority a changé » et posait côte à côte
+// deux blocs JSON. Sur une fiche à quinze alias, repérer à l'œil celui qui
+// est ENTRÉ tient de l'exercice de vision : c'est précisément l'écart qui
+// élargit ou rétrécit la couverture du criblage, et c'est celui-là qu'on
+// manque. Ce composant compare élément par élément et dit ce qui entre, ce
+// qui sort, ce qui reste — dérivé des chemins que le serveur a déjà calculés,
+// sans aucune liste de champs à tenir à jour.
+
+const _diffsDeFiches = {};
+
+function _valeurAuChemin(racine, chemin) {
+ let courant = racine;
+ for (const segment of String(chemin).split(".")) {
+  if (courant === null || courant === undefined || typeof courant !== "object") return undefined;
+  courant = courant[segment];
+ }
+ return courant;
+}
+
+function _texteDeValeur(v) {
+ if (v === null || v === undefined || v === "") return "∅";
+ return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+// Diff élément par élément de deux listes. Les doublons comptent : une liste
+// qui perd l'un de ses deux « Ivanov » a bien perdu une entrée.
+function _diffDeListes(avant, apres) {
+ const clef = (v) => (typeof v === "object" && v !== null) ? JSON.stringify(v) : String(v);
+ const restants = (avant || []).map(clef);
+ const entrees = [], gardees = [];
+ for (const v of (apres || [])) {
+  const i = restants.indexOf(clef(v));
+  if (i === -1) entrees.push(v);
+  else { gardees.push(v); restants.splice(i, 1); }
+ }
+ const sorties = (avant || []).filter((v) => {
+  const i = restants.indexOf(clef(v));
+  if (i === -1) return false;
+  restants.splice(i, 1);
+  return true;
+ });
+ return { entrees, sorties, gardees };
+}
+
+function construireDiffDeFiche(entree) {
+ const chemins = entree.changes_detected || [];
+ if (!chemins.length) return `<p class="section-desc">Aucun écart champ à champ n'a été enregistré pour cette fiche.</p>`;
+ const blocs = chemins.map((chemin) => {
+  const avant = _valeurAuChemin(entree.before, chemin);
+  const apres = _valeurAuChemin(entree.after, chemin);
+  const titre = `<h4 class="diff-champ">${escapeHtml(chemin)}</h4>`;
+  if (Array.isArray(avant) || Array.isArray(apres)) {
+   const { entrees, sorties, gardees } = _diffDeListes(
+    Array.isArray(avant) ? avant : (avant == null ? [] : [avant]),
+    Array.isArray(apres) ? apres : (apres == null ? [] : [apres]));
+   if (!entrees.length && !sorties.length) {
+    // Même contenu dans un autre ordre : le dire, plutôt que d'afficher
+    // deux listes identiques et laisser chercher la différence.
+    return `${titre}<p class="diff-vide"><span>Mêmes entrées, ordre différent.</span></p>`;
+   }
+   const puces = (items, cls, signe) => items.map((v) =>
+    `<li class="${cls}"><span class="diff-signe" aria-hidden="true">${signe}</span>${escapeHtml(_texteDeValeur(v))}</li>`).join("");
+   const compte = `<p class="diff-compte"><span>${entrees.length} entrée(s), ${sorties.length} sortie(s), ${gardees.length} inchangée(s).</span></p>`;
+   return `${titre}${compte}<ul class="diff-liste">${puces(sorties, "sortie", "−")}${puces(entrees, "entree", "+")}</ul>`;
+  }
+  return `${titre}<div class="diff-cote-a-cote">
+   <div class="diff-avant"><span class="diff-etiquette">Avant</span><code>${escapeHtml(_texteDeValeur(avant))}</code></div>
+   <div class="diff-apres"><span class="diff-etiquette">Après</span><code>${escapeHtml(_texteDeValeur(apres))}</code></div>
+  </div>`;
+ });
+ return blocs.join("");
+}
+
+function ouvrirDiffDeFiche(contexte, index) {
+ const entree = (_diffsDeFiches[contexte] || [])[index];
+ const modale = document.getElementById("diff-fiche-modal");
+ const corps = document.getElementById("diff-fiche-corps");
+ if (!modale || !corps) return;
+ if (!entree) {
+  corps.innerHTML = `<p class="section-desc">Cette fiche n'est plus dans le delta affiché : rechargez l'écran.</p>`;
+ } else {
+  const titre = document.getElementById("diff-fiche-titre");
+  if (titre) titre.textContent = `${entree.primary_name || ""} — ${entree.id || ""}`;
+  corps.innerHTML = construireDiffDeFiche(entree);
+ }
+ modale.classList.remove("hidden");
+}
+
+// Ligne « modifiée » commune aux deux écrans : le résumé des champs touchés
+// et le bouton qui ouvre le détail. Un seul rendu, deux appelants — l'écran
+// d'homologation et le dossier figé montrent exactement la même chose.
+function _lignesModifiees(items, contexte) {
+ _diffsDeFiches[contexte] = items || [];
+ return `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th><th></th></tr></thead><tbody>`
+  + (items || []).map((e, i) => `<tr>
+   <td><code>${escapeHtml(e.id || "")}</code></td>
+   <td><strong>${escapeHtml(e.primary_name || "")}</strong></td>
+   <td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td>
+   <td><button type="button" class="btn btn-sm btn-secondary" onclick="ouvrirDiffDeFiche('${escapeHtml(contexte)}', ${i})">Comparer</button></td>
+  </tr>`).join("")
+  + `</tbody>`;
+}
+
 // Delta détaillé (étape 1) : listes des ajouts / modifications / suppressions
 function renderReviewDeltaDetails(deltaDetails) {
  const container = document.getElementById("review-delta-details");
@@ -5264,16 +6063,6 @@ function renderReviewDeltaDetails(deltaDetails) {
  <tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td>
  <td><span class="status-badge ${cls}">${escapeHtml(e.primary_name || "")}</span></td></tr>`).join("");
 
- const modifiedRows = modified.map(e => {
- const changes = (e.changes_detected || []).map(field => {
- const before = e.before ? e.before[field] : undefined;
- const after = e.after ? e.after[field] : undefined;
- const fmt = v => (v === null || v === undefined) ? "∅" : (typeof v === "object" ? JSON.stringify(v) : String(v));
- return `<small><strong>${escapeHtml(field)}</strong> : <span style="color:var(--text-muted)">${escapeHtml(fmt(before))}</span> → ${escapeHtml(fmt(after))}</small>`;
- }).join("<br>");
- return `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td><strong>${escapeHtml(e.primary_name || "")}</strong></td><td>${changes || "-"}</td></tr>`;
- }).join("");
-
  const section = (title, count, inner) => count ? `
  <details style="margin-bottom: 0.6rem;">
  <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${count})</summary>
@@ -5282,7 +6071,7 @@ function renderReviewDeltaDetails(deltaDetails) {
 
  container.innerHTML =
  section(" Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
- section(" Modifications (avant → après)", modified.length, `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>${modifiedRows}</tbody>`) +
+ section(" Modifications (avant → après)", modified.length, _lignesModifiees(modified, "review")) +
  section(" Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
 }
 
@@ -5406,9 +6195,10 @@ async function openReviewHistoryDetail(recordId) {
   const lignesSimples = items => `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>`
    + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td><td>${escapeHtml(e.primary_name || "")}</td></tr>`).join("")
    + `</tbody>`;
-  const lignesModifiees = items => `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>`
-   + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.primary_name || "")}</td><td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td></tr>`).join("")
-   + `</tbody>`;
+  // Le dossier figé n'affichait que le NOM des champs touchés : « ce que le
+  // réviseur avait sous les yeux » s'arrêtait donc avant l'essentiel. Même
+  // rendu que l'écran d'homologation, même comparaison.
+  const lignesModifiees = items => _lignesModifiees(items, "historique");
 
   const cahier = report ? `
    <table style="width:100%; margin-bottom:0.8rem;"><tbody>
@@ -5915,7 +6705,7 @@ function renderReviewEntitiesTable(data) {
  return `
  <tr ${item.excluded ? 'style="opacity: 0.65;"' : ""}>
  <td><input type="checkbox" ${checked} onchange="toggleReviewSelection(${item.id}, this.checked)"></td>
- <td><code>${escapeHtml(item.entity_id)}</code></td>
+ <td><code>${escapeHtml(item.entity_id)}</code> ${boutonCopier(item.entity_id, "Copier")}</td>
  <td>${escapeHtml(item.entity_type)}</td>
  <td><strong>${escapeHtml(item.primary_name)}</strong></td>
  <td>${exclusionCell}</td>
@@ -6117,10 +6907,30 @@ const ALERT_PRIORITY_CONF = {
 
 function alertPriorityBadge(a) {
  const [color, label] = ALERT_PRIORITY_CONF[a.priority] || ["var(--text-muted)", a.priority || "—"];
- const overdue = a.overdue
- ? `<br><span title="Échéance SLA dépassée (${formatDateTime(a.due_at)})" style="color: var(--color-alert); font-size: 0.7rem; font-weight: 700;"> EN RETARD</span>`
- : "";
- return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>${overdue}`;
+ // Le retard s'affichait déjà ; l'APPROCHE, non — on apprenait l'échéance en
+ // la dépassant. Sous douze heures, l'échéance se voit pendant qu'il est
+ // encore temps d'agir. Uniquement sur une alerte encore ouverte : une
+ // clôturée n'a plus d'échéance à tenir.
+ let echeance = "";
+ if (a.overdue) {
+ echeance = `<br><span title="Échéance SLA dépassée (${formatDateTime(a.due_at)})" style="color: var(--color-alert); font-size: 0.7rem; font-weight: 700;"> EN RETARD</span>`;
+ } else if (a.due_at && a.status && !a.status.startsWith("CLOSED")) {
+ const restant = new Date(a.due_at).getTime() - Date.now();
+ if (restant > 0 && restant <= 12 * 3600 * 1000) {
+ const heures = Math.max(1, Math.round(restant / 3600000));
+ echeance = `<br><span title="Échéance SLA : ${formatDateTime(a.due_at)}" style="color: var(--color-warning); font-size: 0.7rem; font-weight: 700;">ÉCHÉANCE ${heures} h</span>`;
+ }
+ }
+ return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>${echeance}`;
+}
+
+// Pastille « EN ATTENTE » d'une alerte reportée. Deux nœuds texte séparés :
+// le libellé (traduisible tel quel) et l'échéance (donnée, jamais traduite).
+// Le drapeau `snoozed` vient du serveur, qui l'éteint seul à l'expiration.
+function alertSnoozeChip(a) {
+ if (!a.snoozed) return "";
+ const quand = formatDateTime(a.snoozed_until);
+ return `<br><span title="Mise en attente — reprend sa place dans la file à cette échéance" style="color: var(--text-muted); font-size: 0.7rem; font-weight: 700;"><span>EN ATTENTE</span><span> → ${escapeHtml(quand)}</span></span>`;
 }
 
 // Export CSV de la file d'alertes avec les filtres actifs de l'écran
@@ -6256,28 +7066,51 @@ function renderAlertsTable(channel, items) {
  // Nouvelle page = nouvelle sélection (les cases ne survivent pas au rendu)
  clearAlertSelection(channel, false);
  if (!items.length) {
- tableEmpty(tbody, 10, "Aucune alerte pour ce filtre.", "");
+ // Deux vides que rien ne doit faire se ressembler : la file à jour
+ // (bonne nouvelle) et le filtre trop étroit (fausse bonne nouvelle —
+ // des alertes existent, l'écran les cache). On regarde les filtres
+ // réellement posés avant de choisir la phrase.
+ const conf = ALERT_CHANNEL_CONF[channel];
+ const restreint = alertsFilterByChannel[channel] !== DEFAULT_ALERT_FILTER
+  || ["listFilter", "priorityFilter", "assigneeFilter"].some((f) => {
+  const el = document.getElementById(conf[f]);
+  return el && el.value;
+  });
+ if (restreint) {
+ tableEmpty(tbody, 10, "Aucune alerte pour ce filtre.", uiIcon("filter"),
+  "Des alertes peuvent exister hors de ce périmètre : élargissez ou effacez les filtres au-dessus de la file.");
+ } else {
+ tableEmpty(tbody, 10, "File à jour : aucune alerte à instruire.", uiIcon("check-circle"),
+  "Les alertes naissent du criblage temps réel, des mises à jour de listes et des lookbacks.");
+ }
  return;
  }
  tbody.innerHTML = items.map(a => {
  const subject = channel === "FILTERING"
  ? describeFilteringSubject(a)
  : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+ const etoile = a.following_me
+ ? `<span class="etoile-suivi" title="Vous suivez ce dossier" aria-hidden="true">★</span> ` : "";
  const selectable = !a.status.startsWith("CLOSED");
  return `
- <tr>
+ <tr data-alert-id="${a.id}">
  <td>${selectable ? `<input type="checkbox" class="alert-select" data-alert-id="${a.id}" onchange="toggleAlertSelection('${channel}', ${a.id}, this.checked)" aria-label="Sélectionner l'alerte ${a.id}">` : ""}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${formatDateTime(a.created_at)}</td>
- <td>${subject}</td>
+ <td>${etoile}${subject}</td>
  <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(a.list_type)}</td>
  <td><strong style="color: ${a.final_score >= 90 ? 'var(--color-alert)' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
- <td>${alertStatusBadge(a.status)}</td>
+ <td>${alertStatusBadge(a.status)}${alertSnoozeChip(a)}</td>
  <td>${escapeHtml(a.assigned_to || "—")}</td>
  <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})"> Instruire</button></td>
  </tr>`;
  }).join("");
+ // La visée clavier (j/k) survit au re-rendu : on la repose par identifiant.
+ if (_viseAlerteId !== null) {
+ const ligne = tbody.querySelector(`tr[data-alert-id="${_viseAlerteId}"]`);
+ if (ligne) ligne.classList.add("ligne-visee");
+ }
 }
 
 async function openAlertModal(alertId) {
@@ -6289,8 +7122,11 @@ async function openAlertModal(alertId) {
  showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
  return;
  }
+ _memoriserRecent("alerte", a.id, `${a.client_name} × ${a.watchlist_name}`);
+ const sousOnglet = (a.channel === "FILTERING") ? "filtering/alerts-filtering" : "screening/alerts-screening";
+ const lienDossier = `${location.origin}${location.pathname}#${sousOnglet}/alerte-${a.id}`;
  document.getElementById("alert-modal-title").innerHTML =
- `Alerte #${a.id} — ${escapeHtml(a.client_name)} × ${escapeHtml(a.watchlist_name)} ${alertStatusBadge(a.status)}`;
+ `Alerte #${a.id} — ${escapeHtml(a.client_name)} × ${escapeHtml(a.watchlist_name)} ${alertStatusBadge(a.status)} ${boutonCopier(lienDossier, "Copier le lien de cette alerte")}`;
 
  const roles = userRoles(currentUser);
  const isReviewer = roles.includes("admin") || roles.includes("reviewer");
@@ -6312,9 +7148,17 @@ async function openAlertModal(alertId) {
  let actionsHtml = "";
  if (!isClosed) {
  actionsHtml += `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">`;
+ // Suivre sans s'assigner : disponible quel que soit l'état ouvert — y
+ // compris en attente de validation, où c'est précisément le besoin.
+ actionsHtml += a.following_me
+ ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">★ Suivi — ne plus suivre</button>`
+ : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">☆ Suivre ce dossier</button>`;
  if (a.status !== "PENDING_VALIDATION") {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
+ actionsHtml += a.snoozed
+ ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="reveillerAlerte(${a.id})"> Réveiller maintenant</button>`
+ : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="reporterAlerte(${a.id})"> Reporter…</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')"> Escalader</button>`;
  actionsHtml += `<button class="btn btn-sm btn-primary" onclick="proposeAlertDecision('FALSE_POSITIVE')"> Proposer : Faux positif</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposeAlertDecision('CONFIRMED')"> Proposer : Vrai positif</button>`;
@@ -6326,6 +7170,9 @@ async function openAlertModal(alertId) {
  actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Décision proposée par @${escapeHtml(a.proposed_by)} — en attente d'un validateur différent (rôle réviseur).</span>`;
  }
  actionsHtml += `</div>`;
+ if ((a.followers || []).length) {
+ actionsHtml += `<div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;"><span>Suivi par :</span> ${a.followers.map((u) => "@" + escapeHtml(u)).join(", ")}</div>`;
+ }
  } else {
  actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
  // Faux positif avere : proposer la mise en liste blanche (reviseurs)
@@ -6417,6 +7264,149 @@ async function changeAlertPriority(priority) {
  if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
+// ------------------ REPORT D'UNE ALERTE (mise en attente) ------------------
+// « Attente de pièces, revoir dans 3 jours » : l'alerte descend en bas de la
+// file — visible, jamais masquée — et le SLA continue de courir. Le motif est
+// obligatoire et part au journal immuable de l'alerte.
+
+const _MOTIFS_DE_REPORT = [
+ "Attente de pièces du client.",
+ "Attente d'un retour du correspondant.",
+ "À revoir après la prochaine mise à jour de listes.",
+];
+
+async function _posterReport(alertId, corps) {
+ const response = await apiFetch(`/api/alerts/${alertId}/snooze`, {
+ method: "POST",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify(corps),
+ });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "Action refusée."), "error");
+ return null;
+ }
+ showToast(data.message, "success");
+ // L'avertissement SLA n'est pas un détail : l'échéance réglementaire
+ // tombera pendant l'attente. Plus long à l'écran, et en avertissement.
+ if (data.warning) showToast(data.warning, "warning", 9000);
+ refreshAlertQueues();
+ const modale = document.getElementById("alert-modal");
+ if (modale && _modaleVisible(modale) && currentAlertId === alertId) openAlertModal(alertId);
+ return data;
+}
+
+async function reporterAlerte(alertId) {
+ const jours = await promptDialog("Reporter l'alerte", {
+ message: "Revoir dans combien de jours ? (1 à 30) L'échéance SLA continue de courir pendant l'attente.",
+ placeholder: "3",
+ suggestions: ["1", "3", "7"],
+ });
+ if (jours === null) return;
+ const n = parseInt(String(jours).trim(), 10);
+ if (!Number.isInteger(n) || n < 1 || n > 30) {
+ showToast("Durée invalide : entre 1 et 30 jours.", "error");
+ return;
+ }
+ const motif = await promptDialog("Motif du report", {
+ message: "Le motif est inscrit au journal de l'alerte.",
+ textarea: true,
+ placeholder: "Ex. attente de pièces du client…",
+ suggestions: _MOTIFS_DE_REPORT,
+ });
+ if (motif === null) return;
+ const until = new Date(Date.now() + n * 86400000).toISOString();
+ await _posterReport(alertId, { until, reason: motif });
+}
+
+async function reveillerAlerte(alertId) {
+ await _posterReport(alertId, { until: null });
+}
+
+// ------------------ SUIVI D'UN DOSSIER (sans se l'assigner) ------------------
+// Le validateur attend l'issue d'un dossier qu'il n'instruit pas ; l'analyste
+// veut savoir ce que devient l'alerte escaladée. Suivre = être notifié des
+// actions des autres. Geste personnel : rien au journal immuable de l'alerte.
+
+async function suivreAlerte(alertId) {
+ try {
+ const response = await apiFetch(`/api/alerts/${alertId}/follow`, { method: "POST" });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "Action refusée."), "error");
+ return;
+ }
+ showToast(data.message, "success");
+ const modale = document.getElementById("alert-modal");
+ if (modale && _modaleVisible(modale) && currentAlertId === alertId) openAlertModal(alertId);
+ refreshAlertQueues();
+ } catch (e) {
+ showToast("Erreur réseau pendant le changement de suivi.", "error");
+ }
+}
+
+// ------------------ TRIAGE AU CLAVIER DES FILES (j / k / o / r) ------------------
+// Le motif des clients mail : j/k parcourent la file affichée, o (ou Entrée)
+// instruit la ligne visée, r la reporte, Échap relâche la visée. Inactif dès
+// qu'un champ a le focus ou qu'une modale est ouverte — le clavier appartient
+// alors à quelqu'un d'autre.
+
+let _viseAlerteId = null;
+
+function _fileAffichee() {
+ for (const conf of Object.values(ALERT_CHANNEL_CONF)) {
+ const section = document.getElementById(`sub-sec-${conf.section}`);
+ if (!section || section.classList.contains("hidden")) continue;
+ const onglet = section.closest(".tab-content");
+ if (onglet && onglet.classList.contains("hidden")) continue;
+ return conf;
+ }
+ return null;
+}
+
+function _viserLigne(ligne) {
+ document.querySelectorAll("tr.ligne-visee").forEach((tr) => tr.classList.remove("ligne-visee"));
+ _viseAlerteId = null;
+ if (!ligne) return;
+ ligne.classList.add("ligne-visee");
+ _viseAlerteId = parseInt(ligne.dataset.alertId, 10);
+ ligne.scrollIntoView({ block: "nearest" });
+}
+
+function initTriageClavier() {
+ document.addEventListener("keydown", (e) => {
+ if (e.ctrlKey || e.metaKey || e.altKey) return;
+ if (!["j", "k", "o", "r", "Enter", "Escape"].includes(e.key)) return;
+ const cible = e.target;
+ if (cible && (cible.tagName === "INPUT" || cible.tagName === "TEXTAREA"
+  || cible.tagName === "SELECT" || cible.isContentEditable)) return;
+ // Entrée active déjà l'élément focalisé (tri des colonnes, boutons) : on
+ // ne la prend que quand le focus est au corps de page, à personne.
+ if (e.key === "Enter" && cible !== document.body && cible !== document.documentElement) return;
+ if (document.querySelector(".modal:not(.hidden)")) return;
+ const conf = _fileAffichee();
+ if (!conf) return;
+ const tbody = document.querySelector(`#${conf.table} tbody`);
+ const lignes = tbody ? Array.from(tbody.querySelectorAll("tr[data-alert-id]")) : [];
+ if (!lignes.length) return;
+ const idx = lignes.findIndex((tr) => tr.classList.contains("ligne-visee"));
+ if (e.key === "j" || e.key === "k") {
+ e.preventDefault();
+ let prochaine;
+ if (idx === -1) prochaine = e.key === "j" ? 0 : lignes.length - 1;
+ else prochaine = e.key === "j" ? Math.min(idx + 1, lignes.length - 1) : Math.max(idx - 1, 0);
+ _viserLigne(lignes[prochaine]);
+ } else if (e.key === "Escape") {
+ if (idx !== -1) _viserLigne(null);
+ } else if (idx !== -1) {
+ e.preventDefault();
+ const id = parseInt(lignes[idx].dataset.alertId, 10);
+ if (e.key === "r") reporterAlerte(id);
+ else openAlertModal(id);
+ }
+ });
+}
+
 async function uploadAlertAttachment() {
  const input = document.getElementById("alert-attachment-file");
  if (!input || !input.files || !input.files.length) {
@@ -6452,11 +7442,32 @@ async function alertActionWithComment(action, promptLabel) {
  if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
 }
 
+// Les motifs vivent dans les réglages, mais un analyste n'ouvre jamais
+// l'écran Paramètres : ils se chargent à la première décision, puis restent.
+let _motifsDeCloture = null;
+
+async function chargerMotifsDeCloture() {
+ if (_motifsDeCloture !== null) return _motifsDeCloture;
+ if (ingestionSettings && ingestionSettings.alert_close_reasons) {
+ _motifsDeCloture = ingestionSettings.alert_close_reasons;
+ return _motifsDeCloture;
+ }
+ try {
+ const response = await apiFetch("/api/settings/ingestion", { silent: true });
+ if (response.ok) {
+ _motifsDeCloture = (await response.json()).alert_close_reasons || [];
+ return _motifsDeCloture;
+ }
+ } catch (e) { /* sans motifs, le dialogue reste ce qu'il était */ }
+ return [];
+}
+
 async function proposeAlertDecision(decision) {
  const label = decision === "CONFIRMED" ? "vrai positif" : "faux positif";
  const comment = await promptDialog(`Proposer « ${label} »`, {
  message: "Commentaire obligatoire motivant la décision proposée (validation 4-yeux ensuite).",
- textarea: true, placeholder: "Motivation réglementaire de la décision..."
+ textarea: true, placeholder: "Motivation réglementaire de la décision...",
+ suggestions: await chargerMotifsDeCloture()
  });
  if (comment === null) return;
  const data = await _postAlertAction("propose", { decision, comment });
@@ -6499,7 +7510,8 @@ function renderWhitelistTable(items) {
  const tbody = document.querySelector("#whitelist-table tbody");
  if (!tbody) return;
  if (!items.length) {
- tableEmpty(tbody, 8, "Aucune paire en liste blanche.");
+ tableEmpty(tbody, 8, "Aucune paire en liste blanche.", uiIcon("shield"),
+ "Une paire s'ajoute depuis une alerte, en la clôturant en faux positif : cette correspondance précise ne redéclenchera plus.");
  return;
  }
  const stateBadge = (state) => {
@@ -9078,6 +10090,44 @@ async function runPaletteSearch(term) {
  groups.push({ title: "Navigation", items: navMatches.map(n => ({
  html: escapeHtml(n.label), action: n.action })) });
  }
+ // Réglages : l'index est DÉRIVÉ du balisage (titres de cartes des
+ // panneaux de réglages), jamais recopié — une carte ajoutée est trouvable
+ // sans toucher la palette. Les cartes masquées (rôle insuffisant) sont
+ // exclues : proposer un écran que le serveur refusera n'aide personne.
+ if (needle.length >= 2) {
+ const entrees = [];
+ document.querySelectorAll(
+ '[id^="sub-sec-settings-"] .card h2, [id^="sub-sec-settings-"] .card h3, ' +
+ '#sec-account .card h2, #sec-account .card h3').forEach(titre => {
+ const carte = titre.closest(".card");
+ if (!carte || carte.classList.contains("hidden")) return;
+ const texte = titre.textContent.trim();
+ if (!texte.toLowerCase().includes(needle)) return;
+ const panneau = titre.closest(".sub-tab-content");
+ entrees.push({ texte, panneauId: panneau ? panneau.id.replace(/^sub-sec-/, "") : null, titre });
+ });
+ if (entrees.length) {
+ groups.push({ title: "Réglages", items: entrees.slice(0, 5).map(r => ({
+ html: `${escapeHtml(r.texte)} <small style="color: var(--text-muted);">Paramètres</small>`,
+ action: () => {
+ if (r.panneauId) { switchTab("settings"); switchSubTab("settings", r.panneauId); }
+ else { switchTab("account"); }
+ r.titre.scrollIntoView({ block: "start", behavior: "smooth" });
+ },
+ })) });
+ }
+ }
+
+ // Palette vide : les derniers dossiers ouverts, avant la première frappe
+ if (!needle) {
+ const recents = _recentsMemorises();
+ if (recents.length) {
+ // En tête de liste : le retour au dossier prime sur le menu de navigation
+ groups.unshift({ title: "Récents", items: recents.map(r => ({
+ html: `${r.type === "alerte" ? "Alerte #" + r.id : "Client"} — ${escapeHtml(r.libelle || r.id)}`,
+ action: () => ouvrirRecent(r.type, r.id) })) });
+ }
+ }
  renderPaletteResults(groups);
  if (needle.length < 2) { _paletteSetSearching(false); return; }
  _paletteSetSearching(true);
@@ -9101,6 +10151,13 @@ async function runPaletteSearch(term) {
  groups.push({ title: `Alertes (${al.total})`, items: al.items.map(a => ({
  html: `<strong>#${a.id} ${escapeHtml(a.client_name)}</strong> × ${escapeHtml(a.watchlist_name)} <small style="color: var(--text-muted);">${escapeHtml(statusLabel(a.status))}</small>`,
  action: () => { const sp = a.channel === "FILTERING" ? "filtering" : "screening"; switchTab(sp); switchSubTab(sp, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening"); openAlertModal(a.id); },
+ })) });
+ }
+ const cl = data.clients || {};
+ if ((cl.items || []).length) {
+ groups.push({ title: `Clients (${cl.total})`, items: cl.items.map(c2 => ({
+ html: `<strong>${escapeHtml(c2.name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(c2.client_id)} · ${c2.client_type === "PM" ? "Personne morale" : "Personne physique"}</small>`,
+ action: () => openClient360(c2.client_id),
  })) });
  }
  renderPaletteResults(groups);
@@ -9513,7 +10570,7 @@ function updateLocationHash(tabId, subTabId) {
 function applyHashRoute() {
  const raw = (location.hash || "").replace(/^#/, "");
  if (!raw) return false;
- let [tabId, subTabId] = raw.split("/");
+ let [tabId, subTabId, extra] = raw.split("/");
  // Vieux liens profonds #alerts/... : l'onglet a été scindé — le sous-onglet
  // décide de l'espace (filtrage pour alerts-filtering, criblage sinon).
  if (tabId === "alerts") {
@@ -9526,6 +10583,13 @@ function applyHashRoute() {
  switchTab(tabId);
  if (subTabId && document.getElementById(`sub-sec-${subTabId}`)) {
  switchSubTab(tabId, subTabId);
+ }
+ // Troisième segment : le dossier lui-même. « #…/alerte-123 » rouvre
+ // l'alerte — c'est ce qui rend « copier le lien » utile : le destinataire
+ // arrive SUR le dossier, pas sur la file.
+ const dossierAlerte = extra && extra.match(/^alerte-(\d+)$/);
+ if (dossierAlerte && typeof openAlertModal === "function") {
+ openAlertModal(parseInt(dossierAlerte[1], 10));
  }
  } finally {
  _applyingHashRoute = false;
@@ -10083,6 +11147,36 @@ function initDropZones() {
 
 // ------------------ VUE CLIENT 360° ------------------
 
+// Re-criblage d'UN client, a la demande : le dossier KYC vient d'etre
+// corrige, l'analyste veut la reponse du moteur maintenant — sans attendre
+// une mise a jour de liste ni lancer le lookback du referentiel entier.
+// Memes garanties que le temps reel (journal d'audit, alertes).
+async function recriblerClient(clientId) {
+ const ok = await confirmDialog(
+ `Recribler « ${clientId} » contre les listes en production ? La décision sera `
+ + `journalisée et une alerte ouvrira si une correspondance dépasse le seuil.`);
+ if (!ok) return;
+ try {
+ const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/screen`, { method: "POST" });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "criblage impossible."), "error");
+ return;
+ }
+ const statut = data.status || (data.best_match || {}).status || "—";
+ if (statut === "ALERT") {
+ showToast(`Criblage terminé : correspondance au-dessus du seuil${data.alert_id ? ` — alerte #${data.alert_id}` : ""}.`, "warning", 7000);
+ refreshAlertQueues?.();
+ } else {
+ showToast("Criblage terminé : aucune correspondance au-dessus du seuil.", "success", 5000);
+ }
+ refreshSidebarCounters?.();
+ } catch (e) {
+ console.error("Rescreen client error:", e);
+ showToast("Erreur réseau pendant le criblage.", "error");
+ }
+}
+
 async function openClient360(clientId) {
  if (!clientId) return;
  const modal = document.getElementById("client360-modal");
@@ -10096,9 +11190,14 @@ async function openClient360(clientId) {
  if (!response.ok) { body.innerHTML = '<p class="section-desc">Client introuvable.</p>'; return; }
  const d = await response.json();
  const k = d.kyc;
- if (title) title.textContent = ` Vue client 360° — ${k ? (k.company_name || `${k.first_name || ""} ${k.last_name || ""}`.trim()) : clientId}`;
+ const nomClient = k ? (k.company_name || `${k.first_name || ""} ${k.last_name || ""}`.trim()) : clientId;
+ _memoriserRecent("client", clientId, nomClient || clientId);
+ if (title) title.textContent = ` Vue client 360° — ${nomClient || clientId}`;
 
  const kycHtml = k ? `
+ <div style="display: flex; justify-content: flex-end; margin-bottom: 0.5rem;">
+ <button class="btn btn-sm btn-secondary" onclick="recriblerClient('${escapeHtml(clientId)}')">Recribler ce client maintenant</button>
+ </div>
  <div class="details-grid" style="margin-bottom: 1rem;">
  <div class="details-item"><strong>Identifiant</strong><span>${escapeHtml(clientId)}</span></div>
  <div class="details-item"><strong>Type</strong><span>${k.client_type === "PP" ? "Personne physique" : "Personne morale"}</span></div>

@@ -2,7 +2,7 @@ import json
 import hashlib
 import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from fiskr.config import config
 
@@ -427,6 +427,11 @@ class Alert(Base):
     # et echeance SLA (due_at = created_at + delai du reglage par priorite)
     priority = Column(String(12), nullable=True, index=True)  # LOW|MEDIUM|HIGH|CRITICAL
     due_at = Column(DateTime, nullable=True)
+    # Mise en attente (« attente de pieces, revoir le 12 ») : la file classe
+    # l'alerte APRES les actives tant que l'echeance n'est pas passee — jamais
+    # masquee, et le SLA (due_at) continue de courir : reporter son travail ne
+    # reporte pas l'obligation. Chaque report est trace dans alert_events.
+    snoozed_until = Column(DateTime, nullable=True)
     # Checklist d'instruction (dossier) : {"0": {done, by, at}, ...}
     checklist_state = Column(JSON, nullable=True)
 
@@ -908,6 +913,21 @@ class FpRuleTest(Base):
     last_error = Column(Text, nullable=True)
     last_run_at = Column(DateTime, nullable=True)
     created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class AlertFollower(Base):
+    """
+    Suivi d'un dossier d'alerte sans se l'assigner : le suiveur est notifie
+    des actions des autres (categorie criblage, recapitulatif periodique).
+    Personnel et reversible — ce n'est PAS un acte d'instruction, donc rien
+    n'en va au journal immuable de l'alerte.
+    """
+    __tablename__ = "alert_followers"
+    __table_args__ = (UniqueConstraint("alert_id", "username", name="uq_alert_follower"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    username = Column(String(100), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class AlertEvent(Base):

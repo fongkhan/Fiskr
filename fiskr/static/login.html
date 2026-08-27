@@ -17,8 +17,12 @@
  (function () {
  try {
  var theme = localStorage.getItem("fiskr_theme");
- if (theme === "light" || theme === "dark") {
- document.documentElement.setAttribute("data-theme", theme);
+ if (theme === "system" && window.matchMedia &&
+ window.matchMedia("(prefers-color-scheme: light)").matches) {
+ theme = "light";
+ }
+ if (theme === "light") {
+ document.documentElement.setAttribute("data-theme", "light");
  }
  } catch (e) { /* thème sombre par défaut */ }
  })();

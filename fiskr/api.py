@@ -11,7 +11,7 @@ import secrets
 import logging
 import shutil
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -45,7 +45,7 @@ from fiskr.database import (
     AuditTrail, Snapshot,
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     safe_upload_filename,
-    SyncReport, Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
+    SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
@@ -109,7 +109,8 @@ from fiskr.settings import (
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     BLOCKING_COMPONENTS, BLOCKING_FIELD_COMPONENTS, MAX_BLOCKING_FIELDS,
     blocking_layout, blocking_layout_with_source, blocking_config_for,
-    alert_sla_hours, notification_events,
+    alert_sla_hours, notification_events, alert_close_reasons,
+    SETTING_ALERT_CLOSE_REASONS,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     sync_auto_enabled, sync_sources_enabled, sync_automation_sources,
@@ -1775,9 +1776,19 @@ class UpdateUserAdminRequest(BaseModel):
     role: Optional[str] = None
 
 @app.get("/api/auth/me")
-async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Returns profile info of the currently logged-in user."""
-    return {"user": current_user}
+async def get_me(request: Request,
+                 current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Profil de l'utilisateur connecte, et echeance de sa session.
+
+    L'echeance est rendue ICI parce que le client ne peut pas la lire : le
+    cookie est HttpOnly. Sans elle, l'interface ne peut pas prevenir avant
+    l'expiration — le premier appel apres 8 h recevait un 401 et redirigeait
+    brutalement vers la connexion, en emportant le commentaire ou le
+    formulaire en cours de saisie.
+    """
+    from fiskr.auth import session_expires_at
+    return {"user": current_user, "session_expires_at": session_expires_at(request)}
 
 # ------------------ USER MANAGEMENT ENDPOINTS ------------------
 
@@ -1917,6 +1928,62 @@ async def get_admin_log(
             for r in rows
         ],
     }
+
+@app.get("/api/export/admin-log.csv")
+async def export_admin_log_csv(
+    action: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
+):
+    """
+    Export CSV du journal d'administration — la piece que le controleur
+    demande, et le seul des cinq tableaux d'exploitation qui soit pagine cote
+    serveur : un export « ce qui est affiche » n'en montrerait qu'une page.
+    Meme garde que la lecture (admin ou auditeur), memes bornes et meme
+    neutralisation d'injection de formules que les autres exports.
+    """
+    query = db.query(AdminAuditLog)
+    if action:
+        query = query.filter(AdminAuditLog.action == action.strip().upper())
+    rows = query.order_by(AdminAuditLog.at.desc(), AdminAuditLog.id.desc())                 .limit(_EXPORT_MAX_ROWS).all()
+    header = ["id", "horodatage", "utilisateur", "action", "cible", "avant", "apres", "detail"]
+    data = [
+        [r.id, r.at.isoformat() if r.at else "", r.username or "", r.action or "",
+         r.target or "", json.dumps(r.before, ensure_ascii=False) if r.before else "",
+         json.dumps(r.after, ensure_ascii=False) if r.after else "", r.detail or ""]
+        for r in rows
+    ]
+    return _csv_response(f"fiskr_journal_admin_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
+
+
+@app.get("/api/export/notifications.csv")
+async def export_notifications_csv(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin_or_auditor)
+):
+    """Export CSV du journal des envois : la preuve que les notifications
+    partent (ou pas), filtrable par statut comme l'ecran."""
+    query = db.query(NotificationDelivery)
+    if status_filter:
+        wanted = [s.strip().upper() for s in status_filter.split(",") if s.strip()]
+        bad = [s for s in wanted if s not in _NOTIFICATION_STATUSES]
+        if bad:
+            raise HTTPException(status_code=400,
+                                detail=f"Statut(s) inconnu(s) : {', '.join(bad)}.")
+        query = query.filter(NotificationDelivery.status.in_(wanted))
+    rows = query.order_by(NotificationDelivery.created_at.desc(),
+                          NotificationDelivery.id.desc()).limit(_EXPORT_MAX_ROWS).all()
+    header = ["id", "cree_le", "evenement", "urgence", "destinataires", "statut",
+              "envoye_le", "erreur"]
+    data = [
+        [r.id, r.created_at.isoformat() if r.created_at else "", r.event_key or "",
+         r.urgency or "", r.recipients or "", r.status or "",
+         r.sent_at.isoformat() if r.sent_at else "", r.error or ""]
+        for r in rows
+    ]
+    return _csv_response(f"fiskr_notifications_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
+
 
 # ------------------ RETENTION DES DONNEES (RGPD / ARCHIVAGE) ------------------
 
@@ -5645,9 +5712,32 @@ async def quick_search(
         "status": a.status, "channel": a.channel,
     } for a in al_rows]
 
+    # --- Clients : la palette cherchait les listes et les alertes, pas la
+    # base clients — « Dupont » ne rendait jamais SES clients. Une requete
+    # bornee sur le referentiel en production (memes bornes que les alertes).
+    cl_total, cl_items = 0, []
+    client_snaps = [row.snapshot_id for row in db.query(Snapshot.snapshot_id).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
+    if client_snaps:
+        cl_query = db.query(ClientEntity).filter(
+            ClientEntity.snapshot_id.in_(client_snaps),
+            or_(ClientEntity.client_first_name.ilike(like),
+                ClientEntity.client_last_name.ilike(like),
+                ClientEntity.client_company_name.ilike(like),
+                ClientEntity.client_id.ilike(like)))
+        cl_total = cl_query.count()
+        cl_items = [{
+            "client_id": c.client_id,
+            "name": (c.client_company_name
+                     or f"{c.client_first_name or ''} {c.client_last_name or ''}".strip()
+                     or c.client_id),
+            "client_type": c.client_type,
+        } for c in cl_query.order_by(ClientEntity.id.desc()).limit(limit).all()]
+
     return {
         "watchlist": {"total": wl_total, "items": wl_items},
         "alerts": {"total": al_total, "items": al_items},
+        "clients": {"total": cl_total, "items": cl_items},
     }
 
 
@@ -6042,6 +6132,43 @@ async def get_audit_history_detail(
     return _audit_row(row, details=True)
 
 # ------------------ VUE CLIENT 360° ------------------
+
+@app.post("/api/clients/{client_id}/screen")
+async def screen_existing_client(
+    client_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Re-crible UN client du referentiel en production, a la demande.
+
+    Le geste manquait : depuis la vue client 360 ou une alerte, « recribler ce
+    client maintenant » n'existait pas — les seuls chemins etaient le
+    re-criblage declenche par une mise a jour de LISTE, ou le lookback du
+    referentiel entier. Or c'est un geste d'instruction ordinaire : le dossier
+    KYC vient d'etre corrige (date de naissance, pays), l'analyste veut la
+    reponse du moteur maintenant, pour CE client.
+
+    Memes garanties que le criblage temps reel : quality gate, liste blanche,
+    regles anti-FP, journal d'audit immuable, alertes. C'est le meme
+    `screen_client_profile`, alimente par la fiche du referentiel plutot que
+    par un formulaire.
+    """
+    snap_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
+    row = None
+    if snap_ids:
+        row = db.query(ClientEntity).filter(
+            ClientEntity.client_id == client_id,
+            ClientEntity.snapshot_id.in_(snap_ids)).first()
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="Client introuvable dans le référentiel en production.")
+    client_dict = {c.name: getattr(row, c.name) for c in row.__table__.columns
+                   if c.name not in ("id", "snapshot_id", "entity_checksum")}
+    _ensure_watchlist_cache(db)
+    return screen_client_profile(db, client_dict, current_user["username"], None)
+
 
 @app.get("/api/clients/{client_id}/overview")
 async def get_client_overview(
@@ -7556,6 +7683,8 @@ class IngestionSettingsUpdate(BaseModel):
     quality_min_score_pct: Optional[float] = None
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
     alert_sla_hours: Optional[Dict[str, int]] = None
+    # Motifs de cloture proposes aux analystes ([] = aucune suggestion)
+    alert_close_reasons: Optional[List[str]] = None
     notification_events: Optional[Dict[str, bool]] = None
     # Digest KPI periodique : {"enabled": bool, "cron": "0 8 * * 1-5"}
     digest: Optional[Dict[str, Any]] = None
@@ -7611,6 +7740,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_backtest_panel": str(auto_bt_panel["value"]) if auto_bt_panel["value"] else None,
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
+        "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
         "resource_fields": resource_fields(db),
@@ -7668,6 +7798,7 @@ async def update_ingestion_settings(
     changed = {k: v for k, v in updates.items() if v is not None}
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
+              payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
               payload.institution, payload.adverse_media, payload.narrative_llm,
@@ -7716,6 +7847,15 @@ async def update_ingestion_settings(
         merged = dict(alert_sla_hours(db))
         merged.update(sla)
         set_setting(db, SETTING_ALERT_SLA_HOURS, merged, updated_by=admin_user["username"])
+    if payload.alert_close_reasons is not None:
+        motifs = [str(m).strip() for m in payload.alert_close_reasons if str(m).strip()]
+        if len(motifs) > 50:
+            raise HTTPException(status_code=400, detail="Au plus 50 motifs de clôture.")
+        if any(len(m) > 300 for m in motifs):
+            raise HTTPException(status_code=400, detail="Un motif de clôture tient en 300 caractères.")
+        # [] est un choix valable : « pas de suggestions » — distinct de None
+        # (non fourni), qui laisse la bibliothèque par défaut.
+        set_setting(db, SETTING_ALERT_CLOSE_REASONS, motifs, updated_by=admin_user["username"])
     if payload.notification_events is not None:
         unknown = [e for e in payload.notification_events if e not in DEFAULT_NOTIFICATION_EVENTS]
         if unknown:
@@ -10161,6 +10301,13 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
             alert.due_at and alert.due_at < datetime.utcnow()
             and alert.status in ALERT_OPEN_STATUSES
         ),
+        "snoozed_until": alert.snoozed_until.isoformat() if alert.snoozed_until else None,
+        # En attente = echeance de report future ET alerte ouverte : un report
+        # expire s'eteint tout seul, sans geste et sans ecriture en base
+        "snoozed": bool(
+            alert.snoozed_until and alert.snoozed_until > datetime.utcnow()
+            and alert.status in ALERT_OPEN_STATUSES
+        ),
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -10192,6 +10339,67 @@ def _get_open_alert(db: Session, alert_id: int) -> Alert:
 
 def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
     db.add(AlertEvent(alert_id=alert_id, username=username, action=action, detail=detail or None))
+
+def _notifier_les_suiveurs(db: Session, alert: Alert, action: str, actor: str) -> None:
+    """
+    Notifie les suiveurs du dossier d'une action qui vient d'etre commise —
+    a appeler APRES le commit, comme tout emit. L'auteur de l'action est
+    exclu (il la connait), et sans suiveur on n'emet RIEN : avec une audience
+    vide, le repli « destinataires globaux » du routeur arroserait tout le
+    monde — exactement l'inondation que le suivi individuel evite.
+    """
+    try:
+        from fiskr.notifier import _email_of
+        suiveurs = [r.username for r in
+                    db.query(AlertFollower).filter(AlertFollower.alert_id == alert.id).all()
+                    if r.username != actor]
+        if not suiveurs:
+            return
+        emails: List[str] = []
+        for username in suiveurs:
+            emails += _email_of(db, username)
+        if not emails:
+            return
+        emit(db, "alert_followed_activity", {
+            "Alerte": f"#{alert.id}",
+            "Client": alert.client_name,
+            "Liste": alert.watchlist_name,
+            "Action": action,
+            "Par": actor,
+        }, recipients_override=emails)
+    except Exception as e:  # le suivi n'a pas le droit de casser l'action suivie
+        logger.error(f"Notification des suiveurs impossible (alerte {alert.id}) : {e}")
+
+@app.post("/api/alerts/{alert_id}/follow")
+async def follow_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Suit ou cesse de suivre un dossier d'alerte (bascule), sans se l'assigner :
+    le suiveur est notifie des actions des autres sur le dossier. Geste
+    personnel et reversible — il ne s'inscrit PAS au journal immuable de
+    l'alerte, qui ne trace que l'instruction.
+    """
+    alert = _get_open_alert(db, alert_id)
+    username = current_user["username"]
+    existant = db.query(AlertFollower).filter(
+        AlertFollower.alert_id == alert.id, AlertFollower.username == username).first()
+    if existant:
+        db.delete(existant)
+        db.commit()
+        message = "Vous ne suivez plus ce dossier."
+        following = False
+    else:
+        db.add(AlertFollower(alert_id=alert.id, username=username))
+        db.commit()
+        message = "Vous suivez ce dossier : les actions des autres vous seront notifiées."
+        following = True
+    followers = [r.username for r in
+                 db.query(AlertFollower).filter(AlertFollower.alert_id == alert.id)
+                   .order_by(AlertFollower.created_at.asc()).all()]
+    return {"message": message, "following": following, "followers": followers}
 
 # ------------------ DOSSIER D'INVESTIGATION ------------------
 
@@ -11644,15 +11852,30 @@ async def list_alerts(
         {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
         value=Alert.priority, else_=2
     )
-    rows = query.order_by(priority_rank.asc(), Alert.due_at.asc().nullslast(),
+    # Les mises en attente descendent en bas de la file — visibles (jamais
+    # masquees : un produit de conformite ne cache pas du travail), mais
+    # apres les alertes actives. Un report expire redevient actif tout seul.
+    from sqlalchemy import and_
+    en_attente = case(
+        (and_(Alert.snoozed_until.isnot(None), Alert.snoozed_until > datetime.utcnow()), 1),
+        else_=0,
+    )
+    rows = query.order_by(en_attente.asc(), priority_rank.asc(), Alert.due_at.asc().nullslast(),
                           Alert.final_score.desc(), Alert.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
+    # Dossiers que CE lecteur suit, en une requete sur la page affichee : le
+    # marqueur de la file est personnel, il ne peut pas vivre dans le resume.
+    suivis = set()
+    if rows:
+        suivis = {r.alert_id for r in db.query(AlertFollower).filter(
+            AlertFollower.username == current_user["username"],
+            AlertFollower.alert_id.in_([a.id for a in rows])).all()}
     return {
         "total": total,
         "open_count": open_count,
         "page": page,
         "page_size": page_size,
-        "items": [_alert_summary(a) for a in rows],
+        "items": [{**_alert_summary(a), "following_me": a.id in suivis} for a in rows],
     }
 
 @app.get("/api/alerts/{alert_id}")
@@ -11670,8 +11893,13 @@ async def get_alert_detail(
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
     attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id) \
                     .order_by(AlertAttachment.uploaded_at.asc()).all()
+    followers = [r.username for r in
+                 db.query(AlertFollower).filter(AlertFollower.alert_id == alert_id)
+                   .order_by(AlertFollower.created_at.asc()).all()]
     return {
         **_alert_summary(alert),
+        "followers": followers,
+        "following_me": current_user["username"] in followers,
         "attachments": [
             {
                 "id": att.id, "file_name": att.file_name, "comment": att.comment,
@@ -11723,6 +11951,7 @@ async def assign_alert(
         "Délégation": f"au lieu de @{redirected_from} (absent)" if redirected_from else "—",
         "Échéance": alert.due_at.isoformat() if alert.due_at else "—",
     })
+    _notifier_les_suiveurs(db, alert, f"Assignée à @{assignee}", current_user["username"])
     return {"message": f"Alerte assignée à {assignee}"
                        + (f" (délégué de @{redirected_from}, absent)." if redirected_from else "."),
             **_alert_summary(alert)}
@@ -11741,6 +11970,7 @@ async def comment_alert(
         raise HTTPException(status_code=400, detail="Le commentaire ne peut pas être vide.")
     _log_alert_event(db, alert.id, current_user["username"], "COMMENT", comment)
     db.commit()
+    _notifier_les_suiveurs(db, alert, "Commentaire ajouté", current_user["username"])
     return {"message": "Commentaire ajouté."}
 
 @app.post("/api/alerts/{alert_id}/escalate")
@@ -11764,6 +11994,7 @@ async def escalate_alert(
         "Score": alert.final_score, "Priorité": alert.priority,
         "Escaladée par": current_user["username"], "Motif": comment,
     })
+    _notifier_les_suiveurs(db, alert, "Escaladée", current_user["username"])
     return {"message": "Alerte escaladée.", **_alert_summary(alert)}
 
 def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
@@ -11795,6 +12026,10 @@ async def propose_alert_decision(
         raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
 
     username = current_user["username"]
+    # Proposer une decision, c'est instruire : une mise en attente encore
+    # active n'a plus de sens et fausserait le classement de la file.
+    if alert.snoozed_until:
+        alert.snoozed_until = None
     alert.proposed_decision = decision
     alert.proposed_by = username
     alert.proposed_at = datetime.utcnow()
@@ -11822,6 +12057,7 @@ async def propose_alert_decision(
     else:
         emit(db, "alert_closed_direct", {**common, "Clôturée par": username,
                                          "Statut": alert.status})
+    _notifier_les_suiveurs(db, alert, f"Décision proposée : {label}", username)
     return {"message": message, **_alert_summary(alert)}
 
 @app.post("/api/alerts/{alert_id}/validate")
@@ -11877,6 +12113,9 @@ async def validate_alert_decision(
         }
     db.commit()
     emit(db, event_key, {**common, **extra})
+    _notifier_les_suiveurs(db, alert,
+                           "Décision validée, dossier clos" if payload.approve
+                           else "Décision refusée, renvoyée en analyse", username)
     return {"message": message, **_alert_summary(alert)}
 
 class AlertPriorityRequest(BaseModel):
@@ -11901,7 +12140,74 @@ async def set_alert_priority(
     _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
                      f"Priorité {old_priority} → {new_priority}.")
     db.commit()
+    _notifier_les_suiveurs(db, alert, f"Priorité passée à {new_priority}", current_user["username"])
     return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
+
+class AlertSnoozeRequest(BaseModel):
+    until: Optional[str] = None   # ISO 8601 ; None = réveiller maintenant
+    reason: Optional[str] = None  # requis pour reporter, ignoré au réveil
+
+_SNOOZE_MAX_JOURS = 30
+
+@app.post("/api/alerts/{alert_id}/snooze")
+async def snooze_alert(
+    alert_id: int,
+    payload: AlertSnoozeRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Reporte une alerte ouverte (« attente de pièces, revoir dans 3 jours ») ou
+    la réveille (until: null). Le report classe l'alerte en bas de la file mais
+    ne la masque jamais, et ne suspend PAS l'échéance SLA : due_at continue de
+    courir — reporter son travail ne reporte pas l'obligation. Chaque report et
+    chaque réveil s'inscrivent dans l'historique immuable de l'alerte, motif
+    compris : un dossier qui dort doit pouvoir dire pourquoi.
+    """
+    alert = _get_open_alert(db, alert_id)
+    now = datetime.utcnow()
+    if payload.until is None:
+        if not (alert.snoozed_until and alert.snoozed_until > now):
+            raise HTTPException(status_code=400, detail="Cette alerte n'est pas en attente.")
+        alert.snoozed_until = None
+        _log_alert_event(db, alert.id, current_user["username"], "WOKEN",
+                         "Réveillée avant l'échéance de mise en attente.")
+        db.commit()
+        _notifier_les_suiveurs(db, alert, "Réveillée (fin de mise en attente)", current_user["username"])
+        return {"message": "Alerte réveillée : elle reprend sa place dans la file.",
+                **_alert_summary(alert)}
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400,
+                            detail="Un motif est requis pour reporter (il est inscrit au journal de l'alerte).")
+    try:
+        until = datetime.fromisoformat(payload.until.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Échéance de report illisible (ISO 8601 attendu).")
+    if until.tzinfo is not None:
+        until = until.astimezone(timezone.utc).replace(tzinfo=None)
+    if until <= now:
+        raise HTTPException(status_code=400, detail="L'échéance de report doit être dans le futur.")
+    if until > now + timedelta(days=_SNOOZE_MAX_JOURS):
+        # Litteral (pas de f-string) : la chaine rendue doit exister telle
+        # quelle dans la source pour le dictionnaire de traduction ; un test
+        # verifie qu'elle reste accordee a _SNOOZE_MAX_JOURS.
+        raise HTTPException(status_code=400,
+                            detail="Report limité à 30 jours : au-delà, c'est une décision qui s'instruit, pas une attente.")
+    # Le SLA n'attend pas : si l'echeance reglementaire tombe pendant le
+    # report, on reporte quand meme (l'attente de pieces peut etre reelle)
+    # mais on le DIT — l'analyste choisit en connaissance de cause.
+    warning = None
+    if alert.due_at and until > alert.due_at:
+        warning = (f"L'échéance SLA ({alert.due_at.strftime('%d/%m/%Y %H:%M')} UTC) tombe "
+                   "pendant la mise en attente : elle continue de courir, l'alerte passera en retard.")
+    alert.snoozed_until = until
+    _log_alert_event(db, alert.id, current_user["username"], "SNOOZED",
+                     f"Mise en attente jusqu'au {until.strftime('%d/%m/%Y %H:%M')} UTC — {reason}")
+    db.commit()
+    _notifier_les_suiveurs(db, alert, "Mise en attente", current_user["username"])
+    return {"message": f"Alerte mise en attente jusqu'au {until.strftime('%d/%m/%Y %H:%M')} UTC.",
+            "warning": warning, **_alert_summary(alert)}
 
 class AlertBulkRequest(BaseModel):
     ids: List[int]

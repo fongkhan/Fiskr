@@ -9,6 +9,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — comparing two versions of a listed record (quality-of-life 8/N)
+Eighth batch of the programme, verified in a real browser against a genuine server-computed delta.
+
+**What the approver could not actually see** (n° 22). The delta already said "aliases.high_priority changed" and put two JSON blocks side by side in a table cell. On a record carrying fifteen aliases, spotting the one that *entered* is an eyesight exercise — and that is precisely the difference that widens or narrows screening coverage. A reviewer approving a list has to be able to say what they are approving.
+
+**Element-by-element comparison.** A "Compare" button on each modified record opens a field-by-field view: for list-valued fields (aliases, countries, dates of birth) it says what entered, what left, what stayed, with counts; for scalar fields it shows before and after side by side, with `∅` for an absent value. Same-contents-in-another-order is reported as such rather than shown as two identical lists. Everything is **derived from the dotted paths the server already computes** — nothing to maintain when a field is added, and a field that did not change never appears.
+
+**The frozen approval file gained the same view.** It claims to show "what the reviewer had before their eyes", but for modifications it listed only the *names* of the touched fields. Both screens now go through one shared renderer.
+
+Two details that are not decoration: entering and leaving are marked by a **sign (+ / −) as well as by colour** — on a screen that says what enters a sanctions list, colour alone cannot carry the information; and the button passes a context plus an index, never the record itself, so no third-party list content ever travels inside an HTML attribute.
+
+12 tests pin the batch, seven of which **execute the comparison for real in Node** rather than inspecting the source for the right letters — a wrong comparison would pass any textual check. They cover the duplicate case (a record losing one of its two identical aliases has genuinely lost an entry, which a set-based diff would miss), dotted-path resolution into nested values, and neutralisation of record content.
+
+### Added — table comfort: column choice, density, searchable comboboxes (quality-of-life 7/N)
+Seventh batch of the programme, verified in a real browser (sixteen checks).
+
+**Choose each table's columns** (n° 21). Every filterable table — and the four big server-paginated ones (both alert queues, the listed-parties base, the screening journal) — gains a "Columns" button. The panel derives its checkboxes from the real `thead` at the moment it opens: a column added tomorrow is choosable tomorrow, nothing to maintain. Hiding goes through **one regenerated stylesheet** (`#table tr > *:nth-child(n)`), so the choice survives every re-render without visiting a single row. Three edges are guarded: you cannot hide the last visible column (an unfindable table with no way back), a forged table id in localStorage cannot enter the stylesheet (form-checked before any rule is written), and the **"as displayed" CSV export drops hidden columns from the file exactly as they left the screen** — otherwise its name would lie.
+
+**Display density** (n° 21, second half). One toolbar button toggles comfortable/compact globally — the compact values already existed as a per-table class; they are now a per-workstation preference, persisted and announced on the button.
+
+**Searchable comboboxes for long selects** (n° 19). One reusable component: any select marked `data-combobox` gains a filter-as-you-type field — the analyst directory in both queues, list types in the whitelist filter and the two manual-add forms. The original select stays in the DOM as the **source of truth**: options are derived from it at every opening (a directory repopulated later is visible with nothing re-wired), and selection goes back through `select.value` plus a dispatched `change` event, so every existing `onchange` keeps firing. Filtering is accent- and case-insensitive (same rule as the global search), the keyboard walks the list (arrows, Enter, Escape restores the real selection), screen readers get the full combobox pattern (`role`, `aria-expanded`, `aria-activedescendant`), and selection binds on `mousedown` because `click` lands after `blur` has already closed the list.
+
+13 tests pin the batch.
+
+### Added — follow a case without assigning it to yourself (quality-of-life 6/N)
+Sixth batch of the programme, verified in a real browser.
+
+**Follow a case** (n° 12). The validator waits for the outcome of a case they do not review; the analyst wants to know what becomes of the alert they escalated. Until now the only way to stay informed was to *assign yourself* — which distorts the workload screens. Following is a **personal, reversible** gesture: a button in the alert case, a star on your followed rows in the queue, the list of followers on the case — and **nothing in the alert's immutable journal**, which records instruction, not curiosity.
+
+**The notification rides the existing rails.** One new catalog event ("activity on a followed case", digest urgency — never a flood), one new pseudo-audience: `followers`. Every lifecycle action — assign, comment, escalate, propose, validate, priority, hold, wake — notifies the case's followers through the same channels, opt-outs and delivery journal as everything else. The author of an action is never notified of their own gesture.
+
+**The router trap this batch had to disarm**: an event with no resolvable recipients falls back to the global addresses — the deployment-without-accounts behaviour, kept. For a followers-routed event that fallback would turn "nobody follows this case" into "everybody gets mail". Two guards now hold: the emitter stays silent when there is no follower left after excluding the actor, and `resolve_recipients` never falls back to global addresses for a followers-routed event. A test pins each.
+
+Also in this batch: the development database turned out corrupted (a `cp` of the SQLite file taken while its WAL was live — the copy misses the unflushed pages). Rebuilt from the readable pages; the session's backup discipline now goes through SQLite's backup API, which includes the WAL.
+
+10 tests pin the batch.
+
+### Added — keyboard triage and honest postponing (quality-of-life 5/N)
+Fifth batch of the programme, verified in a real browser (sixteen checks, dialogs driven key by key).
+
+**Postpone an alert — on hold, never hidden** (n° 11). "Awaiting documents, review in 3 days" is a legitimate state the product had no word for; analysts parked such alerts in their heads. `POST /api/alerts/{id}/snooze` gives it three non-negotiable properties. *Never hidden*: a postponed alert drops to the bottom of the queue but stays in it — hiding work is the exact defect class this product spends its life hunting. *The SLA keeps running*: `due_at` does not move, and when the regulatory deadline falls inside the hold, the server says so at the moment of postponing — the analyst chooses knowingly. *Journaled*: the reason is mandatory and lands in the alert's immutable history (SNOOZED, WOKEN) — a sleeping file must be able to say why. An expired hold switches itself off at read time, no write, no gesture; proposing a decision clears it, since deciding *is* the review the hold was waiting for. The chip on the row says "ON HOLD → date"; the modal offers "Wake now".
+
+**Keyboard triage of the queues** (n° 8). The mail-client pattern: `j`/`k` walk the displayed queue, `o` (or Enter) opens the highlighted alert, `r` postpones it, Escape releases the highlight. The handler stands down whenever the keyboard belongs to someone else — a focused field, an open modal — and Enter is only taken when focus rests on the page body, because Enter already activates sort headers and buttons. The highlight survives the queue's re-render (it is re-applied by alert id), and the `?` help announces the new keys — a shortcut nothing announces is a shortcut nobody uses.
+
+13 tests pin the batch: the three snooze properties (including "due_at never moves" and the warning), the bottom-of-queue-but-present ordering, the self-extinguishing expiry, and the guards that keep the triage keys away from form fields and open modals.
+
+### Added — visual comfort: system theme, in-app news, empty states that point somewhere (quality-of-life 4/N)
+Fourth batch of the programme, verified in a real browser (fifteen checks, including OS theme emulation).
+
+**The theme can follow the system** (n° 6). Two preferences — dark, light — served machines whose own setting changes at dusk: the analyst repeated in Fiskr the choice the OS had already made. A third state follows `prefers-color-scheme`, **live** (a media-query listener, no reload), and the boot script in both pages' heads knows it too — otherwise every visit would flash dark before switching. The button cycles dark → light → system with its own icon and label per state; a corrupt stored preference falls back to dark, and a test walks the cycle table looking for dead ends: a state no click can leave, or none can reach.
+
+**What's new, announced where people work** (n° 27). The changelog lives in the repository; nobody in an agency will read it there. A panel in the tool carries entries written in French at each delivered batch, newest first; a dot on the toolbar button signals what arrived since this workstation last opened the panel — and *opening* is what marks it seen, not loading the page, or the dot would never show anywhere. The entries are ordinary visible strings, so the translation guards apply to them in full: a batch added without its five translations fails the build. The newest entry announces this very batch.
+
+**Empty states that point somewhere** (n° 28). « Aucune alerte pour ce filtre » covered two opposite realities: the queue genuinely clear (good news) and a filter narrow enough to hide work (news that only *looks* good — the costliest misreading a compliance product can offer). The queue's empty state now inspects the filters actually set and says which case it is, each with its own icon and its own advice. Six more large tables gained the gesture that fills them — snapshots point to the Sources screen, the whitelist explains that pairs are born from false-positive closures, the pending-review table says when batches will appear. The hint renders escaped, is styled quieter than the message, and every hint string is checked against the dictionary **derived from the calls themselves** — no list to maintain.
+
+14 tests pin the batch: the succession table of the theme cycle, the boot scripts of both pages, the well-formedness and translation of every news entry, and the two queue emptinesses that must never look alike again.
+
+### Added — search that reaches everything, and the missing exports (quality-of-life 3/N)
+Third batch of the programme, verified in a real browser.
+
+**The palette finds clients** (n° 17). Ctrl+K searched the lists and the alerts — never the client base: typing "Dupont" would not return *your* clients. The global search now carries a third section, bounded like the others, restricted to the client base **in production** — a base awaiting approval has no business in it, and a test pins that. The result opens the client 360 view.
+
+**The palette finds the settings** (n° 18). "seuil", "email", "SLA", "rétention" now lead to the settings card in question. The index is **derived from the markup** — the palette reads the card headings (h2 *and* h3: the SLA block, business notifications and outgoing webhooks live under h3) at the moment of typing. No list to maintain: a card added tomorrow is findable tomorrow. Cards hidden from the current role are excluded — offering a screen the server will refuse helps nobody. "SMTP" deliberately finds nothing: it is configured in `.env`, and the palette cannot navigate there.
+
+**The five missing CSV exports** (n° 20). Two go through the server, because the distinction matters: the **administration journal** is paginated server-side — an export of "what is displayed" would show one page, and it is precisely the piece an inspection asks for whole. It follows the same guard as its reading (admin *or auditor*), the same 50 000-row bound and the same formula-injection neutralisation as every other export. The **delivery journal** exports with its status filter, and rejects an unknown status rather than ignoring it. The other three — accounts, sources, learned equivalences — export **exactly what is displayed**: filtered rows stay out, group headers stay out, and the client-side neutralisation applies the *same rule* as the server (`= + - @` prefixed with an apostrophe), because a forged name executing in the analyst's spreadsheet does not care which side built the file.
+
+### Added — the analyst's day (quality-of-life 2/N)
+Second batch of the programme, all four verified in a real browser.
+
+**The deadline shows while there is still time** (n° 9). The lateness already showed — "EN RETARD" — but the *approach* did not: you learned about the deadline by missing it. Under twelve hours, an amber chip announces "ÉCHÉANCE 6 h", only on alerts still open — a closed one has no deadline left to keep. Honest inventory note: the queue was *already* sorted by priority then due date; the sorting was never the gap, the visibility was.
+
+**Closure reason library** (n° 10). Every decision requires a comment, and analysts retyped the same sentences. The reasons live in the settings (one per line, admin-set, five sensible defaults shipped), and appear as clickable chips above the comment field at decision time. A library, not a straitjacket: the click *fills* the field, the text stays editable, and a second click appends rather than replaces. An empty list is a valid choice — "no suggestions" — distinct from "not provided", which keeps the defaults; without that distinction an admin could never remove them. Analysts never open the settings screen, so the reasons load lazily on the first decision.
+
+**Recently opened, before the first keystroke** (n° 13). The last ten dossiers opened — alerts and client 360 views — appear in the Ctrl+K palette *ahead of navigation*: returning to the dossier from ten minutes ago beats reaching the menu. Deduplicated, capped at ten, localStorage only.
+
+**Re-screen one client, now** (n° 16). The gesture was missing: the only screening paths were a list update (automatic delta) or the full-base lookback. Yet it is an ordinary act of instruction — the KYC record was just corrected, the analyst wants the engine's answer for *this* client. `POST /api/clients/{id}/screen` feeds the production record through the same `screen_client_profile` as real-time screening: quality gate, whitelist, anti-FP rules, immutable audit journal, alerts. A button in the client 360 view carries it; the toast says what came out, and the queues refresh when an alert opens.
+
+One bug caught by this batch's own test before it shipped: the re-screen button interpolated the client id with `JSON.stringify`, whose double quotes would have broken the double-quoted `onclick` attribute at runtime — the exact "affordance that renders and does nothing" class this project keeps hunting.
+
+### Added — six everyday frictions, removed in one batch (quality-of-life 1/N)
+First batch of the quality-of-life programme, chosen for effort-to-value. Each item was verified in a real browser before shipping.
+
+**The session no longer takes your work with it.** The token lives eight hours and the cookie is HttpOnly, so the client could not know the expiry — the first call past it got a 401 and a hard redirect to the login page, taking whatever was being typed. `/api/auth/me` now returns the expiry (the server is the only party who can read it); a banner — not a modal, nobody gets interrupted mid-sentence — appears at T-10 min with a live countdown. And if the 401 lands anyway, every filled field is photographed *before* the redirect (sessionStorage: same tab, never sent anywhere) and put back after reconnection — only into fields still empty, then a toast says so.
+
+**Table headers stay put.** Zero `position: sticky` in the stylesheet: on the reference list or the screening journal, the header scrolled away at row thirty and you sorted blind. The `th` background was already opaque; a shadow replaces the border that `border-collapse` scrolls away.
+
+**One click to copy — and the link opens the case.** Entity ids, full snapshot hashes (the screen truncates to eight characters; the *full* hash is the citable reference, so that is what the button copies), and the link to an alert. A link that lands on the *queue* would be useless: the hash route accepts a third segment (`#…/alerte-123`) that reopens the alert itself. One delegation for the whole page, clipboard API with a fallback.
+
+**Filters are remembered.** The thirteen generic filter bars restarted empty on every visit; "CRITICAL, unassigned" was re-set ten times a day. Persisted per table (localStorage), restored on return — with a subtlety: the dropdowns fill from the *data*, so at restore time the wanted option may not exist yet; the wish is kept on the select and applied the moment the option appears. The flip side is guarded too: a filter forgotten from yesterday would read as an almost-empty table, so an active bar carries a visible marker.
+
+**`?` shows the shortcuts.** Ctrl+K, Escape, Enter-to-sort all existed — and nothing announced them. A shortcut nothing announces is a shortcut nobody uses. The `?` key (ignored while typing in a field) opens a small help dialog; it rides the existing modal machinery — focus trap, Escape, backdrop — for free.
+
+**The tab title counts the work.** `(3) Fiskr — …` when alerts are open: a background tab now says whether coming back is worth it. The base title is captured once, so refreshes cannot stack `(3) (3) (3)`.
+
+One proposal from the inventory died on contact with the code, and honestly: "resend a failed notification" already existed, endpoint *and* button. The published roadmap marks it as such.
+
+All new visible strings are translated in the six languages — the i18n guards insisted. 15 tests pin the batch, including the ordering that matters (photograph *before* redirect), the wish mechanism for restored filters, and the guard that `?` typed in a search field stays a question mark.
+
 ### Fixed — "SMTP configured" was displayed while every message was failing
 Three states resemble each other and do not have the same consequences: SMTP **configured**, SMTP **reachable**, and messages **actually delivered**. The commissioning screen reported the first and stopped there — honestly, saying in as many words that "configured does not mean reachable" and offering a probe for the second. The third it left alone, although the product *holds the answer*: every notification writes a row with its status and its error.
 

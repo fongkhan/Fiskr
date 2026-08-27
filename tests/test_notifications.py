@@ -113,7 +113,8 @@ def test_catalog_is_coherent():
     """Le catalogue est la source unique : defauts, libelles et audiences en dependent."""
     from fiskr.notify import EVENT_LABELS
     assert set(EVENT_CATALOG) == set(DEFAULT_NOTIFICATION_EVENTS) == set(EVENT_LABELS)
-    allowed = set(VALID_ROLES) | {AUDIENCE_ASSIGNEE, AUDIENCE_ACTOR}
+    from fiskr.events import PSEUDO_AUDIENCES
+    allowed = set(VALID_ROLES) | set(PSEUDO_AUDIENCES)
     for key, event in EVENT_CATALOG.items():
         assert event.label.strip(), key
         assert event.category in CATEGORY_LABELS, key

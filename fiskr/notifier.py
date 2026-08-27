@@ -24,7 +24,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from fiskr import notify
 from fiskr.database import NotificationDelivery, User
 from fiskr.events import (
-    AUDIENCE_ACTOR, AUDIENCE_ASSIGNEE, CATEGORY_LABELS, DIGEST, EVENT_CATALOG, IMMEDIATE,
+    AUDIENCE_ACTOR, AUDIENCE_ASSIGNEE, AUDIENCE_FOLLOWERS, CATEGORY_LABELS,
+    DIGEST, EVENT_CATALOG, IMMEDIATE, PSEUDO_AUDIENCES,
 )
 from fiskr.settings import notification_batch_settings, notification_events
 
@@ -100,7 +101,7 @@ def resolve_recipients(db, event_key: str, payload: Dict[str, Any]) -> List[str]
     if event is None:
         return []
     emails: List[str] = []
-    roles = [a for a in event.audience if a not in (AUDIENCE_ASSIGNEE, AUDIENCE_ACTOR)]
+    roles = [a for a in event.audience if a not in PSEUDO_AUDIENCES]
     if roles:
         emails += _users_with_roles(db, roles)
     if AUDIENCE_ASSIGNEE in event.audience:
@@ -114,7 +115,11 @@ def resolve_recipients(db, event_key: str, payload: Dict[str, Any]) -> List[str]
         extras = []
     emails += [str(a).strip() for a in extras if str(a).strip()]
 
-    if not emails:
+    if not emails and AUDIENCE_FOLLOWERS not in event.audience:
+        # Repli global : un deploiement sans emails de comptes garde le
+        # comportement historique. JAMAIS pour un evenement route vers les
+        # suiveurs : « personne ne suit ce dossier » doit rester « personne »,
+        # pas « tout le monde ».
         emails = notify.default_recipients()
     # Filtre personnel : les comptes qui ont coupe cette categorie (ou tout)
     # dans leur espace « Mon compte » sortent de la liste — apres le routage

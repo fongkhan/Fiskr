@@ -274,6 +274,38 @@ async def get_current_user(
         "totp_enabled": bool(user.totp_enabled),
     }
 
+def session_expires_at(request) -> Optional[str]:
+    """
+    Echeance de la session portee par la requete (ISO 8601 UTC), ou None.
+
+    Le cookie est HttpOnly : le navigateur ne peut PAS lire l'echeance du
+    jeton cote client. Sans cette information, l'interface ne peut pas
+    prevenir avant l'expiration — le premier appel apres 8 h recoit un 401 et
+    redirige vers la connexion, en emportant le formulaire en cours. C'est le
+    serveur qui la donne, via /api/auth/me.
+
+    Ne leve jamais : une cle d'API n'expire pas (None), un jeton illisible
+    rend None — l'appelant a deja ete authentifie par ailleurs.
+    """
+    try:
+        token = None
+        if request is not None:
+            auth = request.headers.get("Authorization") or ""
+            if auth.startswith("Bearer "):
+                token = auth[7:]
+            if not token:
+                token = request.cookies.get("fiskr_access_token")
+        if not token or token.startswith("fsk_"):
+            return None
+        payload = decode_access_token(token)
+        exp = (payload or {}).get("exp")
+        if not exp:
+            return None
+        return datetime.fromtimestamp(int(exp), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
 def require_roles(*allowed: str):
     """
     Fabrique une dependance FastAPI exigeant l'un des roles donnes.
