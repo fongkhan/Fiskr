@@ -50,7 +50,11 @@ AUDIENCE_ACTOR = "actor"         # auteur de l'action (proposeur, auteur de regl
 # (recipients_override) — le routeur ne sait pas les resoudre, et surtout ne
 # doit PAS replier sur les destinataires globaux quand il n'y en a aucun.
 AUDIENCE_FOLLOWERS = "followers"
-PSEUDO_AUDIENCES = (AUDIENCE_ASSIGNEE, AUDIENCE_ACTOR, AUDIENCE_FOLLOWERS)
+# Personnes citees dans un commentaire (@nom) : memes regles que les suiveurs
+# — fournies par l'emetteur, jamais de repli sur les destinataires globaux.
+AUDIENCE_MENTIONED = "mentioned"
+PSEUDO_AUDIENCES = (AUDIENCE_ASSIGNEE, AUDIENCE_ACTOR, AUDIENCE_FOLLOWERS,
+                    AUDIENCE_MENTIONED)
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,13 @@ EVENT_CATALOG: Dict[str, Event] = {
         label="Échéance SLA dépassée sur une alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_ASSIGNEE,),
         urgency=DIGEST, link="#alerts/alerts-screening",
+    ),
+    "alert_mentioned": Event(
+        label="Vous êtes cité dans un commentaire d'alerte",
+        category=CATEGORY_SCREENING, audience=(AUDIENCE_MENTIONED,),
+        # Citer quelqu'un, c'est lui demander quelque chose maintenant : un
+        # recapitulatif du soir raterait la question.
+        urgency=IMMEDIATE, link="#alerts/alerts-screening",
     ),
     "alert_followed_activity": Event(
         label="Activité sur un dossier suivi",

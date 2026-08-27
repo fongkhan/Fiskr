@@ -46,6 +46,7 @@ from fiskr.database import (
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     safe_upload_filename,
     SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
+    WatchlistNote,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
@@ -4538,6 +4539,70 @@ async def patch_watchlist_entity(
         "entity": _serialize_watchlist_entity(row, snap),
     }
 
+
+# ------------------ NOTES INTERNES SUR UNE FICHE LISTÉE ------------------
+#
+# « Homonymie établie pour le client X », « même personne que EU-1234 »,
+# « société dissoute en 2019 » : ce que l'analyste apprend en instruisant une
+# alerte reste aujourd'hui dans sa tête ou dans le commentaire d'un dossier
+# clos que personne ne relira. Le suivant refait le même travail.
+#
+# La note est ancrée sur l'identifiant MÉTIER de la fiche : elle survit à la
+# synchronisation de mardi, qui remplace toutes les lignes de l'instantané.
+# Elle n'a AUCUN effet sur le criblage — c'est ce qui la distingue de la liste
+# blanche — et l'API le dit à chaque lecture, pas seulement l'écran.
+
+class WatchlistNoteRequest(BaseModel):
+    note: str
+
+_NOTE_MAX_CARACTERES = 4000
+_NOTES_MAX_RENDUES = 100
+
+@app.get("/api/watchlist/notes/{entity_id}")
+async def list_watchlist_notes(
+    entity_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Notes internes portant sur cette fiche listée, de la plus récente à la
+    plus ancienne."""
+    rows = db.query(WatchlistNote).filter(WatchlistNote.entity_id == entity_id) \
+             .order_by(WatchlistNote.created_at.desc(), WatchlistNote.id.desc()) \
+             .limit(_NOTES_MAX_RENDUES).all()
+    return {
+        "entity_id": entity_id,
+        "sans_effet_sur_le_criblage": True,
+        "items": [
+            {"id": r.id, "note": r.note, "created_by": r.created_by,
+             "created_at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows
+        ],
+    }
+
+@app.post("/api/watchlist/notes/{entity_id}", status_code=status.HTTP_201_CREATED)
+async def add_watchlist_note(
+    entity_id: str,
+    payload: WatchlistNoteRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Ajoute une note interne. Append-only : une note se complète, ne se récrit
+    pas — sinon « qui savait quoi, quand » devient irrécupérable, et c'est
+    précisément la question d'une inspection.
+    """
+    note = (payload.note or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="La note ne peut pas être vide.")
+    if len(note) > _NOTE_MAX_CARACTERES:
+        raise HTTPException(status_code=400,
+                            detail="Note trop longue : 4 000 caractères au maximum.")
+    ligne = WatchlistNote(entity_id=entity_id, note=note,
+                          created_by=current_user["username"])
+    db.add(ligne)
+    db.commit()
+    return {"message": "Note enregistrée. Elle n'a aucun effet sur le criblage.",
+            "id": ligne.id}
 
 @app.get("/api/watchlist/entity/{entity_pk}/changes")
 async def get_watchlist_entity_changes(
@@ -10370,6 +10435,55 @@ def _notifier_les_suiveurs(db: Session, alert: Alert, action: str, actor: str) -
     except Exception as e:  # le suivi n'a pas le droit de casser l'action suivie
         logger.error(f"Notification des suiveurs impossible (alerte {alert.id}) : {e}")
 
+_MOTIF_CITATION = re.compile(r"@([A-Za-z0-9._-]{1,100})")
+
+def _notifier_les_citations(db: Session, alert: Alert, commentaire: str,
+                            auteur: str) -> Dict[str, Any]:
+    """
+    Previent les personnes citees (@nom) dans un commentaire d'alerte.
+
+    Rend le compte-rendu a l'appelant, parce qu'une citation silencieuse est
+    pire que pas de citation du tout : « j'ai cite Marie, elle n'a jamais
+    repondu » a trois causes possibles — nom mal ecrit, compte sans adresse,
+    ou notification coupee — et l'auteur doit pouvoir les distinguer AVANT de
+    croire sa question posee. Les deux premieres se disent ici.
+    """
+    resultat: Dict[str, Any] = {"mentions_notifiees": [], "mentions_inconnues": [],
+                                "mentions_sans_adresse": []}
+    try:
+        jetons = {j for j in _MOTIF_CITATION.findall(commentaire or "")}
+        if not jetons:
+            return resultat
+        from fiskr.notifier import _email_of
+        # Resolution insensible a la casse : on ecrit « @Marie » a une
+        # collegue enregistree « marie », et la citation doit porter.
+        comptes = {u.username.lower(): u.username for u in db.query(User).all()}
+        destinataires: List[str] = []
+        for jeton in sorted(jetons):
+            reel = comptes.get(jeton.lower())
+            if reel is None:
+                resultat["mentions_inconnues"].append(jeton)
+                continue
+            if reel == auteur:
+                continue          # se citer soi-meme ne se notifie pas
+            adresses = _email_of(db, reel)
+            if not adresses:
+                resultat["mentions_sans_adresse"].append(reel)
+                continue
+            resultat["mentions_notifiees"].append(reel)
+            destinataires += adresses
+        if destinataires:
+            emit(db, "alert_mentioned", {
+                "Alerte": f"#{alert.id}",
+                "Client": alert.client_name,
+                "Liste": alert.watchlist_name,
+                "Citée par": auteur,
+                "Commentaire": commentaire,
+            }, recipients_override=destinataires)
+    except Exception as e:   # une citation ne casse pas le commentaire
+        logger.error(f"Notification des citations impossible (alerte {alert.id}) : {e}")
+    return resultat
+
 @app.post("/api/alerts/{alert_id}/follow")
 async def follow_alert(
     alert_id: int,
@@ -11896,10 +12010,22 @@ async def get_alert_detail(
     followers = [r.username for r in
                  db.query(AlertFollower).filter(AlertFollower.alert_id == alert_id)
                    .order_by(AlertFollower.created_at.asc()).all()]
+    # Notes internes de la fiche listee : l'analyste rencontre le liste ICI.
+    # Les servir avec le dossier evite qu'une homonymie deja etablie par un
+    # collegue soit re-instruite de zero pour la troisieme fois.
+    notes = db.query(WatchlistNote) \
+              .filter(WatchlistNote.entity_id == alert.watchlist_entity_id) \
+              .order_by(WatchlistNote.created_at.desc(), WatchlistNote.id.desc()) \
+              .limit(_NOTES_MAX_RENDUES).all()
     return {
         **_alert_summary(alert),
         "followers": followers,
         "following_me": current_user["username"] in followers,
+        "watchlist_notes": [
+            {"id": n.id, "note": n.note, "created_by": n.created_by,
+             "created_at": n.created_at.isoformat() if n.created_at else None}
+            for n in notes
+        ],
         "attachments": [
             {
                 "id": att.id, "file_name": att.file_name, "comment": att.comment,
@@ -11971,7 +12097,8 @@ async def comment_alert(
     _log_alert_event(db, alert.id, current_user["username"], "COMMENT", comment)
     db.commit()
     _notifier_les_suiveurs(db, alert, "Commentaire ajouté", current_user["username"])
-    return {"message": "Commentaire ajouté."}
+    citations = _notifier_les_citations(db, alert, comment, current_user["username"])
+    return {"message": "Commentaire ajouté.", **citations}
 
 @app.post("/api/alerts/{alert_id}/escalate")
 async def escalate_alert(

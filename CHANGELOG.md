@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — what you know no longer stays in your head (quality-of-life 9/N)
+Ninth batch of the programme, verified in a real browser.
+
+**Mention a colleague** (n° 25). Writing "@marie can you confirm?" in an alert comment notified nobody. The interesting part is not the notification — it is the **silence**: "I mentioned Marie and she never answered" has three possible causes (a misspelt name, an account with no e-mail address, or nothing at all), and the author has to be able to tell them apart *before* believing the question asked. The comment endpoint now resolves each `@name` against real accounts, case-insensitively, skips self-mentions, notifies through the existing rails (a new catalog event, immediate urgency — a mention is a request for something now, an evening digest would miss the question), and **returns the three outcomes separately**, which the front end shows as three distinct toasts. Mentions are highlighted in the alert history, decorated *after* escaping — the other order would inject the decoration's own markup.
+
+**Internal note on a listed record** (n° 30). What an analyst learns while reviewing — "homonymy established with client 12345", "company dissolved in 2019" — ended up in the comment of a closed case nobody re-reads, and the next analyst redid the work. Notes are now attached to the listed record, shown both in the alert case file (where the analyst actually meets the listed party) and on the record itself.
+
+Two structural choices, each pinned by a test. The note is keyed on the **business identifier**, not on the current snapshot row: the snapshot is wholly replaced at Tuesday's synchronisation, and a note keyed on it would die exactly when remembering matters. And the note has **no effect on screening** — that is what distinguishes it from the whitelist, which does suppress alerts. The screen says so twice (when reading, and again when writing), and the API says it too, because a note that looked like it acted on the engine would be the worst kind of setting: the one you can save and that does nothing.
+
+Notes are append-only, like the alert journal: a note is completed, never rewritten — otherwise "who knew what, when" becomes unrecoverable, which is precisely an inspection's question. The router's global fallback is disarmed for mentions as it already was for followers: "nobody resolvable" must stay "nobody", never "everybody".
+
+15 tests pin the batch.
+
 ### Added — comparing two versions of a listed record (quality-of-life 8/N)
 Eighth batch of the programme, verified in a real browser against a genuine server-computed delta.
 

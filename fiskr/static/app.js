@@ -1429,6 +1429,92 @@ function initAideRaccourcis() {
  });
 }
 
+// ------------------ NOTES INTERNES SUR UNE FICHE LISTÉE ------------------
+//
+// Ce que l'analyste apprend en instruisant — « homonymie établie pour le
+// client X », « société dissoute en 2019 » — restait dans sa tête ou dans le
+// commentaire d'un dossier clos que personne ne relit. Le suivant refaisait
+// le même travail.
+//
+// La phrase « sans effet sur le criblage » n'est pas un ornement : sans elle,
+// quelqu'un écrira une note en croyant que l'alerte ne reviendra pas. C'est
+// la liste blanche qui agit sur le moteur, jamais une note.
+
+function _lignesDeNotes(notes) {
+ const lignes = (notes || []).map((n) => `
+  <div class="note-fiche">
+   <small>${n.created_at ? new Date(n.created_at).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(n.created_by)}</strong></small>
+   <div>${marquerLesCitations(n.note)}</div>
+  </div>`).join("");
+ return lignes || '<small style="color: var(--text-muted);">Aucune note sur cette fiche.</small>';
+}
+
+function blocNotesDeFiche(entityId, notes) {
+ if (!entityId) return "";
+ return `
+ <h3 style="font-size: 0.95rem; margin: 1rem 0 0.35rem;">Notes internes sur la fiche listée</h3>
+ <p class="section-desc" style="margin-bottom: 0.5rem;">Mémoire d'instruction partagée, attachée à la fiche et non à ce dossier : elle survit aux mises à jour de liste. <strong>Sans effet sur le criblage : seule la liste blanche supprime des alertes.</strong></p>
+ <div id="notes-fiche-liste" style="max-height: 180px; overflow-y: auto;">${_lignesDeNotes(notes)}</div>
+ <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="ajouterNoteDeFiche('${escapeHtml(entityId)}')"> Ajouter une note</button>`;
+}
+
+async function chargerSectionNotes(entityId) {
+ const section = document.getElementById("entity-notes-section");
+ if (!section) return;
+ const items = await chargerNotesDeFiche(entityId);
+ // Notes indisponibles : le dire. Une section vide se lirait « aucune note »,
+ // et c'est exactement la lecture qu'il ne faut pas induire.
+ section.innerHTML = items === null
+  ? '<p class="section-desc" style="margin-top: 1rem;">Notes internes indisponibles pour le moment.</p>'
+  : blocNotesDeFiche(entityId, items);
+}
+
+async function chargerNotesDeFiche(entityId) {
+ try {
+  const reponse = await apiFetch(`/api/watchlist/notes/${encodeURIComponent(entityId)}`);
+  if (!reponse.ok) return null;
+  return (await reponse.json()).items || [];
+ } catch (e) {
+  return null;
+ }
+}
+
+async function ajouterNoteDeFiche(entityId) {
+ const note = await promptDialog("Note interne sur cette fiche", {
+  message: "Visible de tous les analystes, attachée à la fiche listée. Sans effet sur le criblage : seule la liste blanche supprime des alertes.",
+  textarea: true,
+  placeholder: "Ex. homonymie établie avec le client 12345, pièces au dossier…",
+ });
+ if (note === null) return;
+ try {
+  const reponse = await apiFetch(`/api/watchlist/notes/${encodeURIComponent(entityId)}`, {
+   method: "POST",
+   headers: { "Content-Type": "application/json" },
+   body: JSON.stringify({ note }),
+  });
+  const data = await reponse.json();
+  if (!reponse.ok) {
+   showToast("Erreur : " + (data.detail || "Note refusée."), "error");
+   return;
+  }
+  showToast(data.message, "success");
+  // Le dossier d'alerte ouvert se recharge ; la fiche listée rafraîchit sa
+  // liste sans tout redessiner.
+  const modaleAlerte = document.getElementById("alert-modal");
+  if (modaleAlerte && _modaleVisible(modaleAlerte) && currentAlertId) {
+   openAlertModal(currentAlertId);
+   return;
+  }
+  const conteneur = document.getElementById("notes-fiche-liste");
+  if (conteneur) {
+   const items = await chargerNotesDeFiche(entityId);
+   if (items) conteneur.innerHTML = _lignesDeNotes(items);
+  }
+ } catch (e) {
+  showToast("Erreur réseau pendant l'enregistrement de la note.", "error");
+ }
+}
+
 // ------------------ NOUVEAUTÉS (ce qui a changé, annoncé dans l'outil) ------------------
 // Le journal des modifications vit dans le dépôt ; personne en agence n'ira
 // l'y lire. Ces entrées sont rédigées à chaque lot livré, du plus récent au
@@ -1437,6 +1523,15 @@ function initAideRaccourcis() {
 // chacun découvre les nouveautés une fois, puis le point s'éteint.
 
 const FISKR_NOUVEAUTES = [
+ {
+ id: "2026-08-27-lot-9", date: "2026-08-27",
+ titre: "Ce que vous savez ne reste plus dans votre tête",
+ points: [
+ "Citez un collègue avec @son-nom dans un commentaire : il est prévenu immédiatement.",
+ "Une note interne sur une fiche listée survit aux mises à jour de liste.",
+ "Un nom mal écrit ne prévient personne — et l'outil vous le dit tout de suite.",
+ ],
+ },
  {
  id: "2026-08-26-lot-8", date: "2026-08-26",
  titre: "Comparer deux versions d'une fiche listée",
@@ -4662,12 +4757,14 @@ function renderWatchlistDetails(item) {
  </div>
  ${extendedFieldsRows(item)}
  <div id="entity-relations-section"></div>
+ <div id="entity-notes-section"></div>
  <div id="entity-changes-section"></div>
  `;
 
  modal.classList.remove("hidden");
  if (item.id) loadEntityChanges(item.id);
  if (item.entity_id) loadEntityRelations(item.entity_id);
+ if (item.entity_id) chargerSectionNotes(item.entity_id);
 }
 
 // ------------------ RELATIONS & LIENS CAPITALISTIQUES (règle des 50 %) ------------------
@@ -7141,7 +7238,7 @@ async function openAlertModal(alertId) {
  const eventsHtml = (a.events || []).map(e => `
  <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
  <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
- ${e.detail ? `<div style="font-size: 0.85rem;">${escapeHtml(e.detail)}</div>` : ""}
+ ${e.detail ? `<div style="font-size: 0.85rem;">${marquerLesCitations(e.detail)}</div>` : ""}
  </div>
  `).join("");
 
@@ -7211,6 +7308,7 @@ async function openAlertModal(alertId) {
  </div>
  ${resourceEquivalencesHtml(a.decision_tree)}
  ${nameRarityHtml(a.decision_tree)}
+ ${blocNotesDeFiche(a.watchlist_entity_id, a.watchlist_notes)}
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
  <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Pièces jointes</h3>
@@ -7436,10 +7534,35 @@ async function uploadAlertAttachment() {
 }
 
 async function alertActionWithComment(action, promptLabel) {
- const comment = await promptDialog(promptLabel, { textarea: true, placeholder: "Votre commentaire..." });
+ const comment = await promptDialog(promptLabel, { textarea: true, placeholder: "Votre commentaire... citez un collègue avec @son-nom." });
  if (comment === null) return;
  const data = await _postAlertAction(action, { comment });
- if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
+ if (data) { rendreCompteDesCitations(data); openAlertModal(currentAlertId); refreshAlertQueues(); }
+}
+
+// Une citation silencieuse est pire que pas de citation : « j'ai cité Marie,
+// elle n'a jamais répondu » a trois causes possibles, et l'auteur doit les
+// distinguer AVANT de croire sa question posée.
+function rendreCompteDesCitations(data) {
+ const prevenus = data.mentions_notifiees || [];
+ const inconnus = data.mentions_inconnues || [];
+ const sansAdresse = data.mentions_sans_adresse || [];
+ if (prevenus.length) {
+  showToast(`Prévenu(s) : ${prevenus.map((u) => "@" + u).join(", ")}`, "success");
+ }
+ if (inconnus.length) {
+  showToast(`Aucun compte ne correspond à ${inconnus.map((u) => "@" + u).join(", ")} : personne n'a été prévenu.`, "warning", 8000);
+ }
+ if (sansAdresse.length) {
+  showToast(`Sans adresse de courriel, donc non prévenu(s) : ${sansAdresse.map((u) => "@" + u).join(", ")}`, "warning", 8000);
+ }
+}
+
+// Marque les @citations d'un texte. La neutralisation passe AVANT : on décore
+// du texte déjà échappé, jamais l'inverse.
+function marquerLesCitations(texte) {
+ return escapeHtml(texte).replace(/@([A-Za-z0-9._-]{1,100})/g,
+  '<span class="citation">@$1</span>');
 }
 
 // Les motifs vivent dans les réglages, mais un analyste n'ouvre jamais

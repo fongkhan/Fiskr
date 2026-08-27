@@ -24,7 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from fiskr import notify
 from fiskr.database import NotificationDelivery, User
 from fiskr.events import (
-    AUDIENCE_ACTOR, AUDIENCE_ASSIGNEE, AUDIENCE_FOLLOWERS, CATEGORY_LABELS,
+    AUDIENCE_ACTOR, AUDIENCE_ASSIGNEE, AUDIENCE_FOLLOWERS, AUDIENCE_MENTIONED, CATEGORY_LABELS,
     DIGEST, EVENT_CATALOG, IMMEDIATE, PSEUDO_AUDIENCES,
 )
 from fiskr.settings import notification_batch_settings, notification_events
@@ -115,7 +115,8 @@ def resolve_recipients(db, event_key: str, payload: Dict[str, Any]) -> List[str]
         extras = []
     emails += [str(a).strip() for a in extras if str(a).strip()]
 
-    if not emails and AUDIENCE_FOLLOWERS not in event.audience:
+    _sans_repli = (AUDIENCE_FOLLOWERS, AUDIENCE_MENTIONED)
+    if not emails and not any(p in event.audience for p in _sans_repli):
         # Repli global : un deploiement sans emails de comptes garde le
         # comportement historique. JAMAIS pour un evenement route vers les
         # suiveurs : « personne ne suit ce dossier » doit rester « personne »,
