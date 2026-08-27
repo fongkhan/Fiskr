@@ -1077,6 +1077,49 @@ body.densite-compacte th, body.densite-compacte td { padding: 0.35rem 0.6rem; fo
 body.densite-compacte .table-group-row td { padding-top: 0.55rem; }
 .icon-btn.actif { border-color: var(--color-primary); color: var(--color-primary); }
 
+/* ------------------ Diff d'une fiche listée (homologation) ------------------ */
+/* Ce qui entre et ce qui sort ne doivent pas se distinguer par la seule
+   couleur : le signe (+ / −) porte l'information pour qui ne la perçoit pas. */
+.diff-champ {
+    margin: 0.9rem 0 0.35rem;
+    font-size: 0.85rem;
+    font-family: monospace;
+    color: var(--text-secondary);
+}
+.diff-compte, .diff-vide { margin: 0 0 0.35rem; font-size: 0.78rem; color: var(--text-muted); }
+.diff-liste { list-style: none; margin: 0; padding: 0; }
+.diff-liste li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+.diff-signe { font-weight: 700; width: 1em; flex: none; text-align: center; }
+.diff-liste li.entree { background: rgba(34, 197, 94, 0.12); color: var(--success-soft-text); }
+.diff-liste li.sortie { background: rgba(239, 68, 68, 0.12); color: var(--danger-soft-text); }
+.diff-cote-a-cote { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.diff-cote-a-cote > div {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow-wrap: anywhere;
+}
+.diff-avant { background: rgba(239, 68, 68, 0.08); }
+.diff-apres { background: rgba(34, 197, 94, 0.08); }
+.diff-etiquette {
+    display: block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 0.2rem;
+}
+@media (max-width: 640px) {
+    .diff-cote-a-cote { grid-template-columns: 1fr; }
+}
+
 /* ------------------ Combobox cherchable ------------------ */
 /* Le select d'origine reste la source de vérité, masqué ; le champ filtre. */
 select.combobox-source { display: none; }

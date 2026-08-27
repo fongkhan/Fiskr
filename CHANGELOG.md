@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — comparing two versions of a listed record (quality-of-life 8/N)
+Eighth batch of the programme, verified in a real browser against a genuine server-computed delta.
+
+**What the approver could not actually see** (n° 22). The delta already said "aliases.high_priority changed" and put two JSON blocks side by side in a table cell. On a record carrying fifteen aliases, spotting the one that *entered* is an eyesight exercise — and that is precisely the difference that widens or narrows screening coverage. A reviewer approving a list has to be able to say what they are approving.
+
+**Element-by-element comparison.** A "Compare" button on each modified record opens a field-by-field view: for list-valued fields (aliases, countries, dates of birth) it says what entered, what left, what stayed, with counts; for scalar fields it shows before and after side by side, with `∅` for an absent value. Same-contents-in-another-order is reported as such rather than shown as two identical lists. Everything is **derived from the dotted paths the server already computes** — nothing to maintain when a field is added, and a field that did not change never appears.
+
+**The frozen approval file gained the same view.** It claims to show "what the reviewer had before their eyes", but for modifications it listed only the *names* of the touched fields. Both screens now go through one shared renderer.
+
+Two details that are not decoration: entering and leaving are marked by a **sign (+ / −) as well as by colour** — on a screen that says what enters a sanctions list, colour alone cannot carry the information; and the button passes a context plus an index, never the record itself, so no third-party list content ever travels inside an HTML attribute.
+
+12 tests pin the batch, seven of which **execute the comparison for real in Node** rather than inspecting the source for the right letters — a wrong comparison would pass any textual check. They cover the duplicate case (a record losing one of its two identical aliases has genuinely lost an entry, which a set-based diff would miss), dotted-path resolution into nested values, and neutralisation of record content.
+
 ### Added — table comfort: column choice, density, searchable comboboxes (quality-of-life 7/N)
 Seventh batch of the programme, verified in a real browser (sixteen checks).
 

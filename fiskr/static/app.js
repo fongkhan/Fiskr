@@ -1438,6 +1438,15 @@ function initAideRaccourcis() {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-08-26-lot-8", date: "2026-08-26",
+ titre: "Comparer deux versions d'une fiche listée",
+ points: [
+ "À l'homologation, un bouton « Comparer » montre ce qui entre et ce qui sort, champ par champ.",
+ "Les alias ajoutés ou retirés se lisent d'un coup d'œil, au lieu de deux blocs JSON.",
+ "Le dossier d'homologation figé montre désormais la même comparaison.",
+ ],
+ },
+ {
  id: "2026-08-26-lot-7", date: "2026-08-26",
  titre: "Le confort des tableaux",
  points: [
@@ -5932,6 +5941,111 @@ async function openReviewDetail(snapshotId) {
  }
 }
 
+// ------------------ DIFF D'UNE FICHE LISTÉE (homologation) ------------------
+//
+// Le delta disait « aliases.high_priority a changé » et posait côte à côte
+// deux blocs JSON. Sur une fiche à quinze alias, repérer à l'œil celui qui
+// est ENTRÉ tient de l'exercice de vision : c'est précisément l'écart qui
+// élargit ou rétrécit la couverture du criblage, et c'est celui-là qu'on
+// manque. Ce composant compare élément par élément et dit ce qui entre, ce
+// qui sort, ce qui reste — dérivé des chemins que le serveur a déjà calculés,
+// sans aucune liste de champs à tenir à jour.
+
+const _diffsDeFiches = {};
+
+function _valeurAuChemin(racine, chemin) {
+ let courant = racine;
+ for (const segment of String(chemin).split(".")) {
+  if (courant === null || courant === undefined || typeof courant !== "object") return undefined;
+  courant = courant[segment];
+ }
+ return courant;
+}
+
+function _texteDeValeur(v) {
+ if (v === null || v === undefined || v === "") return "∅";
+ return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+// Diff élément par élément de deux listes. Les doublons comptent : une liste
+// qui perd l'un de ses deux « Ivanov » a bien perdu une entrée.
+function _diffDeListes(avant, apres) {
+ const clef = (v) => (typeof v === "object" && v !== null) ? JSON.stringify(v) : String(v);
+ const restants = (avant || []).map(clef);
+ const entrees = [], gardees = [];
+ for (const v of (apres || [])) {
+  const i = restants.indexOf(clef(v));
+  if (i === -1) entrees.push(v);
+  else { gardees.push(v); restants.splice(i, 1); }
+ }
+ const sorties = (avant || []).filter((v) => {
+  const i = restants.indexOf(clef(v));
+  if (i === -1) return false;
+  restants.splice(i, 1);
+  return true;
+ });
+ return { entrees, sorties, gardees };
+}
+
+function construireDiffDeFiche(entree) {
+ const chemins = entree.changes_detected || [];
+ if (!chemins.length) return `<p class="section-desc">Aucun écart champ à champ n'a été enregistré pour cette fiche.</p>`;
+ const blocs = chemins.map((chemin) => {
+  const avant = _valeurAuChemin(entree.before, chemin);
+  const apres = _valeurAuChemin(entree.after, chemin);
+  const titre = `<h4 class="diff-champ">${escapeHtml(chemin)}</h4>`;
+  if (Array.isArray(avant) || Array.isArray(apres)) {
+   const { entrees, sorties, gardees } = _diffDeListes(
+    Array.isArray(avant) ? avant : (avant == null ? [] : [avant]),
+    Array.isArray(apres) ? apres : (apres == null ? [] : [apres]));
+   if (!entrees.length && !sorties.length) {
+    // Même contenu dans un autre ordre : le dire, plutôt que d'afficher
+    // deux listes identiques et laisser chercher la différence.
+    return `${titre}<p class="diff-vide"><span>Mêmes entrées, ordre différent.</span></p>`;
+   }
+   const puces = (items, cls, signe) => items.map((v) =>
+    `<li class="${cls}"><span class="diff-signe" aria-hidden="true">${signe}</span>${escapeHtml(_texteDeValeur(v))}</li>`).join("");
+   const compte = `<p class="diff-compte"><span>${entrees.length} entrée(s), ${sorties.length} sortie(s), ${gardees.length} inchangée(s).</span></p>`;
+   return `${titre}${compte}<ul class="diff-liste">${puces(sorties, "sortie", "−")}${puces(entrees, "entree", "+")}</ul>`;
+  }
+  return `${titre}<div class="diff-cote-a-cote">
+   <div class="diff-avant"><span class="diff-etiquette">Avant</span><code>${escapeHtml(_texteDeValeur(avant))}</code></div>
+   <div class="diff-apres"><span class="diff-etiquette">Après</span><code>${escapeHtml(_texteDeValeur(apres))}</code></div>
+  </div>`;
+ });
+ return blocs.join("");
+}
+
+function ouvrirDiffDeFiche(contexte, index) {
+ const entree = (_diffsDeFiches[contexte] || [])[index];
+ const modale = document.getElementById("diff-fiche-modal");
+ const corps = document.getElementById("diff-fiche-corps");
+ if (!modale || !corps) return;
+ if (!entree) {
+  corps.innerHTML = `<p class="section-desc">Cette fiche n'est plus dans le delta affiché : rechargez l'écran.</p>`;
+ } else {
+  const titre = document.getElementById("diff-fiche-titre");
+  if (titre) titre.textContent = `${entree.primary_name || ""} — ${entree.id || ""}`;
+  corps.innerHTML = construireDiffDeFiche(entree);
+ }
+ modale.classList.remove("hidden");
+}
+
+// Ligne « modifiée » commune aux deux écrans : le résumé des champs touchés
+// et le bouton qui ouvre le détail. Un seul rendu, deux appelants — l'écran
+// d'homologation et le dossier figé montrent exactement la même chose.
+function _lignesModifiees(items, contexte) {
+ _diffsDeFiches[contexte] = items || [];
+ return `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th><th></th></tr></thead><tbody>`
+  + (items || []).map((e, i) => `<tr>
+   <td><code>${escapeHtml(e.id || "")}</code></td>
+   <td><strong>${escapeHtml(e.primary_name || "")}</strong></td>
+   <td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td>
+   <td><button type="button" class="btn btn-sm btn-secondary" onclick="ouvrirDiffDeFiche('${escapeHtml(contexte)}', ${i})">Comparer</button></td>
+  </tr>`).join("")
+  + `</tbody>`;
+}
+
 // Delta détaillé (étape 1) : listes des ajouts / modifications / suppressions
 function renderReviewDeltaDetails(deltaDetails) {
  const container = document.getElementById("review-delta-details");
@@ -5949,16 +6063,6 @@ function renderReviewDeltaDetails(deltaDetails) {
  <tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td>
  <td><span class="status-badge ${cls}">${escapeHtml(e.primary_name || "")}</span></td></tr>`).join("");
 
- const modifiedRows = modified.map(e => {
- const changes = (e.changes_detected || []).map(field => {
- const before = e.before ? e.before[field] : undefined;
- const after = e.after ? e.after[field] : undefined;
- const fmt = v => (v === null || v === undefined) ? "∅" : (typeof v === "object" ? JSON.stringify(v) : String(v));
- return `<small><strong>${escapeHtml(field)}</strong> : <span style="color:var(--text-muted)">${escapeHtml(fmt(before))}</span> → ${escapeHtml(fmt(after))}</small>`;
- }).join("<br>");
- return `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td><strong>${escapeHtml(e.primary_name || "")}</strong></td><td>${changes || "-"}</td></tr>`;
- }).join("");
-
  const section = (title, count, inner) => count ? `
  <details style="margin-bottom: 0.6rem;">
  <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${count})</summary>
@@ -5967,7 +6071,7 @@ function renderReviewDeltaDetails(deltaDetails) {
 
  container.innerHTML =
  section(" Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
- section(" Modifications (avant → après)", modified.length, `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>${modifiedRows}</tbody>`) +
+ section(" Modifications (avant → après)", modified.length, _lignesModifiees(modified, "review")) +
  section(" Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
 }
 
@@ -6091,9 +6195,10 @@ async function openReviewHistoryDetail(recordId) {
   const lignesSimples = items => `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>`
    + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td><td>${escapeHtml(e.primary_name || "")}</td></tr>`).join("")
    + `</tbody>`;
-  const lignesModifiees = items => `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th></tr></thead><tbody>`
-   + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.primary_name || "")}</td><td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td></tr>`).join("")
-   + `</tbody>`;
+  // Le dossier figé n'affichait que le NOM des champs touchés : « ce que le
+  // réviseur avait sous les yeux » s'arrêtait donc avant l'essentiel. Même
+  // rendu que l'écran d'homologation, même comparaison.
+  const lignesModifiees = items => _lignesModifiees(items, "historique");
 
   const cahier = report ? `
    <table style="width:100%; margin-bottom:0.8rem;"><tbody>

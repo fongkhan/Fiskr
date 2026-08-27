@@ -517,6 +517,19 @@
         "Motifs de clôture proposés aux analystes": { en: "Closure reasons offered to analysts", de: "Den Analysten vorgeschlagene Schließungsgründe", es: "Motivos de cierre propuestos a los analistas", zh: "向分析员提供的关闭理由", ar: "أسباب الإغلاق المقترحة للمحللين" },
         "Un motif par ligne. Proposés au moment de la décision : le clic remplit le commentaire, qui reste éditable. Vider la liste retire les suggestions.": { en: "One reason per line. Offered at decision time: clicking fills the comment, which stays editable. Emptying the list removes the suggestions.", de: "Ein Grund pro Zeile. Beim Entscheiden angeboten: Ein Klick füllt den Kommentar, der editierbar bleibt. Eine leere Liste entfernt die Vorschläge.", es: "Un motivo por línea. Se ofrecen al decidir: el clic rellena el comentario, que sigue siendo editable. Vaciar la lista quita las sugerencias.", zh: "每行一个理由。在做决定时提供：点击即可填入评论，且仍可编辑。清空列表将移除建议。", ar: "سبب واحد في كل سطر. تُقترح عند اتخاذ القرار: النقر يملأ التعليق ويبقى قابلاً للتحرير. إفراغ القائمة يزيل الاقتراحات." },
         "Recribler ce client maintenant": { en: "Re-screen this client now", de: "Diesen Kunden jetzt neu screenen", es: "Recribar este cliente ahora", zh: "立即重新筛查该客户", ar: "أعد فحص هذا العميل الآن" },
+        // Diff d'une fiche listée (homologation)
+        "Comparer": { en: "Compare", de: "Vergleichen", es: "Comparar", zh: "比较", ar: "مقارنة" },
+        "Comparaison de la fiche": { en: "Record comparison", de: "Vergleich des Datensatzes", es: "Comparación de la ficha", zh: "记录比对", ar: "مقارنة السجل" },
+        "Avant": { en: "Before", de: "Vorher", es: "Antes", zh: "变更前", ar: "قبل" },
+        "Après": { en: "After", de: "Nachher", es: "Después", zh: "变更后", ar: "بعد" },
+        "Mêmes entrées, ordre différent.": { en: "Same entries, different order.", de: "Gleiche Einträge, andere Reihenfolge.", es: "Mismas entradas, orden distinto.", zh: "条目相同，顺序不同。", ar: "المدخلات نفسها بترتيب مختلف." },
+        "Aucun écart champ à champ n'a été enregistré pour cette fiche.": { en: "No field-by-field difference was recorded for this record.", de: "Für diesen Datensatz wurde kein Feldunterschied erfasst.", es: "No se registró ninguna diferencia campo a campo para esta ficha.", zh: "该记录未记录任何逐字段差异。", ar: "لم يُسجَّل أي فرق حقلاً بحقل لهذا السجل." },
+        "Cette fiche n'est plus dans le delta affiché : rechargez l'écran.": { en: "This record is no longer in the displayed delta: reload the screen.", de: "Dieser Datensatz ist nicht mehr im angezeigten Delta: laden Sie den Bildschirm neu.", es: "Esta ficha ya no está en el delta mostrado: recargue la pantalla.", zh: "该记录已不在当前显示的差异中：请重新加载页面。", ar: "لم يعد هذا السجل ضمن الفروق المعروضة: أعد تحميل الشاشة." },
+        // Nouveautés du lot 8
+        "Comparer deux versions d'une fiche listée": { en: "Compare two versions of a listed record", de: "Zwei Versionen eines gelisteten Datensatzes vergleichen", es: "Comparar dos versiones de una ficha listada", zh: "比对列名记录的两个版本", ar: "مقارنة نسختين من سجل مُدرج" },
+        "À l'homologation, un bouton « Comparer » montre ce qui entre et ce qui sort, champ par champ.": { en: "At approval time, a “Compare” button shows what enters and what leaves, field by field.", de: "Bei der Freigabe zeigt ein „Vergleichen“-Knopf, was hinzukommt und was wegfällt, Feld für Feld.", es: "En la homologación, un botón «Comparar» muestra lo que entra y lo que sale, campo a campo.", zh: "在批准环节，“比较”按钮逐字段显示新增与移除的内容。", ar: "عند الاعتماد، يعرض زر «مقارنة» ما يدخل وما يخرج، حقلاً بحقل." },
+        "Les alias ajoutés ou retirés se lisent d'un coup d'œil, au lieu de deux blocs JSON.": { en: "Added or removed aliases read at a glance, instead of two JSON blocks.", de: "Hinzugefügte oder entfernte Aliasse sind auf einen Blick lesbar statt als zwei JSON-Blöcke.", es: "Los alias añadidos o retirados se leen de un vistazo, en lugar de dos bloques JSON.", zh: "新增或移除的别名一目了然，不再是两段 JSON。", ar: "الألقاب المضافة أو المحذوفة تُقرأ بنظرة واحدة بدل كتلتَي JSON." },
+        "Le dossier d'homologation figé montre désormais la même comparaison.": { en: "The frozen approval file now shows the same comparison.", de: "Die eingefrorene Freigabeakte zeigt jetzt denselben Vergleich.", es: "El expediente de homologación congelado muestra ahora la misma comparación.", zh: "已归档的批准卷宗现在也显示同样的比对。", ar: "ملف الاعتماد المجمَّد يعرض الآن المقارنة نفسها." },
         // Confort des tableaux : colonnes, densité, combobox
         "Colonnes": { en: "Columns", de: "Spalten", es: "Columnas", zh: "列", ar: "الأعمدة" },
         "Choisir les colonnes affichées": { en: "Choose displayed columns", de: "Angezeigte Spalten wählen", es: "Elegir las columnas mostradas", zh: "选择显示的列", ar: "اختيار الأعمدة المعروضة" },
@@ -887,6 +900,12 @@
 
     // ---- Chaines composees (nombres variables) : regles regex ----
     const R = [
+        [/^(\d+) entrée\(s\), (\d+) sortie\(s\), (\d+) inchangée\(s\)\.$/, {
+            en: "$1 added, $2 removed, $3 unchanged.",
+            de: "$1 hinzugefügt, $2 entfernt, $3 unverändert.",
+            es: "$1 añadida(s), $2 retirada(s), $3 sin cambios.",
+            zh: "新增 $1 项，移除 $2 项，$3 项未变。",
+            ar: "$1 مضافة، $2 محذوفة، $3 دون تغيير." }],
         [/^Colonne (\d+)$/, {
             en: "Column $1", de: "Spalte $1", es: "Columna $1",
             zh: "第 $1 列", ar: "العمود $1" }],

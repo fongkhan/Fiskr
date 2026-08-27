@@ -3087,6 +3087,17 @@
  </div>
  </div>
 
+ <!-- Comparaison de deux versions d'une fiche listée (homologation) : ce qui
+      entre, ce qui sort, champ par champ. -->
+ <div id="diff-fiche-modal" class="modal hidden">
+ <div class="modal-content" style="max-width: 720px;">
+ <button type="button" class="close-modal" aria-label="Fermer" onclick="document.getElementById('diff-fiche-modal').classList.add('hidden')">&times;</button>
+ <h2>Comparaison de la fiche</h2>
+ <p class="section-desc" id="diff-fiche-titre"></p>
+ <div id="diff-fiche-corps" style="max-height: 60vh; overflow-y: auto; margin-top: 0.5rem;"></div>
+ </div>
+ </div>
+
  <div id="app-dialog" class="modal hidden" style="z-index: 1200;">
  <div class="modal-content" style="max-width: 480px;">
  <h2 id="app-dialog-title" style="margin-bottom: 0.75rem;">Confirmation</h2>
