@@ -1105,6 +1105,35 @@ tr.apercu-refus { background: rgba(239, 68, 68, 0.07); }
 .assistant-colonnes select { min-width: 180px; }
 .assistant-colonnes code { font-size: 0.82rem; }
 
+/* ------------------ Visite guidée ------------------ */
+.visite-voile {
+    position: fixed;
+    inset: 0;
+    z-index: 1400;
+    background: rgba(0, 0, 0, 0.45);
+}
+.visite-halo {
+    position: fixed;
+    border: 2px solid var(--color-primary);
+    border-radius: 10px;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.001);
+    pointer-events: none;
+}
+.visite-bulle {
+    position: fixed;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    padding: 0.9rem 1rem;
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.visite-bulle h3 { font-size: 1rem; margin: 0 0 0.35rem; }
+.visite-bulle p { font-size: 0.86rem; line-height: 1.55; color: var(--text-secondary); margin: 0 0 0.75rem; }
+.visite-pied { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.visite-compte { font-size: 0.78rem; color: var(--text-muted); }
+
 /* ------------------ Notes internes & citations ------------------ */
 .note-fiche {
     padding: 0.4rem 0.6rem;

@@ -2839,6 +2839,17 @@
  </div>
  <div id="account-notif-categories" style="display: flex; flex-direction: column; gap: 0.4rem;"></div>
  <button class="btn btn-primary" style="margin-top: 1rem;" onclick="saveAccountNotifications()">Enregistrer les notifications</button>
+
+ <hr style="border: none; border-top: 1px solid var(--border-color); margin: 1.25rem 0 1rem;">
+ <h3 style="font-size: 0.95rem; margin-bottom: 0.35rem;">Notifications du navigateur</h3>
+ <p class="section-desc">Un signal du système quand des alertes arrivent pendant que cet onglet est en arrière-plan. Réglage de ce poste, pas du compte — et sans nom de client ni de listé dans le message, qui s'affiche hors de l'application.</p>
+ <div class="form-group">
+ <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+ <input type="checkbox" id="notif-navigateur" style="width: 18px; height: 18px;" onchange="basculerNotificationsNavigateur(this.checked)">
+ <strong>Me prévenir sur ce poste</strong>
+ </label>
+ <small id="notif-navigateur-etat" style="color: var(--text-muted); font-size: 0.78rem; margin-top: 0.35rem; display: block;"></small>
+ </div>
  </div>
 
  <div class="card form-card" id="account-prefs-card">
@@ -3080,6 +3091,8 @@
  </tbody>
  </table>
  </div>
+ <!-- Une visite qu'on ne peut plus revoir est une visite qu'on subit. -->
+ <button type="button" class="btn btn-sm btn-secondary" style="margin-top: 0.75rem;" onclick="document.getElementById('raccourcis-modal').classList.add('hidden'); demarrerVisiteGuidee(true)">Revoir la visite guidée</button>
  </div>
  </div>
 

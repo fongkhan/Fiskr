@@ -1413,6 +1413,246 @@ function initCopierEnUnClic() {
  });
 }
 
+// ------------------ VISITE GUIDÉE (premier passage) ------------------
+//
+// La mise en service guide l'EXPLOITANT qui installe. Rien ne guidait le
+// premier analyste : il arrive sur une application de conformité dont les
+// gestes les plus utiles — la palette, le dossier d'alerte, le triage
+// clavier — ne se devinent pas.
+//
+// Deux règles tiennent cette visite.
+//
+// 1. Chaque étape DÉSIGNE un élément réel de la page, par son identifiant.
+//    Une étape dont l'élément est absent — un écran que ce rôle ne voit pas,
+//    une carte masquée — est SAUTÉE. Montrer du doigt une porte qui n'existe
+//    pas est pire que se taire : l'utilisateur cherche, puis conclut que
+//    l'outil ment.
+// 2. Elle ne s'impose qu'une fois, et reste ouvrable ensuite depuis l'aide
+//    des raccourcis : une visite qu'on ne peut plus revoir est une visite
+//    qu'on subit.
+
+const _VISITE_CLE = "fiskr_visite_vue";
+
+const VISITE_ETAPES = [
+ { cible: "nav-btn-home", titre: "Votre journée",
+   texte: "L'accueil s'ouvre sur ce qui vous attend : vos alertes, ce que vous pouvez valider, ce qui revient. Les panneaux se composent à votre main." },
+ { cible: "nav-btn-screening", titre: "La file d'alertes",
+   texte: "Le criblage des clients ouvre ici. La file se lit de haut en bas : priorité, puis échéance. j et k la parcourent au clavier, o instruit, r reporte." },
+ { cible: "nav-btn-watchlist-mgmt", titre: "Les listes",
+   texte: "Sources officielles, imports et homologation. Une liste n'entre en production qu'après approbation : c'est là que la comparaison des fiches se lit." },
+ { cible: "nouveautes-btn", titre: "Ce qui change",
+   texte: "Les nouveautés de l'outil s'annoncent ici. Un point apparaît tant que vous ne les avez pas ouvertes." },
+ { cible: "theme-toggle-btn", titre: "À votre confort",
+   texte: "Thème sombre, clair ou celui du système ; juste à côté, la densité d'affichage. Vos filtres et vos colonnes sont retenus par tableau." },
+];
+
+let _visiteIndex = 0;
+let _visiteActive = [];
+
+function _elementDeVisite(etape) {
+ const el = document.getElementById(etape.cible);
+ if (!el) return null;
+ // Masqué par le rôle, replié, hors écran : une étape qui ne se voit pas ne
+ // se montre pas.
+ if (el.offsetParent === null && getComputedStyle(el).position !== "fixed") return null;
+ return el;
+}
+
+function demarrerVisiteGuidee(depuisLAide = false) {
+ _visiteActive = VISITE_ETAPES.filter(_elementDeVisite);
+ if (!_visiteActive.length) {
+  if (depuisLAide) showToast("La visite n'a rien à montrer sur cet écran.", "info");
+  return;
+ }
+ _visiteIndex = 0;
+ _afficherEtapeDeVisite();
+}
+
+function _afficherEtapeDeVisite() {
+ _fermerVisiteGuidee(false);
+ const etape = _visiteActive[_visiteIndex];
+ const el = etape && _elementDeVisite(etape);
+ if (!el) { terminerVisiteGuidee(); return; }
+ const zone = el.getBoundingClientRect();
+ const voile = document.createElement("div");
+ voile.id = "visite-voile";
+ voile.className = "visite-voile";
+ voile.innerHTML = `
+  <div class="visite-halo" style="top:${zone.top - 6}px; left:${zone.left - 6}px; width:${zone.width + 12}px; height:${zone.height + 12}px;"></div>
+  <div class="visite-bulle" role="dialog" aria-labelledby="visite-titre" style="top:${Math.min(zone.bottom + 14, window.innerHeight - 200)}px; left:${Math.min(Math.max(zone.left, 12), window.innerWidth - 340)}px;">
+   <h3 id="visite-titre">${escapeHtml(etape.titre)}</h3>
+   <p>${escapeHtml(etape.texte)}</p>
+   <div class="visite-pied">
+    <span class="visite-compte">${_visiteIndex + 1} / ${_visiteActive.length}</span>
+    <span>
+     <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="terminerVisiteGuidee()">Passer</button>
+     <button type="button" class="btn btn-sm btn-primary" onclick="etapeSuivanteDeVisite()">${_visiteIndex + 1 === _visiteActive.length ? "Terminer" : "Suivant"}</button>
+    </span>
+   </div>
+  </div>`;
+ document.body.appendChild(voile);
+ voile.addEventListener("click", (e) => { if (e.target === voile) terminerVisiteGuidee(); });
+}
+
+function etapeSuivanteDeVisite() {
+ _visiteIndex += 1;
+ if (_visiteIndex >= _visiteActive.length) { terminerVisiteGuidee(); return; }
+ _afficherEtapeDeVisite();
+}
+
+function _fermerVisiteGuidee(marquer) {
+ const voile = document.getElementById("visite-voile");
+ if (voile) voile.remove();
+ if (marquer) {
+  try { localStorage.setItem(_VISITE_CLE, "1"); } catch (e) { /* stockage indisponible */ }
+ }
+}
+
+function terminerVisiteGuidee() {
+ _fermerVisiteGuidee(true);
+}
+
+function initVisiteGuidee() {
+ let vue = true;
+ try { vue = localStorage.getItem(_VISITE_CLE) === "1"; } catch (e) { vue = true; }
+ if (vue) return;
+ // Après le premier rendu : les éléments doivent exister pour être désignés.
+ setTimeout(() => demarrerVisiteGuidee(), 1500);
+}
+
+// ------------------ NOTIFICATIONS DU NAVIGATEUR ------------------
+//
+// Une alerte critique qui arrive pendant qu'on travaille ailleurs n'atteint
+// personne : l'onglet compte bien les alertes dans son titre, encore
+// faut-il regarder l'onglet.
+//
+// Trois décisions structurantes.
+//
+// 1. AUCUN NOM dans le message. Une notification du système s'affiche
+//    par-dessus n'importe quelle application, sur un poste parfois partagé
+//    ou projeté. « Ivan Ivanov correspond à la liste OFAC » sur l'écran
+//    d'une salle de réunion est une fuite, pas un service. Le message dit un
+//    NOMBRE, l'application dit le reste.
+// 2. Le sondage ne tourne QUE quand l'onglet est masqué et que le poste l'a
+//    demandé — l'inverse exact du sondage d'écran, qui s'arrête à ce
+//    moment-là. Rien n'est ajouté à la charge du serveur pour les autres.
+// 3. Groupées, jamais une par alerte : un homonyme d'un nom très courant
+//    peut en ouvrir des centaines d'un coup, et le catalogue de
+//    notifications tient déjà cette règle pour les courriels.
+
+const _NOTIF_NAV_CLE = "fiskr_notif_navigateur";
+const _NOTIF_NAV_PERIODE = 60_000;
+let _notifNavTimer = null;
+let _notifNavDernierCompte = null;
+
+function _notifNavAutorisee() {
+ return typeof Notification !== "undefined" && Notification.permission === "granted";
+}
+
+function _notifNavVoulue() {
+ try { return localStorage.getItem(_NOTIF_NAV_CLE) === "1"; } catch (e) { return false; }
+}
+
+function _direEtatNotifNav(message) {
+ const el = document.getElementById("notif-navigateur-etat");
+ if (el) el.textContent = message;
+ const boite = document.getElementById("notif-navigateur");
+ if (boite) boite.checked = _notifNavVoulue() && _notifNavAutorisee();
+}
+
+async function basculerNotificationsNavigateur(voulu) {
+ if (typeof Notification === "undefined") {
+  _direEtatNotifNav("Ce navigateur ne propose pas de notifications système.");
+  return;
+ }
+ if (!voulu) {
+  try { localStorage.setItem(_NOTIF_NAV_CLE, "0"); } catch (e) { /* stockage indisponible */ }
+  _arreterVeilleNotifications();
+  _direEtatNotifNav("Désactivées sur ce poste.");
+  return;
+ }
+ // La permission ne se demande QU'À ce moment : sur un chargement de page,
+ // les navigateurs la refusent d'office et l'utilisateur la refuse aussi.
+ let permission = Notification.permission;
+ if (permission === "default") {
+  try { permission = await Notification.requestPermission(); } catch (e) { permission = "denied"; }
+ }
+ if (permission !== "granted") {
+  // Un refus au niveau du navigateur ne se rattrape pas depuis la page : le
+  // dire, plutôt que laisser une case cochée qui ne produira jamais rien.
+  try { localStorage.setItem(_NOTIF_NAV_CLE, "0"); } catch (e) { /* stockage indisponible */ }
+  _direEtatNotifNav("Refusées par le navigateur : réautorisez ce site dans ses réglages, puis revenez ici.");
+  return;
+ }
+ try { localStorage.setItem(_NOTIF_NAV_CLE, "1"); } catch (e) { /* stockage indisponible */ }
+ _demarrerVeilleNotifications();
+ _direEtatNotifNav("Actives sur ce poste, quand cet onglet est en arrière-plan.");
+}
+
+function _arreterVeilleNotifications() {
+ if (_notifNavTimer) { clearInterval(_notifNavTimer); _notifNavTimer = null; }
+ _notifNavDernierCompte = null;
+}
+
+function _demarrerVeilleNotifications() {
+ if (_notifNavTimer || !_notifNavVoulue() || !_notifNavAutorisee()) return;
+ _notifNavTimer = setInterval(_veilleNotifications, _NOTIF_NAV_PERIODE);
+}
+
+async function _veilleNotifications() {
+ if (!_notifNavVoulue() || !_notifNavAutorisee()) return;
+ // Onglet au premier plan : la page elle-même montre déjà tout. Une
+ // notification pour un écran qu'on regarde est du bruit.
+ if (!ongletMasque()) { _notifNavDernierCompte = null; return; }
+ try {
+  const r = await apiFetch("/api/counters", { silent: true });
+  if (!r.ok) return;
+  const c = await r.json();
+  const ouvertes = (c.open_alerts_screening || 0) + (c.open_alerts_filtering || 0);
+  if (_notifNavDernierCompte === null) { _notifNavDernierCompte = ouvertes; return; }
+  const nouvelles = ouvertes - _notifNavDernierCompte;
+  _notifNavDernierCompte = ouvertes;
+  if (nouvelles > 0) _prevenirLePoste(nouvelles);
+ } catch (e) {
+  // Une veille qui échoue se tait : elle n'a pas d'écran où se plaindre.
+ }
+}
+
+function _prevenirLePoste(nouvelles) {
+ try {
+  const notif = new Notification("Fiskr", {
+   // Un NOMBRE, jamais un nom : ce message s'affiche hors de l'application.
+   body: nouvelles === 1 ? "1 nouvelle alerte à instruire."
+                         : `${nouvelles} nouvelles alertes à instruire.`,
+   tag: "fiskr-alertes",   // une seule bannière, remplacée, jamais empilée
+   icon: "/static/favicon.svg",
+  });
+  notif.onclick = () => {
+   window.focus();
+   switchTab("screening");
+   switchSubTab("screening", "alerts-screening");
+   notif.close();
+  };
+ } catch (e) { /* le navigateur a retiré la permission entre-temps */ }
+}
+
+function initNotificationsNavigateur() {
+ if (typeof Notification === "undefined") {
+  _direEtatNotifNav("Ce navigateur ne propose pas de notifications système.");
+  return;
+ }
+ if (_notifNavVoulue() && _notifNavAutorisee()) {
+  _demarrerVeilleNotifications();
+  _direEtatNotifNav("Actives sur ce poste, quand cet onglet est en arrière-plan.");
+ } else if (_notifNavVoulue()) {
+  // Voulues ici, mais la permission a disparu (réglages du navigateur,
+  // autre profil) : la case ne doit pas prétendre le contraire.
+  _direEtatNotifNav("En attente de l'autorisation du navigateur : recochez la case pour la redemander.");
+ } else {
+  _direEtatNotifNav("Désactivées sur ce poste.");
+ }
+}
+
 // ------------------ AIDE DES RACCOURCIS (touche ?) ------------------
 // Ctrl+K, Échap, Entrée sur les tris existaient — et rien ne les annonçait :
 // un raccourci que rien n'annonce est un raccourci que personne n'emploie.
@@ -1523,6 +1763,15 @@ async function ajouterNoteDeFiche(entityId) {
 // chacun découvre les nouveautés une fois, puis le point s'éteint.
 
 const FISKR_NOUVEAUTES = [
+ {
+ id: "2026-08-27-lot-13", date: "2026-08-27",
+ titre: "L'outil parle au bon moment",
+ points: [
+ "Les alertes qui arrivent pendant que l'onglet est en arrière-plan peuvent vous être signalées par le système.",
+ "Le message dit un nombre, jamais un nom : il s'affiche hors de l'application.",
+ "Une visite guidée accueille le premier passage, et se revoit depuis l'aide.",
+ ],
+ },
  {
  id: "2026-08-27-lot-12", date: "2026-08-27",
  titre: "Par quoi je commence",
@@ -1942,6 +2191,8 @@ document.addEventListener("DOMContentLoaded", () => {
  initAideRaccourcis();
  initNouveautes();
  initTriageClavier();
+ initNotificationsNavigateur();
+ initVisiteGuidee();
  // Confort des tableaux : colonnes masquées reposées, densité, combobox.
  _appliquerColonnes();
  initDensite();

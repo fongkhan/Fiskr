@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the tool speaks at the right moment (quality-of-life 13/N)
+Thirteenth batch, and the last of the inventory. Verified in a real browser.
+
+**Browser notifications** (n° 23) raise a question a compliance product cannot treat lightly: a system notification appears on top of any application, on a workstation that is sometimes shared, sometimes projected in a meeting room. "Ivan Ivanov matches the OFAC list" on that screen is a leak, not a service. **The message therefore carries a number and nothing else** — the application says the rest. A test forbids client and listed-party names from the notification body outright.
+
+Three more decisions hold this feature. The poll runs **only while the tab is hidden** and only if this workstation asked for it — the exact opposite condition of the on-screen poll, which stops precisely then, so nothing is added to anyone else's server load. Signals are **grouped, never one per alert**: a single client sharing a very common name can open hundreds at once, and the notification catalogue already holds that rule for e-mails. And the first reading only takes a baseline: announcing the alerts already there as news would wake someone for work they know about.
+
+The permission is requested **at the user's gesture, never on page load** — asked on load, browsers refuse it outright and so do users. A refusal at browser level is stated where it was asked and the setting returns to off: a ticked box that will never produce anything is worse than an unticked one.
+
+**Guided tour on first arrival** (n° 26). Commissioning guides the *operator* installing the product; nothing guided the first analyst, who arrives on a compliance application whose most useful gestures — the palette, the case file, keyboard triage — cannot be guessed. Each step **designates a real element by its id**, and a step whose element is absent — a screen this role cannot see, a collapsed panel — is **skipped**: pointing at a door that does not exist is worse than saying nothing, because the user searches, then concludes the tool lies. It imposes itself once and stays replayable from the shortcuts help; a tour you cannot see again is a tour you endure.
+
+13 tests pin the batch. With it, the quality-of-life inventory drawn up at the start of this programme is closed: 29 proposals delivered, 3 that already existed.
+
 ### Added — where to start (quality-of-life 12/N)
 Twelfth batch of the programme, verified in a real browser.
 
