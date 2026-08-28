@@ -291,25 +291,67 @@ def flush_digest(db, now: Optional[datetime] = None) -> Dict[str, Any]:
 
     sent, failed = 0, 0
     base = notify.public_url()
+    # Adresse -> raison de l'echec. Sert a marquer CHAQUE ligne d'apres ce qui
+    # lui est reellement arrive, au lieu d'un verdict global.
+    echecs: Dict[str, str] = {}
     for address, groups in per_recipient.items():
         # Categories dans l'ordre canonique du catalogue
         ordered = {c: groups[c] for c in CATEGORY_LABELS if c in groups}
         ordered.update({c: v for c, v in groups.items() if c not in ordered})
         text, html, total = notify.render_digest_email(ordered, link_base=base)
+        if not notify.smtp_configured():
+            echecs[address] = "SMTP non configuré."
+            continue
         try:
-            if notify.smtp_configured():
-                notify.send_email([address], f"[Fiskr] Récapitulatif — {total} évènement(s)", text, html_body=html)
-                sent += 1
+            notify.send_email([address], f"[Fiskr] Récapitulatif — {total} évènement(s)", text, html_body=html)
+            sent += 1
         except Exception as e:
             failed += 1
+            echecs[address] = str(e)
             logger.error(f"Récapitulatif en échec vers {address} : {e}")
 
-    marked = "SENT" if notify.smtp_configured() else "SKIPPED"
+    # Second canal, comme pour les evenements immediats. Il manquait ici : le
+    # recapitulatif ne partait QUE par courriel, donc une messagerie en panne
+    # emportait avec elle le seul resume des evenements de fort volume — et
+    # personne ne pouvait l'apprendre autrement.
+    porte_par_webhook = False
+    urls = notify._webhook_urls()
+    if urls:
+        par_categorie: Dict[str, List[Dict[str, Any]]] = {}
+        for groups in per_recipient.values():
+            for categorie, items in groups.items():
+                par_categorie.setdefault(categorie, []).extend(items)
+        enveloppe = {
+            "event": "digest", "label": "Récapitulatif périodique",
+            "at": now.isoformat() + "Z",
+            "data": {"evenements": len(queued), "destinataires": len(per_recipient),
+                     "par_categorie": par_categorie},
+        }
+        for url in urls:
+            try:
+                notify._post_webhook(url, enveloppe)
+                porte_par_webhook = True
+            except Exception as e:
+                logger.error(f"Récapitulatif — webhook en échec ({url}) : {e}")
+
+    # Le journal disait SENT des lors que SMTP etait CONFIGURE — pas envoye.
+    # Sur une installation dont la messagerie echoue, il affirmait donc que
+    # tout etait parti. Un journal d'envois qui ment est pire que pas de
+    # journal : c'est la piece qu'on produit pour prouver qu'on a prevenu.
     for row in queued:
-        row.status = marked
-        row.sent_at = now if marked == "SENT" else None
+        adresses = [a.strip() for a in (row.recipients or "").split(",") if a.strip()]
+        recues = [a for a in adresses if a not in echecs]
+        if recues or porte_par_webhook:
+            row.status, row.sent_at, row.error = "SENT", now, None
+        elif adresses:
+            row.status, row.sent_at = "FAILED", None
+            row.error = echecs.get(adresses[0], "Envoi impossible.")
+        else:
+            row.status, row.sent_at = "SKIPPED", None
+            row.error = "Aucun destinataire."
     db.commit()
-    return {"recipients": len(per_recipient), "events": len(queued), "sent": sent, "failed": failed}
+    return {"recipients": len(per_recipient), "events": len(queued),
+            "sent": sent, "failed": failed, "webhook": porte_par_webhook}
 
 
 def purge_deliveries(db, ttl_days: int = DELIVERY_TTL_DAYS) -> int:

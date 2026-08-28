@@ -82,6 +82,10 @@ def _base_de_donnees(db) -> Dict[str, Any]:
         "dans .env, puis redémarrez.")
 
 
+# Silence tolere du demon quand RIEN n'attend en file : au-dela, le travail
+# periodique (une passe par nuit) a manque son rendez-vous.
+_DEMON_SILENCE_TOLERE_H = 26
+
 def _demon(db) -> Dict[str, Any]:
     from fiskr import jobs as file_de_travaux
     mode = file_de_travaux.jobs_mode()
@@ -102,13 +106,47 @@ def _demon(db) -> Dict[str, Any]:
     if vivant:
         return _controle("demon", "Socle", "Démon travailleur", OK,
                          "Le démon bat ; les travaux de fond sont pris en charge.")
+
+    # Pas de battement. Le verdict se prend sur les CONSEQUENCES, pas sur le
+    # pouls : sur un hebergement mutualise, le demon travaille sa fenetre puis
+    # s'eteint, et l'hote recupere le processus. Mesure sur l'installation de
+    # production : controle BLOQUANT en permanence, pendant que les 41 sources
+    # tournaient chaque nuit et que les listes avaient moins d'un jour d'age.
+    # Un ecran qui crie au loup vingt-trois heures sur vingt-quatre apprend a
+    # ignorer le seul endroit cense dire la verite.
+    en_file = db.query(Job).filter(Job.status.in_(("QUEUED", "RUNNING"))).count()
+    if en_file:
+        return _controle(
+            "demon", "Socle", "Démon travailleur", BLOQUANT,
+            f"Aucun battement de cœur, et {en_file} travail(aux) en file : "
+            "personne ne les prend. Synchronisations, imports, cahiers de "
+            "tests et mises en production restent en attente.",
+            "Lancez le démon (python -m fiskr.worker) ou laissez l'API le "
+            "relancer (jobs.autostart). Vérifiez ensuite l'écran de diagnostic.",
+            "#settings/settings-integrations")
+
+    dernier = db.query(Job).filter(Job.heartbeat_at.isnot(None)).order_by(
+        Job.heartbeat_at.desc()).first()
+    depuis = None
+    if dernier and dernier.heartbeat_at:
+        depuis = datetime.utcnow() - dernier.heartbeat_at
+    if depuis is not None and depuis < timedelta(hours=_DEMON_SILENCE_TOLERE_H):
+        heures = int(depuis.total_seconds() // 3600)
+        return _controle(
+            "demon", "Socle", "Démon travailleur", OK,
+            f"Le démon ne bat pas en ce moment, mais rien n'attend en file et "
+            f"son dernier passage remonte à {heures} h. Sur un hébergement "
+            "mutualisé, c'est le fonctionnement normal : il travaille sa "
+            "fenêtre, puis l'hôte récupère le processus.")
+    jamais = "aucun passage enregistré" if depuis is None else \
+        f"dernier passage il y a plus de {_DEMON_SILENCE_TOLERE_H} h"
     return _controle(
         "demon", "Socle", "Démon travailleur", BLOQUANT,
-        "Mode `worker` exigé, mais aucun battement de cœur récent. Rien ne "
-        "s'exécutera : synchronisations, imports, cahiers de tests et mises en "
-        "production resteront en file.",
+        f"Aucun battement de cœur et {jamais}. Le travail périodique "
+        "— synchronisations, re-criblages, récapitulatifs — n'a plus lieu.",
         "Lancez le démon (python -m fiskr.worker) ou laissez l'API le relancer "
-        "(jobs.autostart). Vérifiez ensuite l'écran de diagnostic.")
+        "(jobs.autostart). Vérifiez ensuite l'écran de diagnostic.",
+        "#settings/settings-integrations")
 
 
 def _index_de_performance() -> Dict[str, Any]:
@@ -384,8 +422,59 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
         "#screening/screening-batch")
 
 
+# Fenetre d'observation des echecs de synchronisation : assez large pour
+# distinguer un incident d'une panne installee, assez courte pour qu'une
+# source reparee sorte vite du constat.
+_FENETRE_ECHECS_JOURS = 3
+_RAPPORTS_EXAMINES = 200
+
+def _sources_en_echec_repete(db) -> Dict[str, Any]:
+    """
+    Sources dont CHAQUE passage recent echoue.
+
+    Une source qui echoue une nuit est un incident ; une source qui echoue
+    toutes les nuits depuis des semaines est autre chose : c'est une alerte
+    qu'on a appris a ignorer. Et le jour ou une source vivante tombe, son
+    echec se range dans la meme pile, sans se distinguer.
+
+    Le controle ne juge pas de la CAUSE — cle d'API manquante, portail qui
+    refuse, adresse morte : elles se traitent differemment. Il dit seulement
+    ce que personne ne dit aujourd'hui : celle-ci n'a pas fonctionne une seule
+    fois sur ses N derniers passages.
+    """
+    from fiskr.database import SyncReport
+    from datetime import datetime, timedelta
+
+    depuis = datetime.utcnow() - timedelta(days=_FENETRE_ECHECS_JOURS)
+    lignes = db.query(SyncReport).filter(SyncReport.executed_at >= depuis) \
+               .order_by(SyncReport.executed_at.desc()).limit(_RAPPORTS_EXAMINES).all()
+    if not lignes:
+        return _controle("sources_echec", "Exploitation", "Sources en échec répété", OK,
+                         "Aucune synchronisation sur la période : rien à juger.")
+    passages: Dict[str, List[str]] = {}
+    for ligne in lignes:
+        passages.setdefault((ligne.source or "?").upper(), []).append(ligne.status or "?")
+    # Un seul passage ne fait pas une repetition : on exige au moins deux
+    # tentatives, toutes en echec.
+    condamnees = sorted(source for source, statuts in passages.items()
+                        if len(statuts) >= 2 and all(st == "ERROR" for st in statuts))
+    if not condamnees:
+        return _controle("sources_echec", "Exploitation", "Sources en échec répété", OK,
+                         f"Aucune source en échec systématique sur les {_FENETRE_ECHECS_JOURS} derniers jours.")
+    detail = ", ".join(f"{source} ({len(passages[source])} passages)" for source in condamnees)
+    return _controle(
+        "sources_echec", "Exploitation", "Sources en échec répété", ATTENTION,
+        f"{len(condamnees)} source(s) n'ont pas abouti une seule fois sur "
+        f"{_FENETRE_ECHECS_JOURS} jours : {detail}.",
+        "Traitez ou désactivez : une source qui échoue chaque nuit finit par "
+        "rendre invisible celle qui tombera vraiment. Le journal de "
+        "synchronisation donne l'erreur exacte de chaque passage.",
+        "#watchlists/watchlists-sources")
+
+
 _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
-                   _sources_automatiques, _homologation, _referentiel_clients,
+                   _sources_automatiques, _sources_en_echec_repete,
+                   _homologation, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
                    _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)

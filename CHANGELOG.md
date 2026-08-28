@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — an installation that says what is actually wrong (process audit, high-impact findings)
+
+A measured audit of the production installation and of the repository turned up nine findings; the four marked high-impact are treated here. All four share one defect: **the tool knew something was broken and said nothing, or said the opposite.**
+
+**A closed door is not a busy line.** EUR-Lex answers `202` with an empty body — a documented, deliberate refusal that will be identical one second later. The retry loop treated it like a network hiccup and slept between attempts: with the per-source budget of six attempts backing off five seconds, that is **fifteen seconds of pure waiting per run, twice a day**, for a refusal known in advance. The replay is kept — the *repetition* is what makes the proof, and abandoning on the first `202` would confuse a closed door with a slow one — but the wait between two closed doors is gone. Transport errors keep their patience untouched, pinned by a test that watches the recorded sleeps.
+
+**A source that fails every time is not an incident, it is a state of the installation.** Commissioning judged each source on its configuration and never on its results, so a source failing at every single pass for days showed as correctly configured. A new control reads the last passes over a three-day window and names the sources whose **every** attempt failed — a source that succeeded once is not named, because a single failure is a hiccup, and an alarm that cries wolf is one people learn to ignore.
+
+**The daemon was judged on its heartbeat rather than on its consequences.** "The daemon is not beating" is not by itself a fault: nothing may be waiting for it. It now blocks when jobs are actually queued or running with nobody to take them, and when the last pass is more than twenty-six hours old — a nightly daemon is allowed to be quiet at noon. Otherwise it says so plainly, rather than raising an alarm nobody can act on.
+
+**The notification journal claimed sends that never happened.** `flush_digest` marked every queued row `SENT` as soon as SMTP was *configured*, without looking at whether the send succeeded — so an installation with a broken SMTP left a journal full of successful digests and an inbox with none. Each row is now marked on its own outcome: `SENT` when at least one address received it or a webhook carried it, `FAILED` with the transport's own message, `SKIPPED` when there was no recipient at all. And the digest gained the second channel the immediate events already had: when SMTP is down, the webhook carries the summary rather than the summary being lost.
+
+One measurement on the suite itself along the way: the test helper that zeroes retry back-off never zeroed the per-source overrides, so `tests/test_sync.py` genuinely slept through its own retries — **20 seconds recovered** on every run of the file, without weakening a single assertion.
+
+13 tests pin the batch.
+
 ### Added — the tool speaks at the right moment (quality-of-life 13/N)
 Thirteenth batch, and the last of the inventory. Verified in a real browser.
 

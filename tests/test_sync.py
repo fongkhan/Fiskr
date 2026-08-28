@@ -535,10 +535,23 @@ from fiskr.sync import (
 
 
 def _zero_backoff_config(monkeypatch):
-    """Configuration reseau sans attente entre tentatives (tests instantanes)."""
+    """
+    Configuration reseau sans attente entre tentatives (tests instantanes).
+
+    Le budget GLOBAL ne suffit pas : certaines sources portent une surcharge
+    (`_SOURCE_NETWORK_DEFAULTS`, appliquee d'apres l'hote de l'URL), et une
+    adresse EUR-Lex heritait donc de ses 5 secondes malgre ce helper. La
+    promesse « tests instantanes » etait fausse pour ces chemins-la : 20 s de
+    sommeil reel dans la suite, a chaque execution. Un helper qui pretend
+    supprimer l'attente et ne le fait pas est le meme defaut que ce produit
+    chasse partout : le reglage qu'on pose et qui n'agit pas.
+    """
     cfg = get_sync_config()
     cfg["network"]["backoff_seconds"] = 0
     monkeypatch.setattr(sync_mod, "get_sync_config", lambda: cfg)
+    monkeypatch.setattr(sync_mod, "_SOURCE_NETWORK_DEFAULTS",
+                        {source: {**budget, "backoff_seconds": 0}
+                         for source, budget in sync_mod._SOURCE_NETWORK_DEFAULTS.items()})
     return cfg
 
 

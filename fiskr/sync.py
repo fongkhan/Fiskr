@@ -554,6 +554,15 @@ def _with_retries(operation, url: str, retries: int, backoff: float):
                     f"{retries - attempt} tentative(s) restante(s).")
                 break
             if attempt < retries:
+                # Porte close (202 a corps vide) : on rejoue pour CONSTATER la
+                # repetition — c'est elle qui fait la preuve — mais sans
+                # attendre entre deux. La regle d'abandon ci-dessus dit deja
+                # que la patience n'y change rien ; la payer quand meme, c'est
+                # tenir la fenetre de synchronisation ouverte pour rien. Mesure
+                # sur l'installation de production : 15 s par passage, deux
+                # fois par jour, pour un refus connu d'avance.
+                if getattr(e, "porte_close", False):
+                    continue
                 wait = backoff * (attempt + 1)
                 asked = getattr(e, "retry_after", None)
                 if asked is not None:
