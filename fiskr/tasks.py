@@ -391,6 +391,7 @@ def resource_simulation_task(ctx: jobs.JobContext, *, panel_snapshot_id: str,
 def ingest_task(ctx: jobs.JobContext, *, snapshot_id: str, temp_path: str,
                 original_filename: str, file_type: str, delimiter: str = ",",
                 ssie_selector_overrides=None, ssie_source_format=None,
+                column_mapping=None,
                 progress_id: Optional[str] = None, username: str = "?") -> None:
     """
     Import d'un fichier deja televerse : parsing, Quality Gate, persistance,
@@ -407,7 +408,8 @@ def ingest_task(ctx: jobs.JobContext, *, snapshot_id: str, temp_path: str,
             raise ValueError("Snapshot introuvable (supprimé avant l'import ?).")
         result = _ingest_parse_and_finalize(
             session, snap, temp_path, original_filename, file_type, delimiter,
-            ssie_selector_overrides, ssie_source_format, progress_id, username)
+            ssie_selector_overrides, ssie_source_format, progress_id, username,
+            column_mapping=column_mapping)
         ctx.set_result(result)
     finally:
         session.close()

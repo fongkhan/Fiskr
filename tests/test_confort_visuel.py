@@ -104,7 +104,11 @@ def _nouveautes():
                 break
     else:
         raise AssertionError("littéral FISKR_NOUVEAUTES non terminé")
-    bloc = re.sub(r'([{,]\s*)([a-z_][a-z0-9_]*)\s*:', r'\1"\2":', bloc)
+    # Une clé JavaScript est suivie d'une VALEUR (guillemet, crochet, accolade).
+    # Sans cette exigence, une phrase française comme « ..., vous : vos alertes »
+    # se ferait prendre pour une clé et le littéral deviendrait illisible — le
+    # test casserait sur du contenu parfaitement correct.
+    bloc = re.sub(r'([{,]\s*)([a-z_][a-z0-9_]*)\s*:\s*(?=["\[{])', r'\1"\2": ', bloc)
     bloc = re.sub(r",(\s*[}\]])", r"\1", bloc)
     return json.loads(bloc)
 

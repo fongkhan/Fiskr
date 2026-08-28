@@ -3742,22 +3742,25 @@ def parse_worldbank_debarred_json(file_path: str) -> Generator[Dict[str, Any], N
 
 def parse_csv_file(file_path: str, delimiter: str = ",", mapping_dict: dict = None) -> Generator[Dict[str, Any], None, None]:
     """
-    Parses Client or Watchlist CSV dataset dynamically.
-    Uses custom delimiters and maps columns according to config.
+    Lit un CSV clients ou liste. Les en-tetes sont repris tels quels ; une
+    correspondance optionnelle `{champ_attendu: colonne_du_fichier}` vient
+    par-dessus.
+
+    L'ordre compte : on RECOPIE d'abord toutes les colonnes, puis on applique
+    la correspondance. La version precedente ne gardait QUE les champs
+    mappes — une correspondance partielle (« nom » -> client_last_name)
+    faisait donc disparaitre silencieusement client_id, la nationalite et le
+    reste. Un assistant de correspondance construit precisement des
+    correspondances partielles : cablee telle quelle, l'aide aurait cree la
+    perte de donnees qu'elle pretendait eviter.
     """
     with open(file_path, mode="r", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter=delimiter)
         for row in reader:
-            # Map columns
-            mapped_row = {}
-            if mapping_dict:
-                for target, source in mapping_dict.items():
+            mapped_row = {k: v for k, v in row.items()}
+            for target, source in (mapping_dict or {}).items():
+                if source:
                     mapped_row[target] = row.get(source, "")
-            else:
-                # Direct mirror map based on headers
-                for k, v in row.items():
-                    mapped_row[k] = v
-                    
             yield mapped_row
 
 

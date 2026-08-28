@@ -1413,6 +1413,246 @@ function initCopierEnUnClic() {
  });
 }
 
+// ------------------ VISITE GUIDÉE (premier passage) ------------------
+//
+// La mise en service guide l'EXPLOITANT qui installe. Rien ne guidait le
+// premier analyste : il arrive sur une application de conformité dont les
+// gestes les plus utiles — la palette, le dossier d'alerte, le triage
+// clavier — ne se devinent pas.
+//
+// Deux règles tiennent cette visite.
+//
+// 1. Chaque étape DÉSIGNE un élément réel de la page, par son identifiant.
+//    Une étape dont l'élément est absent — un écran que ce rôle ne voit pas,
+//    une carte masquée — est SAUTÉE. Montrer du doigt une porte qui n'existe
+//    pas est pire que se taire : l'utilisateur cherche, puis conclut que
+//    l'outil ment.
+// 2. Elle ne s'impose qu'une fois, et reste ouvrable ensuite depuis l'aide
+//    des raccourcis : une visite qu'on ne peut plus revoir est une visite
+//    qu'on subit.
+
+const _VISITE_CLE = "fiskr_visite_vue";
+
+const VISITE_ETAPES = [
+ { cible: "nav-btn-home", titre: "Votre journée",
+   texte: "L'accueil s'ouvre sur ce qui vous attend : vos alertes, ce que vous pouvez valider, ce qui revient. Les panneaux se composent à votre main." },
+ { cible: "nav-btn-screening", titre: "La file d'alertes",
+   texte: "Le criblage des clients ouvre ici. La file se lit de haut en bas : priorité, puis échéance. j et k la parcourent au clavier, o instruit, r reporte." },
+ { cible: "nav-btn-watchlist-mgmt", titre: "Les listes",
+   texte: "Sources officielles, imports et homologation. Une liste n'entre en production qu'après approbation : c'est là que la comparaison des fiches se lit." },
+ { cible: "nouveautes-btn", titre: "Ce qui change",
+   texte: "Les nouveautés de l'outil s'annoncent ici. Un point apparaît tant que vous ne les avez pas ouvertes." },
+ { cible: "theme-toggle-btn", titre: "À votre confort",
+   texte: "Thème sombre, clair ou celui du système ; juste à côté, la densité d'affichage. Vos filtres et vos colonnes sont retenus par tableau." },
+];
+
+let _visiteIndex = 0;
+let _visiteActive = [];
+
+function _elementDeVisite(etape) {
+ const el = document.getElementById(etape.cible);
+ if (!el) return null;
+ // Masqué par le rôle, replié, hors écran : une étape qui ne se voit pas ne
+ // se montre pas.
+ if (el.offsetParent === null && getComputedStyle(el).position !== "fixed") return null;
+ return el;
+}
+
+function demarrerVisiteGuidee(depuisLAide = false) {
+ _visiteActive = VISITE_ETAPES.filter(_elementDeVisite);
+ if (!_visiteActive.length) {
+  if (depuisLAide) showToast("La visite n'a rien à montrer sur cet écran.", "info");
+  return;
+ }
+ _visiteIndex = 0;
+ _afficherEtapeDeVisite();
+}
+
+function _afficherEtapeDeVisite() {
+ _fermerVisiteGuidee(false);
+ const etape = _visiteActive[_visiteIndex];
+ const el = etape && _elementDeVisite(etape);
+ if (!el) { terminerVisiteGuidee(); return; }
+ const zone = el.getBoundingClientRect();
+ const voile = document.createElement("div");
+ voile.id = "visite-voile";
+ voile.className = "visite-voile";
+ voile.innerHTML = `
+  <div class="visite-halo" style="top:${zone.top - 6}px; left:${zone.left - 6}px; width:${zone.width + 12}px; height:${zone.height + 12}px;"></div>
+  <div class="visite-bulle" role="dialog" aria-labelledby="visite-titre" style="top:${Math.min(zone.bottom + 14, window.innerHeight - 200)}px; left:${Math.min(Math.max(zone.left, 12), window.innerWidth - 340)}px;">
+   <h3 id="visite-titre">${escapeHtml(etape.titre)}</h3>
+   <p>${escapeHtml(etape.texte)}</p>
+   <div class="visite-pied">
+    <span class="visite-compte">${_visiteIndex + 1} / ${_visiteActive.length}</span>
+    <span>
+     <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="terminerVisiteGuidee()">Passer</button>
+     <button type="button" class="btn btn-sm btn-primary" onclick="etapeSuivanteDeVisite()">${_visiteIndex + 1 === _visiteActive.length ? "Terminer" : "Suivant"}</button>
+    </span>
+   </div>
+  </div>`;
+ document.body.appendChild(voile);
+ voile.addEventListener("click", (e) => { if (e.target === voile) terminerVisiteGuidee(); });
+}
+
+function etapeSuivanteDeVisite() {
+ _visiteIndex += 1;
+ if (_visiteIndex >= _visiteActive.length) { terminerVisiteGuidee(); return; }
+ _afficherEtapeDeVisite();
+}
+
+function _fermerVisiteGuidee(marquer) {
+ const voile = document.getElementById("visite-voile");
+ if (voile) voile.remove();
+ if (marquer) {
+  try { localStorage.setItem(_VISITE_CLE, "1"); } catch (e) { /* stockage indisponible */ }
+ }
+}
+
+function terminerVisiteGuidee() {
+ _fermerVisiteGuidee(true);
+}
+
+function initVisiteGuidee() {
+ let vue = true;
+ try { vue = localStorage.getItem(_VISITE_CLE) === "1"; } catch (e) { vue = true; }
+ if (vue) return;
+ // Après le premier rendu : les éléments doivent exister pour être désignés.
+ setTimeout(() => demarrerVisiteGuidee(), 1500);
+}
+
+// ------------------ NOTIFICATIONS DU NAVIGATEUR ------------------
+//
+// Une alerte critique qui arrive pendant qu'on travaille ailleurs n'atteint
+// personne : l'onglet compte bien les alertes dans son titre, encore
+// faut-il regarder l'onglet.
+//
+// Trois décisions structurantes.
+//
+// 1. AUCUN NOM dans le message. Une notification du système s'affiche
+//    par-dessus n'importe quelle application, sur un poste parfois partagé
+//    ou projeté. « Ivan Ivanov correspond à la liste OFAC » sur l'écran
+//    d'une salle de réunion est une fuite, pas un service. Le message dit un
+//    NOMBRE, l'application dit le reste.
+// 2. Le sondage ne tourne QUE quand l'onglet est masqué et que le poste l'a
+//    demandé — l'inverse exact du sondage d'écran, qui s'arrête à ce
+//    moment-là. Rien n'est ajouté à la charge du serveur pour les autres.
+// 3. Groupées, jamais une par alerte : un homonyme d'un nom très courant
+//    peut en ouvrir des centaines d'un coup, et le catalogue de
+//    notifications tient déjà cette règle pour les courriels.
+
+const _NOTIF_NAV_CLE = "fiskr_notif_navigateur";
+const _NOTIF_NAV_PERIODE = 60_000;
+let _notifNavTimer = null;
+let _notifNavDernierCompte = null;
+
+function _notifNavAutorisee() {
+ return typeof Notification !== "undefined" && Notification.permission === "granted";
+}
+
+function _notifNavVoulue() {
+ try { return localStorage.getItem(_NOTIF_NAV_CLE) === "1"; } catch (e) { return false; }
+}
+
+function _direEtatNotifNav(message) {
+ const el = document.getElementById("notif-navigateur-etat");
+ if (el) el.textContent = message;
+ const boite = document.getElementById("notif-navigateur");
+ if (boite) boite.checked = _notifNavVoulue() && _notifNavAutorisee();
+}
+
+async function basculerNotificationsNavigateur(voulu) {
+ if (typeof Notification === "undefined") {
+  _direEtatNotifNav("Ce navigateur ne propose pas de notifications système.");
+  return;
+ }
+ if (!voulu) {
+  try { localStorage.setItem(_NOTIF_NAV_CLE, "0"); } catch (e) { /* stockage indisponible */ }
+  _arreterVeilleNotifications();
+  _direEtatNotifNav("Désactivées sur ce poste.");
+  return;
+ }
+ // La permission ne se demande QU'À ce moment : sur un chargement de page,
+ // les navigateurs la refusent d'office et l'utilisateur la refuse aussi.
+ let permission = Notification.permission;
+ if (permission === "default") {
+  try { permission = await Notification.requestPermission(); } catch (e) { permission = "denied"; }
+ }
+ if (permission !== "granted") {
+  // Un refus au niveau du navigateur ne se rattrape pas depuis la page : le
+  // dire, plutôt que laisser une case cochée qui ne produira jamais rien.
+  try { localStorage.setItem(_NOTIF_NAV_CLE, "0"); } catch (e) { /* stockage indisponible */ }
+  _direEtatNotifNav("Refusées par le navigateur : réautorisez ce site dans ses réglages, puis revenez ici.");
+  return;
+ }
+ try { localStorage.setItem(_NOTIF_NAV_CLE, "1"); } catch (e) { /* stockage indisponible */ }
+ _demarrerVeilleNotifications();
+ _direEtatNotifNav("Actives sur ce poste, quand cet onglet est en arrière-plan.");
+}
+
+function _arreterVeilleNotifications() {
+ if (_notifNavTimer) { clearInterval(_notifNavTimer); _notifNavTimer = null; }
+ _notifNavDernierCompte = null;
+}
+
+function _demarrerVeilleNotifications() {
+ if (_notifNavTimer || !_notifNavVoulue() || !_notifNavAutorisee()) return;
+ _notifNavTimer = setInterval(_veilleNotifications, _NOTIF_NAV_PERIODE);
+}
+
+async function _veilleNotifications() {
+ if (!_notifNavVoulue() || !_notifNavAutorisee()) return;
+ // Onglet au premier plan : la page elle-même montre déjà tout. Une
+ // notification pour un écran qu'on regarde est du bruit.
+ if (!ongletMasque()) { _notifNavDernierCompte = null; return; }
+ try {
+  const r = await apiFetch("/api/counters", { silent: true });
+  if (!r.ok) return;
+  const c = await r.json();
+  const ouvertes = (c.open_alerts_screening || 0) + (c.open_alerts_filtering || 0);
+  if (_notifNavDernierCompte === null) { _notifNavDernierCompte = ouvertes; return; }
+  const nouvelles = ouvertes - _notifNavDernierCompte;
+  _notifNavDernierCompte = ouvertes;
+  if (nouvelles > 0) _prevenirLePoste(nouvelles);
+ } catch (e) {
+  // Une veille qui échoue se tait : elle n'a pas d'écran où se plaindre.
+ }
+}
+
+function _prevenirLePoste(nouvelles) {
+ try {
+  const notif = new Notification("Fiskr", {
+   // Un NOMBRE, jamais un nom : ce message s'affiche hors de l'application.
+   body: nouvelles === 1 ? "1 nouvelle alerte à instruire."
+                         : `${nouvelles} nouvelles alertes à instruire.`,
+   tag: "fiskr-alertes",   // une seule bannière, remplacée, jamais empilée
+   icon: "/static/favicon.svg",
+  });
+  notif.onclick = () => {
+   window.focus();
+   switchTab("screening");
+   switchSubTab("screening", "alerts-screening");
+   notif.close();
+  };
+ } catch (e) { /* le navigateur a retiré la permission entre-temps */ }
+}
+
+function initNotificationsNavigateur() {
+ if (typeof Notification === "undefined") {
+  _direEtatNotifNav("Ce navigateur ne propose pas de notifications système.");
+  return;
+ }
+ if (_notifNavVoulue() && _notifNavAutorisee()) {
+  _demarrerVeilleNotifications();
+  _direEtatNotifNav("Actives sur ce poste, quand cet onglet est en arrière-plan.");
+ } else if (_notifNavVoulue()) {
+  // Voulues ici, mais la permission a disparu (réglages du navigateur,
+  // autre profil) : la case ne doit pas prétendre le contraire.
+  _direEtatNotifNav("En attente de l'autorisation du navigateur : recochez la case pour la redemander.");
+ } else {
+  _direEtatNotifNav("Désactivées sur ce poste.");
+ }
+}
+
 // ------------------ AIDE DES RACCOURCIS (touche ?) ------------------
 // Ctrl+K, Échap, Entrée sur les tris existaient — et rien ne les annonçait :
 // un raccourci que rien n'annonce est un raccourci que personne n'emploie.
@@ -1429,6 +1669,92 @@ function initAideRaccourcis() {
  });
 }
 
+// ------------------ NOTES INTERNES SUR UNE FICHE LISTÉE ------------------
+//
+// Ce que l'analyste apprend en instruisant — « homonymie établie pour le
+// client X », « société dissoute en 2019 » — restait dans sa tête ou dans le
+// commentaire d'un dossier clos que personne ne relit. Le suivant refaisait
+// le même travail.
+//
+// La phrase « sans effet sur le criblage » n'est pas un ornement : sans elle,
+// quelqu'un écrira une note en croyant que l'alerte ne reviendra pas. C'est
+// la liste blanche qui agit sur le moteur, jamais une note.
+
+function _lignesDeNotes(notes) {
+ const lignes = (notes || []).map((n) => `
+  <div class="note-fiche">
+   <small>${n.created_at ? new Date(n.created_at).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(n.created_by)}</strong></small>
+   <div>${marquerLesCitations(n.note)}</div>
+  </div>`).join("");
+ return lignes || '<small style="color: var(--text-muted);">Aucune note sur cette fiche.</small>';
+}
+
+function blocNotesDeFiche(entityId, notes) {
+ if (!entityId) return "";
+ return `
+ <h3 style="font-size: 0.95rem; margin: 1rem 0 0.35rem;">Notes internes sur la fiche listée</h3>
+ <p class="section-desc" style="margin-bottom: 0.5rem;">Mémoire d'instruction partagée, attachée à la fiche et non à ce dossier : elle survit aux mises à jour de liste. <strong>Sans effet sur le criblage : seule la liste blanche supprime des alertes.</strong></p>
+ <div id="notes-fiche-liste" style="max-height: 180px; overflow-y: auto;">${_lignesDeNotes(notes)}</div>
+ <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="ajouterNoteDeFiche('${escapeHtml(entityId)}')"> Ajouter une note</button>`;
+}
+
+async function chargerSectionNotes(entityId) {
+ const section = document.getElementById("entity-notes-section");
+ if (!section) return;
+ const items = await chargerNotesDeFiche(entityId);
+ // Notes indisponibles : le dire. Une section vide se lirait « aucune note »,
+ // et c'est exactement la lecture qu'il ne faut pas induire.
+ section.innerHTML = items === null
+  ? '<p class="section-desc" style="margin-top: 1rem;">Notes internes indisponibles pour le moment.</p>'
+  : blocNotesDeFiche(entityId, items);
+}
+
+async function chargerNotesDeFiche(entityId) {
+ try {
+  const reponse = await apiFetch(`/api/watchlist/notes/${encodeURIComponent(entityId)}`);
+  if (!reponse.ok) return null;
+  return (await reponse.json()).items || [];
+ } catch (e) {
+  return null;
+ }
+}
+
+async function ajouterNoteDeFiche(entityId) {
+ const note = await promptDialog("Note interne sur cette fiche", {
+  message: "Visible de tous les analystes, attachée à la fiche listée. Sans effet sur le criblage : seule la liste blanche supprime des alertes.",
+  textarea: true,
+  placeholder: "Ex. homonymie établie avec le client 12345, pièces au dossier…",
+ });
+ if (note === null) return;
+ try {
+  const reponse = await apiFetch(`/api/watchlist/notes/${encodeURIComponent(entityId)}`, {
+   method: "POST",
+   headers: { "Content-Type": "application/json" },
+   body: JSON.stringify({ note }),
+  });
+  const data = await reponse.json();
+  if (!reponse.ok) {
+   showToast("Erreur : " + (data.detail || "Note refusée."), "error");
+   return;
+  }
+  showToast(data.message, "success");
+  // Le dossier d'alerte ouvert se recharge ; la fiche listée rafraîchit sa
+  // liste sans tout redessiner.
+  const modaleAlerte = document.getElementById("alert-modal");
+  if (modaleAlerte && _modaleVisible(modaleAlerte) && currentAlertId) {
+   openAlertModal(currentAlertId);
+   return;
+  }
+  const conteneur = document.getElementById("notes-fiche-liste");
+  if (conteneur) {
+   const items = await chargerNotesDeFiche(entityId);
+   if (items) conteneur.innerHTML = _lignesDeNotes(items);
+  }
+ } catch (e) {
+  showToast("Erreur réseau pendant l'enregistrement de la note.", "error");
+ }
+}
+
 // ------------------ NOUVEAUTÉS (ce qui a changé, annoncé dans l'outil) ------------------
 // Le journal des modifications vit dans le dépôt ; personne en agence n'ira
 // l'y lire. Ces entrées sont rédigées à chaque lot livré, du plus récent au
@@ -1437,6 +1763,51 @@ function initAideRaccourcis() {
 // chacun découvre les nouveautés une fois, puis le point s'éteint.
 
 const FISKR_NOUVEAUTES = [
+ {
+ id: "2026-08-27-lot-13", date: "2026-08-27",
+ titre: "L'outil parle au bon moment",
+ points: [
+ "Les alertes qui arrivent pendant que l'onglet est en arrière-plan peuvent vous être signalées par le système.",
+ "Le message dit un nombre, jamais un nom : il s'affiche hors de l'application.",
+ "Une visite guidée accueille le premier passage, et se revoit depuis l'aide.",
+ ],
+ },
+ {
+ id: "2026-08-27-lot-12", date: "2026-08-27",
+ titre: "Par quoi je commence",
+ points: [
+ "L'accueil s'ouvre sur ce qui vous attend, vous : vos alertes, ce que vous pouvez valider, ce qui revient.",
+ "« À valider par moi » exclut vos propres propositions, que la règle des quatre yeux vous interdit de valider.",
+ "Les panneaux existants restent : votre disposition personnelle n'est pas touchée.",
+ ],
+ },
+ {
+ id: "2026-08-27-lot-11", date: "2026-08-27",
+ titre: "Associer les colonnes, une fois pour toutes",
+ points: [
+ "Quand les en-têtes ne correspondent pas, associez-les vous-même dans l'aperçu.",
+ "La correspondance est mémorisée pour les fichiers de la même forme, et proposée la fois suivante.",
+ "Elle est proposée, jamais appliquée d'elle-même : vous voyez ce que vous acceptez.",
+ ],
+ },
+ {
+ id: "2026-08-27-lot-10", date: "2026-08-27",
+ titre: "Voir ce que l'import a compris, avant de l'écrire",
+ points: [
+ "« Aperçu avant import » montre les dix premières lignes telles que le moteur les comprend.",
+ "Un en-tête ou un séparateur qui ne correspond pas se voit avant l'import, plus après.",
+ "L'import dit désormais combien de lignes le contrôle qualité a écartées, et pourquoi.",
+ ],
+ },
+ {
+ id: "2026-08-27-lot-9", date: "2026-08-27",
+ titre: "Ce que vous savez ne reste plus dans votre tête",
+ points: [
+ "Citez un collègue avec @son-nom dans un commentaire : il est prévenu immédiatement.",
+ "Une note interne sur une fiche listée survit aux mises à jour de liste.",
+ "Un nom mal écrit ne prévient personne — et l'outil vous le dit tout de suite.",
+ ],
+ },
  {
  id: "2026-08-26-lot-8", date: "2026-08-26",
  titre: "Comparer deux versions d'une fiche listée",
@@ -1820,6 +2191,8 @@ document.addEventListener("DOMContentLoaded", () => {
  initAideRaccourcis();
  initNouveautes();
  initTriageClavier();
+ initNotificationsNavigateur();
+ initVisiteGuidee();
  // Confort des tableaux : colonnes masquées reposées, densité, combobox.
  _appliquerColonnes();
  initDensite();
@@ -1841,6 +2214,17 @@ document.addEventListener("DOMContentLoaded", () => {
  // l'administrateur), une seule fois, sans bloquer le reste du chargement.
  setTimeout(verifierMiseEnService, 1200);
  initListTypeControls();
+ // Le bouton d'aperçu suit le type de fichier sélectionné, dès l'arrivée.
+ if (document.getElementById("ingest-file-type")) toggleSsieOptions();
+ // Un nouveau fichier, une nouvelle correspondance : celle d'avant visait
+ // les colonnes d'un autre fichier.
+ const champFichier = document.getElementById("ingest-file");
+ if (champFichier) champFichier.addEventListener("change", () => {
+  _correspondanceCourante = {};
+  _derniereMemoire = null;
+  const zone = document.getElementById("apercu-import");
+  if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
+ });
  populateManualListSelects();
  initSidebarCollapse();
  // Filtres du tableau des sources (recherche + famille + état)
@@ -2790,6 +3174,146 @@ function toggleSsieOptions() {
  const fileType = document.getElementById("ingest-file-type").value;
  const panel = document.getElementById("ssie-options");
  panel.classList.toggle("hidden", fileType !== "WATCHLIST_SSIE");
+ // L'aperçu ne couvre que les imports CSV — ceux dont les colonnes peuvent
+ // être mal comprises. Le proposer ailleurs laisserait croire qu'il y a un
+ // choix à faire là où le format est publié par l'émetteur.
+ const btn = document.getElementById("apercu-ingest-btn");
+ if (btn) btn.classList.toggle("hidden", !TYPES_AVEC_APERCU.includes(fileType));
+ const zone = document.getElementById("apercu-import");
+ if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
+ // Une correspondance appartient à un fichier et à un type : la garder au
+ // changement l'appliquerait à des colonnes qui n'existent plus.
+ _correspondanceCourante = {};
+ _derniereMemoire = null;
+}
+
+// ------------------ APERÇU AVANT IMPORT ------------------
+// On téléversait un fichier et on découvrait APRÈS coup si les colonnes
+// avaient été comprises. Sur une liste de sanctions, une colonne de nom mal
+// reconnue ne produit pas une erreur : elle produit une liste en production
+// qui ne correspond à rien, et un criblage qui répond « aucune correspondance »
+// sans jamais se plaindre.
+
+const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU"];
+
+// Correspondance en cours d'édition : {champ_du_moteur: colonne_du_fichier}.
+// L'aperçu la rejoue à chaque application, l'import la porte, et le serveur
+// ne la mémorise qu'après un import abouti.
+let _correspondanceCourante = {};
+// Correspondance déjà mémorisée pour cette forme de fichier, proposée par
+// le serveur : retenue ici pour que « Reprendre » ait quoi reprendre.
+let _derniereMemoire = null;
+
+function _rendreAssistant(data) {
+ const colonnes = data.colonnes_du_fichier || [];
+ const champs = data.champs_attendus || [];
+ if (!champs.length || !colonnes.length) return "";
+ const appliquee = data.correspondance_appliquee || {};
+ const memorisee = data.correspondance_memorisee;
+ const options = (choisi) => ['<option value="">— non associé —</option>']
+  .concat(colonnes.map((c) => `<option value="${escapeHtml(c)}"${c === choisi ? " selected" : ""}>${escapeHtml(c)}</option>`))
+  .join("");
+ const lignes = champs.map((champ) => `<tr>
+   <td><code>${escapeHtml(champ)}</code></td>
+   <td><select data-champ="${escapeHtml(champ)}" aria-label="Colonne pour ${escapeHtml(champ)}">${options(appliquee[champ] || "")}</select></td>
+  </tr>`).join("");
+ // Une correspondance mémorisée se PROPOSE, elle ne s'applique jamais d'elle-même :
+ // l'utilisateur doit voir ce qu'il accepte.
+ const memo = memorisee
+  ? `<p class="section-desc"><span>Une correspondance a déjà servi pour un fichier de cette forme.</span>
+     <button type="button" class="btn btn-sm btn-secondary" onclick="appliquerCorrespondanceMemorisee()">Reprendre la correspondance mémorisée</button></p>`
+  : "";
+ return `<details class="assistant-colonnes"${data.aucun_champ_reconnu ? " open" : ""}>
+   <summary>Associer les colonnes du fichier aux champs du moteur</summary>
+   ${memo}
+   <p class="section-desc">À gauche, ce que le moteur lit ; à droite, la colonne de votre fichier qui le remplit. Les colonnes non associées restent dans le fichier, elles ne sont pas perdues.</p>
+   <div class="table-container" style="max-height: 240px;">
+    <table><thead><tr><th>Champ du moteur</th><th>Colonne du fichier</th></tr></thead><tbody>${lignes}</tbody></table>
+   </div>
+   <button type="button" class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="appliquerCorrespondance()">Revoir l'aperçu avec cette correspondance</button>
+  </details>`;
+}
+
+function _correspondanceSaisie() {
+ const sortie = {};
+ document.querySelectorAll(".assistant-colonnes select[data-champ]").forEach((sel) => {
+  if (sel.value) sortie[sel.dataset.champ] = sel.value;
+ });
+ return sortie;
+}
+
+async function appliquerCorrespondance() {
+ _correspondanceCourante = _correspondanceSaisie();
+ await apercuAvantImport();
+}
+
+function appliquerCorrespondanceMemorisee() {
+ const memo = _derniereMemoire || {};
+ for (const [champ, colonne] of Object.entries(memo)) {
+  const sel = document.querySelector(`.assistant-colonnes select[data-champ="${CSS.escape(champ)}"]`);
+  if (sel) sel.value = colonne;
+ }
+ appliquerCorrespondance();
+}
+
+async function apercuAvantImport() {
+ const zone = document.getElementById("apercu-import");
+ const fichier = document.getElementById("ingest-file").files[0];
+ if (!fichier) {
+  showToast("Choisissez d'abord un fichier.", "error");
+  return;
+ }
+ const donnees = new FormData();
+ donnees.append("file", fichier);
+ donnees.append("file_type", document.getElementById("ingest-file-type").value);
+ donnees.append("delimiter", document.getElementById("ingest-delimiter").value || ",");
+ if (Object.keys(_correspondanceCourante).length) {
+  donnees.append("column_mapping", JSON.stringify(_correspondanceCourante));
+ }
+ zone.classList.remove("hidden");
+ zone.innerHTML = '<p class="section-desc">Lecture des premières lignes…</p>';
+ try {
+  const reponse = await apiFetch("/api/ingest/preview", { method: "POST", body: donnees });
+  const data = await reponse.json();
+  if (!reponse.ok) {
+   zone.innerHTML = `<p class="section-desc" style="color: var(--color-alert);">${escapeHtml(data.detail || "Aperçu impossible.")}</p>`;
+   return;
+  }
+  zone.innerHTML = rendreApercuImport(data);
+ } catch (e) {
+  zone.innerHTML = '<p class="section-desc" style="color: var(--color-alert);">Aperçu indisponible : réessayez.</p>';
+ }
+}
+
+function rendreApercuImport(data) {
+ const lignes = data.lignes || [];
+ if (!lignes.length) {
+  return '<p class="section-desc">Aucune ligne lisible dans ce fichier : vérifiez le séparateur.</p>';
+ }
+ const champs = Object.keys(lignes[0].compris || {});
+ const entetes = champs.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+ const corps = lignes.map((l) => `<tr class="${l.accepte ? "" : "apercu-refus"}">
+   <td>${l.accepte ? '<span class="apercu-verdict-ok">Acceptée</span>' : '<span class="apercu-verdict-ko">Écartée</span>'}</td>
+   ${champs.map((c) => `<td>${escapeHtml(l.compris[c] || "—")}</td>`).join("")}
+  </tr>`).join("");
+ // L'alarme d'abord, quand elle a lieu d'être : c'est la seule lecture qui
+ // change ce que l'utilisateur doit faire dans la seconde qui suit.
+ const alarme = data.aucun_champ_reconnu
+  ? `<div class="apercu-alarme"><strong>Aucun champ attendu n'a été reconnu.</strong> <span>Les colonnes du fichier ne correspondent pas à celles que le moteur lit, ou le séparateur est faux. Importer maintenant produirait une liste vide ou fausse, sans message d'erreur.</span></div>`
+  : "";
+ const motifs = (data.rejected_reasons || []).length
+  ? `<p class="section-desc"><span>Motifs de refus rencontrés :</span> ${data.rejected_reasons.map((m) => escapeHtml(m)).join(" · ")}</p>`
+  : "";
+ _derniereMemoire = data.correspondance_memorisee || null;
+ return `${alarme}
+  ${_rendreAssistant(data)}
+  <h4 style="margin: 0.5rem 0;">Aperçu : ${lignes.length} première(s) ligne(s)</h4>
+  <p class="section-desc"><span>${data.acceptees} acceptée(s), ${data.rejected_count} écartée(s) sur l'échantillon.</span> <span>Colonnes lues dans le fichier :</span> ${escapeHtml((data.colonnes_du_fichier || []).join(", ") || "aucune")}</p>
+  ${motifs}
+  <div class="table-container" style="max-height: 260px;">
+   <table><thead><tr><th>Verdict</th>${entetes}</tr></thead><tbody>${corps}</tbody></table>
+  </div>
+  <p class="section-desc" style="margin-top: 0.5rem;">Ce tableau montre ce que le moteur a retenu de chaque ligne — pas la ligne brute. Une colonne vide en face d'un champ attendu est le signe d'un en-tête qui ne correspond pas. Rien n'a été enregistré.</p>`;
 }
 
 // ------------------ PROGRESSION DES OPERATIONS LONGUES ------------------
@@ -2900,6 +3424,11 @@ async function handleIngestion(event) {
  formData.append("file_type", fileType);
  formData.append("file", fileInput.files[0]);
  formData.append("delimiter", delimiter || ",");
+ // La correspondance validée dans l'aperçu suit le fichier jusqu'à l'import :
+ // sans cela, l'aperçu montrerait une chose et l'import en écrirait une autre.
+ if (Object.keys(_correspondanceCourante).length) {
+  formData.append("column_mapping", JSON.stringify(_correspondanceCourante));
+ }
 
  if (fileType === "WATCHLIST_SSIE") {
  const selectorsRaw = document.getElementById("ssie-selectors").value.trim();
@@ -2961,6 +3490,14 @@ async function handleIngestion(event) {
  data = finalState.result || {};
  }
  showToast(`Instantané importé avec succès ! ${data.message}`, "success");
+ // Les lignes écartées par le Quality Gate étaient jusqu'ici passées sous
+ // silence : « import réussi » sur un fichier dont la moitié a été refusée
+ // se lit comme un succès complet. Le dire, avec les motifs.
+ if (data.rejected_count) {
+  const motifs = (data.rejected_reasons || []).slice(0, 3).join(" · ");
+  showToast(`${data.rejected_count} ligne(s) écartée(s) par le contrôle qualité.${motifs ? " " + motifs : ""}`,
+            "warning", 10000);
+ }
  fileInput.value = "";
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
@@ -4662,12 +5199,14 @@ function renderWatchlistDetails(item) {
  </div>
  ${extendedFieldsRows(item)}
  <div id="entity-relations-section"></div>
+ <div id="entity-notes-section"></div>
  <div id="entity-changes-section"></div>
  `;
 
  modal.classList.remove("hidden");
  if (item.id) loadEntityChanges(item.id);
  if (item.entity_id) loadEntityRelations(item.entity_id);
+ if (item.entity_id) chargerSectionNotes(item.entity_id);
 }
 
 // ------------------ RELATIONS & LIENS CAPITALISTIQUES (règle des 50 %) ------------------
@@ -7141,7 +7680,7 @@ async function openAlertModal(alertId) {
  const eventsHtml = (a.events || []).map(e => `
  <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
  <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
- ${e.detail ? `<div style="font-size: 0.85rem;">${escapeHtml(e.detail)}</div>` : ""}
+ ${e.detail ? `<div style="font-size: 0.85rem;">${marquerLesCitations(e.detail)}</div>` : ""}
  </div>
  `).join("");
 
@@ -7211,6 +7750,7 @@ async function openAlertModal(alertId) {
  </div>
  ${resourceEquivalencesHtml(a.decision_tree)}
  ${nameRarityHtml(a.decision_tree)}
+ ${blocNotesDeFiche(a.watchlist_entity_id, a.watchlist_notes)}
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Historique</h3>
  <div style="max-height: 220px; overflow-y: auto;">${eventsHtml || '<small style="color: var(--text-muted);">Aucun événement.</small>'}</div>
  <h3 style="font-size: 0.95rem; margin: 1rem 0 0.5rem;">Pièces jointes</h3>
@@ -7436,10 +7976,35 @@ async function uploadAlertAttachment() {
 }
 
 async function alertActionWithComment(action, promptLabel) {
- const comment = await promptDialog(promptLabel, { textarea: true, placeholder: "Votre commentaire..." });
+ const comment = await promptDialog(promptLabel, { textarea: true, placeholder: "Votre commentaire... citez un collègue avec @son-nom." });
  if (comment === null) return;
  const data = await _postAlertAction(action, { comment });
- if (data) { openAlertModal(currentAlertId); refreshAlertQueues(); }
+ if (data) { rendreCompteDesCitations(data); openAlertModal(currentAlertId); refreshAlertQueues(); }
+}
+
+// Une citation silencieuse est pire que pas de citation : « j'ai cité Marie,
+// elle n'a jamais répondu » a trois causes possibles, et l'auteur doit les
+// distinguer AVANT de croire sa question posée.
+function rendreCompteDesCitations(data) {
+ const prevenus = data.mentions_notifiees || [];
+ const inconnus = data.mentions_inconnues || [];
+ const sansAdresse = data.mentions_sans_adresse || [];
+ if (prevenus.length) {
+  showToast(`Prévenu(s) : ${prevenus.map((u) => "@" + u).join(", ")}`, "success");
+ }
+ if (inconnus.length) {
+  showToast(`Aucun compte ne correspond à ${inconnus.map((u) => "@" + u).join(", ")} : personne n'a été prévenu.`, "warning", 8000);
+ }
+ if (sansAdresse.length) {
+  showToast(`Sans adresse de courriel, donc non prévenu(s) : ${sansAdresse.map((u) => "@" + u).join(", ")}`, "warning", 8000);
+ }
+}
+
+// Marque les @citations d'un texte. La neutralisation passe AVANT : on décore
+// du texte déjà échappé, jamais l'inverse.
+function marquerLesCitations(texte) {
+ return escapeHtml(texte).replace(/@([A-Za-z0-9._-]{1,100})/g,
+  '<span class="citation">@$1</span>');
 }
 
 // Les motifs vivent dans les réglages, mais un analyste n'ouvre jamais
@@ -7834,6 +8399,27 @@ const DASHBOARD_WIDGETS = {
  renderStatusDonut(`${body.id}-donut`, `${body.id}-legend`, d.alerts.by_status || {});
  } },
 
+ // Panneaux PERSONNELS. Tous les autres comptent le collectif : « alertes
+ // ouvertes » les compte toutes, « charge par analyste » montre celle de
+ // tout le monde. Ceux-ci répondent à « par quoi je commence ».
+ "tile-mes-alertes": { cat: "kpi", icon: uiIcon("user"), title: "Mes alertes", sub: "assignées, ouvertes",
+ fetchValue: async () => {
+  const j = await chargerMaJournee();
+  if (!j) return "—";
+  return j.mes_alertes.en_retard
+   ? `${j.mes_alertes.total} (${j.mes_alertes.en_retard} en retard)`
+   : j.mes_alertes.total;
+ },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
+ "tile-a-valider": { cat: "kpi", icon: uiIcon("eye"), title: "À valider par moi", sub: "hors mes propres propositions",
+ fetchValue: async () => {
+  const j = await chargerMaJournee();
+  if (!j) return "—";
+  return j.a_valider.peut_valider ? j.a_valider.total : "—";
+ },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
+ "table-ma-journee": { cat: "tables", icon: uiIcon("briefcase"), title: "Ma journée", render: renderMaJourneeWidget },
+
  "table-todo": { cat: "tables", icon: uiIcon("clock"), title: "À traiter en priorité", render: renderTodoWidget },
  "table-syncs": { cat: "tables", icon: uiIcon("refresh"), title: "Dernières synchronisations", render: renderSyncsWidget },
  "table-jobs": { cat: "tables", icon: uiIcon("gear"), title: "Travaux récents", render: renderJobsWidget },
@@ -7859,6 +8445,11 @@ const DASHBOARD_WIDGETS = {
 
 // Disposition par défaut : l'accueil historique (tuiles + graphiques + listes)
 const DASHBOARD_DEFAULT_LAYOUT = [
+ // « Par quoi je commence » avant « où en est la maison » : les panneaux
+ // personnels ouvrent la disposition par défaut. Une disposition déjà
+ // composée par l'utilisateur n'est jamais touchée.
+ { id: "tile-mes-alertes", size: "sm" }, { id: "tile-a-valider", size: "sm" },
+ { id: "table-ma-journee", size: "md" },
  { id: "tile-screening", size: "sm" }, { id: "tile-filtering", size: "sm" },
  { id: "tile-4eyes", size: "sm" }, { id: "tile-review", size: "sm" },
  { id: "tile-fp-rate", size: "sm" }, { id: "tile-avg-delay", size: "sm" },
@@ -7877,6 +8468,9 @@ function _defaultDashboardLayout() {
 }
 
 async function loadDashboardLayout() {
+ // Un retour sur l'accueil doit montrer l'état du moment, pas celui d'il y a
+ // une heure : la journée se relit à chaque rendu.
+ _maJournee = null;
  try {
  const response = await apiFetch("/api/me/dashboard", { silent: true });
  if (response.ok) {
@@ -7961,7 +8555,8 @@ function _hydrateDashboardWidgets() {
  }
  } else {
  const body = document.getElementById(`dw-body-${w.id}`);
- if (body) def.render(body, d);
+ if (body) Promise.resolve(def.render(body, d))
+  .catch(e => console.error(`Panneau ${w.id} :`, e));
  }
  } catch (e) {
  console.error(`Panneau ${w.id} :`, e); // un panneau cassé ne casse pas l'accueil
@@ -7970,6 +8565,71 @@ function _hydrateDashboardWidgets() {
 }
 
 // ---- Panneaux « tableaux » ----
+
+// « Ma journée » : une seule lecture serveur pour les trois panneaux, mise en
+// cache le temps du rendu de l'accueil — trois panneaux ne doivent pas faire
+// trois requêtes identiques.
+let _maJournee = null;
+let _maJourneePromesse = null;
+
+async function chargerMaJournee(forcer = false) {
+ if (forcer) { _maJournee = null; _maJourneePromesse = null; }
+ if (_maJournee) return _maJournee;
+ if (!_maJourneePromesse) {
+  _maJourneePromesse = (async () => {
+   try {
+    const r = await apiFetch("/api/me/journee", { silent: true });
+    _maJournee = r.ok ? await r.json() : null;
+   } catch (e) {
+    _maJournee = null;
+   }
+   _maJourneePromesse = null;
+   return _maJournee;
+  })();
+ }
+ return _maJourneePromesse;
+}
+
+async function renderMaJourneeWidget(body) {
+ const j = await chargerMaJournee();
+ if (!j) {
+  // Indisponible n'est pas « rien à faire » : la seconde lecture ferait
+  // fermer l'écran à quelqu'un qui a du travail.
+  body.innerHTML = '<p class="section-desc">Votre journée est indisponible pour le moment.</p>';
+  return;
+ }
+ const ligne = (texte, meta, action) => `<li${action ? ` onclick="${action}"` : ' style="cursor: default;"'}>
+   <span class="item-main">${texte}</span>
+   <span class="item-meta">${meta}</span>
+  </li>`;
+ const ouvrir = (a) => {
+  const espace = a.channel === "FILTERING" ? "filtering" : "screening";
+  const sous = a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening";
+  return `switchTab('${espace}'); switchSubTab('${espace}', '${sous}'); openAlertModal(${a.id})`;
+ };
+ const morceaux = [];
+ for (const a of j.mes_alertes.items.slice(0, 4)) {
+  morceaux.push(ligne(`#${a.id} — ${escapeHtml(a.client_name || "?")}`,
+   `${escapeHtml(a.priority || "—")}${a.overdue ? " · en retard" : ""}`, ouvrir(a)));
+ }
+ for (const a of j.a_valider.items.slice(0, 3)) {
+  morceaux.push(ligne(`#${a.id} — <span>à valider</span> · ${escapeHtml(a.client_name || "?")}`,
+   `<span>proposée par</span> @${escapeHtml(a.proposed_by || "?")}`, ouvrir(a)));
+ }
+ if (j.reveils_du_jour) {
+  morceaux.push(ligne(`<span>Mises en attente qui reviennent</span>`, `${j.reveils_du_jour}`,
+   "switchTab('screening'); switchSubTab('screening', 'alerts-screening')"));
+ }
+ if (j.lots_a_homologuer) {
+  morceaux.push(ligne(`<span>Lots à homologuer</span>`, `${j.lots_a_homologuer}`,
+   "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')"));
+ }
+ if (j.dossiers_suivis) {
+  morceaux.push(ligne(`<span>Dossiers suivis encore ouverts</span>`, `${j.dossiers_suivis}`, ""));
+ }
+ body.innerHTML = '<ul class="home-list">' + (morceaux.length ? morceaux.join("")
+  : ligne('<span style="color: var(--text-muted);">Rien ne vous attend : votre journée est à jour.</span>', "", "")) + '</ul>';
+}
 
 function renderTodoWidget(body, d) {
  const oldest = d.alerts.oldest_open || [];

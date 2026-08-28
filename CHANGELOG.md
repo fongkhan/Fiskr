@@ -9,6 +9,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the tool speaks at the right moment (quality-of-life 13/N)
+Thirteenth batch, and the last of the inventory. Verified in a real browser.
+
+**Browser notifications** (n° 23) raise a question a compliance product cannot treat lightly: a system notification appears on top of any application, on a workstation that is sometimes shared, sometimes projected in a meeting room. "Ivan Ivanov matches the OFAC list" on that screen is a leak, not a service. **The message therefore carries a number and nothing else** — the application says the rest. A test forbids client and listed-party names from the notification body outright.
+
+Three more decisions hold this feature. The poll runs **only while the tab is hidden** and only if this workstation asked for it — the exact opposite condition of the on-screen poll, which stops precisely then, so nothing is added to anyone else's server load. Signals are **grouped, never one per alert**: a single client sharing a very common name can open hundreds at once, and the notification catalogue already holds that rule for e-mails. And the first reading only takes a baseline: announcing the alerts already there as news would wake someone for work they know about.
+
+The permission is requested **at the user's gesture, never on page load** — asked on load, browsers refuse it outright and so do users. A refusal at browser level is stated where it was asked and the setting returns to off: a ticked box that will never produce anything is worse than an unticked one.
+
+**Guided tour on first arrival** (n° 26). Commissioning guides the *operator* installing the product; nothing guided the first analyst, who arrives on a compliance application whose most useful gestures — the palette, the case file, keyboard triage — cannot be guessed. Each step **designates a real element by its id**, and a step whose element is absent — a screen this role cannot see, a collapsed panel — is **skipped**: pointing at a door that does not exist is worse than saying nothing, because the user searches, then concludes the tool lies. It imposes itself once and stays replayable from the shortcuts help; a tour you cannot see again is a tour you endure.
+
+13 tests pin the batch. With it, the quality-of-life inventory drawn up at the start of this programme is closed: 29 proposals delivered, 3 that already existed.
+
+### Added — where to start (quality-of-life 12/N)
+Twelfth batch of the programme, verified in a real browser.
+
+**The home page was already a rich, customisable panel grid — and every panel was collective** (n° 29). "Open alerts" counts them all, "workload per analyst" shows everyone's. Nothing answered the first question of a morning: what do I start with? So this batch adds no new screen: three **personal** panels join the existing catalogue, and the user places them wherever they like. A separate "My day" page would have duplicated a grid that is already personalisable.
+
+**One number changes meaning, and it is the point of the batch.** The collective "four eyes" tile counts decisions awaiting validation — including the ones *I* proposed, which the four-eyes rule forbids me to validate. Announcing "3 to validate" to someone who can validate none of them promises work that does not exist. The personal count keeps only what this reader can actually act on, and a test pins the count against the server's own refusal, so the two cannot drift apart.
+
+The "My day" panel gathers what is waiting: my alerts in the queue's own order (with lateness), what I can validate and who proposed it, my holds coming back within the day, batches awaiting approval, followed cases still open. Three panels, **one request** — a shared promise, refreshed on every return to the home page rather than served an hour stale. And "unavailable" is never rendered as "nothing to do": the second reading would close the screen on someone who has work.
+
+One robustness fix on the existing machinery along the way: the panel dispatcher's `try/catch` is synchronous and cannot see a rejected promise, so an async panel failing would have left the home page half-drawn.
+
+14 tests pin the batch.
+
+### Added — mapping the columns, once and for all (quality-of-life 11/N)
+Eleventh batch of the programme, verified in a real browser through a genuine import.
+
+**The previous batch diagnosed; this one cures** (n° 15). The preview says "no expected field was recognised" — and left the user to go rename columns in their own file. An assistant now sits in the preview: on the left what the engine reads, on the right the column of your file that fills it. Apply, review the preview, import. The mapping travels with the file all the way to the import, because a preview showing one thing while the import writes another would be worse than no preview at all.
+
+**The trap of this batch was already in the code.** `parse_csv_file` carried a `mapping_dict` parameter with **no caller anywhere** — and its semantics kept *only* the mapped fields. A partial mapping ("nom" → `client_last_name`), which is exactly what an assistant produces, would have silently dropped the client id, the nationality and everything else. Wiring it as-is would have created the very data loss the assistant exists to prevent. The reader now mirrors every column first and applies the mapping on top; the first test of the batch holds that ordering.
+
+**Two explicit refusals rather than a silence.** An unknown target field would never be read by the import; a source column absent from the file would fill the field with emptiness. Both cases would leave the user believing they had fixed the problem — so both are refused, naming the field and the column.
+
+**Memory by header fingerprint.** The mapping is remembered per file *shape* (headers normalised and sorted) and offered on the next import of a file with the same shape. Two guarantees: it is written **only after an import that actually succeeded** — remembering a mapping that was typed but never proven would mean re-offering an error nobody ever saw — and it is **offered, never applied on its own**: the alarm stays up until the user takes it, because a mapping guessed and applied in silence is precisely the defect the assistant exists to prevent.
+
+16 tests pin the batch, including the reader's mirror-then-map ordering, the fingerprint's independence from order and case, and the chain that carries the mapping from endpoint to job to reader.
+
+### Added — seeing what the import understood, before it writes (quality-of-life 10/N)
+Tenth batch of the programme, verified in a real browser.
+
+**The defect this batch targets is not an error — it is a misleading success** (n° 14). You upload a client base whose surname column is called `nom` instead of `client_last_name`. Nothing raises. The Quality Gate discards the rows one by one, and the screen announces "snapshot imported successfully". The list in production is empty or truncated, and screening answers "no match" without ever complaining.
+
+**Preview before import.** A button on CSV imports runs the first ten rows through the *real* CSV reader and the *real* Quality Gate, and shows **what the engine retained from each row** — not the raw row, because the difference between the two is exactly what reveals a misnamed header. Nothing is written: no snapshot, no record, no leftover temp file, each pinned by a test. Rejection reasons are surfaced **as the Quality Gate writes them** ("Rule_B01: Champ Nom Principal Vide"), never reworded — a second wording would be a second source of truth, bound to drift from the rule.
+
+One alarm, and only one: when *no* expected field was filled on *any* row, the header or the delimiter does not match, and importing would produce an empty or wrong list. Fields that are merely empty here and there are not flagged — a natural-person base legitimately has no company name, and an alarm that cries wolf is an alarm people learn to ignore.
+
+The preview covers CSV imports only. The connected official sources have a dedicated reader and a format published by the issuer: offering a preview there would suggest a choice exists where there is none.
+
+**And the import now says what it discarded.** The `continue` after a failed Quality Gate check was silent: the endpoint returned the accepted count, and nobody compared it to the file's line count. Rejections are now counted at all four sites (a test derives the sites from the source, so a forgotten one fails the build — a wrong count is worse than no count, because it reassures), with their first distinct reasons, returned with the result and shown as a warning after the import.
+
+15 tests pin the batch.
+
+### Added — what you know no longer stays in your head (quality-of-life 9/N)
+Ninth batch of the programme, verified in a real browser.
+
+**Mention a colleague** (n° 25). Writing "@marie can you confirm?" in an alert comment notified nobody. The interesting part is not the notification — it is the **silence**: "I mentioned Marie and she never answered" has three possible causes (a misspelt name, an account with no e-mail address, or nothing at all), and the author has to be able to tell them apart *before* believing the question asked. The comment endpoint now resolves each `@name` against real accounts, case-insensitively, skips self-mentions, notifies through the existing rails (a new catalog event, immediate urgency — a mention is a request for something now, an evening digest would miss the question), and **returns the three outcomes separately**, which the front end shows as three distinct toasts. Mentions are highlighted in the alert history, decorated *after* escaping — the other order would inject the decoration's own markup.
+
+**Internal note on a listed record** (n° 30). What an analyst learns while reviewing — "homonymy established with client 12345", "company dissolved in 2019" — ended up in the comment of a closed case nobody re-reads, and the next analyst redid the work. Notes are now attached to the listed record, shown both in the alert case file (where the analyst actually meets the listed party) and on the record itself.
+
+Two structural choices, each pinned by a test. The note is keyed on the **business identifier**, not on the current snapshot row: the snapshot is wholly replaced at Tuesday's synchronisation, and a note keyed on it would die exactly when remembering matters. And the note has **no effect on screening** — that is what distinguishes it from the whitelist, which does suppress alerts. The screen says so twice (when reading, and again when writing), and the API says it too, because a note that looked like it acted on the engine would be the worst kind of setting: the one you can save and that does nothing.
+
+Notes are append-only, like the alert journal: a note is completed, never rewritten — otherwise "who knew what, when" becomes unrecoverable, which is precisely an inspection's question. The router's global fallback is disarmed for mentions as it already was for followers: "nobody resolvable" must stay "nobody", never "everybody".
+
+15 tests pin the batch.
+
 ### Added — comparing two versions of a listed record (quality-of-life 8/N)
 Eighth batch of the programme, verified in a real browser against a genuine server-computed delta.
 

@@ -46,6 +46,7 @@ from fiskr.database import (
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     safe_upload_filename,
     SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
+    WatchlistNote, CsvColumnMapping,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
@@ -3286,6 +3287,186 @@ def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
                               snapshot_id=snap.snapshot_id)
     return snap
 
+# ------------------ APERÇU AVANT IMPORT ------------------
+#
+# Aujourd'hui on téléverse un fichier et on découvre APRÈS coup si les
+# colonnes ont été comprises. Sur une liste de sanctions, une colonne de nom
+# mal reconnue ne produit pas une erreur : elle produit une liste en
+# production qui ne correspond à rien, et un criblage qui répond « aucune
+# correspondance » sans jamais se plaindre.
+#
+# L'aperçu fait passer les premières lignes par le VRAI lecteur CSV et le VRAI
+# Quality Gate, et rend ce qui a été compris — puis l'utilisateur décide. Rien
+# n'est écrit : ni instantané, ni fiche, ni journal.
+
+def _empreinte_des_entetes(colonnes: List[str]) -> str:
+    """Empreinte stable de la FORME d'un fichier : en-têtes normalisés et
+    triés. Deux exports du même outil se ressemblent ; un export d'un autre
+    outil ne lui ressemble pas — et une correspondance mémorisée ne doit
+    jamais s'appliquer à un fichier qui n'est pas le même."""
+    normalisees = sorted((c or "").strip().lower() for c in colonnes if (c or "").strip())
+    return hashlib.sha256("\u0000".join(normalisees).encode("utf-8")).hexdigest()
+
+def _valider_correspondance(file_type: str, brut: Optional[str],
+                            colonnes: Optional[List[str]] = None) -> Dict[str, str]:
+    """
+    Lit et contrôle une correspondance reçue du client.
+
+    Deux refus explicites plutôt qu'un silence : un champ cible inconnu ne
+    serait jamais lu par l'import, et une colonne source absente du fichier
+    remplirait le champ de vide. Dans les deux cas l'utilisateur croirait
+    avoir corrigé le problème — c'est la panne que l'assistant doit éviter,
+    pas reproduire.
+    """
+    if not brut:
+        return {}
+    try:
+        correspondance = json.loads(brut)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Correspondance de colonnes illisible (JSON attendu).")
+    if not isinstance(correspondance, dict):
+        raise HTTPException(status_code=400, detail="Correspondance de colonnes illisible (JSON attendu).")
+    connus = set(_APERCU_CHAMPS.get(file_type, ()))
+    propre: Dict[str, str] = {}
+    for cible, source in correspondance.items():
+        cible, source = str(cible).strip(), str(source or "").strip()
+        if not source:
+            continue          # « ne pas mapper ce champ » est un choix valide
+        if cible not in connus:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Champ inconnu dans la correspondance : {cible}. L'import ne le lirait jamais.")
+        if colonnes is not None and source not in colonnes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Colonne absente du fichier : {source}. Le champ {cible} resterait vide.")
+        propre[cible] = source
+    return propre
+
+_APERCU_LIGNES = 10
+_APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU")
+
+@app.post("/api/ingest/preview")
+async def preview_ingest(
+    file_type: str = Form(...),
+    file: UploadFile = File(...),
+    delimiter: str = Form(","),
+    column_mapping: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Aperçu d'un import CSV : les dix premières lignes telles que le moteur les
+    comprend, avec le verdict du Quality Gate. Aucune écriture.
+
+    Limité aux imports CSV — ceux dont les colonnes peuvent être mal comprises.
+    Les sources officielles branchées ont un lecteur dédié et un format publié
+    par l'émetteur : leur donner un aperçu laisserait croire qu'il y a là un
+    choix à faire, alors qu'il n'y en a pas.
+    """
+    if file_type not in _APERCU_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="L'aperçu ne couvre que les imports CSV (base clients, liste au format CSV).")
+
+    # Même plafond que l'import réel : la porte de l'aperçu ne peut pas être
+    # plus large que celle qu'elle précède.
+    nature = "clients" if file_type == "CLIENT_BASE" else "liste"
+    # Même dossier temporaire que l'import réel, et un nom qui dit ce que
+    # c'est : un aperçu abandonné doit se reconnaître d'un coup d'œil.
+    temp_dir = PROJECT_ROOT / "temp_ingestion"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    chemin = temp_dir / f"apercu_{uuid.uuid4().hex[:8]}.csv"
+    try:
+        copier_televersement_vers(chemin, file, nature)
+        lignes: List[Dict[str, Any]] = []
+        colonnes: List[str] = []
+        rejets = _CompteurDeRejets()
+        acceptees = 0
+        # Premier passage : les en-têtes seuls, pour valider la correspondance
+        # CONTRE le fichier réel avant de l'appliquer.
+        premiere = next(parse_csv_file(str(chemin), delimiter=delimiter), {})
+        colonnes = [c for c in premiere.keys() if c]
+        correspondance = _valider_correspondance(file_type, column_mapping, colonnes)
+        # Correspondance mémorisée pour cette forme de fichier : proposée,
+        # jamais appliquée d'office — l'utilisateur voit ce qu'il accepte.
+        empreinte = _empreinte_des_entetes(colonnes)
+        memorisee = db.query(CsvColumnMapping).filter(
+            CsvColumnMapping.file_type == file_type,
+            CsvColumnMapping.headers_fingerprint == empreinte).first()
+        for brut in parse_csv_file(str(chemin), delimiter=delimiter,
+                                   mapping_dict=correspondance or None):
+            item = ensure_parsed_name(dict(brut))
+            report = evaluate_and_clean(item)
+            if report["is_valid"]:
+                acceptees += 1
+            else:
+                rejets.ajouter(report)
+            lignes.append({
+                "accepte": bool(report["is_valid"]),
+                "motifs": [str(e) for e in (report.get("errors") or [])],
+                # Ce que le moteur a RETENU de la ligne, pas la ligne brute :
+                # c'est la difference entre les deux qui révèle une colonne
+                # mal nommée.
+                "compris": _apercu_champs_compris(file_type, item),
+            })
+            if len(lignes) >= _APERCU_LIGNES:
+                break
+        # Un champ vide ici ou là est banal : une base de personnes physiques
+        # n'a pas de raison sociale. Le seul signal qui n'admet pas de lecture
+        # innocente est celui-ci — AUCUN des champs attendus n'a été rempli
+        # sur AUCUNE ligne : l'en-tête ou le séparateur ne correspond pas.
+        # Le dire comme un fait unique vaut mieux qu'une liste de suspicions
+        # dont on apprend vite à ne plus tenir compte.
+        aucun_reconnu = bool(lignes) and not any(
+            (valeur or "").strip()
+            for ligne in lignes for valeur in ligne["compris"].values())
+        return {
+            "aucun_champ_reconnu": aucun_reconnu,
+            "file_type": file_type,
+            "delimiter": delimiter,
+            "colonnes_du_fichier": colonnes,
+            "champs_attendus": list(_APERCU_CHAMPS.get(file_type, ())),
+            "correspondance_appliquee": correspondance,
+            "correspondance_memorisee": (memorisee.mapping if memorisee else None),
+            "empreinte_entetes": empreinte,
+            "lignes_examinees": len(lignes),
+            "acceptees": acceptees,
+            "lignes": lignes,
+            **rejets.rapport(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Aperçu d'import impossible : {e}")
+        raise HTTPException(status_code=400,
+                            detail="Fichier illisible : vérifiez le format et le séparateur.")
+    finally:
+        # Rien ne doit rester d'un aperçu : ni instantané, ni fichier.
+        try:
+            Path(chemin).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+# Champs que l'import LIT réellement, par type de fichier. Dérivés du Quality
+# Gate, qui les nomme déjà dans ses messages de refus : les recopier ici
+# serait une seconde source de vérité, vouée à diverger.
+_APERCU_CHAMPS = {
+    "CLIENT_BASE": ("client_id", "client_type", "client_first_name", "client_last_name",
+                    "client_company_name", "client_dob", "nationality", "residence"),
+    "WATCHLIST_EU": ("entity_id", "entity_type", "primary_name", "nationality",
+                     "birth_date", "origin"),
+}
+
+def _apercu_champs_compris(file_type: str, item: Dict[str, Any]) -> Dict[str, str]:
+    """Ce que le moteur a retenu de la ligne, champ par champ. Une valeur vide
+    en face d'un champ attendu est le signe visible d'une colonne mal nommée."""
+    sortie: Dict[str, str] = {}
+    for champ in _APERCU_CHAMPS.get(file_type, ()):
+        valeur = item.get(champ)
+        sortie[champ] = "" if valeur in (None, "") else str(valeur)
+    return sortie
+
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
 def ingest_snapshot(
@@ -3294,6 +3475,7 @@ def ingest_snapshot(
     delimiter: str = Form(","),
     ssie_selectors: Optional[str] = Form(None),
     ssie_source_format: Optional[str] = Form(None),
+    column_mapping: Optional[str] = Form(None),
     progress_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
@@ -3307,6 +3489,9 @@ def ingest_snapshot(
     threadpool, l'event loop reste disponible pour servir GET /api/progress
     pendant toute la duree de l'import (suivi en direct des gros fichiers).
     """
+    # Correspondance de colonnes validée AVANT toute écriture : un refus ne
+    # doit pas laisser un instantané orphelin derrière lui.
+    correspondance = _valider_correspondance(file_type, column_mapping)
     # Validate SSIE selectors overrides upfront (before any snapshot record is created)
     ssie_selector_overrides = None
     if file_type == "WATCHLIST_SSIE" and ssie_selectors:
@@ -3390,6 +3575,7 @@ def ingest_snapshot(
                                   "original_filename": original_filename,
                                   "file_type": file_type,
                                   "delimiter": delimiter,
+                                  "column_mapping": correspondance or None,
                                   "ssie_selector_overrides": ssie_selector_overrides,
                                   "ssie_source_format": ssie_source_format,
                                   "progress_id": progress_id,
@@ -3421,11 +3607,74 @@ def ingest_snapshot(
             os.remove(temp_file_path)
 
 
+class _CompteurDeRejets:
+    """
+    Compte ce que le Quality Gate ecarte pendant un import, et retient les
+    premiers motifs distincts.
+
+    Le nombre seul ne suffit pas : « 4 812 lignes ecartees » n'aide personne.
+    Ce sont les MOTIFS qui disent quoi corriger, et le Quality Gate les ecrit
+    deja en nommant la colonne attendue (« Rule_B01 : ... client_last_name
+    manquant »). On les remonte tels quels, bornes, sans en reformuler un seul.
+    """
+
+    _MOTIFS_RETENUS = 5
+
+    def __init__(self):
+        self.total = 0
+        self._motifs: List[str] = []
+
+    def ajouter(self, report: Dict[str, Any]) -> None:
+        self.total += 1
+        for erreur in (report.get("errors") or []):
+            texte = str(erreur).strip()
+            if texte and texte not in self._motifs and len(self._motifs) < self._MOTIFS_RETENUS:
+                self._motifs.append(texte)
+
+    def rapport(self) -> Dict[str, Any]:
+        return {"rejected_count": self.total, "rejected_reasons": list(self._motifs)}
+
+
+def _memoriser_correspondance(db: Session, file_type: str, chemin, delimiter: str,
+                              correspondance: Dict[str, str], username: str) -> None:
+    """Retient la correspondance pour cette FORME de fichier. Ne leve jamais :
+    une memoire d'assistance ne fait pas echouer un import qui a reussi."""
+    try:
+        # Mêmes colonnes qu'à l'aperçu — les en-têtes BRUTS, sans correspondance
+        # appliquée : les deux empreintes doivent coïncider, sinon la mémoire
+        # ne serait jamais retrouvée et l'assistant paraîtrait sans mémoire.
+        premiere = next(parse_csv_file(str(chemin), delimiter=delimiter), {})
+        colonnes = [c for c in premiere.keys() if c]
+        if not colonnes:
+            return
+        empreinte = _empreinte_des_entetes(colonnes)
+        ligne = db.query(CsvColumnMapping).filter(
+            CsvColumnMapping.file_type == file_type,
+            CsvColumnMapping.headers_fingerprint == empreinte).first()
+        if ligne:
+            ligne.mapping = correspondance
+            ligne.created_by = username
+            ligne.created_at = datetime.utcnow()
+        else:
+            db.add(CsvColumnMapping(
+                file_type=file_type, headers_fingerprint=empreinte,
+                headers_sample=", ".join(colonnes[:12]),
+                mapping=correspondance, created_by=username))
+        db.commit()
+    except Exception as e:
+        logger.error(f"Mémorisation de la correspondance impossible : {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                original_filename: str, file_type: str,
                                delimiter: str, ssie_selector_overrides,
                                ssie_source_format, progress_id: Optional[str],
-                               username: str) -> Dict[str, Any]:
+                               username: str,
+                               column_mapping: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Corps de l'import d'un fichier deja televerse : parsing, Quality Gate,
     persistance par lots, bascule de statut (homologation ou production),
@@ -3441,6 +3690,12 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
     snap_id = snap.snapshot_id
     try:
         record_count = 0
+        # Le Quality Gate ecarte des lignes, et jusqu'ici il le faisait en
+        # SILENCE : l'import rendait le nombre de fiches acceptees, personne
+        # ne le comparait au nombre de lignes du fichier. Une colonne mal
+        # nommee produisait donc un « import reussi » avec une liste vide ou
+        # amputee — le defaut le plus couteux du produit, et le plus discret.
+        rejets = _CompteurDeRejets()
         ofac_relations = None  # liens entre profils (OFAC uniquement)
 
         # 3. Parse contents based on File Type
@@ -3526,6 +3781,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 # Validate quality gate
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
+                    rejets.ajouter(report)
                     continue
                     
                 # Create checksum
@@ -3592,6 +3848,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     item = ensure_parsed_name(item)
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
+                        rejets.ajouter(report)
                         continue
                     ent_checksum = compute_checksum(item)
 
@@ -3629,12 +3886,14 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     if record_count % _INGEST_COMMIT_EVERY == 0:
                         snap = _ingest_progress_tick(db, snap, record_count, progress_id)
             else:
-                for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
+                for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
+                                        mapping_dict=column_mapping or None):
                     # Moteur de detection des noms : colonnes explicites ou
                     # decoupage du nom principal pour les individus (PP/I)
                     item = ensure_parsed_name(item)
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
+                        rejets.ajouter(report)
                         continue
                     ent_checksum = compute_checksum(item)
                     
@@ -3695,9 +3954,11 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
 
         elif file_type == "CLIENT_BASE":
             # Client base CSV
-            for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
+            for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
+                                        mapping_dict=column_mapping or None):
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
+                    rejets.ajouter(report)
                     continue
                     
                 ent_checksum = compute_checksum(item)
@@ -3829,12 +4090,19 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Clôturées par règle": rescreen_result.get("closed_by_rule"),
             }, urgency_override="immediate")
         progress_registry.finish(progress_id)
+        # La correspondance ne se mémorise qu'ICI : au bout d'un import qui a
+        # abouti. Retenir une correspondance saisie mais jamais éprouvée
+        # reviendrait à reproposer plus tard une erreur qu'on n'a pas vue.
+        if column_mapping and file_type in _APERCU_TYPES:
+            _memoriser_correspondance(db, file_type, temp_file_path, delimiter,
+                                      column_mapping, username)
         return {
             "message": message,
             "snapshot_id": snap_id,
             "record_count": record_count,
             "status": snap.status,
-            "rescreen": rescreen_result
+            "rescreen": rescreen_result,
+            **rejets.rapport(),
         }
     except Exception as e:
         db.rollback()
@@ -4538,6 +4806,70 @@ async def patch_watchlist_entity(
         "entity": _serialize_watchlist_entity(row, snap),
     }
 
+
+# ------------------ NOTES INTERNES SUR UNE FICHE LISTÉE ------------------
+#
+# « Homonymie établie pour le client X », « même personne que EU-1234 »,
+# « société dissoute en 2019 » : ce que l'analyste apprend en instruisant une
+# alerte reste aujourd'hui dans sa tête ou dans le commentaire d'un dossier
+# clos que personne ne relira. Le suivant refait le même travail.
+#
+# La note est ancrée sur l'identifiant MÉTIER de la fiche : elle survit à la
+# synchronisation de mardi, qui remplace toutes les lignes de l'instantané.
+# Elle n'a AUCUN effet sur le criblage — c'est ce qui la distingue de la liste
+# blanche — et l'API le dit à chaque lecture, pas seulement l'écran.
+
+class WatchlistNoteRequest(BaseModel):
+    note: str
+
+_NOTE_MAX_CARACTERES = 4000
+_NOTES_MAX_RENDUES = 100
+
+@app.get("/api/watchlist/notes/{entity_id}")
+async def list_watchlist_notes(
+    entity_id: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Notes internes portant sur cette fiche listée, de la plus récente à la
+    plus ancienne."""
+    rows = db.query(WatchlistNote).filter(WatchlistNote.entity_id == entity_id) \
+             .order_by(WatchlistNote.created_at.desc(), WatchlistNote.id.desc()) \
+             .limit(_NOTES_MAX_RENDUES).all()
+    return {
+        "entity_id": entity_id,
+        "sans_effet_sur_le_criblage": True,
+        "items": [
+            {"id": r.id, "note": r.note, "created_by": r.created_by,
+             "created_at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows
+        ],
+    }
+
+@app.post("/api/watchlist/notes/{entity_id}", status_code=status.HTTP_201_CREATED)
+async def add_watchlist_note(
+    entity_id: str,
+    payload: WatchlistNoteRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Ajoute une note interne. Append-only : une note se complète, ne se récrit
+    pas — sinon « qui savait quoi, quand » devient irrécupérable, et c'est
+    précisément la question d'une inspection.
+    """
+    note = (payload.note or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="La note ne peut pas être vide.")
+    if len(note) > _NOTE_MAX_CARACTERES:
+        raise HTTPException(status_code=400,
+                            detail="Note trop longue : 4 000 caractères au maximum.")
+    ligne = WatchlistNote(entity_id=entity_id, note=note,
+                          created_by=current_user["username"])
+    db.add(ligne)
+    db.commit()
+    return {"message": "Note enregistrée. Elle n'a aucun effet sur le criblage.",
+            "id": ligne.id}
 
 @app.get("/api/watchlist/entity/{entity_pk}/changes")
 async def get_watchlist_entity_changes(
@@ -10370,6 +10702,55 @@ def _notifier_les_suiveurs(db: Session, alert: Alert, action: str, actor: str) -
     except Exception as e:  # le suivi n'a pas le droit de casser l'action suivie
         logger.error(f"Notification des suiveurs impossible (alerte {alert.id}) : {e}")
 
+_MOTIF_CITATION = re.compile(r"@([A-Za-z0-9._-]{1,100})")
+
+def _notifier_les_citations(db: Session, alert: Alert, commentaire: str,
+                            auteur: str) -> Dict[str, Any]:
+    """
+    Previent les personnes citees (@nom) dans un commentaire d'alerte.
+
+    Rend le compte-rendu a l'appelant, parce qu'une citation silencieuse est
+    pire que pas de citation du tout : « j'ai cite Marie, elle n'a jamais
+    repondu » a trois causes possibles — nom mal ecrit, compte sans adresse,
+    ou notification coupee — et l'auteur doit pouvoir les distinguer AVANT de
+    croire sa question posee. Les deux premieres se disent ici.
+    """
+    resultat: Dict[str, Any] = {"mentions_notifiees": [], "mentions_inconnues": [],
+                                "mentions_sans_adresse": []}
+    try:
+        jetons = {j for j in _MOTIF_CITATION.findall(commentaire or "")}
+        if not jetons:
+            return resultat
+        from fiskr.notifier import _email_of
+        # Resolution insensible a la casse : on ecrit « @Marie » a une
+        # collegue enregistree « marie », et la citation doit porter.
+        comptes = {u.username.lower(): u.username for u in db.query(User).all()}
+        destinataires: List[str] = []
+        for jeton in sorted(jetons):
+            reel = comptes.get(jeton.lower())
+            if reel is None:
+                resultat["mentions_inconnues"].append(jeton)
+                continue
+            if reel == auteur:
+                continue          # se citer soi-meme ne se notifie pas
+            adresses = _email_of(db, reel)
+            if not adresses:
+                resultat["mentions_sans_adresse"].append(reel)
+                continue
+            resultat["mentions_notifiees"].append(reel)
+            destinataires += adresses
+        if destinataires:
+            emit(db, "alert_mentioned", {
+                "Alerte": f"#{alert.id}",
+                "Client": alert.client_name,
+                "Liste": alert.watchlist_name,
+                "Citée par": auteur,
+                "Commentaire": commentaire,
+            }, recipients_override=destinataires)
+    except Exception as e:   # une citation ne casse pas le commentaire
+        logger.error(f"Notification des citations impossible (alerte {alert.id}) : {e}")
+    return resultat
+
 @app.post("/api/alerts/{alert_id}/follow")
 async def follow_alert(
     alert_id: int,
@@ -11896,10 +12277,22 @@ async def get_alert_detail(
     followers = [r.username for r in
                  db.query(AlertFollower).filter(AlertFollower.alert_id == alert_id)
                    .order_by(AlertFollower.created_at.asc()).all()]
+    # Notes internes de la fiche listee : l'analyste rencontre le liste ICI.
+    # Les servir avec le dossier evite qu'une homonymie deja etablie par un
+    # collegue soit re-instruite de zero pour la troisieme fois.
+    notes = db.query(WatchlistNote) \
+              .filter(WatchlistNote.entity_id == alert.watchlist_entity_id) \
+              .order_by(WatchlistNote.created_at.desc(), WatchlistNote.id.desc()) \
+              .limit(_NOTES_MAX_RENDUES).all()
     return {
         **_alert_summary(alert),
         "followers": followers,
         "following_me": current_user["username"] in followers,
+        "watchlist_notes": [
+            {"id": n.id, "note": n.note, "created_by": n.created_by,
+             "created_at": n.created_at.isoformat() if n.created_at else None}
+            for n in notes
+        ],
         "attachments": [
             {
                 "id": att.id, "file_name": att.file_name, "comment": att.comment,
@@ -11971,7 +12364,8 @@ async def comment_alert(
     _log_alert_event(db, alert.id, current_user["username"], "COMMENT", comment)
     db.commit()
     _notifier_les_suiveurs(db, alert, "Commentaire ajouté", current_user["username"])
-    return {"message": "Commentaire ajouté."}
+    citations = _notifier_les_citations(db, alert, comment, current_user["username"])
+    return {"message": "Commentaire ajouté.", **citations}
 
 @app.post("/api/alerts/{alert_id}/escalate")
 async def escalate_alert(
@@ -12388,6 +12782,89 @@ def _normalize_dashboard_widgets(widgets: Any) -> List[Dict[str, str]]:
         seen.add(widget_id)
         normalized.append({"id": widget_id, "size": size})
     return normalized
+
+@app.get("/api/me/journee")
+async def get_ma_journee(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Ce qui attend CE lecteur aujourd'hui.
+
+    L'accueil est une grille riche, mais tous ses panneaux sont collectifs :
+    « alertes ouvertes » les compte toutes, « charge par analyste » montre
+    celle de tout le monde. Rien ne repond a « par quoi je commence ».
+
+    Un point merite d'etre dit, parce qu'il change un chiffre : la tuile
+    « 4 yeux » collective compte les decisions en attente de validation, y
+    compris CELLES QUE J'AI PROPOSEES — que la regle des quatre yeux
+    m'interdit precisement de valider. Annoncer « 3 a valider » a quelqu'un
+    qui n'en peut valider aucune, c'est promettre du travail qui n'existe
+    pas. Le compte personnel ne retient donc que ce sur quoi ce lecteur peut
+    reellement agir.
+    """
+    from sqlalchemy import case, or_
+    moi = current_user["username"]
+    roles = parse_roles(current_user.get("role"))
+    peut_valider = bool({"admin", "reviewer"} & set(roles))
+    maintenant = datetime.utcnow()
+
+    ouvertes = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    rang = case({"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
+                value=Alert.priority, else_=2)
+
+    # 1. Mes alertes : celles qui me sont assignees, dans l'ordre de la file.
+    miennes_q = ouvertes.filter(Alert.assigned_to == moi)
+    miennes = miennes_q.order_by(rang.asc(), Alert.due_at.asc().nullslast(),
+                                 Alert.final_score.desc()).limit(10).all()
+    mes_retards = miennes_q.filter(Alert.due_at.isnot(None),
+                                   Alert.due_at < maintenant).count()
+
+    # 2. A valider PAR MOI : proposees par quelqu'un d'autre.
+    a_valider: List[Alert] = []
+    a_valider_total = 0
+    if peut_valider:
+        validables = db.query(Alert).filter(
+            Alert.status == "PENDING_VALIDATION",
+            or_(Alert.proposed_by.is_(None), Alert.proposed_by != moi))
+        a_valider_total = validables.count()
+        a_valider = validables.order_by(Alert.proposed_at.asc().nullslast()).limit(10).all()
+
+    # 3. Ce qui me revient : mes mises en attente arrivees a echeance.
+    reveils = ouvertes.filter(
+        Alert.assigned_to == moi, Alert.snoozed_until.isnot(None),
+        Alert.snoozed_until <= maintenant + timedelta(hours=24)).count()
+
+    # 4. Les dossiers que je suis, encore ouverts.
+    suivis_ids = [r.alert_id for r in
+                  db.query(AlertFollower).filter(AlertFollower.username == moi).all()]
+    suivis = 0
+    if suivis_ids:
+        suivis = db.query(Alert).filter(
+            Alert.id.in_(suivis_ids), Alert.status.in_(ALERT_OPEN_STATUSES)).count()
+
+    # 5. Les lots qui attendent une homologation, si j'y ai droit.
+    lots = db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count() if peut_valider else 0
+
+    def _resume(a: Alert) -> Dict[str, Any]:
+        return {"id": a.id, "channel": a.channel or "SCREENING",
+                "client_name": a.client_name, "watchlist_name": a.watchlist_name,
+                "priority": a.priority, "status": a.status,
+                "due_at": a.due_at.isoformat() if a.due_at else None,
+                "overdue": bool(a.due_at and a.due_at < maintenant),
+                "proposed_by": a.proposed_by}
+
+    return {
+        "username": moi,
+        "mes_alertes": {"total": miennes_q.count(), "en_retard": mes_retards,
+                        "items": [_resume(a) for a in miennes]},
+        "a_valider": {"total": a_valider_total,
+                      "items": [_resume(a) for a in a_valider],
+                      "peut_valider": peut_valider},
+        "reveils_du_jour": reveils,
+        "dossiers_suivis": suivis,
+        "lots_a_homologuer": lots,
+    }
 
 @app.get("/api/me/dashboard")
 async def get_my_dashboard(

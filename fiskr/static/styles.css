@@ -1077,6 +1077,78 @@ body.densite-compacte th, body.densite-compacte td { padding: 0.35rem 0.6rem; fo
 body.densite-compacte .table-group-row td { padding-top: 0.55rem; }
 .icon-btn.actif { border-color: var(--color-primary); color: var(--color-primary); }
 
+/* ------------------ Aperçu avant import ------------------ */
+/* Le verdict porte un mot, pas seulement une couleur de fond. */
+.apercu-verdict-ok { color: var(--success-soft-text); font-weight: 600; font-size: 0.8rem; }
+.apercu-verdict-ko { color: var(--danger-soft-text); font-weight: 600; font-size: 0.8rem; }
+tr.apercu-refus { background: rgba(239, 68, 68, 0.07); }
+.apercu-alarme {
+    padding: 0.7rem 0.9rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-left-width: 4px;
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.08);
+    font-size: 0.87rem;
+    line-height: 1.5;
+}
+
+/* Assistant de correspondance de colonnes (aperçu avant import) */
+.assistant-colonnes {
+    margin: 0.5rem 0 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--surface-2);
+}
+.assistant-colonnes > summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; }
+.assistant-colonnes select { min-width: 180px; }
+.assistant-colonnes code { font-size: 0.82rem; }
+
+/* ------------------ Visite guidée ------------------ */
+.visite-voile {
+    position: fixed;
+    inset: 0;
+    z-index: 1400;
+    background: rgba(0, 0, 0, 0.45);
+}
+.visite-halo {
+    position: fixed;
+    border: 2px solid var(--color-primary);
+    border-radius: 10px;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.001);
+    pointer-events: none;
+}
+.visite-bulle {
+    position: fixed;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    padding: 0.9rem 1rem;
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.visite-bulle h3 { font-size: 1rem; margin: 0 0 0.35rem; }
+.visite-bulle p { font-size: 0.86rem; line-height: 1.55; color: var(--text-secondary); margin: 0 0 0.75rem; }
+.visite-pied { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.visite-compte { font-size: 0.78rem; color: var(--text-muted); }
+
+/* ------------------ Notes internes & citations ------------------ */
+.note-fiche {
+    padding: 0.4rem 0.6rem;
+    border-left: 2px solid var(--border-color);
+    margin: 0 0 0.35rem 0.25rem;
+    font-size: 0.85rem;
+}
+.note-fiche small { color: var(--text-muted); }
+/* Une citation se voit : c'est ce qui distingue « @marie a été prévenue »
+   d'un simple mot dans une phrase. */
+.citation {
+    color: var(--color-primary);
+    font-weight: 600;
+}
+
 /* ------------------ Diff d'une fiche listée (homologation) ------------------ */
 /* Ce qui entre et ce qui sort ne doivent pas se distinguer par la seule
    couleur : le signe (+ / −) porte l'information pour qui ne la perçoit pas. */
