@@ -1524,6 +1524,15 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-08-27-lot-10", date: "2026-08-27",
+ titre: "Voir ce que l'import a compris, avant de l'écrire",
+ points: [
+ "« Aperçu avant import » montre les dix premières lignes telles que le moteur les comprend.",
+ "Un en-tête ou un séparateur qui ne correspond pas se voit avant l'import, plus après.",
+ "L'import dit désormais combien de lignes le contrôle qualité a écartées, et pourquoi.",
+ ],
+ },
+ {
  id: "2026-08-27-lot-9", date: "2026-08-27",
  titre: "Ce que vous savez ne reste plus dans votre tête",
  points: [
@@ -1936,6 +1945,8 @@ document.addEventListener("DOMContentLoaded", () => {
  // l'administrateur), une seule fois, sans bloquer le reste du chargement.
  setTimeout(verifierMiseEnService, 1200);
  initListTypeControls();
+ // Le bouton d'aperçu suit le type de fichier sélectionné, dès l'arrivée.
+ if (document.getElementById("ingest-file-type")) toggleSsieOptions();
  populateManualListSelects();
  initSidebarCollapse();
  // Filtres du tableau des sources (recherche + famille + état)
@@ -2885,6 +2896,77 @@ function toggleSsieOptions() {
  const fileType = document.getElementById("ingest-file-type").value;
  const panel = document.getElementById("ssie-options");
  panel.classList.toggle("hidden", fileType !== "WATCHLIST_SSIE");
+ // L'aperçu ne couvre que les imports CSV — ceux dont les colonnes peuvent
+ // être mal comprises. Le proposer ailleurs laisserait croire qu'il y a un
+ // choix à faire là où le format est publié par l'émetteur.
+ const btn = document.getElementById("apercu-ingest-btn");
+ if (btn) btn.classList.toggle("hidden", !TYPES_AVEC_APERCU.includes(fileType));
+ const zone = document.getElementById("apercu-import");
+ if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
+}
+
+// ------------------ APERÇU AVANT IMPORT ------------------
+// On téléversait un fichier et on découvrait APRÈS coup si les colonnes
+// avaient été comprises. Sur une liste de sanctions, une colonne de nom mal
+// reconnue ne produit pas une erreur : elle produit une liste en production
+// qui ne correspond à rien, et un criblage qui répond « aucune correspondance »
+// sans jamais se plaindre.
+
+const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU"];
+
+async function apercuAvantImport() {
+ const zone = document.getElementById("apercu-import");
+ const fichier = document.getElementById("ingest-file").files[0];
+ if (!fichier) {
+  showToast("Choisissez d'abord un fichier.", "error");
+  return;
+ }
+ const donnees = new FormData();
+ donnees.append("file", fichier);
+ donnees.append("file_type", document.getElementById("ingest-file-type").value);
+ donnees.append("delimiter", document.getElementById("ingest-delimiter").value || ",");
+ zone.classList.remove("hidden");
+ zone.innerHTML = '<p class="section-desc">Lecture des premières lignes…</p>';
+ try {
+  const reponse = await apiFetch("/api/ingest/preview", { method: "POST", body: donnees });
+  const data = await reponse.json();
+  if (!reponse.ok) {
+   zone.innerHTML = `<p class="section-desc" style="color: var(--color-alert);">${escapeHtml(data.detail || "Aperçu impossible.")}</p>`;
+   return;
+  }
+  zone.innerHTML = rendreApercuImport(data);
+ } catch (e) {
+  zone.innerHTML = '<p class="section-desc" style="color: var(--color-alert);">Aperçu indisponible : réessayez.</p>';
+ }
+}
+
+function rendreApercuImport(data) {
+ const lignes = data.lignes || [];
+ if (!lignes.length) {
+  return '<p class="section-desc">Aucune ligne lisible dans ce fichier : vérifiez le séparateur.</p>';
+ }
+ const champs = Object.keys(lignes[0].compris || {});
+ const entetes = champs.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+ const corps = lignes.map((l) => `<tr class="${l.accepte ? "" : "apercu-refus"}">
+   <td>${l.accepte ? '<span class="apercu-verdict-ok">Acceptée</span>' : '<span class="apercu-verdict-ko">Écartée</span>'}</td>
+   ${champs.map((c) => `<td>${escapeHtml(l.compris[c] || "—")}</td>`).join("")}
+  </tr>`).join("");
+ // L'alarme d'abord, quand elle a lieu d'être : c'est la seule lecture qui
+ // change ce que l'utilisateur doit faire dans la seconde qui suit.
+ const alarme = data.aucun_champ_reconnu
+  ? `<div class="apercu-alarme"><strong>Aucun champ attendu n'a été reconnu.</strong> <span>Les colonnes du fichier ne correspondent pas à celles que le moteur lit, ou le séparateur est faux. Importer maintenant produirait une liste vide ou fausse, sans message d'erreur.</span></div>`
+  : "";
+ const motifs = (data.rejected_reasons || []).length
+  ? `<p class="section-desc"><span>Motifs de refus rencontrés :</span> ${data.rejected_reasons.map((m) => escapeHtml(m)).join(" · ")}</p>`
+  : "";
+ return `${alarme}
+  <h4 style="margin: 0.5rem 0;">Aperçu : ${lignes.length} première(s) ligne(s)</h4>
+  <p class="section-desc"><span>${data.acceptees} acceptée(s), ${data.rejected_count} écartée(s) sur l'échantillon.</span> <span>Colonnes lues dans le fichier :</span> ${escapeHtml((data.colonnes_du_fichier || []).join(", ") || "aucune")}</p>
+  ${motifs}
+  <div class="table-container" style="max-height: 260px;">
+   <table><thead><tr><th>Verdict</th>${entetes}</tr></thead><tbody>${corps}</tbody></table>
+  </div>
+  <p class="section-desc" style="margin-top: 0.5rem;">Ce tableau montre ce que le moteur a retenu de chaque ligne — pas la ligne brute. Une colonne vide en face d'un champ attendu est le signe d'un en-tête qui ne correspond pas. Rien n'a été enregistré.</p>`;
 }
 
 // ------------------ PROGRESSION DES OPERATIONS LONGUES ------------------
@@ -3056,6 +3138,14 @@ async function handleIngestion(event) {
  data = finalState.result || {};
  }
  showToast(`Instantané importé avec succès ! ${data.message}`, "success");
+ // Les lignes écartées par le Quality Gate étaient jusqu'ici passées sous
+ // silence : « import réussi » sur un fichier dont la moitié a été refusée
+ // se lit comme un succès complet. Le dire, avec les motifs.
+ if (data.rejected_count) {
+  const motifs = (data.rejected_reasons || []).slice(0, 3).join(" · ");
+  showToast(`${data.rejected_count} ligne(s) écartée(s) par le contrôle qualité.${motifs ? " " + motifs : ""}`,
+            "warning", 10000);
+ }
  fileInput.value = "";
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();

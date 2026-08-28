@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — seeing what the import understood, before it writes (quality-of-life 10/N)
+Tenth batch of the programme, verified in a real browser.
+
+**The defect this batch targets is not an error — it is a misleading success** (n° 14). You upload a client base whose surname column is called `nom` instead of `client_last_name`. Nothing raises. The Quality Gate discards the rows one by one, and the screen announces "snapshot imported successfully". The list in production is empty or truncated, and screening answers "no match" without ever complaining.
+
+**Preview before import.** A button on CSV imports runs the first ten rows through the *real* CSV reader and the *real* Quality Gate, and shows **what the engine retained from each row** — not the raw row, because the difference between the two is exactly what reveals a misnamed header. Nothing is written: no snapshot, no record, no leftover temp file, each pinned by a test. Rejection reasons are surfaced **as the Quality Gate writes them** ("Rule_B01: Champ Nom Principal Vide"), never reworded — a second wording would be a second source of truth, bound to drift from the rule.
+
+One alarm, and only one: when *no* expected field was filled on *any* row, the header or the delimiter does not match, and importing would produce an empty or wrong list. Fields that are merely empty here and there are not flagged — a natural-person base legitimately has no company name, and an alarm that cries wolf is an alarm people learn to ignore.
+
+The preview covers CSV imports only. The connected official sources have a dedicated reader and a format published by the issuer: offering a preview there would suggest a choice exists where there is none.
+
+**And the import now says what it discarded.** The `continue` after a failed Quality Gate check was silent: the endpoint returned the accepted count, and nobody compared it to the file's line count. Rejections are now counted at all four sites (a test derives the sites from the source, so a forgotten one fails the build — a wrong count is worse than no count, because it reassures), with their first distinct reasons, returned with the result and shown as a warning after the import.
+
+15 tests pin the batch.
+
 ### Added — what you know no longer stays in your head (quality-of-life 9/N)
 Ninth batch of the programme, verified in a real browser.
 

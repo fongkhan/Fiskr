@@ -3287,6 +3287,126 @@ def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
                               snapshot_id=snap.snapshot_id)
     return snap
 
+# ------------------ APERÇU AVANT IMPORT ------------------
+#
+# Aujourd'hui on téléverse un fichier et on découvre APRÈS coup si les
+# colonnes ont été comprises. Sur une liste de sanctions, une colonne de nom
+# mal reconnue ne produit pas une erreur : elle produit une liste en
+# production qui ne correspond à rien, et un criblage qui répond « aucune
+# correspondance » sans jamais se plaindre.
+#
+# L'aperçu fait passer les premières lignes par le VRAI lecteur CSV et le VRAI
+# Quality Gate, et rend ce qui a été compris — puis l'utilisateur décide. Rien
+# n'est écrit : ni instantané, ni fiche, ni journal.
+
+_APERCU_LIGNES = 10
+_APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU")
+
+@app.post("/api/ingest/preview")
+async def preview_ingest(
+    file_type: str = Form(...),
+    file: UploadFile = File(...),
+    delimiter: str = Form(","),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Aperçu d'un import CSV : les dix premières lignes telles que le moteur les
+    comprend, avec le verdict du Quality Gate. Aucune écriture.
+
+    Limité aux imports CSV — ceux dont les colonnes peuvent être mal comprises.
+    Les sources officielles branchées ont un lecteur dédié et un format publié
+    par l'émetteur : leur donner un aperçu laisserait croire qu'il y a là un
+    choix à faire, alors qu'il n'y en a pas.
+    """
+    if file_type not in _APERCU_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="L'aperçu ne couvre que les imports CSV (base clients, liste au format CSV).")
+
+    # Même plafond que l'import réel : la porte de l'aperçu ne peut pas être
+    # plus large que celle qu'elle précède.
+    nature = "clients" if file_type == "CLIENT_BASE" else "liste"
+    # Même dossier temporaire que l'import réel, et un nom qui dit ce que
+    # c'est : un aperçu abandonné doit se reconnaître d'un coup d'œil.
+    temp_dir = PROJECT_ROOT / "temp_ingestion"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    chemin = temp_dir / f"apercu_{uuid.uuid4().hex[:8]}.csv"
+    try:
+        copier_televersement_vers(chemin, file, nature)
+        lignes: List[Dict[str, Any]] = []
+        colonnes: List[str] = []
+        rejets = _CompteurDeRejets()
+        acceptees = 0
+        for brut in parse_csv_file(str(chemin), delimiter=delimiter):
+            if not colonnes:
+                colonnes = [c for c in brut.keys() if c]
+            item = ensure_parsed_name(dict(brut))
+            report = evaluate_and_clean(item)
+            if report["is_valid"]:
+                acceptees += 1
+            else:
+                rejets.ajouter(report)
+            lignes.append({
+                "accepte": bool(report["is_valid"]),
+                "motifs": [str(e) for e in (report.get("errors") or [])],
+                # Ce que le moteur a RETENU de la ligne, pas la ligne brute :
+                # c'est la difference entre les deux qui révèle une colonne
+                # mal nommée.
+                "compris": _apercu_champs_compris(file_type, item),
+            })
+            if len(lignes) >= _APERCU_LIGNES:
+                break
+        # Un champ vide ici ou là est banal : une base de personnes physiques
+        # n'a pas de raison sociale. Le seul signal qui n'admet pas de lecture
+        # innocente est celui-ci — AUCUN des champs attendus n'a été rempli
+        # sur AUCUNE ligne : l'en-tête ou le séparateur ne correspond pas.
+        # Le dire comme un fait unique vaut mieux qu'une liste de suspicions
+        # dont on apprend vite à ne plus tenir compte.
+        aucun_reconnu = bool(lignes) and not any(
+            (valeur or "").strip()
+            for ligne in lignes for valeur in ligne["compris"].values())
+        return {
+            "aucun_champ_reconnu": aucun_reconnu,
+            "file_type": file_type,
+            "delimiter": delimiter,
+            "colonnes_du_fichier": colonnes,
+            "lignes_examinees": len(lignes),
+            "acceptees": acceptees,
+            "lignes": lignes,
+            **rejets.rapport(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Aperçu d'import impossible : {e}")
+        raise HTTPException(status_code=400,
+                            detail="Fichier illisible : vérifiez le format et le séparateur.")
+    finally:
+        # Rien ne doit rester d'un aperçu : ni instantané, ni fichier.
+        try:
+            Path(chemin).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+# Champs que l'import LIT réellement, par type de fichier. Dérivés du Quality
+# Gate, qui les nomme déjà dans ses messages de refus : les recopier ici
+# serait une seconde source de vérité, vouée à diverger.
+_APERCU_CHAMPS = {
+    "CLIENT_BASE": ("client_id", "client_type", "client_first_name", "client_last_name",
+                    "client_company_name", "client_dob", "nationality", "residence"),
+    "WATCHLIST_EU": ("entity_id", "entity_type", "primary_name", "nationality",
+                     "birth_date", "origin"),
+}
+
+def _apercu_champs_compris(file_type: str, item: Dict[str, Any]) -> Dict[str, str]:
+    """Ce que le moteur a retenu de la ligne, champ par champ. Une valeur vide
+    en face d'un champ attendu est le signe visible d'une colonne mal nommée."""
+    sortie: Dict[str, str] = {}
+    for champ in _APERCU_CHAMPS.get(file_type, ()):
+        valeur = item.get(champ)
+        sortie[champ] = "" if valeur in (None, "") else str(valeur)
+    return sortie
+
 @app.post("/api/snapshots/ingest")
 @app.post("/api/ingest")
 def ingest_snapshot(
@@ -3422,6 +3542,34 @@ def ingest_snapshot(
             os.remove(temp_file_path)
 
 
+class _CompteurDeRejets:
+    """
+    Compte ce que le Quality Gate ecarte pendant un import, et retient les
+    premiers motifs distincts.
+
+    Le nombre seul ne suffit pas : « 4 812 lignes ecartees » n'aide personne.
+    Ce sont les MOTIFS qui disent quoi corriger, et le Quality Gate les ecrit
+    deja en nommant la colonne attendue (« Rule_B01 : ... client_last_name
+    manquant »). On les remonte tels quels, bornes, sans en reformuler un seul.
+    """
+
+    _MOTIFS_RETENUS = 5
+
+    def __init__(self):
+        self.total = 0
+        self._motifs: List[str] = []
+
+    def ajouter(self, report: Dict[str, Any]) -> None:
+        self.total += 1
+        for erreur in (report.get("errors") or []):
+            texte = str(erreur).strip()
+            if texte and texte not in self._motifs and len(self._motifs) < self._MOTIFS_RETENUS:
+                self._motifs.append(texte)
+
+    def rapport(self) -> Dict[str, Any]:
+        return {"rejected_count": self.total, "rejected_reasons": list(self._motifs)}
+
+
 def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                original_filename: str, file_type: str,
                                delimiter: str, ssie_selector_overrides,
@@ -3442,6 +3590,12 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
     snap_id = snap.snapshot_id
     try:
         record_count = 0
+        # Le Quality Gate ecarte des lignes, et jusqu'ici il le faisait en
+        # SILENCE : l'import rendait le nombre de fiches acceptees, personne
+        # ne le comparait au nombre de lignes du fichier. Une colonne mal
+        # nommee produisait donc un « import reussi » avec une liste vide ou
+        # amputee — le defaut le plus couteux du produit, et le plus discret.
+        rejets = _CompteurDeRejets()
         ofac_relations = None  # liens entre profils (OFAC uniquement)
 
         # 3. Parse contents based on File Type
@@ -3527,6 +3681,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 # Validate quality gate
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
+                    rejets.ajouter(report)
                     continue
                     
                 # Create checksum
@@ -3593,6 +3748,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     item = ensure_parsed_name(item)
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
+                        rejets.ajouter(report)
                         continue
                     ent_checksum = compute_checksum(item)
 
@@ -3636,6 +3792,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     item = ensure_parsed_name(item)
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
+                        rejets.ajouter(report)
                         continue
                     ent_checksum = compute_checksum(item)
                     
@@ -3699,6 +3856,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
+                    rejets.ajouter(report)
                     continue
                     
                 ent_checksum = compute_checksum(item)
@@ -3835,7 +3993,8 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             "snapshot_id": snap_id,
             "record_count": record_count,
             "status": snap.status,
-            "rescreen": rescreen_result
+            "rescreen": rescreen_result,
+            **rejets.rapport(),
         }
     except Exception as e:
         db.rollback()

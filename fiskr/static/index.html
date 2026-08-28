@@ -336,10 +336,18 @@
  <input type="text" id="ingest-delimiter" value="," placeholder="," style="text-align: center;">
  </div>
  </div>
- <button type="submit" id="submit-ingest-btn" class="btn btn-secondary" style="margin-top: 1rem;">
- Charger & Archiver
+ <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem;">
+ <!-- L'aperçu ne couvre que les imports CSV : le bouton se montre pour eux. -->
+ <button type="button" id="apercu-ingest-btn" class="btn btn-secondary hidden" onclick="apercuAvantImport()">
+ Aperçu avant import
  </button>
+ <button type="submit" id="submit-ingest-btn" class="btn btn-secondary">
+ Charger &amp; Archiver
+ </button>
+ </div>
  </form>
+ <!-- Aperçu : les premières lignes telles que le moteur les comprend. -->
+ <div id="apercu-import" class="hidden" style="margin-top: 1rem;"></div>
  <!-- Progression de l'import (gros fichiers) : alimentee par GET /api/progress -->
  <div id="ingest-progress" class="progress-tracker hidden" aria-live="polite">
  <div class="progress-tracker-label"><span id="ingest-progress-phase">Préparation…</span><span id="ingest-progress-count"></span></div>

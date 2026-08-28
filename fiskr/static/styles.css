@@ -1077,6 +1077,22 @@ body.densite-compacte th, body.densite-compacte td { padding: 0.35rem 0.6rem; fo
 body.densite-compacte .table-group-row td { padding-top: 0.55rem; }
 .icon-btn.actif { border-color: var(--color-primary); color: var(--color-primary); }
 
+/* ------------------ Aperçu avant import ------------------ */
+/* Le verdict porte un mot, pas seulement une couleur de fond. */
+.apercu-verdict-ok { color: var(--success-soft-text); font-weight: 600; font-size: 0.8rem; }
+.apercu-verdict-ko { color: var(--danger-soft-text); font-weight: 600; font-size: 0.8rem; }
+tr.apercu-refus { background: rgba(239, 68, 68, 0.07); }
+.apercu-alarme {
+    padding: 0.7rem 0.9rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-left-width: 4px;
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.08);
+    font-size: 0.87rem;
+    line-height: 1.5;
+}
+
 /* ------------------ Notes internes & citations ------------------ */
 .note-fiche {
     padding: 0.4rem 0.6rem;
