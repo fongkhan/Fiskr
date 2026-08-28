@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — where to start (quality-of-life 12/N)
+Twelfth batch of the programme, verified in a real browser.
+
+**The home page was already a rich, customisable panel grid — and every panel was collective** (n° 29). "Open alerts" counts them all, "workload per analyst" shows everyone's. Nothing answered the first question of a morning: what do I start with? So this batch adds no new screen: three **personal** panels join the existing catalogue, and the user places them wherever they like. A separate "My day" page would have duplicated a grid that is already personalisable.
+
+**One number changes meaning, and it is the point of the batch.** The collective "four eyes" tile counts decisions awaiting validation — including the ones *I* proposed, which the four-eyes rule forbids me to validate. Announcing "3 to validate" to someone who can validate none of them promises work that does not exist. The personal count keeps only what this reader can actually act on, and a test pins the count against the server's own refusal, so the two cannot drift apart.
+
+The "My day" panel gathers what is waiting: my alerts in the queue's own order (with lateness), what I can validate and who proposed it, my holds coming back within the day, batches awaiting approval, followed cases still open. Three panels, **one request** — a shared promise, refreshed on every return to the home page rather than served an hour stale. And "unavailable" is never rendered as "nothing to do": the second reading would close the screen on someone who has work.
+
+One robustness fix on the existing machinery along the way: the panel dispatcher's `try/catch` is synchronous and cannot see a rejected promise, so an async panel failing would have left the home page half-drawn.
+
+14 tests pin the batch.
+
 ### Added — mapping the columns, once and for all (quality-of-life 11/N)
 Eleventh batch of the programme, verified in a real browser through a genuine import.
 

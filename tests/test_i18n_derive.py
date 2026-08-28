@@ -49,7 +49,11 @@ def _en_json(txt):
     """Le litteral est du JSON a trois details pres : cles de langue non
     guillemetees, virgules finales tolerees, commentaires de ligne."""
     txt = re.sub(r"^\s*//.*$", "", txt, flags=re.M)
-    txt = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)\s*:', r'\1"\2":', txt)
+    # Une cle est suivie d'une VALEUR (guillemet, crochet, accolade). Sans
+    # cette exigence, une phrase francaise citee dans une CLE — « ..., vous :
+    # vos alertes » — se ferait prendre pour une cle a son tour, et le
+    # dictionnaire deviendrait illisible sur du contenu parfaitement correct.
+    txt = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?=["\[{])', r'\1"\2": ', txt)
     txt = re.sub(r",(\s*[}\]])", r"\1", txt)
     return json.loads(txt)
 

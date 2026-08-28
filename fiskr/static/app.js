@@ -1524,6 +1524,15 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-08-27-lot-12", date: "2026-08-27",
+ titre: "Par quoi je commence",
+ points: [
+ "L'accueil s'ouvre sur ce qui vous attend, vous : vos alertes, ce que vous pouvez valider, ce qui revient.",
+ "« À valider par moi » exclut vos propres propositions, que la règle des quatre yeux vous interdit de valider.",
+ "Les panneaux existants restent : votre disposition personnelle n'est pas touchée.",
+ ],
+ },
+ {
  id: "2026-08-27-lot-11", date: "2026-08-27",
  titre: "Associer les colonnes, une fois pour toutes",
  points: [
@@ -8139,6 +8148,27 @@ const DASHBOARD_WIDGETS = {
  renderStatusDonut(`${body.id}-donut`, `${body.id}-legend`, d.alerts.by_status || {});
  } },
 
+ // Panneaux PERSONNELS. Tous les autres comptent le collectif : « alertes
+ // ouvertes » les compte toutes, « charge par analyste » montre celle de
+ // tout le monde. Ceux-ci répondent à « par quoi je commence ».
+ "tile-mes-alertes": { cat: "kpi", icon: uiIcon("user"), title: "Mes alertes", sub: "assignées, ouvertes",
+ fetchValue: async () => {
+  const j = await chargerMaJournee();
+  if (!j) return "—";
+  return j.mes_alertes.en_retard
+   ? `${j.mes_alertes.total} (${j.mes_alertes.en_retard} en retard)`
+   : j.mes_alertes.total;
+ },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
+ "tile-a-valider": { cat: "kpi", icon: uiIcon("eye"), title: "À valider par moi", sub: "hors mes propres propositions",
+ fetchValue: async () => {
+  const j = await chargerMaJournee();
+  if (!j) return "—";
+  return j.a_valider.peut_valider ? j.a_valider.total : "—";
+ },
+ go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
+ "table-ma-journee": { cat: "tables", icon: uiIcon("briefcase"), title: "Ma journée", render: renderMaJourneeWidget },
+
  "table-todo": { cat: "tables", icon: uiIcon("clock"), title: "À traiter en priorité", render: renderTodoWidget },
  "table-syncs": { cat: "tables", icon: uiIcon("refresh"), title: "Dernières synchronisations", render: renderSyncsWidget },
  "table-jobs": { cat: "tables", icon: uiIcon("gear"), title: "Travaux récents", render: renderJobsWidget },
@@ -8164,6 +8194,11 @@ const DASHBOARD_WIDGETS = {
 
 // Disposition par défaut : l'accueil historique (tuiles + graphiques + listes)
 const DASHBOARD_DEFAULT_LAYOUT = [
+ // « Par quoi je commence » avant « où en est la maison » : les panneaux
+ // personnels ouvrent la disposition par défaut. Une disposition déjà
+ // composée par l'utilisateur n'est jamais touchée.
+ { id: "tile-mes-alertes", size: "sm" }, { id: "tile-a-valider", size: "sm" },
+ { id: "table-ma-journee", size: "md" },
  { id: "tile-screening", size: "sm" }, { id: "tile-filtering", size: "sm" },
  { id: "tile-4eyes", size: "sm" }, { id: "tile-review", size: "sm" },
  { id: "tile-fp-rate", size: "sm" }, { id: "tile-avg-delay", size: "sm" },
@@ -8182,6 +8217,9 @@ function _defaultDashboardLayout() {
 }
 
 async function loadDashboardLayout() {
+ // Un retour sur l'accueil doit montrer l'état du moment, pas celui d'il y a
+ // une heure : la journée se relit à chaque rendu.
+ _maJournee = null;
  try {
  const response = await apiFetch("/api/me/dashboard", { silent: true });
  if (response.ok) {
@@ -8266,7 +8304,8 @@ function _hydrateDashboardWidgets() {
  }
  } else {
  const body = document.getElementById(`dw-body-${w.id}`);
- if (body) def.render(body, d);
+ if (body) Promise.resolve(def.render(body, d))
+  .catch(e => console.error(`Panneau ${w.id} :`, e));
  }
  } catch (e) {
  console.error(`Panneau ${w.id} :`, e); // un panneau cassé ne casse pas l'accueil
@@ -8275,6 +8314,71 @@ function _hydrateDashboardWidgets() {
 }
 
 // ---- Panneaux « tableaux » ----
+
+// « Ma journée » : une seule lecture serveur pour les trois panneaux, mise en
+// cache le temps du rendu de l'accueil — trois panneaux ne doivent pas faire
+// trois requêtes identiques.
+let _maJournee = null;
+let _maJourneePromesse = null;
+
+async function chargerMaJournee(forcer = false) {
+ if (forcer) { _maJournee = null; _maJourneePromesse = null; }
+ if (_maJournee) return _maJournee;
+ if (!_maJourneePromesse) {
+  _maJourneePromesse = (async () => {
+   try {
+    const r = await apiFetch("/api/me/journee", { silent: true });
+    _maJournee = r.ok ? await r.json() : null;
+   } catch (e) {
+    _maJournee = null;
+   }
+   _maJourneePromesse = null;
+   return _maJournee;
+  })();
+ }
+ return _maJourneePromesse;
+}
+
+async function renderMaJourneeWidget(body) {
+ const j = await chargerMaJournee();
+ if (!j) {
+  // Indisponible n'est pas « rien à faire » : la seconde lecture ferait
+  // fermer l'écran à quelqu'un qui a du travail.
+  body.innerHTML = '<p class="section-desc">Votre journée est indisponible pour le moment.</p>';
+  return;
+ }
+ const ligne = (texte, meta, action) => `<li${action ? ` onclick="${action}"` : ' style="cursor: default;"'}>
+   <span class="item-main">${texte}</span>
+   <span class="item-meta">${meta}</span>
+  </li>`;
+ const ouvrir = (a) => {
+  const espace = a.channel === "FILTERING" ? "filtering" : "screening";
+  const sous = a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening";
+  return `switchTab('${espace}'); switchSubTab('${espace}', '${sous}'); openAlertModal(${a.id})`;
+ };
+ const morceaux = [];
+ for (const a of j.mes_alertes.items.slice(0, 4)) {
+  morceaux.push(ligne(`#${a.id} — ${escapeHtml(a.client_name || "?")}`,
+   `${escapeHtml(a.priority || "—")}${a.overdue ? " · en retard" : ""}`, ouvrir(a)));
+ }
+ for (const a of j.a_valider.items.slice(0, 3)) {
+  morceaux.push(ligne(`#${a.id} — <span>à valider</span> · ${escapeHtml(a.client_name || "?")}`,
+   `<span>proposée par</span> @${escapeHtml(a.proposed_by || "?")}`, ouvrir(a)));
+ }
+ if (j.reveils_du_jour) {
+  morceaux.push(ligne(`<span>Mises en attente qui reviennent</span>`, `${j.reveils_du_jour}`,
+   "switchTab('screening'); switchSubTab('screening', 'alerts-screening')"));
+ }
+ if (j.lots_a_homologuer) {
+  morceaux.push(ligne(`<span>Lots à homologuer</span>`, `${j.lots_a_homologuer}`,
+   "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')"));
+ }
+ if (j.dossiers_suivis) {
+  morceaux.push(ligne(`<span>Dossiers suivis encore ouverts</span>`, `${j.dossiers_suivis}`, ""));
+ }
+ body.innerHTML = '<ul class="home-list">' + (morceaux.length ? morceaux.join("")
+  : ligne('<span style="color: var(--text-muted);">Rien ne vous attend : votre journée est à jour.</span>', "", "")) + '</ul>';
+}
 
 function renderTodoWidget(body, d) {
  const oldest = d.alerts.oldest_open || [];

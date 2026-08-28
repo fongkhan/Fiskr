@@ -12783,6 +12783,89 @@ def _normalize_dashboard_widgets(widgets: Any) -> List[Dict[str, str]]:
         normalized.append({"id": widget_id, "size": size})
     return normalized
 
+@app.get("/api/me/journee")
+async def get_ma_journee(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Ce qui attend CE lecteur aujourd'hui.
+
+    L'accueil est une grille riche, mais tous ses panneaux sont collectifs :
+    « alertes ouvertes » les compte toutes, « charge par analyste » montre
+    celle de tout le monde. Rien ne repond a « par quoi je commence ».
+
+    Un point merite d'etre dit, parce qu'il change un chiffre : la tuile
+    « 4 yeux » collective compte les decisions en attente de validation, y
+    compris CELLES QUE J'AI PROPOSEES — que la regle des quatre yeux
+    m'interdit precisement de valider. Annoncer « 3 a valider » a quelqu'un
+    qui n'en peut valider aucune, c'est promettre du travail qui n'existe
+    pas. Le compte personnel ne retient donc que ce sur quoi ce lecteur peut
+    reellement agir.
+    """
+    from sqlalchemy import case, or_
+    moi = current_user["username"]
+    roles = parse_roles(current_user.get("role"))
+    peut_valider = bool({"admin", "reviewer"} & set(roles))
+    maintenant = datetime.utcnow()
+
+    ouvertes = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    rang = case({"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
+                value=Alert.priority, else_=2)
+
+    # 1. Mes alertes : celles qui me sont assignees, dans l'ordre de la file.
+    miennes_q = ouvertes.filter(Alert.assigned_to == moi)
+    miennes = miennes_q.order_by(rang.asc(), Alert.due_at.asc().nullslast(),
+                                 Alert.final_score.desc()).limit(10).all()
+    mes_retards = miennes_q.filter(Alert.due_at.isnot(None),
+                                   Alert.due_at < maintenant).count()
+
+    # 2. A valider PAR MOI : proposees par quelqu'un d'autre.
+    a_valider: List[Alert] = []
+    a_valider_total = 0
+    if peut_valider:
+        validables = db.query(Alert).filter(
+            Alert.status == "PENDING_VALIDATION",
+            or_(Alert.proposed_by.is_(None), Alert.proposed_by != moi))
+        a_valider_total = validables.count()
+        a_valider = validables.order_by(Alert.proposed_at.asc().nullslast()).limit(10).all()
+
+    # 3. Ce qui me revient : mes mises en attente arrivees a echeance.
+    reveils = ouvertes.filter(
+        Alert.assigned_to == moi, Alert.snoozed_until.isnot(None),
+        Alert.snoozed_until <= maintenant + timedelta(hours=24)).count()
+
+    # 4. Les dossiers que je suis, encore ouverts.
+    suivis_ids = [r.alert_id for r in
+                  db.query(AlertFollower).filter(AlertFollower.username == moi).all()]
+    suivis = 0
+    if suivis_ids:
+        suivis = db.query(Alert).filter(
+            Alert.id.in_(suivis_ids), Alert.status.in_(ALERT_OPEN_STATUSES)).count()
+
+    # 5. Les lots qui attendent une homologation, si j'y ai droit.
+    lots = db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count() if peut_valider else 0
+
+    def _resume(a: Alert) -> Dict[str, Any]:
+        return {"id": a.id, "channel": a.channel or "SCREENING",
+                "client_name": a.client_name, "watchlist_name": a.watchlist_name,
+                "priority": a.priority, "status": a.status,
+                "due_at": a.due_at.isoformat() if a.due_at else None,
+                "overdue": bool(a.due_at and a.due_at < maintenant),
+                "proposed_by": a.proposed_by}
+
+    return {
+        "username": moi,
+        "mes_alertes": {"total": miennes_q.count(), "en_retard": mes_retards,
+                        "items": [_resume(a) for a in miennes]},
+        "a_valider": {"total": a_valider_total,
+                      "items": [_resume(a) for a in a_valider],
+                      "peut_valider": peut_valider},
+        "reveils_du_jour": reveils,
+        "dossiers_suivis": suivis,
+        "lots_a_homologuer": lots,
+    }
+
 @app.get("/api/me/dashboard")
 async def get_my_dashboard(
     db: Session = Depends(get_db),
