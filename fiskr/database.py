@@ -304,6 +304,11 @@ class SyncReport(Base):
     removed_count = Column(Integer, default=0)
     delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
     email_sent = Column(Boolean, default=False)
+    # Octets REELLEMENT transferes pendant le passage (apres compression, tels
+    # que comptes sur le fil). Deux passages « NO_CHANGE » coutaient l'un rien
+    # — reponse 304, aucun corps — et l'autre une fenetre de nuit entiere, et
+    # le rapport les disait pareils. NULL : passage anterieur a la mesure.
+    bytes_downloaded = Column(Integer, nullable=True)
 
 # Types de snapshots persistes en WatchlistEntity (listes officielles).
 # Vit ici (et non dans api.py) pour que le demon travailleur et les modules

@@ -616,8 +616,10 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
     interpolees depuis .env par fiskr/config.py, le secret ne vit jamais
     dans un fichier versionne.
 
-    Retourne {"not_modified": bool, "etag": ..., "last_modified": ...} :
-    dest_path n'est PAS ecrit quand `not_modified` est vrai.
+    Retourne {"not_modified": bool, "bytes": ..., "etag": ...,
+    "last_modified": ...} : dest_path n'est PAS ecrit quand `not_modified` est
+    vrai, et `bytes` vaut alors 0. `bytes` compte les octets vus SUR LE FIL
+    (contenu compresse), pas la taille du fichier une fois decode.
     """
     import httpx
     network = get_sync_config()["network"]
@@ -641,7 +643,7 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
                 raise _retryable_from_response(response, _corps_de_202_vide(response))
             if response.status_code == 304:
                 # Source inchangee depuis le dernier passage : rien a lire
-                return {"not_modified": True,
+                return {"not_modified": True, "bytes": 0,
                         "etag": (validators or {}).get("etag"),
                         "last_modified": (validators or {}).get("last_modified")}
             response.raise_for_status()
@@ -680,7 +682,14 @@ def download_to_file(url: str, dest_path: Path, timeout: Optional[float] = None,
                     progress(received, total)
                 except Exception:
                     pass
+            # `received` compte les octets DECODES ; le fil, lui, porte du
+            # gzip (httpx l'annonce et le decode tout seul, les portails le
+            # servent). Les deux different d'un facteur 3 a 6 sur ces sources,
+            # et c'est le fil qu'on paie. Rapporter l'un pour l'autre serait
+            # exactement le defaut chasse partout ailleurs : un nombre qui a
+            # l'air d'une mesure et qui ne mesure pas la bonne chose.
             return {"not_modified": False,
+                    "bytes": getattr(response, "num_bytes_downloaded", received),
                     "etag": response.headers.get("etag"),
                     "last_modified": response.headers.get("last-modified")}
 
@@ -1159,6 +1168,17 @@ def _truncate_delta_details(delta: Dict[str, Any]) -> Dict[str, Any]:
     return {"summary": delta.get("summary", {}), "details": truncated}
 
 
+def _volume_lisible(octets: Optional[int]) -> str:
+    """Volume transfere, ecrit pour un humain (« 3,8 Mio », « 24 Kio »)."""
+    if octets is None:
+        return "volume non mesure"
+    if octets < 1024:
+        return f"{octets} o"
+    if octets < 1024 * 1024:
+        return f"{octets / 1024:.0f} Kio".replace(".", ",")
+    return f"{octets / 1024 / 1024:.1f} Mio".replace(".", ",")
+
+
 def _save_report(db, **kwargs) -> SyncReport:
     report = SyncReport(**kwargs)
     db.add(report)
@@ -1403,16 +1423,20 @@ def _run_list_replacement_sync(
             outcome = download_to_file(url, temp_file, progress=tracker.downloading(),
                                        validators=stored_validators(db, source),
                                        headers=auth_headers) or {}
+            octets = outcome.get("bytes")
             if outcome.get("not_modified"):
                 logger.info(f"Sync {source}: source inchangee (HTTP 304), aucun telechargement.")
                 return _finalize_report(
                     db, source=source, trigger=trigger, status="NO_CHANGE",
                     message=f"Source {source} inchangee depuis le dernier passage "
                             f"(réponse 304 du serveur, aucun téléchargement).",
-                    previous_snapshot_id=previous_id
+                    previous_snapshot_id=previous_id, bytes_downloaded=0
                 )
             remember_validators(db, source, outcome.get("etag"), outcome.get("last_modified"))
         else:
+            # Telechargement fourni par l'appelant : rien a mesurer ici, et un
+            # zero serait un mensonge — le volume reste inconnu (NULL).
+            octets = None
             fetch(url, temp_file)
 
         tracker.phase("HASH")
@@ -1428,10 +1452,15 @@ def _run_list_replacement_sync(
                 message = f"Le fichier {source} est identique a un snapshot deja en attente d'homologation."
             else:
                 message = f"Le fichier {source} est identique a la version active (hash inchange)."
+            # Ce passage-la n'a rien change ET a coute un transfert : le dire,
+            # sinon il se confond avec le 304 qui n'a rien coute du tout.
+            if octets:
+                message += f" {_volume_lisible(octets)} retéléchargés pour rien."
             return _finalize_report(
                 db, source=source, trigger=trigger, status="NO_CHANGE",
                 message=message,
-                previous_snapshot_id=duplicate.snapshot_id
+                previous_snapshot_id=duplicate.snapshot_id,
+                bytes_downloaded=octets
             )
 
         snap_id = f"{source.lower()}-sync-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -1494,7 +1523,8 @@ def _run_list_replacement_sync(
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
             removed_count=summary["removed_count"],
-            delta_report=_truncate_delta_details(delta)
+            delta_report=_truncate_delta_details(delta),
+            bytes_downloaded=octets
         )
     except Exception as e:
         db.rollback()

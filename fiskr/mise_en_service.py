@@ -244,18 +244,44 @@ def _referentiel_clients(db) -> Dict[str, Any]:
 
 
 def _seuils(db) -> Dict[str, Any]:
+    """
+    Un seuil se calibre sur SON univers : un portefeuille et des listes donnent
+    un taux de faux positifs qui n'appartient qu'à eux.
+
+    D'où la dépendance que ce contrôle énonce désormais au lieu de la taire.
+    Sans référentiel clients, il n'y a rien à mesurer — demander de calibrer
+    est alors demander un travail que personne ne peut faire, et une consigne
+    impossible s'ignore aussi vite qu'une alarme qui crie au loup. Le contrôle
+    reste À FAIRE (le seuil livré n'a effectivement jamais été revu), mais il
+    dit par quoi commencer, et son lien pointe vers ce premier geste — l'import
+    — plutôt que vers l'écran des seuils où il n'y a rien à faire encore.
+    """
+    from fiskr.database import ClientEntity
     from fiskr.settings import score_thresholds
     seuils = score_thresholds(db)
     origine = seuils.get("source")
     coupure = seuils.get("cut_off_threshold")
     if origine == "config":
+        if not db.query(ClientEntity).count():
+            return _controle(
+                "seuils", "Criblage", "Seuils de score", A_FAIRE,
+                f"Seuil de coupure à {coupure} — la valeur livrée, jamais revue "
+                f"sur cette installation, et rien ici ne permet encore de la "
+                f"revoir : sans référentiel clients, il n'y a pas de taux de "
+                f"faux positifs à mesurer.",
+                "L'ordre compte : importez d'abord le référentiel clients, "
+                "lancez un lookback sur les listes déjà en production, puis "
+                "simulez des seuils candidats sur les décisions ainsi produites "
+                "(« Simuler » sur l'écran des seuils) avant d'en arrêter un.",
+                "#watchlist-mgmt/watchlist-import")
         return _controle(
             "seuils", "Criblage", "Seuils de score", A_FAIRE,
             f"Seuil de coupure à {coupure} — la valeur livrée, jamais revue sur "
             f"cette installation.",
-            "Un seuil se calibre sur SON univers : un portefeuille et des listes "
-            "donnent un taux de faux positifs qui n'appartient qu'à eux. "
-            "Mesurez avant d'arrêter une valeur (cahier de tests sur panel).",
+            "Le portefeuille est là : lancez un lookback, puis simulez des "
+            "seuils candidats sur les décisions produites (« Simuler » sur "
+            "l'écran des seuils) avant d'en arrêter un. Un seuil se calibre sur "
+            "SON univers, jamais sur une valeur reprise d'ailleurs.",
             "#screening/alerts-blocking")
     return _controle("seuils", "Criblage", "Seuils de score", OK,
                      f"Seuil de coupure réglé à {coupure} depuis l'application.",
