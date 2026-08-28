@@ -1093,6 +1093,18 @@ tr.apercu-refus { background: rgba(239, 68, 68, 0.07); }
     line-height: 1.5;
 }
 
+/* Assistant de correspondance de colonnes (aperçu avant import) */
+.assistant-colonnes {
+    margin: 0.5rem 0 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--surface-2);
+}
+.assistant-colonnes > summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; }
+.assistant-colonnes select { min-width: 180px; }
+.assistant-colonnes code { font-size: 0.82rem; }
+
 /* ------------------ Notes internes & citations ------------------ */
 .note-fiche {
     padding: 0.4rem 0.6rem;

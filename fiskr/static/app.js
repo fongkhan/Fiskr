@@ -1524,6 +1524,15 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-08-27-lot-11", date: "2026-08-27",
+ titre: "Associer les colonnes, une fois pour toutes",
+ points: [
+ "Quand les en-têtes ne correspondent pas, associez-les vous-même dans l'aperçu.",
+ "La correspondance est mémorisée pour les fichiers de la même forme, et proposée la fois suivante.",
+ "Elle est proposée, jamais appliquée d'elle-même : vous voyez ce que vous acceptez.",
+ ],
+ },
+ {
  id: "2026-08-27-lot-10", date: "2026-08-27",
  titre: "Voir ce que l'import a compris, avant de l'écrire",
  points: [
@@ -1947,6 +1956,15 @@ document.addEventListener("DOMContentLoaded", () => {
  initListTypeControls();
  // Le bouton d'aperçu suit le type de fichier sélectionné, dès l'arrivée.
  if (document.getElementById("ingest-file-type")) toggleSsieOptions();
+ // Un nouveau fichier, une nouvelle correspondance : celle d'avant visait
+ // les colonnes d'un autre fichier.
+ const champFichier = document.getElementById("ingest-file");
+ if (champFichier) champFichier.addEventListener("change", () => {
+  _correspondanceCourante = {};
+  _derniereMemoire = null;
+  const zone = document.getElementById("apercu-import");
+  if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
+ });
  populateManualListSelects();
  initSidebarCollapse();
  // Filtres du tableau des sources (recherche + famille + état)
@@ -2903,6 +2921,10 @@ function toggleSsieOptions() {
  if (btn) btn.classList.toggle("hidden", !TYPES_AVEC_APERCU.includes(fileType));
  const zone = document.getElementById("apercu-import");
  if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
+ // Une correspondance appartient à un fichier et à un type : la garder au
+ // changement l'appliquerait à des colonnes qui n'existent plus.
+ _correspondanceCourante = {};
+ _derniereMemoire = null;
 }
 
 // ------------------ APERÇU AVANT IMPORT ------------------
@@ -2913,6 +2935,66 @@ function toggleSsieOptions() {
 // sans jamais se plaindre.
 
 const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU"];
+
+// Correspondance en cours d'édition : {champ_du_moteur: colonne_du_fichier}.
+// L'aperçu la rejoue à chaque application, l'import la porte, et le serveur
+// ne la mémorise qu'après un import abouti.
+let _correspondanceCourante = {};
+// Correspondance déjà mémorisée pour cette forme de fichier, proposée par
+// le serveur : retenue ici pour que « Reprendre » ait quoi reprendre.
+let _derniereMemoire = null;
+
+function _rendreAssistant(data) {
+ const colonnes = data.colonnes_du_fichier || [];
+ const champs = data.champs_attendus || [];
+ if (!champs.length || !colonnes.length) return "";
+ const appliquee = data.correspondance_appliquee || {};
+ const memorisee = data.correspondance_memorisee;
+ const options = (choisi) => ['<option value="">— non associé —</option>']
+  .concat(colonnes.map((c) => `<option value="${escapeHtml(c)}"${c === choisi ? " selected" : ""}>${escapeHtml(c)}</option>`))
+  .join("");
+ const lignes = champs.map((champ) => `<tr>
+   <td><code>${escapeHtml(champ)}</code></td>
+   <td><select data-champ="${escapeHtml(champ)}" aria-label="Colonne pour ${escapeHtml(champ)}">${options(appliquee[champ] || "")}</select></td>
+  </tr>`).join("");
+ // Une correspondance mémorisée se PROPOSE, elle ne s'applique jamais d'elle-même :
+ // l'utilisateur doit voir ce qu'il accepte.
+ const memo = memorisee
+  ? `<p class="section-desc"><span>Une correspondance a déjà servi pour un fichier de cette forme.</span>
+     <button type="button" class="btn btn-sm btn-secondary" onclick="appliquerCorrespondanceMemorisee()">Reprendre la correspondance mémorisée</button></p>`
+  : "";
+ return `<details class="assistant-colonnes"${data.aucun_champ_reconnu ? " open" : ""}>
+   <summary>Associer les colonnes du fichier aux champs du moteur</summary>
+   ${memo}
+   <p class="section-desc">À gauche, ce que le moteur lit ; à droite, la colonne de votre fichier qui le remplit. Les colonnes non associées restent dans le fichier, elles ne sont pas perdues.</p>
+   <div class="table-container" style="max-height: 240px;">
+    <table><thead><tr><th>Champ du moteur</th><th>Colonne du fichier</th></tr></thead><tbody>${lignes}</tbody></table>
+   </div>
+   <button type="button" class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="appliquerCorrespondance()">Revoir l'aperçu avec cette correspondance</button>
+  </details>`;
+}
+
+function _correspondanceSaisie() {
+ const sortie = {};
+ document.querySelectorAll(".assistant-colonnes select[data-champ]").forEach((sel) => {
+  if (sel.value) sortie[sel.dataset.champ] = sel.value;
+ });
+ return sortie;
+}
+
+async function appliquerCorrespondance() {
+ _correspondanceCourante = _correspondanceSaisie();
+ await apercuAvantImport();
+}
+
+function appliquerCorrespondanceMemorisee() {
+ const memo = _derniereMemoire || {};
+ for (const [champ, colonne] of Object.entries(memo)) {
+  const sel = document.querySelector(`.assistant-colonnes select[data-champ="${CSS.escape(champ)}"]`);
+  if (sel) sel.value = colonne;
+ }
+ appliquerCorrespondance();
+}
 
 async function apercuAvantImport() {
  const zone = document.getElementById("apercu-import");
@@ -2925,6 +3007,9 @@ async function apercuAvantImport() {
  donnees.append("file", fichier);
  donnees.append("file_type", document.getElementById("ingest-file-type").value);
  donnees.append("delimiter", document.getElementById("ingest-delimiter").value || ",");
+ if (Object.keys(_correspondanceCourante).length) {
+  donnees.append("column_mapping", JSON.stringify(_correspondanceCourante));
+ }
  zone.classList.remove("hidden");
  zone.innerHTML = '<p class="section-desc">Lecture des premières lignes…</p>';
  try {
@@ -2959,7 +3044,9 @@ function rendreApercuImport(data) {
  const motifs = (data.rejected_reasons || []).length
   ? `<p class="section-desc"><span>Motifs de refus rencontrés :</span> ${data.rejected_reasons.map((m) => escapeHtml(m)).join(" · ")}</p>`
   : "";
+ _derniereMemoire = data.correspondance_memorisee || null;
  return `${alarme}
+  ${_rendreAssistant(data)}
   <h4 style="margin: 0.5rem 0;">Aperçu : ${lignes.length} première(s) ligne(s)</h4>
   <p class="section-desc"><span>${data.acceptees} acceptée(s), ${data.rejected_count} écartée(s) sur l'échantillon.</span> <span>Colonnes lues dans le fichier :</span> ${escapeHtml((data.colonnes_du_fichier || []).join(", ") || "aucune")}</p>
   ${motifs}
@@ -3077,6 +3164,11 @@ async function handleIngestion(event) {
  formData.append("file_type", fileType);
  formData.append("file", fileInput.files[0]);
  formData.append("delimiter", delimiter || ",");
+ // La correspondance validée dans l'aperçu suit le fichier jusqu'à l'import :
+ // sans cela, l'aperçu montrerait une chose et l'import en écrirait une autre.
+ if (Object.keys(_correspondanceCourante).length) {
+  formData.append("column_mapping", JSON.stringify(_correspondanceCourante));
+ }
 
  if (fileType === "WATCHLIST_SSIE") {
  const selectorsRaw = document.getElementById("ssie-selectors").value.trim();

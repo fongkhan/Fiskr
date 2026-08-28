@@ -719,7 +719,7 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète — **1 643 fonctions de test** réparties sur 163
+Exécutez la suite complète — **1 659 fonctions de test** réparties sur 164
 fichiers — avec pytest :
 ```bash
 python -m pytest

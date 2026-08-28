@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — mapping the columns, once and for all (quality-of-life 11/N)
+Eleventh batch of the programme, verified in a real browser through a genuine import.
+
+**The previous batch diagnosed; this one cures** (n° 15). The preview says "no expected field was recognised" — and left the user to go rename columns in their own file. An assistant now sits in the preview: on the left what the engine reads, on the right the column of your file that fills it. Apply, review the preview, import. The mapping travels with the file all the way to the import, because a preview showing one thing while the import writes another would be worse than no preview at all.
+
+**The trap of this batch was already in the code.** `parse_csv_file` carried a `mapping_dict` parameter with **no caller anywhere** — and its semantics kept *only* the mapped fields. A partial mapping ("nom" → `client_last_name`), which is exactly what an assistant produces, would have silently dropped the client id, the nationality and everything else. Wiring it as-is would have created the very data loss the assistant exists to prevent. The reader now mirrors every column first and applies the mapping on top; the first test of the batch holds that ordering.
+
+**Two explicit refusals rather than a silence.** An unknown target field would never be read by the import; a source column absent from the file would fill the field with emptiness. Both cases would leave the user believing they had fixed the problem — so both are refused, naming the field and the column.
+
+**Memory by header fingerprint.** The mapping is remembered per file *shape* (headers normalised and sorted) and offered on the next import of a file with the same shape. Two guarantees: it is written **only after an import that actually succeeded** — remembering a mapping that was typed but never proven would mean re-offering an error nobody ever saw — and it is **offered, never applied on its own**: the alarm stays up until the user takes it, because a mapping guessed and applied in silence is precisely the defect the assistant exists to prevent.
+
+16 tests pin the batch, including the reader's mirror-then-map ordering, the fingerprint's independence from order and case, and the chain that carries the mapping from endpoint to job to reader.
+
 ### Added — seeing what the import understood, before it writes (quality-of-life 10/N)
 Tenth batch of the programme, verified in a real browser.
 

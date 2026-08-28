@@ -46,7 +46,7 @@ from fiskr.database import (
     WatchlistEntity, ClientEntity, compute_checksum, User, verify_password, hash_password,
     safe_upload_filename,
     SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
-    WatchlistNote,
+    WatchlistNote, CsvColumnMapping,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
@@ -3299,6 +3299,50 @@ def _ingest_progress_tick(db: Session, snap: Snapshot, count: int,
 # Quality Gate, et rend ce qui a été compris — puis l'utilisateur décide. Rien
 # n'est écrit : ni instantané, ni fiche, ni journal.
 
+def _empreinte_des_entetes(colonnes: List[str]) -> str:
+    """Empreinte stable de la FORME d'un fichier : en-têtes normalisés et
+    triés. Deux exports du même outil se ressemblent ; un export d'un autre
+    outil ne lui ressemble pas — et une correspondance mémorisée ne doit
+    jamais s'appliquer à un fichier qui n'est pas le même."""
+    normalisees = sorted((c or "").strip().lower() for c in colonnes if (c or "").strip())
+    return hashlib.sha256("\u0000".join(normalisees).encode("utf-8")).hexdigest()
+
+def _valider_correspondance(file_type: str, brut: Optional[str],
+                            colonnes: Optional[List[str]] = None) -> Dict[str, str]:
+    """
+    Lit et contrôle une correspondance reçue du client.
+
+    Deux refus explicites plutôt qu'un silence : un champ cible inconnu ne
+    serait jamais lu par l'import, et une colonne source absente du fichier
+    remplirait le champ de vide. Dans les deux cas l'utilisateur croirait
+    avoir corrigé le problème — c'est la panne que l'assistant doit éviter,
+    pas reproduire.
+    """
+    if not brut:
+        return {}
+    try:
+        correspondance = json.loads(brut)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Correspondance de colonnes illisible (JSON attendu).")
+    if not isinstance(correspondance, dict):
+        raise HTTPException(status_code=400, detail="Correspondance de colonnes illisible (JSON attendu).")
+    connus = set(_APERCU_CHAMPS.get(file_type, ()))
+    propre: Dict[str, str] = {}
+    for cible, source in correspondance.items():
+        cible, source = str(cible).strip(), str(source or "").strip()
+        if not source:
+            continue          # « ne pas mapper ce champ » est un choix valide
+        if cible not in connus:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Champ inconnu dans la correspondance : {cible}. L'import ne le lirait jamais.")
+        if colonnes is not None and source not in colonnes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Colonne absente du fichier : {source}. Le champ {cible} resterait vide.")
+        propre[cible] = source
+    return propre
+
 _APERCU_LIGNES = 10
 _APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU")
 
@@ -3307,6 +3351,8 @@ async def preview_ingest(
     file_type: str = Form(...),
     file: UploadFile = File(...),
     delimiter: str = Form(","),
+    column_mapping: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
@@ -3337,9 +3383,19 @@ async def preview_ingest(
         colonnes: List[str] = []
         rejets = _CompteurDeRejets()
         acceptees = 0
-        for brut in parse_csv_file(str(chemin), delimiter=delimiter):
-            if not colonnes:
-                colonnes = [c for c in brut.keys() if c]
+        # Premier passage : les en-têtes seuls, pour valider la correspondance
+        # CONTRE le fichier réel avant de l'appliquer.
+        premiere = next(parse_csv_file(str(chemin), delimiter=delimiter), {})
+        colonnes = [c for c in premiere.keys() if c]
+        correspondance = _valider_correspondance(file_type, column_mapping, colonnes)
+        # Correspondance mémorisée pour cette forme de fichier : proposée,
+        # jamais appliquée d'office — l'utilisateur voit ce qu'il accepte.
+        empreinte = _empreinte_des_entetes(colonnes)
+        memorisee = db.query(CsvColumnMapping).filter(
+            CsvColumnMapping.file_type == file_type,
+            CsvColumnMapping.headers_fingerprint == empreinte).first()
+        for brut in parse_csv_file(str(chemin), delimiter=delimiter,
+                                   mapping_dict=correspondance or None):
             item = ensure_parsed_name(dict(brut))
             report = evaluate_and_clean(item)
             if report["is_valid"]:
@@ -3370,6 +3426,10 @@ async def preview_ingest(
             "file_type": file_type,
             "delimiter": delimiter,
             "colonnes_du_fichier": colonnes,
+            "champs_attendus": list(_APERCU_CHAMPS.get(file_type, ())),
+            "correspondance_appliquee": correspondance,
+            "correspondance_memorisee": (memorisee.mapping if memorisee else None),
+            "empreinte_entetes": empreinte,
             "lignes_examinees": len(lignes),
             "acceptees": acceptees,
             "lignes": lignes,
@@ -3415,6 +3475,7 @@ def ingest_snapshot(
     delimiter: str = Form(","),
     ssie_selectors: Optional[str] = Form(None),
     ssie_source_format: Optional[str] = Form(None),
+    column_mapping: Optional[str] = Form(None),
     progress_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
@@ -3428,6 +3489,9 @@ def ingest_snapshot(
     threadpool, l'event loop reste disponible pour servir GET /api/progress
     pendant toute la duree de l'import (suivi en direct des gros fichiers).
     """
+    # Correspondance de colonnes validée AVANT toute écriture : un refus ne
+    # doit pas laisser un instantané orphelin derrière lui.
+    correspondance = _valider_correspondance(file_type, column_mapping)
     # Validate SSIE selectors overrides upfront (before any snapshot record is created)
     ssie_selector_overrides = None
     if file_type == "WATCHLIST_SSIE" and ssie_selectors:
@@ -3511,6 +3575,7 @@ def ingest_snapshot(
                                   "original_filename": original_filename,
                                   "file_type": file_type,
                                   "delimiter": delimiter,
+                                  "column_mapping": correspondance or None,
                                   "ssie_selector_overrides": ssie_selector_overrides,
                                   "ssie_source_format": ssie_source_format,
                                   "progress_id": progress_id,
@@ -3570,11 +3635,46 @@ class _CompteurDeRejets:
         return {"rejected_count": self.total, "rejected_reasons": list(self._motifs)}
 
 
+def _memoriser_correspondance(db: Session, file_type: str, chemin, delimiter: str,
+                              correspondance: Dict[str, str], username: str) -> None:
+    """Retient la correspondance pour cette FORME de fichier. Ne leve jamais :
+    une memoire d'assistance ne fait pas echouer un import qui a reussi."""
+    try:
+        # Mêmes colonnes qu'à l'aperçu — les en-têtes BRUTS, sans correspondance
+        # appliquée : les deux empreintes doivent coïncider, sinon la mémoire
+        # ne serait jamais retrouvée et l'assistant paraîtrait sans mémoire.
+        premiere = next(parse_csv_file(str(chemin), delimiter=delimiter), {})
+        colonnes = [c for c in premiere.keys() if c]
+        if not colonnes:
+            return
+        empreinte = _empreinte_des_entetes(colonnes)
+        ligne = db.query(CsvColumnMapping).filter(
+            CsvColumnMapping.file_type == file_type,
+            CsvColumnMapping.headers_fingerprint == empreinte).first()
+        if ligne:
+            ligne.mapping = correspondance
+            ligne.created_by = username
+            ligne.created_at = datetime.utcnow()
+        else:
+            db.add(CsvColumnMapping(
+                file_type=file_type, headers_fingerprint=empreinte,
+                headers_sample=", ".join(colonnes[:12]),
+                mapping=correspondance, created_by=username))
+        db.commit()
+    except Exception as e:
+        logger.error(f"Mémorisation de la correspondance impossible : {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                original_filename: str, file_type: str,
                                delimiter: str, ssie_selector_overrides,
                                ssie_source_format, progress_id: Optional[str],
-                               username: str) -> Dict[str, Any]:
+                               username: str,
+                               column_mapping: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Corps de l'import d'un fichier deja televerse : parsing, Quality Gate,
     persistance par lots, bascule de statut (homologation ou production),
@@ -3786,7 +3886,8 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     if record_count % _INGEST_COMMIT_EVERY == 0:
                         snap = _ingest_progress_tick(db, snap, record_count, progress_id)
             else:
-                for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
+                for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
+                                        mapping_dict=column_mapping or None):
                     # Moteur de detection des noms : colonnes explicites ou
                     # decoupage du nom principal pour les individus (PP/I)
                     item = ensure_parsed_name(item)
@@ -3853,7 +3954,8 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
 
         elif file_type == "CLIENT_BASE":
             # Client base CSV
-            for item in parse_csv_file(str(temp_file_path), delimiter=delimiter):
+            for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
+                                        mapping_dict=column_mapping or None):
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
                     rejets.ajouter(report)
@@ -3988,6 +4090,12 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Clôturées par règle": rescreen_result.get("closed_by_rule"),
             }, urgency_override="immediate")
         progress_registry.finish(progress_id)
+        # La correspondance ne se mémorise qu'ICI : au bout d'un import qui a
+        # abouti. Retenir une correspondance saisie mais jamais éprouvée
+        # reviendrait à reproposer plus tard une erreur qu'on n'a pas vue.
+        if column_mapping and file_type in _APERCU_TYPES:
+            _memoriser_correspondance(db, file_type, temp_file_path, delimiter,
+                                      column_mapping, username)
         return {
             "message": message,
             "snapshot_id": snap_id,

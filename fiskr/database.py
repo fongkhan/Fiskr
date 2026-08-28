@@ -915,6 +915,35 @@ class FpRuleTest(Base):
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class CsvColumnMapping(Base):
+    """
+    Correspondance colonnes-du-fichier -> champs-du-moteur, memorisee par
+    EMPREINTE D'EN-TETES.
+
+    L'empreinte porte la liste des en-tetes du fichier, normalisee et triee :
+    deux exports du meme outil se ressemblent, un export d'un autre outil ne
+    lui ressemble pas. C'est ce qui permet de reproposer une correspondance
+    sans jamais l'appliquer a un fichier qui n'est pas le meme — une
+    correspondance devinee et appliquee en silence serait exactement le
+    defaut que l'assistant existe pour eviter.
+
+    Ecrite au moment de l'import REUSSI, pas au moment de la saisie : on ne
+    memorise que ce qui a servi pour de bon.
+    """
+    __tablename__ = "csv_column_mappings"
+    __table_args__ = (UniqueConstraint("file_type", "headers_fingerprint",
+                                       name="uq_csv_mapping"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    file_type = Column(String(50), nullable=False, index=True)
+    headers_fingerprint = Column(String(64), nullable=False, index=True)
+    # Apercu lisible des en-tetes, pour que l'ecran puisse dire A QUOI la
+    # correspondance memorisee correspond (une empreinte ne se lit pas).
+    headers_sample = Column(Text, nullable=True)
+    mapping = Column(JSON, nullable=False)
+    created_by = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class WatchlistNote(Base):
     """
     Note interne d'analyste sur une fiche listee : « homonymie etablie pour le
