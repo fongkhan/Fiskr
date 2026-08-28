@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — EUR-Lex through the door meant for machines, and a daemon judged on its consequences
+
+Two decisions taken by the operator on the audit's findings, and applied here.
+
+**The EUR-Lex refusal is treated at its root, and the earlier diagnosis was wrong about whose fault it was.** The portal answers `202` with an empty body to the production installation, twice a day for weeks. The previous batch removed the pointless waiting between two refusals and left the operator a choice: repair, or suspend the source. That was not enough — and the framing was off. **A portal that protects its human-facing HTML pages from a client scraping them is not misbehaving. What was abnormal was asking for the Official Journal that way at all.**
+
+The Publications Office exposes the same material through a door built for machines, public and without registration: the CELLAR SPARQL endpoint for the day's list, and the CELEX address for each act's text. Both are now the default route (`sync.eurlex.voie: cellar`); the portal route stays available and is simply named.
+
+**Verified before switching, because a new route that quietly changes what a source produces would be worse than the refusal.** Three real acts of 7 August 2026 — including a genuine nominative designation — were fetched by both routes and run through the same extractor: **the extracted records are identical, field for field**. The CELLAR response also weighs twelve times less (22 KiB against 277 KiB for the portal page). End to end against the live services, both modes work: alert detects the 4 acts of the day and archives their PDFs with SHA-256, extract produces 5 records.
+
+Three things this batch was careful about. An act now carries **two addresses that must never be confused**: `url`, the citable EUR-Lex address that goes into records, into the probative PDF and into an audit file; and `url_lecture`, the technical address the product actually reads from — an API address has no business in an opposable document. The keyword comes from a setting, so it enters the SPARQL query **as data**, escaped. And **neither route falls back on the other**: silently retreating to the door that refuses would produce an error that says nothing about the route chosen.
+
+One limitation, stated rather than discovered later: CELLAR holds no PDF for recent acts, so the probative PDF is still served by EUR-Lex. On a blocked installation, detection and extraction no longer depend on the portal; archiving the PDF still does. A failed archive does not interrupt the sync and is counted in the report, as before.
+
+**The daemon may switch itself off when there is nothing to process.** The previous batch already stopped judging it on its heartbeat; the rule is now stated plainly and the control follows it. With nothing queued and no automatic sync scheduled, the verdict is OK: there is nothing to take charge of, and demanding a live process would be demanding that it watch over nothing.
+
+That leaves one trap, and it is why the control does not simply trust an empty queue: **the daemon hosts the schedulers**. Dead, it enqueues nothing — "empty queue" is exactly what a dead scheduler produces. The witness is therefore elsewhere: the last *scheduled* sync, which can only exist if a scheduler ran to submit it. And the window is **derived from the sources' own cron expressions** — the most frequent one, plus a two-hour margin — rather than from a hard-coded number that would have declared an installation late when it only synchronises on Mondays.
+
+38 tests pin the batch, in two files.
+
 ### Changed — measure the right thing, and count it only once (process audit, medium-impact findings)
 
 The four medium-impact findings of the audit. One of them did not survive verification, and saying so is part of the batch.

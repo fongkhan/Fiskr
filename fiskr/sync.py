@@ -19,6 +19,7 @@ l'application et envoye par email si un serveur SMTP est configure (.env).
 """
 import os
 import re
+import json
 import time
 import uuid
 import hashlib
@@ -63,6 +64,44 @@ DEFAULT_OFAC_NONSDN_URL = "https://sanctionslistservice.ofac.treas.gov/api/Publi
 # Version anglaise du Journal Officiel : c'est la reference reglementaire retenue
 DEFAULT_EURLEX_DAILY_URL = "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
 DEFAULT_EURLEX_KEYWORD = "restrictive measures"
+
+# ------------------ EUR-LEX : LA VOIE MACHINE (CELLAR) ------------------
+#
+# Le portail EUR-Lex sert une page faite pour un humain, et il la protege : il
+# rend un 202 a corps vide aux clients qu'il ne veut pas. Mesure sur
+# l'installation de production, deux fois par jour depuis des semaines. Ce
+# refus n'a rien d'anormal — c'est ce que fait un portail devant un client qui
+# racle une page HTML. Ce qui etait anormal, c'est de le lui demander ainsi.
+#
+# L'Office des publications expose la MEME matiere par une porte faite pour
+# les machines, publique et sans inscription :
+#   - la liste du jour, par le point SPARQL de CELLAR ;
+#   - le texte de chaque acte, par son adresse CELEX sur CELLAR.
+# Verification avant bascule, sur trois actes reels (dont une designation
+# nominative) : les fiches extraites par les deux voies sont IDENTIQUES, et la
+# reponse CELLAR pese douze fois moins que la page du portail (22 Kio contre
+# 277 Kio). Changer de porte ne change donc pas ce que la source produit.
+DEFAULT_EURLEX_SPARQL_URL = "https://publications.europa.eu/webapi/rdf/sparql"
+DEFAULT_CELLAR_CONTENT_URL = "http://publications.europa.eu/resource/celex/{celex}"
+
+# Collection du Journal Officiel serie L : le meme perimetre que la page du
+# jour que lisait la voie portail. La serie C (communications) reste dehors.
+_OJ_SERIE_L = "http://publications.europa.eu/resource/authority/document-collection/OJ-L"
+
+# Sans cet en-tete, CELLAR rend la fiche RDF de l'acte — du metadata la ou on
+# attend le texte, donc une extraction qui ne trouve rien sans se plaindre.
+_ENTETES_CELLAR_TEXTE = {"Accept": "application/xhtml+xml", "Accept-Language": "eng"}
+
+# Borne de la requete du jour : un JO n'a jamais 200 actes de mesures
+# restrictives. Le plafond existe pour qu'une requete qui derape rende une
+# reponse bornee, pas pour trier.
+_MAX_ACTES_PAR_JOUR = 200
+
+# Adresse CITABLE d'un acte. C'est elle qui part dans les fiches et dans le
+# PDF probant : un auditeur doit pouvoir ouvrir le lien, et l'adresse d'une
+# API technique ne se cite pas dans un dossier.
+def eurlex_act_url(celex: str) -> str:
+    return f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}"
 
 # Registre national des gels des avoirs (Direction generale du Tresor, API
 # publique ENGEL sans authentification) : criblage obligatoire pour les
@@ -268,6 +307,13 @@ def get_sync_config(db=None) -> Dict[str, Any]:
         "eurlex": {
             "enabled": bool((sync_cfg.get("eurlex") or {}).get("enabled", True)),
             "mode": str((sync_cfg.get("eurlex") or {}).get("mode", "alert") or "alert").lower(),
+            # `voie` choisit la PORTE, jamais le contenu (cf. DEFAULT_EURLEX_SPARQL_URL) :
+            #   cellar  — porte machine de l'Office des publications (defaut)
+            #   portail — lecture de la page du jour d'EUR-Lex (voie historique)
+            "voie": str((sync_cfg.get("eurlex") or {}).get("voie", "cellar") or "cellar").lower(),
+            "sparql_url": (sync_cfg.get("eurlex") or {}).get("sparql_url", DEFAULT_EURLEX_SPARQL_URL),
+            "cellar_content_url": (sync_cfg.get("eurlex") or {}).get(
+                "cellar_content_url", DEFAULT_CELLAR_CONTENT_URL),
             "daily_journal_url": (sync_cfg.get("eurlex") or {}).get("daily_journal_url", DEFAULT_EURLEX_DAILY_URL),
             "keyword": (sync_cfg.get("eurlex") or {}).get("keyword", DEFAULT_EURLEX_KEYWORD),
         },
@@ -2265,17 +2311,134 @@ def _archive_act_pdf(act: Dict[str, str], pdf_fetcher: Callable[[str, Path], Non
         return False
 
 
+def _echappe_sparql(texte: str) -> str:
+    """
+    Un mot-cle vient d'un reglage : il entre dans la requete comme DONNEE.
+    Sans cet echappement, un guillemet dans « sanctions "cibleés" » fermerait
+    le litteral et le reste du reglage deviendrait de la requete.
+    """
+    return (str(texte or "").replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", " ").replace("\r", " "))
+
+
+def requete_actes_du_jour(for_date: date, keyword: str) -> str:
+    """
+    Requete SPARQL des actes du JO serie L d'une date dont le titre anglais
+    porte le mot-cle.
+
+    Le filtre reproduit celui de la voie portail — serie L, titre anglais,
+    mot-cle — pour que changer de porte ne change pas ce que la source
+    retient. Le titre est celui de l'expression anglaise : c'est la version
+    de reference retenue par le produit, et celle sur laquelle le mot-cle a
+    ete calibre.
+    """
+    return f'''PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+PREFIX lang: <http://publications.europa.eu/resource/authority/language/>
+SELECT DISTINCT ?celex ?title WHERE {{
+  ?work cdm:official-journal-act_date_publication
+          "{for_date.strftime("%Y-%m-%d")}"^^<http://www.w3.org/2001/XMLSchema#date> ;
+        cdm:official-journal-act_part_of_collection_document <{_OJ_SERIE_L}> ;
+        cdm:resource_legal_id_celex ?celex .
+  ?expr cdm:expression_belongs_to_work ?work ;
+        cdm:expression_uses_language lang:ENG ;
+        cdm:expression_title ?title .
+  FILTER(CONTAINS(LCASE(STR(?title)), "{_echappe_sparql(keyword).lower()}"))
+}} ORDER BY ?celex LIMIT {_MAX_ACTES_PAR_JOUR}'''
+
+
+def fetch_eurlex_acts_cellar(
+    for_date: date,
+    http_get: Callable[..., str],
+    keyword: str = DEFAULT_EURLEX_KEYWORD,
+    sparql_url: str = DEFAULT_EURLEX_SPARQL_URL,
+    cellar_content_url: str = DEFAULT_CELLAR_CONTENT_URL,
+) -> List[Dict[str, str]]:
+    """
+    Actes du jour par la porte machine de l'Office des publications.
+
+    Chaque acte porte DEUX adresses, et la distinction est le coeur de ce
+    changement : `url` est l'adresse CITABLE sur EUR-Lex — celle qui part dans
+    les fiches, dans le PDF probant et dans un dossier d'audit — tandis que
+    `url_lecture` est l'adresse par laquelle le produit va CHERCHER le texte.
+    Les confondre reviendrait a citer une API technique dans une piece
+    opposable, ou a aller lire la ou l'on se fait refuser.
+    """
+    from urllib.parse import urlencode
+    url = f"{sparql_url}?" + urlencode({
+        "query": requete_actes_du_jour(for_date, keyword),
+        "format": "application/sparql-results+json",
+    })
+    brut = http_get(url)
+    try:
+        resultats = json.loads(brut)["results"]["bindings"]
+    except (ValueError, KeyError, TypeError) as e:
+        # Une reponse illisible n'est pas un JO sans publication : le dire,
+        # sinon un jour sans actes et un point d'acces casse se ressemblent.
+        raise RuntimeError(
+            f"Reponse SPARQL illisible de {sparql_url} : {e}. "
+            f"Le Journal Officiel du {for_date:%d/%m/%Y} n'a PAS ete lu.") from e
+
+    actes: List[Dict[str, str]] = []
+    for ligne in resultats:
+        celex = (ligne.get("celex") or {}).get("value", "").strip()
+        titre = (ligne.get("title") or {}).get("value", "").strip()
+        if not celex or not titre:
+            continue
+        actes.append({
+            "title": titre,
+            "url": eurlex_act_url(celex),
+            "url_lecture": cellar_content_url.format(celex=celex),
+            "celex": celex,
+        })
+    return actes
+
+
+def _lecteur_cellar(http_get: Callable[..., str]) -> Callable[[str], str]:
+    """
+    Lecteur d'acte pour la voie CELLAR : le meme `http_get`, avec l'en-tete
+    qui decide de ce qu'on recoit. Sans lui, CELLAR rend la fiche RDF de
+    l'acte — du metadata la ou on attend le texte, donc une extraction qui ne
+    trouve rien et ne s'en plaint pas.
+    """
+    def _lire(url: str) -> str:
+        try:
+            return http_get(url, headers=dict(_ENTETES_CELLAR_TEXTE))
+        except TypeError:
+            # Double de test a un seul argument : ce qu'il rend ne depend pas
+            # d'un en-tete, et lui en imposer un le ferait echouer pour rien.
+            return http_get(url)
+    return _lire
+
+
 def fetch_eurlex_acts(
     for_date: date,
-    http_get: Callable[[str], str],
+    http_get: Callable[..., str],
     daily_url_template: str,
     keyword: str,
+    voie: str = "portail",
+    sparql_url: str = DEFAULT_EURLEX_SPARQL_URL,
+    cellar_content_url: str = DEFAULT_CELLAR_CONTENT_URL,
 ) -> List[Dict[str, str]]:
     """
     Actes du Journal Officiel du jour dont le titre porte le mot-cle
-    (« mesures restrictives »). UNE seule requete, sur la page du jour :
-    c'est tout ce dont le mode « signal d'alerte precoce » a besoin.
+    (« mesures restrictives »). UNE seule requete : c'est tout ce dont le mode
+    « signal d'alerte precoce » a besoin.
+
+    Deux voies, meme perimetre et meme filtre (cf. DEFAULT_EURLEX_SPARQL_URL) :
+      - `cellar`  : point SPARQL de l'Office des publications. Porte faite
+                    pour les machines, publique, sans inscription.
+      - `portail` : lecture de la page du jour d'EUR-Lex. Voie historique,
+                    gardee pour les installations qui la preferent — mais
+                    c'est celle que le portail refuse quand il ne reconnait
+                    pas l'origine de la requete.
+
+    AUCUN repli automatique de l'une sur l'autre : une voie configuree qui
+    echoue doit echouer franchement. Se rabattre en silence sur la porte
+    refusee produirait une erreur qui ne parle pas de la voie choisie.
     """
+    if (voie or "portail").lower() == "cellar":
+        return fetch_eurlex_acts_cellar(for_date, http_get, keyword,
+                                        sparql_url, cellar_content_url)
     daily_url = daily_url_template.format(date=for_date.strftime("%d%m%Y"))
     logger.info(f"Sync EUR-Lex: lecture du Journal Officiel {daily_url}")
     # Tentative de cookie de session avant la page du jour. Ce qu'elle obtient
@@ -2298,10 +2461,13 @@ def fetch_eurlex_acts(
 
 def fetch_eurlex_entities(
     for_date: date,
-    http_get: Callable[[str], str],
+    http_get: Callable[..., str],
     daily_url_template: str,
     keyword: str,
     progress: Optional[Callable[[int, int], None]] = None,
+    voie: str = "portail",
+    sparql_url: str = DEFAULT_EURLEX_SPARQL_URL,
+    cellar_content_url: str = DEFAULT_CELLAR_CONTENT_URL,
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
     """
     Recupere le JO du jour, filtre les actes "mesures restrictives" et scrape
@@ -2316,7 +2482,10 @@ def fetch_eurlex_entities(
 
     N'est utilise que par le mode `extract` (heuristique, cf. get_sync_config).
     """
-    acts = fetch_eurlex_acts(for_date, http_get, daily_url_template, keyword)
+    en_cellar = (voie or "portail").lower() == "cellar"
+    acts = fetch_eurlex_acts(for_date, http_get, daily_url_template, keyword,
+                             voie, sparql_url, cellar_content_url)
+    lire = _lecteur_cellar(http_get) if en_cellar else http_get
 
     all_entities: Dict[str, Dict[str, Any]] = {}
     failed_acts: List[Dict[str, str]] = []
@@ -2326,10 +2495,12 @@ def fetch_eurlex_entities(
                 progress(done, len(acts))
             except Exception:
                 pass  # la progression n'interrompt jamais un scraping
+        # On LIT ou le texte se donne, on CITE l'adresse opposable.
+        adresse_lecture = act.get("url_lecture") or act["url"]
         try:
-            act_html = http_get(act["url"])
+            act_html = lire(adresse_lecture)
         except Exception as e:
-            logger.warning(f"Sync EUR-Lex: echec du chargement de l'acte {act['url']}: {e}")
+            logger.warning(f"Sync EUR-Lex: echec du chargement de l'acte {adresse_lecture}: {e}")
             failed_acts.append({"url": act["url"], "title": act.get("title", ""), "error": str(e)})
             continue
         for ent in scrape_act_entities(act_html, act["title"], act["url"]):
@@ -2351,7 +2522,9 @@ def _run_eurlex_alert(db, for_date: date, trigger: str, getter, pdf_getter,
     """
     tracker = SyncProgress("EURLEX")
     try:
-        acts = fetch_eurlex_acts(for_date, getter, cfg["daily_journal_url"], cfg["keyword"])
+        acts = fetch_eurlex_acts(for_date, getter, cfg["daily_journal_url"], cfg["keyword"],
+                                 cfg.get("voie", "cellar"), cfg.get("sparql_url", DEFAULT_EURLEX_SPARQL_URL),
+                                 cfg.get("cellar_content_url", DEFAULT_CELLAR_CONTENT_URL))
         tracker.phase("DOWNLOAD", processed=0, total=len(acts))
 
         journal_day = for_date.strftime("%d/%m/%Y")
@@ -2421,6 +2594,7 @@ def run_eurlex_sync(
     pdf_fetcher: Optional[Callable[[str, Path], None]] = None,
     archive_dir: Optional[Path] = None,
     mode: Optional[str] = None,
+    voie: Optional[str] = None,
 ) -> SyncReport:
     """
     Surveillance du Journal Officiel de l'UE (version anglaise, qui fait
@@ -2451,6 +2625,10 @@ def run_eurlex_sync(
     pdf_getter = pdf_fetcher or download_to_file
     archive_dir = archive_dir or EURLEX_ARCHIVE_DIR
 
+    # Comme `mode` : l'argument prime sur le reglage, pour forcer une passe
+    # ponctuelle par l'autre porte sans toucher a la configuration.
+    cfg = dict(cfg)
+    cfg["voie"] = (voie or cfg.get("voie") or "cellar").lower()
     effective_mode = (mode or cfg.get("mode") or "alert").lower()
     if effective_mode != "extract":
         return _run_eurlex_alert(db, for_date, trigger, getter, pdf_getter, archive_dir, cfg)
@@ -2464,7 +2642,10 @@ def run_eurlex_sync(
     try:
         acts, scraped, failed_acts = fetch_eurlex_entities(
             for_date, getter, cfg["daily_journal_url"], cfg["keyword"],
-            progress=lambda done, total: tracker.phase("DOWNLOAD", processed=done, total=total))
+            progress=lambda done, total: tracker.phase("DOWNLOAD", processed=done, total=total),
+            voie=cfg.get("voie", "cellar"),
+            sparql_url=cfg.get("sparql_url", DEFAULT_EURLEX_SPARQL_URL),
+            cellar_content_url=cfg.get("cellar_content_url", DEFAULT_CELLAR_CONTENT_URL))
 
         # Archivage probant : le PDF officiel de chaque acte retenu fait foi.
         # Les echecs de telechargement sont restitues au rapport (piece

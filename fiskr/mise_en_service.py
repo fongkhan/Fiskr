@@ -82,9 +82,57 @@ def _base_de_donnees(db) -> Dict[str, Any]:
         "dans .env, puis redémarrez.")
 
 
-# Silence tolere du demon quand RIEN n'attend en file : au-dela, le travail
-# periodique (une passe par nuit) a manque son rendez-vous.
-_DEMON_SILENCE_TOLERE_H = 26
+# Marge accordee au travail periodique par-dessus sa propre cadence : une
+# passe planifiee a 4 h peut demarrer a 4 h 20 sans que rien n'aille mal.
+# Elle s'ajoute a la periode DEDUITE des expressions cron des sources
+# activees, plutot que de la remplacer par un chiffre en dur — une source
+# hebdomadaire ne doit pas etre declaree en retard le lendemain.
+_MARGE_TRAVAIL_PERIODIQUE_H = 2
+
+# Plancher de la fenetre, quand la cadence deduite est plus serree que cela :
+# un ecran de mise en service ne doit pas passer au rouge parce qu'une source
+# horaire a saute un tour.
+_FENETRE_PERIODIQUE_MINIMALE_H = 26
+
+
+def _cadence_periodique_attendue(db):
+    """
+    (nombre de sources planifiees, fenetre au-dela de laquelle le travail
+    periodique a manque son rendez-vous) — ou (0, None) si RIEN n'est
+    planifie.
+
+    La fenetre est DEDUITE des expressions cron des sources activees : on
+    prend la plus frequente, puisque c'est elle qui donnera signe de vie en
+    premier. Un chiffre en dur aurait declare en retard une installation qui
+    ne synchronise que le lundi.
+    """
+    from datetime import timedelta
+    from fiskr.cron import next_run, CronError
+    from fiskr.settings import sync_schedules
+    from fiskr.sync import get_sync_config
+
+    cfg = get_sync_config(db)
+    if not cfg.get("auto_enabled"):
+        return 0, None
+    periodes, planifiees = [], 0
+    for source, expr in (sync_schedules(db) or {}).items():
+        if not (cfg.get(source) or {}).get("enabled"):
+            continue
+        planifiees += 1
+        try:
+            premier = next_run(expr)
+            second = next_run(expr, after=premier) if premier else None
+        except (CronError, ValueError, TypeError):
+            continue  # expression illisible : elle est signalee ailleurs
+        if premier and second:
+            periodes.append(second - premier)
+    if not planifiees:
+        return 0, None
+    if not periodes:
+        return planifiees, timedelta(hours=_FENETRE_PERIODIQUE_MINIMALE_H)
+    fenetre = min(periodes) + timedelta(hours=_MARGE_TRAVAIL_PERIODIQUE_H)
+    return planifiees, max(fenetre, timedelta(hours=_FENETRE_PERIODIQUE_MINIMALE_H))
+
 
 def _demon(db) -> Dict[str, Any]:
     from fiskr import jobs as file_de_travaux
@@ -125,27 +173,51 @@ def _demon(db) -> Dict[str, Any]:
             "relancer (jobs.autostart). Vérifiez ensuite l'écran de diagnostic.",
             "#settings/settings-integrations")
 
-    dernier = db.query(Job).filter(Job.heartbeat_at.isnot(None)).order_by(
-        Job.heartbeat_at.desc()).first()
+    # Rien n'attend. Un demon qui s'eteint quand il n'a rien a traiter n'est
+    # pas en panne : c'est le comportement attendu sur un hebergement
+    # mutualise, et le battement de coeur n'est donc PAS le juge.
+    #
+    # Reste la seule question qui compte, et elle a un piege : le demon
+    # heberge les planificateurs. S'il est mort, plus rien ne s'inscrit en
+    # file — « file vide » est exactement ce que produit un planificateur
+    # eteint. Le temoin ne peut donc pas etre la file : c'est la derniere
+    # synchronisation PLANIFIEE, qui ne peut exister que si un planificateur
+    # a tourne pour la soumettre.
+    planifiees, fenetre = _cadence_periodique_attendue(db)
+    if not planifiees:
+        return _controle(
+            "demon", "Socle", "Démon travailleur", OK,
+            "Le démon ne bat pas, mais rien n'attend en file et aucune "
+            "synchronisation automatique n'est programmée : il n'y a rien à "
+            "traiter, et un démon sans travail a le droit d'être éteint.")
+
+    from fiskr.database import SyncReport
+    dernier_passage = db.query(SyncReport).filter(
+        SyncReport.trigger == "SCHEDULED").order_by(
+        SyncReport.executed_at.desc()).first()
     depuis = None
-    if dernier and dernier.heartbeat_at:
-        depuis = datetime.utcnow() - dernier.heartbeat_at
-    if depuis is not None and depuis < timedelta(hours=_DEMON_SILENCE_TOLERE_H):
+    if dernier_passage and dernier_passage.executed_at:
+        depuis = datetime.utcnow() - dernier_passage.executed_at
+    heures_fenetre = int(fenetre.total_seconds() // 3600)
+    if depuis is not None and depuis < fenetre:
         heures = int(depuis.total_seconds() // 3600)
         return _controle(
             "demon", "Socle", "Démon travailleur", OK,
             f"Le démon ne bat pas en ce moment, mais rien n'attend en file et "
-            f"son dernier passage remonte à {heures} h. Sur un hébergement "
-            "mutualisé, c'est le fonctionnement normal : il travaille sa "
-            "fenêtre, puis l'hôte récupère le processus.")
-    jamais = "aucun passage enregistré" if depuis is None else \
-        f"dernier passage il y a plus de {_DEMON_SILENCE_TOLERE_H} h"
+            f"la dernière synchronisation planifiée remonte à {heures} h : les "
+            f"planificateurs ont bien tourné. Il travaille sa fenêtre, puis "
+            f"l'hôte récupère le processus — c'est le fonctionnement normal "
+            f"d'un hébergement mutualisé.")
+    jamais = ("aucune synchronisation planifiée n'a jamais eu lieu" if depuis is None
+              else f"la dernière remonte à plus de {heures_fenetre} h")
     return _controle(
         "demon", "Socle", "Démon travailleur", BLOQUANT,
-        f"Aucun battement de cœur et {jamais}. Le travail périodique "
-        "— synchronisations, re-criblages, récapitulatifs — n'a plus lieu.",
+        f"{planifiees} source(s) sont programmées et {jamais}. Ce n'est pas le "
+        "démon éteint qui pose problème — c'est que le travail périodique "
+        "n'a plus lieu : synchronisations, re-criblages, récapitulatifs.",
         "Lancez le démon (python -m fiskr.worker) ou laissez l'API le relancer "
-        "(jobs.autostart). Vérifiez ensuite l'écran de diagnostic.",
+        "(jobs.autostart) : c'est lui qui héberge les planificateurs. "
+        "Vérifiez ensuite l'écran de diagnostic.",
         "#settings/settings-integrations")
 
 
