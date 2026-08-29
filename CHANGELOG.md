@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a purge that promised to be reversible, and destroyed the one thing anyone would ask for again
+
+The class hunt continues: *what the product asserts without having checked it*. This one was written in plain words at the top of the retention module — "the purge stays reversible offline" — while the archive held only the **rows** of alert attachments: id, name, path. The file itself went to `os.remove`. Restoring that archive gave back references to destroyed files, which is exactly the state the previous batch made visible on screen. **Evidence does not reconstitute itself.**
+
+The file now travels with its row: it is copied into the purge archive before deletion, under a name carrying the attachment's id — two alerts can both have uploaded "scan.pdf", and the archive must not lose one. The archived row names the copy, so the piece is found rather than guessed at: without that back-reference the archive would hold an original path that no longer designates anything.
+
+**Two opposite situations came out of the same code path, and neither was said out loud.**
+
+When the copy fails, the piece is **still there** and there is a window to act — so the alert is not purged at all. Kept a month longer it will be purged on the next pass; destroyed without a copy, never. Only the alert concerned is spared: one stubborn file must not freeze the whole purge.
+
+When deleting the file fails, the opposite happens: the row goes, the file stays. The database says "purged" while the data is still on disk — the exact reverse of what a retention policy promises, and nothing in the application showed it. The purge does not stop (interrupting would decide in the operator's place, which is this module's stated design), but a dedicated **immediate** notification now names both cases, and the administration journal — the append-only trace read during an audit — carries the count of pieces copied.
+
+Immediate and not digested, deliberately: a piece in limbo can be recovered while the file is still there, and a summary the next morning would drown it. The signal fires **even when nothing was deleted at all** — an alert spared because its evidence could not be copied produces precisely zero deletions, and that is the case where one must speak. And it stays silent on a clean purge: a signal that fires every time is a signal people filter.
+
+12 tests pin the batch, including the case where two attachments share a filename and the one where a spared alert produces no deletion.
+
 ### Added — what the product asserts without having checked it
 
 The audit turned up the same defect three times, in three unrelated places: the journal marked "sent" without looking at whether the send succeeded, a control judged the daemon on its pulse rather than on its consequences, and a counter was about to measure a file's decoded size where it is the wire that gets paid for. **This batch hunts the class, not the instance.** Two more catches in the same register.
