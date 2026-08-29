@@ -486,6 +486,49 @@ def _conservation(db) -> Dict[str, Any]:
         "#settings/settings-retention")
 
 
+def _pieces_probantes(db) -> Dict[str, Any]:
+    """
+    Les pieces justificatives que la base annonce sont-elles encore la ?
+
+    Une piece vit en deux endroits : une ligne en base qui porte son nom, et
+    un fichier sur le disque. Les ecrans lisent la ligne ; le telechargement
+    lit le fichier, et decouvre son absence au moment ou quelqu'un clique.
+    Dans un produit de conformite, ce moment-la porte un nom : le controle.
+
+    D'ou ce controle, qui pose la question AVANT — a froid, pendant qu'il
+    reste un espoir de retrouver les fichiers dans une sauvegarde. C'est le
+    pendant exact du controle de conservation : celui-la protege une preuve
+    qu'on pourrait perdre demain, celui-ci constate celle qui manque deja.
+    """
+    from fiskr.preuves import inventaire
+    etat = inventaire(db)
+    if not etat["annoncees"]:
+        return _controle(
+            "pieces", "Exploitation", "Pièces probantes", OK,
+            "Aucune pièce justificative n'est encore rattachée : rien n'est "
+            "annoncé, donc rien ne manque.")
+    verifiees = sum(f["verifiees"] for f in etat["familles"])
+    portee = (f"{verifiees} vérifiée(s) sur {etat['annoncees']} annoncée(s)"
+              if etat["tronque"] else f"{etat['annoncees']} pièce(s)")
+    if not etat["manquantes"]:
+        return _controle(
+            "pieces", "Exploitation", "Pièces probantes", OK,
+            f"{portee} : chaque fichier annoncé est bien présent sur le disque.")
+    detail = " ; ".join(
+        f"{f['libelle']} : {f['manquantes']}"
+        for f in etat["familles"] if f["manquantes"])
+    return _controle(
+        "pieces", "Exploitation", "Pièces probantes", ATTENTION,
+        f"{etat['manquantes']} pièce(s) annoncée(s) en base sont introuvables "
+        f"sur le disque ({detail}). Les écrans affichent leur nom ; le "
+        f"téléchargement échouera. Portée du contrôle : {portee}.",
+        "Restaurez les dossiers de pièces depuis une sauvegarde (ils ne sont "
+        "pas dans la base : une restauration de base seule ne les ramène pas). "
+        "Les références restent en place — effacer la ligne effacerait la "
+        "trace que la pièce a existé.",
+        "#settings/settings-governance")
+
+
 def _couverture_du_criblage(db) -> Dict[str, Any]:
     """
     « Tous vos clients ont-ils été criblés ? » — la première question d'un
@@ -574,7 +617,7 @@ _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
-                   _smtp)
+                   _pieces_probantes, _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
 
 

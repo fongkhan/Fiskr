@@ -7997,6 +7997,13 @@ async def download_sync_evidence(
 # Pieces justificatives des exclusions d'entites (valeur probante en audit)
 EXCLUSION_EVIDENCE_DIR = PROJECT_ROOT / "exclusion_evidence"
 
+# Une piece justificative vit en deux endroits : une ligne en base qui porte
+# son nom, et un fichier sur le disque. Les ecrans lisaient la ligne seule et
+# promettaient donc un telechargement sans jamais verifier qu'il aboutirait —
+# la promesse se rompait au clic, c'est-a-dire le jour du controle. Chaque
+# liste dit maintenant ce qu'elle a verifie (cf. fiskr/preuves.py).
+from fiskr.preuves import piece_presente
+
 class IngestionSettingsUpdate(BaseModel):
     require_approval: Optional[bool] = None
     exclusion_justification_required: Optional[bool] = None
@@ -10255,6 +10262,7 @@ async def list_review_entities(
                 "excluded": bool(r.excluded),
                 "exclusion_justification": r.exclusion_justification,
                 "exclusion_file_name": r.exclusion_file_name,
+                "exclusion_file_present": piece_presente(r.exclusion_file_path),
                 "excluded_by": r.excluded_by,
             }
             for r in rows
@@ -10851,6 +10859,7 @@ async def get_alert_casefile(
         ],
         "attachments": [
             {"id": att.id, "file_name": att.file_name, "comment": att.comment,
+             "file_present": piece_presente(att.file_path),
              "uploaded_by": att.uploaded_by,
              "uploaded_at": att.uploaded_at.isoformat() if att.uploaded_at else None}
             for att in attachments
@@ -12296,6 +12305,7 @@ async def get_alert_detail(
         "attachments": [
             {
                 "id": att.id, "file_name": att.file_name, "comment": att.comment,
+                "file_present": piece_presente(att.file_path),
                 "uploaded_by": att.uploaded_by,
                 "uploaded_at": att.uploaded_at.isoformat() if att.uploaded_at else None,
             }
@@ -13113,6 +13123,7 @@ def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
         "list_type": pair.list_type,
         "justification": pair.justification,
         "evidence_file_name": pair.evidence_file_name,
+        "evidence_file_present": piece_presente(pair.evidence_file_path),
         "created_by": pair.created_by,
         "created_at": pair.created_at.isoformat() if pair.created_at else None,
         "expires_at": pair.expires_at.isoformat() if pair.expires_at else None,

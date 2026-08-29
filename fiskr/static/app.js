@@ -7721,9 +7721,15 @@ async function openAlertModal(alertId) {
  }
 
  // Pieces jointes + selection de priorite (case management)
+ // Une piece dont le fichier a disparu ne se propose PAS au telechargement :
+ // le lien tiendrait une promesse que le clic romprait, et il la romprait le
+ // jour du controle. La reference reste affichee — elle est la trace que la
+ // piece a existe.
  const attachmentsHtml = (a.attachments || []).map(att => `
  <li style="font-size: 0.82rem; margin-bottom: 0.25rem;">
- <a href="/api/alerts/attachments/${att.id}" target="_blank" style="color: var(--color-accent);"> ${escapeHtml(att.file_name)}</a>
+ ${att.file_present === false
+   ? `<span title="Fichier introuvable sur le serveur" style="color: var(--text-muted); text-decoration: line-through;"> ${escapeHtml(att.file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : `<a href="/api/alerts/attachments/${att.id}" target="_blank" style="color: var(--color-accent);"> ${escapeHtml(att.file_name)}</a>`}
  <small style="color: var(--text-muted);"> — @${escapeHtml(att.uploaded_by)}, ${formatDateTime(att.uploaded_at)}${att.comment ? " · " + escapeHtml(att.comment) : ""}</small>
  </li>`).join("");
  const prioritySelector = !isClosed ? `
@@ -8089,7 +8095,9 @@ function renderWhitelistTable(items) {
  <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
  <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(p.list_type)}</td>
- <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;"> ${escapeHtml(p.evidence_file_name)}</a>` : ""}</td>
+ <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? (p.evidence_file_present === false
+   ? `<br><span title="Fichier introuvable sur le serveur" style="color: var(--text-muted); font-size: 0.75rem; text-decoration: line-through;"> ${escapeHtml(p.evidence_file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;"> ${escapeHtml(p.evidence_file_name)}</a>`) : ""}</td>
  <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString(uiLocale()) : ""}</small></td>
  <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString(uiLocale()) : "—"}</td>
  <td>${stateBadge(p.state)}</td>
@@ -12889,7 +12897,9 @@ function renderCasefile(cf) {
  </p>${inheritedHtml}`;
 
  const attachmentsHtml = (cf.attachments || []).map(att =>
- `<li>${escapeHtml(att.file_name)} <small style="color: var(--text-muted);">(@${escapeHtml(att.uploaded_by)})</small></li>`
+ `<li>${att.file_present === false
+   ? `<span style="color: var(--text-muted); text-decoration: line-through;">${escapeHtml(att.file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : escapeHtml(att.file_name)} <small style="color: var(--text-muted);">(@${escapeHtml(att.uploaded_by)})</small></li>`
  ).join("") || `<li style="color: var(--text-muted);">Aucune pièce jointe.</li>`;
 
  const eventsHtml = (cf.events || []).slice(-15).map(e => `

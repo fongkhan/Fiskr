@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — what the product asserts without having checked it
+
+The audit turned up the same defect three times, in three unrelated places: the journal marked "sent" without looking at whether the send succeeded, a control judged the daemon on its pulse rather than on its consequences, and a counter was about to measure a file's decoded size where it is the wire that gets paid for. **This batch hunts the class, not the instance.** Two more catches in the same register.
+
+**A piece of evidence lives in two places at once: a row in the database carrying its name, and a file on disk.** The screens read the row. The download reads the file — and discovered its absence at the moment someone clicked. In a compliance product that moment has a name: the audit. Evidence does not reconstitute itself, so the question has to be asked **cold**, while a backup can still answer it.
+
+`fiskr/preuves.py` inventories the three families of evidence — alert attachments, whitelist justifications, exclusion justifications — comparing what the base *announces* against what is *there*. A new commissioning control raises the count and names the families concerned, never the intact ones: an alarm that lists what is fine is an alarm people stop reading. Its remedy says explicitly not to delete the reference — **erasing the row of a vanished piece would erase the trace that it ever existed**, which is the opposite of the service rendered. And a partial inventory says so rather than announcing "all present" after looking at a third.
+
+Three states, not two, throughout: a piece **present**, a piece **missing**, and a row **with no piece at all**. A declared absence and a broken promise do not read alike, and only the second is a defect. The screens follow: a piece whose file is gone keeps its name — struck through, badged "file not found" — and is no longer offered as a download. The link would hold a promise the click would break, and it would break it on the day of the audit.
+
+One performance decision, carrying a lesson this repository has already paid for. The listed-entities table holds millions of rows and no evidence column is indexed there; the query therefore filters on `excluded IS TRUE` first, which is what the partial index `ix_wl_entities_excluded` covers — the same query without it took 21 to 35 seconds in production to return zero rows. The criterion subtracts nothing: a record carries an exclusion justification only if it is excluded, and both columns are written together.
+
+**Second catch, one layer lower: `smtplib.sendmail` only raises when *every* recipient is refused.** A partial refusal comes back in a dictionary nobody was reading, and the caller concluded "sent". Two addresses out of five refused cannot be written as a successful send in the very record produced to prove someone was warned. The raised error now **names the refused addresses** with the server's own codes — and does not name the ones that were served. The defect is latent on the current installation (measured: 200 rows out of 200 carry a single recipient), which is exactly why it deserved fixing before it stopped being latent.
+
+22 tests pin the batch. Verified in a real browser: a whitelist justification whose file was removed shows struck through with its badge and no link, one that is present keeps its download link, and the commissioning control found the missing piece and named its family. Zero JavaScript errors.
+
 ### Changed — EUR-Lex through the door meant for machines, and a daemon judged on its consequences
 
 Two decisions taken by the operator on the audit's findings, and applied here.

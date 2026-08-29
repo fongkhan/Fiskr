@@ -71,6 +71,12 @@ def send_email(recipients: Sequence[str], subject: str, body: str,
     c'est le point d'entree des envois declenches par un utilisateur, qui
     doivent remonter une erreur explicite plutot que d'echouer en silence.
 
+    Un refus PARTIEL leve aussi. `smtplib.sendmail` ne signale par exception
+    que le rejet de TOUS les destinataires ; les refus partiels reviennent
+    dans un dictionnaire, et ne pas le lire revenait a ecrire « envoye » sur
+    une ligne dont la moitie des adresses n'a rien recu. L'erreur levee NOMME
+    les adresses refusees : c'est ce qu'il faut pour agir.
+
     `body` est la version texte ; `html_body` (optionnel) ajoute une alternative
     HTML — les clients mail modernes affichent le HTML, les autres le texte.
     """
@@ -104,7 +110,18 @@ def send_email(recipients: Sequence[str], subject: str, body: str,
             pass
         if user and password:
             server.login(user, password)
-        server.sendmail(sender, recipients, msg.as_string())
+        # `sendmail` ne LEVE que si le serveur refuse TOUS les destinataires ;
+        # un refus PARTIEL revient dans un dictionnaire que personne ne lisait.
+        # L'appelant en concluait « envoye », et le journal des notifications
+        # — la piece qu'on produit pour prouver qu'on a prevenu — l'ecrivait.
+        # Deux adresses sur cinq refusees ne peuvent pas se lire comme un
+        # envoi reussi : ici, elles sont nommees.
+        refuses = server.sendmail(sender, recipients, msg.as_string())
+    if refuses:
+        details = "; ".join(
+            f"{adresse} ({code} {str(motif)[:120]})"
+            for adresse, (code, motif) in sorted(refuses.items()))
+        raise RuntimeError(f"Destinataire(s) refuse(s) par le serveur : {details}")
 
 
 def _send_email(subject: str, body: str, html_body: Optional[str] = None,

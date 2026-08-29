@@ -15,6 +15,9 @@
 
     // ---- Dictionnaire : « chaîne française » -> { en, de, es, zh, ar } ----
     const T = {
+        "Fichier introuvable": { en: "File not found", de: "Datei nicht gefunden", es: "Archivo no encontrado", zh: "文件缺失", ar: "الملف غير موجود" },
+        "Fichier introuvable sur le serveur": { en: "File not found on the server", de: "Datei auf dem Server nicht gefunden", es: "Archivo no encontrado en el servidor", zh: "服务器上找不到该文件", ar: "الملف غير موجود على الخادم" },
+        "Pièces probantes": { en: "Evidence files", de: "Nachweisdokumente", es: "Piezas probatorias", zh: "证明文件", ar: "المستندات الإثباتية" },
         "Mise en service": { en: "Commissioning", de: "Inbetriebnahme", es: "Puesta en servicio", zh: "启用检查", ar: "بدء التشغيل" },
         "Revérifier": { en: "Re-check", de: "Erneut prüfen", es: "Volver a verificar", zh: "重新检查", ar: "إعادة الفحص" },
         "Tester l'envoi de courriel": { en: "Test e-mail delivery", de: "E-Mail-Versand testen", es: "Probar el envío de correo", zh: "测试邮件发送", ar: "اختبار إرسال البريد" },
