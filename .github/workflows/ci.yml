@@ -1,8 +1,19 @@
 name: CI
 
 on:
+  # Le declencheur `push` ne couvre que master. Une branche de travail est
+  # couverte par `pull_request` des qu'une PR existe : la garder ici faisait
+  # tourner DEUX fois la suite complete sur le meme commit — un run `push` et
+  # un run `pull_request`, a quelques secondes d'intervalle, avec deux
+  # resultats a lire la ou il n'y a qu'un seul etat de code.
+  #
+  # Ce qui est perdu, et assume : une branche poussee sans PR n'a plus de
+  # verification automatique. Elle reste couverte par la suite complete jouee
+  # en local avant chaque commit (la discipline de ce depot), et
+  # `workflow_dispatch` permet de declencher un run a la demande sur n'importe
+  # quelle branche.
   push:
-    branches: ["master", "claude/**"]
+    branches: ["master"]
   pull_request:
     branches: ["master"]
   workflow_dispatch:

@@ -137,10 +137,35 @@ sync:
     #           restrictives est paru ». PDF archive et homologateurs
     #           prevenus, aucune fiche deduite du texte.
     mode: "extract"
-    # Version anglaise du Journal Officiel : reference reglementaire retenue.
-    # {date} est remplace par la date du jour au format DDMMYYYY
+    # Par quelle PORTE la meme matiere est demandee. Le perimetre (Journal
+    # Officiel serie L, titre anglais, mot-cle) et les fiches produites sont
+    # identiques dans les deux cas — verifie sur trois actes reels avant la
+    # bascule, extraction pour extraction.
+    #   cellar  : point SPARQL de l'Office des publications pour la liste du
+    #             jour, adresse CELEX de CELLAR pour le texte de chaque acte.
+    #             Porte faite pour les machines, publique et sans inscription.
+    #             Voie par defaut : le portail EUR-Lex protege ses pages HTML
+    #             et rend un 202 a corps vide aux origines qu'il ne reconnait
+    #             pas — un refus qu'aucune patience ne leve, constate sur une
+    #             installation en production. C'est le raclage de la page
+    #             humaine qui etait anormal, pas le refus.
+    #   portail : lecture de la page du jour d'EUR-Lex. Voie historique,
+    #             gardee pour les installations qui la preferent.
+    # Aucun repli automatique de l'une sur l'autre : une voie qui echoue
+    # echoue franchement, sous peine d'une erreur qui ne parle pas de la voie
+    # choisie.
+    voie: "cellar"
+    sparql_url: "https://publications.europa.eu/webapi/rdf/sparql"
+    cellar_content_url: "http://publications.europa.eu/resource/celex/{celex}"
+    # Voie `portail` uniquement. Version anglaise du Journal Officiel :
+    # reference reglementaire retenue. {date} au format DDMMYYYY.
     daily_journal_url: "https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate={date}&locale=en"
     keyword: "restrictive measures"
+    # NOTE : le PDF officiel archive (piece probante en audit) reste servi par
+    # EUR-Lex — CELLAR ne detient pas de PDF pour les actes recents. Sur une
+    # installation refusee par le portail, la DETECTION et l'EXTRACTION ne
+    # dependent donc plus de lui, l'archivage du PDF si. Un echec d'archivage
+    # n'interrompt pas la synchronisation et est compte dans le rapport.
   # Registre national des gels des avoirs (DGT) : obligation autonome pour les
   # etablissements assujettis francais (lignes directrices ACPR/DGT).
   dgt:

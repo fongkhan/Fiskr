@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — EUR-Lex through the door meant for machines, and a daemon judged on its consequences
+
+Two decisions taken by the operator on the audit's findings, and applied here.
+
+**The EUR-Lex refusal is treated at its root, and the earlier diagnosis was wrong about whose fault it was.** The portal answers `202` with an empty body to the production installation, twice a day for weeks. The previous batch removed the pointless waiting between two refusals and left the operator a choice: repair, or suspend the source. That was not enough — and the framing was off. **A portal that protects its human-facing HTML pages from a client scraping them is not misbehaving. What was abnormal was asking for the Official Journal that way at all.**
+
+The Publications Office exposes the same material through a door built for machines, public and without registration: the CELLAR SPARQL endpoint for the day's list, and the CELEX address for each act's text. Both are now the default route (`sync.eurlex.voie: cellar`); the portal route stays available and is simply named.
+
+**Verified before switching, because a new route that quietly changes what a source produces would be worse than the refusal.** Three real acts of 7 August 2026 — including a genuine nominative designation — were fetched by both routes and run through the same extractor: **the extracted records are identical, field for field**. The CELLAR response also weighs twelve times less (22 KiB against 277 KiB for the portal page). End to end against the live services, both modes work: alert detects the 4 acts of the day and archives their PDFs with SHA-256, extract produces 5 records.
+
+Three things this batch was careful about. An act now carries **two addresses that must never be confused**: `url`, the citable EUR-Lex address that goes into records, into the probative PDF and into an audit file; and `url_lecture`, the technical address the product actually reads from — an API address has no business in an opposable document. The keyword comes from a setting, so it enters the SPARQL query **as data**, escaped. And **neither route falls back on the other**: silently retreating to the door that refuses would produce an error that says nothing about the route chosen.
+
+One limitation, stated rather than discovered later: CELLAR holds no PDF for recent acts, so the probative PDF is still served by EUR-Lex. On a blocked installation, detection and extraction no longer depend on the portal; archiving the PDF still does. A failed archive does not interrupt the sync and is counted in the report, as before.
+
+**The daemon may switch itself off when there is nothing to process.** The previous batch already stopped judging it on its heartbeat; the rule is now stated plainly and the control follows it. With nothing queued and no automatic sync scheduled, the verdict is OK: there is nothing to take charge of, and demanding a live process would be demanding that it watch over nothing.
+
+That leaves one trap, and it is why the control does not simply trust an empty queue: **the daemon hosts the schedulers**. Dead, it enqueues nothing — "empty queue" is exactly what a dead scheduler produces. The witness is therefore elsewhere: the last *scheduled* sync, which can only exist if a scheduler ran to submit it. And the window is **derived from the sources' own cron expressions** — the most frequent one, plus a two-hour margin — rather than from a hard-coded number that would have declared an installation late when it only synchronises on Mondays.
+
+38 tests pin the batch, in two files.
+
+### Changed — measure the right thing, and count it only once (process audit, medium-impact findings)
+
+The four medium-impact findings of the audit. One of them did not survive verification, and saying so is part of the batch.
+
+**A pass that changes nothing can still cost a night window — and the obvious counter measures the wrong thing.** Two syncs both reported `NO_CHANGE`: one answered `304` without a single byte, the other re-downloaded the whole list to find it identical. Nothing in the report told them apart. The reports now carry the volume actually transferred, and an unchanged-but-paid-for pass says so in its own message ("3,8 Mio retéléchargés pour rien"). The trap was in *which* number to record: these sources are served gzipped, so the bytes written to disk are four to six times the bytes on the wire — measured on the real server, 24 269 bytes carried for a 111 592-byte file. Recording the decoded size would have published a cost 4.6× too large with the authority of a measurement, which is the exact defect this project hunts everywhere else. What is recorded is `num_bytes_downloaded`: the wire. A download handed to the caller is not measured, and is stored as *unknown* rather than as zero — zero would claim the pass was free.
+
+**A threshold cannot be calibrated against an empty client base.** Commissioning asked for exactly that: with no portfolio, "calibrate your cut-off" is work nobody can do, and an impossible instruction is ignored as fast as an alarm that cries wolf. The control now states its prerequisite, names the order — import, lookback, simulate candidate thresholds on the decisions produced, then settle on one — and its link points at that first gesture rather than at the thresholds screen where there is nothing to do yet. With a portfolio present, the link goes back to the thresholds screen and the sequence drops the import. A threshold already set from the application stays green either way: the added dependency must not resurrect an alarm that was properly extinguished.
+
+**One commit, one result.** CI triggered on `push` to `claude/**` *and* on `pull_request` to master, so a commit pushed to a branch carrying an open PR ran the full suite twice on the same SHA, minutes apart. `push` now covers master only. What is lost, and stated rather than glossed over: a branch pushed without a PR no longer gets automatic verification. It stays covered by the full suite run locally before each commit — the discipline of this repository — and by `workflow_dispatch` for an on-demand run on any branch.
+
+**The README's test count corrected itself thirteen times, by hand.** The guard did its job — it failed at every batch — but it only ever reported the gap; the number had to be retyped, a gesture whose only possible outcome is a typo. `tools/compte_de_tests.py` now counts and, with `--corriger`, rewrites the sentence, preserving the paragraph's own line breaks. **The guard imports the tool** instead of repeating the counting: two copies of that logic would eventually let the tool write what the guard rejects. Two refusals hold it: a count below 500 functions writes nothing (a stale README beats an absurd number carrying a tool's authority), and a sentence that has changed shape is reported rather than silently skipped. It corrects, it does not uniformise — the three thousands-separators the guard accepts are all left alone, so the tool never produces a diff for its own sake.
+
+**One finding retracted.** The audit claimed sixteen sources re-download because conditional requests were not extended to them. Verification says otherwise, three times over. The mechanism works end to end — a real sync of `ae_local_terrorists` stores its validators on the first pass and gets a `304` with nothing downloaded on the second. Those sixteen do not get a `304` because their publisher rebuilds them nightly: 24 of the 27 registry datasets carry the current day's date, and a rebuild changes the ETag even when the content is byte-identical. And the transfer is *already* compressed — 9.8 MiB on the wire for 43.4 MiB of CSV across all 27 sources. There was no defect to fix; what was missing was the measurement, which is what this batch delivers.
+
+22 tests pin the batch.
+
+### Fixed — an installation that says what is actually wrong (process audit, high-impact findings)
+
+A measured audit of the production installation and of the repository turned up nine findings; the four marked high-impact are treated here. All four share one defect: **the tool knew something was broken and said nothing, or said the opposite.**
+
+**A closed door is not a busy line.** EUR-Lex answers `202` with an empty body — a documented, deliberate refusal that will be identical one second later. The retry loop treated it like a network hiccup and slept between attempts: with the per-source budget of six attempts backing off five seconds, that is **fifteen seconds of pure waiting per run, twice a day**, for a refusal known in advance. The replay is kept — the *repetition* is what makes the proof, and abandoning on the first `202` would confuse a closed door with a slow one — but the wait between two closed doors is gone. Transport errors keep their patience untouched, pinned by a test that watches the recorded sleeps.
+
+**A source that fails every time is not an incident, it is a state of the installation.** Commissioning judged each source on its configuration and never on its results, so a source failing at every single pass for days showed as correctly configured. A new control reads the last passes over a three-day window and names the sources whose **every** attempt failed — a source that succeeded once is not named, because a single failure is a hiccup, and an alarm that cries wolf is one people learn to ignore.
+
+**The daemon was judged on its heartbeat rather than on its consequences.** "The daemon is not beating" is not by itself a fault: nothing may be waiting for it. It now blocks when jobs are actually queued or running with nobody to take them, and when the last pass is more than twenty-six hours old — a nightly daemon is allowed to be quiet at noon. Otherwise it says so plainly, rather than raising an alarm nobody can act on.
+
+**The notification journal claimed sends that never happened.** `flush_digest` marked every queued row `SENT` as soon as SMTP was *configured*, without looking at whether the send succeeded — so an installation with a broken SMTP left a journal full of successful digests and an inbox with none. Each row is now marked on its own outcome: `SENT` when at least one address received it or a webhook carried it, `FAILED` with the transport's own message, `SKIPPED` when there was no recipient at all. And the digest gained the second channel the immediate events already had: when SMTP is down, the webhook carries the summary rather than the summary being lost.
+
+One measurement on the suite itself along the way: the test helper that zeroes retry back-off never zeroed the per-source overrides, so `tests/test_sync.py` genuinely slept through its own retries — **20 seconds recovered** on every run of the file, without weakening a single assertion.
+
+13 tests pin the batch.
+
 ### Added — the tool speaks at the right moment (quality-of-life 13/N)
 Thirteenth batch, and the last of the inventory. Verified in a real browser.
 

@@ -193,7 +193,7 @@ def test_eurlex_sync_long_act_title_clamped_to_column(db, tmp_path):
     """
     report = run_eurlex_sync(db, for_date=date(2026, 6, 8), mode="extract",
                              http_get=make_http_get(daily_html, act_html),
-                             pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path / "archives")
+                             pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path / "archives", voie="portail")
 
     assert report.status == "SUCCESS"
     assert report.added_count == 1
@@ -298,7 +298,7 @@ def make_http_get(daily_html: str, act_html: str):
 
 def test_eurlex_sync_no_publication(db):
     html_without_measures = "<html><body><a href='./x'>Reglement sur les fromages</a></body></html>"
-    report = run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=make_http_get(html_without_measures, ""))
+    report = run_eurlex_sync(db, for_date=date(2026, 7, 8), http_get=make_http_get(html_without_measures, ""), voie="portail")
 
     assert report.status == "NO_PUBLICATION"
     assert db.query(Snapshot).count() == 0
@@ -309,7 +309,7 @@ def test_eurlex_sync_scrape_then_incremental_merge(db, tmp_path):
     # Jour 1 : 3 listes extraits de l'acte
     report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), mode="extract",
                               http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
-                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
+                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir, voie="portail")
     assert report1.status == "SUCCESS"
     assert report1.added_count == 3
     act = report1.delta_report["acts"][0]
@@ -328,7 +328,7 @@ def test_eurlex_sync_scrape_then_incremental_merge(db, tmp_path):
     """
     report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), mode="extract",
                               http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
-                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
+                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir, voie="portail")
     assert report2.status == "SUCCESS"
     # Fusion : PETROV inchange, KUZNETSOV ajoute, ZARYA/VOLGA reconduits (pas de suppression)
     assert report2.added_count == 1
@@ -442,8 +442,13 @@ def test_api_sync_config_and_reports(client):
 
 
 def test_api_sync_run_eurlex_no_publication(client, monkeypatch):
-    # JO du jour sans acte "mesures restrictives" : rapport NO_PUBLICATION, aucun snapshot cree
-    monkeypatch.setattr("fiskr.sync.http_get_text", lambda url, timeout=60.0: "<html><body>Rien aujourd'hui</body></html>")
+    # JO du jour sans acte "mesures restrictives" : rapport NO_PUBLICATION, aucun
+    # snapshot cree. Ce test passe par la voie PAR DEFAUT (cellar) : c'est celle
+    # qui tourne en production, c'est donc elle qu'un test de bout en bout doit
+    # emprunter.
+    vide = '{"head": {"vars": ["celex", "title"]}, "results": {"bindings": []}}'
+    monkeypatch.setattr("fiskr.sync.http_get_text",
+                        lambda url, timeout=60.0, **kw: vide)
     data = _run_sync(client, {"source": "EURLEX", "date": "2026-07-09"})
     assert data["status"] == "NO_PUBLICATION"
     assert data["source"] == "EURLEX"
@@ -498,7 +503,7 @@ def test_eurlex_sync_staging_merge_base_includes_pending(db, tmp_path):
     # Jour 1 : 3 listes -> snapshot pending
     report1 = run_eurlex_sync(db, for_date=date(2026, 7, 8), mode="extract",
                               http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
-                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
+                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir, voie="portail")
     assert report1.status == "PENDING_REVIEW"
 
     # Jour 2 : nouvel acte -> le pending du jour 2 reconduit les entites du pending du jour 1
@@ -510,7 +515,7 @@ def test_eurlex_sync_staging_merge_base_includes_pending(db, tmp_path):
     """
     report2 = run_eurlex_sync(db, for_date=date(2026, 7, 9), mode="extract",
                               http_get=make_http_get(MOCK_DAILY_OJ_HTML, act_day2),
-                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir)
+                              pdf_fetcher=stub_pdf_fetcher, archive_dir=archive_dir, voie="portail")
     assert report2.status == "PENDING_REVIEW"
 
     day2_entities = db.query(WatchlistEntity).filter(
@@ -535,10 +540,23 @@ from fiskr.sync import (
 
 
 def _zero_backoff_config(monkeypatch):
-    """Configuration reseau sans attente entre tentatives (tests instantanes)."""
+    """
+    Configuration reseau sans attente entre tentatives (tests instantanes).
+
+    Le budget GLOBAL ne suffit pas : certaines sources portent une surcharge
+    (`_SOURCE_NETWORK_DEFAULTS`, appliquee d'apres l'hote de l'URL), et une
+    adresse EUR-Lex heritait donc de ses 5 secondes malgre ce helper. La
+    promesse « tests instantanes » etait fausse pour ces chemins-la : 20 s de
+    sommeil reel dans la suite, a chaque execution. Un helper qui pretend
+    supprimer l'attente et ne le fait pas est le meme defaut que ce produit
+    chasse partout : le reglage qu'on pose et qui n'agit pas.
+    """
     cfg = get_sync_config()
     cfg["network"]["backoff_seconds"] = 0
     monkeypatch.setattr(sync_mod, "get_sync_config", lambda: cfg)
+    monkeypatch.setattr(sync_mod, "_SOURCE_NETWORK_DEFAULTS",
+                        {source: {**budget, "backoff_seconds": 0}
+                         for source, budget in sync_mod._SOURCE_NETWORK_DEFAULTS.items()})
     return cfg
 
 
@@ -743,7 +761,7 @@ def test_eurlex_partial_failure_is_success_with_visible_failures(db, tmp_path):
     report = run_eurlex_sync(
         db, for_date=date(2026, 7, 10), mode="extract",
         http_get=_flaky_getter("L_2026_2222"),
-        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail",
     )
     # Un acte sur deux scrape : la sync aboutit mais l'anomalie est VISIBLE
     assert report.status == "SUCCESS"
@@ -757,7 +775,7 @@ def test_eurlex_total_failure_is_error_not_no_change(db, tmp_path):
     report = run_eurlex_sync(
         db, for_date=date(2026, 7, 11), mode="extract",
         http_get=_flaky_getter("legal-content"),  # tous les actes en echec
-        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail",
     )
     # Panne reseau totale : ERROR (jamais un faux NO_CHANGE rassurant)
     assert report.status == "ERROR"
@@ -783,7 +801,7 @@ def test_eurlex_alert_mode_signals_without_inventing_designations(db, tmp_path, 
     report = run_eurlex_sync(
         db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
-        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail",
     )
 
     assert report.status == "SUCCESS"
@@ -804,7 +822,7 @@ def test_eurlex_alert_mode_archives_the_official_pdf(db, tmp_path):
     report = run_eurlex_sync(
         db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
-        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail",
     )
     acts = (report.delta_report or {}).get("acts") or []
     assert acts[0]["pdf_file"], "le PDF officiel doit etre archive"
@@ -821,7 +839,7 @@ def test_eurlex_alert_mode_warns_when_consolidated_source_is_off(db, tmp_path):
     report = run_eurlex_sync(
         db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(MOCK_DAILY_OJ_HTML, MOCK_ACT_HTML),
-        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail",
     )
     assert "EUFSF" in report.message and "désactivée" in report.message
     assert (report.delta_report or {}).get("eu_fsf_enabled") is False
@@ -832,7 +850,7 @@ def test_eurlex_alert_mode_stays_quiet_without_acts(db, tmp_path):
     report = run_eurlex_sync(
         db, mode="alert", for_date=date(2026, 7, 8),
         http_get=make_http_get(html_without_measures, ""),
-        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path,
+        pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail",
     )
     assert report.status == "NO_PUBLICATION"
 
@@ -848,7 +866,7 @@ def test_eurlex_alert_mode_makes_one_request_for_the_daily_page(db, tmp_path):
         return MOCK_DAILY_OJ_HTML
 
     run_eurlex_sync(db, mode="alert", for_date=date(2026, 7, 8), http_get=counting_getter,
-                    pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path)
+                    pdf_fetcher=stub_pdf_fetcher, archive_dir=tmp_path, voie="portail")
     assert len(seen) == 1, f"une seule requete attendue, obtenu {seen}"
 
 
