@@ -172,6 +172,10 @@ watchlist_hash: str = "N/A"
 # Layout de blocking utilise pour CONSTRUIRE l'index en memoire : les sondes
 # du criblage doivent utiliser le meme (coherence index/sonde garantie)
 watchlist_index_layout: List[str] = ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
+# Types de liste REELLEMENT charges dans ce processus. Derive du cache a
+# chaque chargement, jamais tenu a la main : c'est la seule facon qu'il dise
+# la meme chose que ce contre quoi on crible.
+watchlist_types: set = set()
 
 def _entity_search_blob(ent: Dict[str, Any]) -> str:
     """Texte normalise (accents/casse) sur lequel la palette Ctrl+K cherche :
@@ -189,7 +193,7 @@ def _entity_search_blob(ent: Dict[str, Any]) -> str:
 
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
-    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index
+    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index, watchlist_types
     
     # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
     snapshots = db.query(Snapshot).filter(
@@ -208,6 +212,7 @@ def load_watchlist_cache(db: Session):
         
     if not snapshots:
         logger.warning("No watchlist snapshots found in database to load cache.")
+        watchlist_types = set()
         return
         
     # Get active watchlist hash
@@ -251,6 +256,7 @@ def load_watchlist_cache(db: Session):
     watchlist_index = temp_index
     watchlist_index_layout = screening_layout
     watchlist_search_index = temp_search
+    watchlist_types = {e["_list_type"] for e in temp_store if e.get("_list_type")}
     # Frequence des mots de nom sur le corpus qui vient d'etre charge : c'est
     # la seule fois ou l'on tient l'univers crible en entier, et le compte doit
     # porter sur CE corpus, pas sur un autre. La table est posee dans le
@@ -2840,6 +2846,11 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
             detail={"errors": report["errors"]}
         )
         
+    # Univers reel du criblage. Pose APRES le quality gate (un profil
+    # inexploitable se refuse pour ce qu'il est, pas au nom de l'installation)
+    # et AVANT tout calcul : ce qui suit n'aurait aucun sens sans liste.
+    exiger_un_univers(requested_lists)
+
     cleansed_client = client_dict.copy()
     
     # Override client fields with cleansed variables
@@ -3068,6 +3079,51 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "country_risk": country_risk.assess_client(client_dict),
     }
 
+def exiger_un_univers(requested_lists: Optional[List[str]] = None) -> List[str]:
+    """
+    Les listes contre lesquelles ce criblage va REELLEMENT porter — et un
+    refus quand il n'y en a aucune.
+
+    POURQUOI CE REFUS EXISTE
+    ------------------------
+    Sans univers, le moteur ne trouve aucun candidat et rend « aucune
+    correspondance ». Rien ne casse, rien n'alerte : le client repart avec un
+    quitus, et le journal de criblage — la piece produite en inspection —
+    ecrit que ce client a bien ete crible. C'est le meme defaut que le cache
+    vide qui rendait NO_MATCH sous Passenger, a ceci pres qu'il ne demande
+    aucune panne pour se produire : une installation neuve, une liste retiree
+    de la production, ou une restriction de perimetre visant une liste absente
+    suffisent.
+
+    `_validate_screening_lists` verifie qu'un NOM de liste est connu ; il ne
+    dit rien de sa presence en production. Les deux questions sont
+    differentes, et c'est la seconde qui decide de ce qui est crible.
+
+    Le refus est FRANC : rendre une decision serait ecrire une fausse piece,
+    et une fausse piece de conformite est pire que pas de piece du tout.
+    """
+    disponibles = set(watchlist_types)
+    if not disponibles:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Aucune liste n'est en production : rien à cribler. "
+                   "Un criblage rendu maintenant dirait « aucune correspondance » "
+                   "sans avoir comparé à quoi que ce soit. Importez ou "
+                   "synchronisez au moins une liste, puis recommencez.")
+    if not requested_lists:
+        return sorted(disponibles)
+    retenues = sorted(set(requested_lists) & disponibles)
+    if not retenues:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Aucune des listes demandées n'est en production : "
+                   f"{', '.join(sorted(requested_lists))}. "
+                   f"En production : {', '.join(sorted(disponibles))}. "
+                   f"Restreindre le périmètre à une liste absente rendrait "
+                   f"« aucune correspondance » sans rien avoir comparé.")
+    return retenues
+
+
 def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
     """Valide et normalise une restriction de perimetre (None = toutes listes)."""
     if not raw_lists:
@@ -3134,6 +3190,11 @@ async def screen_preview(
     countries = [c.strip().upper() for c in (country or "").split(",") if c.strip()]
     requested_lists = _validate_screening_lists(
         [v for v in (lists or "").split(",") if v.strip()])
+    # Meme refus que le criblage reglementaire : un criblage a blanc ne
+    # journalise rien, mais il repond a un humain qui en tirera une
+    # conclusion. « Aucune correspondance » sur un univers vide en est une
+    # fausse, journalisee ou non.
+    exiger_un_univers(requested_lists)
     return _screen_preview(db, name, type, dob, countries, requested_lists, limit)
 
 @app.post("/api/transactions/screen")
@@ -3173,6 +3234,10 @@ async def screen_transaction_message(
     # « N/A » comme hash de liste. Place apres le parsing : un message invalide
     # est rejete sans payer le chargement.
     _ensure_watchlist_cache(db)
+    # Et un cache CHARGE n'est pas un univers : sans liste en production, le
+    # filtrage rendrait PASS sur toutes les parties du paiement — un virement
+    # libere au nom d'une comparaison qui n'a pas eu lieu.
+    exiger_un_univers(requested_lists)
     try:
         result = screen_payment_message(
             db, parsed, watchlist_index, watchlist_version, watchlist_hash,
@@ -5482,6 +5547,12 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         # Execute desormais dans le demon travailleur : son cache de listes
         # demarre vide et n'est pas rafraichi par le veilleur du processus API
         _ensure_watchlist_cache(db)
+        # L'univers se verifie UNE fois, ici. `screen_client_profile` refuserait
+        # de toute facon, mais ligne par ligne : dix mille refus identiques
+        # noieraient la cause dans le detail de chaque client, alors que le
+        # defaut ne concerne aucun d'eux. La campagne echoue une seule fois,
+        # en disant pourquoi.
+        exiger_un_univers(requested_lists)
         for profile in profiles:
             try:
                 result = screen_client_profile(db, profile, username, requested_lists)

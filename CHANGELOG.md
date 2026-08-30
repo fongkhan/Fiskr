@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — "no match" when there was nothing to match against
+
+The gravest instance of the class so far, because it needs no failure to occur and because what it produces is a **false compliance record**.
+
+With no list in production, the engine finds no candidate and returns "no match". Nothing breaks, nothing alerts: the client walks away with a clean bill, and the screening journal — the piece produced during an inspection — records that they were duly screened. It takes no outage: a fresh installation, a list pulled out of production, or a simple scope restriction naming an absent list is enough.
+
+The existing check was asking the wrong question. `_validate_screening_lists` verifies that a list **name** is known to the product; it says nothing about whether that list is **in production**. The two are different questions, and it is the second that decides what actually gets screened. Restricting the scope to `WATCHLIST_PEP` on an installation that does not carry it returned a serene "0 candidates, no alert" — with an audit-trail line to match.
+
+**The refusal is blunt, on all four paths**: regulatory screening, dry-run screening, ISO 20022 payment filtering, and mass campaigns. Rendering a decision would mean writing a false record, and a false compliance record is worse than no record at all. On the payment path the stake is plainer still: a transfer released as PASS on the strength of a comparison that never happened.
+
+Three decisions shape it. The universe is **derived from the loaded cache** rather than kept by hand — two separately maintained inventories eventually diverge, and the one that lies is always the one being read. The refusal comes **after the quality gate**, so an unusable profile is refused for what it is rather than in the name of the installation's state — otherwise the user corrects the wrong thing. And a campaign checks **once**, up front: `screen_client_profile` would refuse anyway, but row by row, and ten thousand identical refusals would bury the cause in the detail of each client when the defect concerns none of them.
+
+The message says what an answer would have been worth, not just that one is impossible: "impossible" reads as a passing outage and invites a retry. A partially available restriction still goes through — one absent list among present ones does not cancel a screening, the universe is simply rendered as it is.
+
+**One existing test asserted the old behaviour** and has been rewritten. It restricted to a list absent from production and expected "0 candidates, no alert" plus an audit line. Its original intent — that a restriction really does exclude the other lists — is now held honestly, against a PEP list actually placed in production for the test. What replaces the old assertion is the refusal, plus the fact that **no journal line is written at all** for that client.
+
+14 tests pin the batch.
+
 ### Fixed — a purge that promised to be reversible, and destroyed the one thing anyone would ask for again
 
 The class hunt continues: *what the product asserts without having checked it*. This one was written in plain words at the top of the retention module — "the purge stays reversible offline" — while the archive held only the **rows** of alert attachments: id, name, path. The file itself went to `os.remove`. Restoring that archive gave back references to destroyed files, which is exactly the state the previous batch made visible on screen. **Evidence does not reconstitute itself.**
