@@ -36,10 +36,10 @@ from urllib.parse import urljoin
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.limites import TAILLE_MAX_TELECHARGEMENT, TAILLE_MAX_PAGE
 from fiskr.quality import evaluate_and_clean
-from fiskr.delta import calculate_delta, calculate_delta_db
+from fiskr.delta import calculate_delta_db
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
-    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv,
+    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv, parse_canada_opensanctions_csv,
     parse_opensanctions_simple_csv,
     parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES,
     parse_canada_sema_csv, parse_dfat_consolidated,
@@ -154,12 +154,25 @@ DEFAULT_CSL_URL = (
 # Liste consolidee des sanctions autonomes canadiennes (SEMA), publiee par
 # Affaires mondiales Canada. Le Canada designe de facon autonome, avec un
 # perimetre qui ne recoupe ni celui de l'UE ni celui de l'OFAC.
-# Le CSV a ete RETIRE (404 constate en production) : la voie servie est
-# desormais le XML, un tableau plat d'enregistrements que le meme lecteur
-# consomme. Il porte en outre les navires designes et leur numero OMI, que
-# le CSV n'avait jamais publies.
+# Le CSV a ete RETIRE (404 constate en production), et le XML qui l'a remplace
+# NE PORTE AUCUN NOM. Mesure le 1er octobre 2026 sur le fichier publie :
+# 5 708 enregistrements, quatre balises seulement — annexe, numero d'ordre, un
+# code numerique et une date — dont les intitules ne correspondent meme pas
+# aux valeurs (« Pays » contient des dates de naissance). Aucun lecteur ne peut
+# en tirer une liste a cribler : branche dessus, le produit lisait zero fiche
+# chaque nuit, et la liste canadienne etait vide en production.
+#
+# Deux voies, sur le modele de SECO (`sync.canada.format`) :
+#   - `opensanctions` (defaut) : jeu `ca_dfatd_sema_sanctions`, format plat
+#     targets.simple.csv, tenu a jour par OpenSanctions a partir de la meme
+#     publication officielle. Soumis a la licence OpenSanctions pour un usage
+#     commercial, comme les autres sources du registre.
+#   - `csv` : le CSV officiel, si Affaires mondiales Canada le republie.
 DEFAULT_CANADA_URL = (
-    "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.xml"
+    "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.csv"
+)
+DEFAULT_CANADA_OPENSANCTIONS_URL = (
+    "https://data.opensanctions.org/datasets/latest/ca_dfatd_sema_sanctions/targets.simple.csv"
 )
 
 # Liste consolidee australienne (DFAT) : sanctions onusiennes transposees ET
@@ -352,10 +365,7 @@ def get_sync_config(db=None) -> Dict[str, Any]:
         "csl": _csl_source_config(sync_cfg.get("csl") or {}),
         # Sanctions autonomes canadiennes (SEMA) et liste consolidee
         # australienne (DFAT) : opt-in selon l'exposition geographique.
-        "canada": {
-            "enabled": bool((sync_cfg.get("canada") or {}).get("enabled", False)),
-            "url": (sync_cfg.get("canada") or {}).get("url", DEFAULT_CANADA_URL),
-        },
+        "canada": _canada_source_config(sync_cfg.get("canada") or {}),
         "dfat": {
             "enabled": bool((sync_cfg.get("dfat") or {}).get("enabled", False)),
             "url": (sync_cfg.get("dfat") or {}).get("url", DEFAULT_DFAT_URL),
@@ -411,6 +421,28 @@ def _csl_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         "url": str(raw.get("url", "") or "").strip() or DEFAULT_CSL_URL,
         "exclude_sources": excluded,
     }
+
+
+def _canada_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Meme logique que SECO : le format choisit le lecteur ET l'URL par defaut,
+    pour qu'un basculement de format suffise a changer de source.
+
+    Une URL pointant sur le XML officiel est IGNOREE : ce fichier ne porte
+    aucun nom (cf. DEFAULT_CANADA_URL), et la garder ferait lire zero fiche a
+    chaque passage — ce que l'installation de production a vecu deux mois.
+    Une installation qui l'avait renseignee bascule donc d'elle-meme sur la
+    voie qui fonctionne, au lieu d'echouer chaque nuit.
+    """
+    fmt = str(raw.get("format", "opensanctions") or "opensanctions").strip().lower()
+    if fmt not in ("csv", "opensanctions"):
+        fmt = "opensanctions"
+    url = str(raw.get("url", "") or "").strip()
+    if url.lower().split("?")[0].endswith(".xml"):
+        url = ""
+    if not url:
+        url = DEFAULT_CANADA_OPENSANCTIONS_URL if fmt == "opensanctions" else DEFAULT_CANADA_URL
+    return {"enabled": bool(raw.get("enabled", False)), "format": fmt, "url": url}
 
 
 def _seco_source_config(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -1214,6 +1246,10 @@ def _truncate_delta_details(delta: Dict[str, Any]) -> Dict[str, Any]:
     return {"summary": delta.get("summary", {}), "details": truncated}
 
 
+class LectureVide(RuntimeError):
+    """Un fichier source lu sans qu'aucune fiche n'en sorte (cf. _run_list_replacement_sync)."""
+
+
 def _volume_lisible(octets: Optional[int]) -> str:
     """Volume transfere, ecrit pour un humain (« 3,8 Mio », « 24 Kio »)."""
     if octets is None:
@@ -1523,6 +1559,23 @@ def _run_list_replacement_sync(
 
         record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)),
                                            progress=tracker.persisting(db, snap_id))
+        if not record_count:
+            # Un fichier telecharge dont AUCUNE fiche ne sort n'est pas une liste
+            # vide : c'est un lecteur qui ne reconnait plus ce qu'on lui donne.
+            # Releve en production : l'URL canadienne etait passee au XML, le
+            # lecteur etait reste CSV, et chaque nuit depuis deux mois le rapport
+            # disait « 0 fiches lues : contenu identique a la liste active » —
+            # zero compare a zero. Le premier de ces lots vides avait meme ete
+            # homologue : la liste canadienne etait vide en production.
+            # L'echec est franc, la production reste intacte, et l'echec repete
+            # se nomme ensuite dans la mise en service.
+            raise LectureVide(
+                f"Le fichier de {source} a été téléchargé "
+                f"({_volume_lisible(temp_file.stat().st_size if temp_file.exists() else None)}) "
+                f"mais aucune fiche n'a pu en être lue. Le format publié a "
+                f"probablement changé, ou le lecteur ne correspond pas au fichier "
+                f"(extension {temp_suffix}). La liste en production est laissée "
+                f"intacte.")
         if after_persist:
             after_persist(db)
         # Le snapshot a pu etre detache par les commits periodiques
@@ -1856,18 +1909,21 @@ def run_canada_sync(
     reload_cache: Optional[Callable[[], None]] = None,
 ) -> SyncReport:
     """
-    Telecharge la liste consolidee des sanctions autonomes canadiennes (SEMA)
-    et remplace la liste canadienne active.
+    Remplace la liste canadienne active (sanctions autonomes, SEMA).
 
-    Le fichier existe en anglais et en francais ; le lecteur accepte les deux
-    jeux d'intitules de colonnes, pour qu'un telechargement depuis la page
-    francophone ne produise pas une liste vide.
+    Deux voies (`sync.canada.format`, cf. DEFAULT_CANADA_URL) : le jeu
+    OpenSanctions `ca_dfatd_sema_sanctions` par defaut, ou le CSV officiel —
+    le lecteur accepte alors les intitules anglais comme francais.
     """
     cfg = get_sync_config()["canada"]
+    if cfg["format"] == "opensanctions":
+        parser, label, suffix = parse_canada_opensanctions_csv, "Canada_SEMA_OpenSanctions", ".csv"
+    else:
+        parser, label, suffix = parse_canada_sema_csv, "Canada_SEMA_Consolidated", ".csv"
     return _run_list_replacement_sync(
         db, source="CANADA", file_type="WATCHLIST_CANADA", url=cfg["url"],
-        parser=parse_canada_sema_csv, file_label="Canada_SEMA_Consolidated",
-        temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+        parser=parser, file_label=label,
+        temp_suffix=suffix, trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 

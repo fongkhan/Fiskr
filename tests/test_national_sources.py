@@ -148,7 +148,21 @@ def test_canada_rebuilds_a_stable_key_from_the_regulatory_reference(tmp_path):
     assert first == second and first[0].startswith("CA-")
 
 
-def test_canada_sync_lifecycle(db):
+def _voie_canada(monkeypatch, fmt):
+    import fiskr.sync as sync_mod
+    reel = sync_mod.get_sync_config
+
+    def _config(*a, **k):
+        cfg = reel(*a, **k)
+        cfg["canada"] = {**cfg["canada"], "format": fmt}
+        return cfg
+    monkeypatch.setattr(sync_mod, "get_sync_config", _config)
+
+
+def test_canada_sync_lifecycle(db, monkeypatch):
+    # Ce test exerce le lecteur du CSV OFFICIEL : il nomme sa voie, la voie par
+    # defaut etant desormais OpenSanctions (le XML officiel ne porte aucun nom).
+    _voie_canada(monkeypatch, "csv")
     report = run_canada_sync(db, fetcher=_fetcher(CANADA_EN))
     assert report.status == "SUCCESS"
     assert report.source == "CANADA"

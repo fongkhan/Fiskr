@@ -240,10 +240,30 @@ def _index_de_performance() -> Dict[str, Any]:
 # ------------------------------------------------------------------ Listes
 
 def _listes_en_production(db) -> Dict[str, Any]:
+    """
+    Compter les listes ne suffit pas : une liste en production SANS FICHE se
+    compte comme les autres et ne protege de personne. Releve en production :
+    la liste canadienne y etait vide depuis deux mois, comptee parmi « 39
+    listes en production », pendant que sa synchronisation rapportait chaque
+    nuit un « contenu identique a la liste active » — zero compare a zero.
+    """
     from fiskr.database import Snapshot, WATCHLIST_FILE_TYPES
+    from fiskr.fraicheur import mesurer
     pretes = db.query(Snapshot).filter(
         Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
         Snapshot.status == "READY").count()
+    vides = mesurer(db)["listes_vides"] if pretes else []
+    if pretes and vides:
+        return _controle(
+            "listes", "Listes", "Listes en production", ATTENTION,
+            f"{pretes} liste(s) en production, dont {len(vides)} sans aucune "
+            f"fiche : {', '.join(vides)}. Une liste vide ne crible rien, et "
+            f"rien d'autre ne le signale — le criblage contre elle répond "
+            f"« aucune correspondance ».",
+            "Ouvrez la source concernée : un lecteur qui ne reconnaît plus le "
+            "format publié rend une liste vide sans lever d'erreur. Rétablissez "
+            "la source, ou retirez la liste de la production.",
+            "#watchlist-mgmt/watchlist-active")
     if pretes:
         return _controle("listes", "Listes", "Listes en production", OK,
                          f"{pretes} liste(s) en production.",
@@ -281,6 +301,61 @@ def _sources_automatiques(db) -> Dict[str, Any]:
                      lien="#watchlist-mgmt/watchlist-sync")
 
 
+# Retard tolere entre la parution d'une version et sa mise en production :
+# le temps d'une relecture, week-end compris. Au-dela d'une semaine, le
+# criblage porte sur une liste qui n'existe plus sous cette forme.
+_RETARD_TOLERE_H = 48
+_RETARD_BLOQUANT_H = 7 * 24
+
+
+def _fraicheur_des_listes(db) -> Dict[str, Any]:
+    """
+    Depuis quand ce contre quoi on crible n'est plus la derniere version.
+
+    Le controle « Homologation des lots » regarde le REGLAGE (une revue est-elle
+    exigee ?) ; celui-ci regarde le RESULTAT (les revues ont-elles lieu ?). Le
+    premier etait vert pendant que 639 lots attendaient et que toutes les
+    listes avaient un mois de retard. Cf. fiskr/fraicheur.py.
+    """
+    from fiskr.fraicheur import mesurer, phrase_de_retard
+    etat = mesurer(db)
+    if not etat["listes_en_retard"]:
+        perimes = etat["lots_perimes"]
+        return _controle(
+            "fraicheur", "Listes", "Fraîcheur des listes", OK,
+            "Chaque liste en production est la dernière version récupérée."
+            + (f" {perimes} lot(s) périmé(s) restent en file — plus anciens "
+               f"que la production, ils ne peuvent plus être approuvés."
+               if perimes else ""),
+            lien="#watchlist-mgmt/watchlist-review")
+    retard = etat["retard_max_heures"]
+    pires = sorted((l for l in etat["listes"] if l["versions_en_attente"]),
+                   key=lambda l: -l["retard_heures"])[:5]
+    detail = ", ".join(f"{l['type'].replace('WATCHLIST_', '')} "
+                       f"({phrase_de_retard(l['retard_heures'])})" for l in pires)
+    etat_du_controle = (BLOQUANT if retard >= _RETARD_BLOQUANT_H
+                        else ATTENTION if retard >= _RETARD_TOLERE_H else OK)
+    if etat_du_controle == OK:
+        return _controle(
+            "fraicheur", "Listes", "Fraîcheur des listes", OK,
+            f"{etat['listes_en_retard']} liste(s) ont une version récente en "
+            f"attente de relecture, depuis {phrase_de_retard(retard)} au plus.",
+            lien="#watchlist-mgmt/watchlist-review")
+    return _controle(
+        "fraicheur", "Listes", "Fraîcheur des listes", etat_du_controle,
+        f"{etat['listes_en_retard']} liste(s) sur {etat['listes_en_production']} "
+        f"criblent contre une version dépassée : une plus récente attend "
+        f"l'homologation, depuis {phrase_de_retard(retard)} pour la plus "
+        f"ancienne. Les plus en retard : {detail}. "
+        f"{etat['lots_en_attente']} lot(s) en file au total.",
+        "Un gel des avoirs s'applique dès sa publication. Homologuez la "
+        "dernière version de chaque liste (homologation groupée) : les lots "
+        "plus anciens de la même liste sont alors retirés de la file d'eux-"
+        "mêmes. Si personne ne peut relire chaque nuit, c'est le réglage "
+        "d'homologation qu'il faut revoir, pas la file qu'il faut laisser monter.",
+        "#watchlist-mgmt/watchlist-review")
+
+
 def _homologation(db) -> Dict[str, Any]:
     from fiskr.settings import get_setting, SETTING_REQUIRE_APPROVAL
     exige = get_setting(db, SETTING_REQUIRE_APPROVAL, True)
@@ -300,16 +375,19 @@ def _homologation(db) -> Dict[str, Any]:
 # ---------------------------------------------------------------- Criblage
 
 def _referentiel_clients(db) -> Dict[str, Any]:
-    from fiskr.database import ClientEntity
-    n = db.query(ClientEntity).count()
+    # Meme definition que « Couverture du criblage » : le referentiel EN
+    # PRODUCTION, pas toute ligne de la table (cf. couverture.clients_en_production).
+    from fiskr.couverture import clients_en_production
+    n = clients_en_production(db)
     if n:
         return _controle("clients", "Criblage", "Référentiel clients", OK,
-                         f"{n} fiche(s) client en base.",
+                         f"{n} client(s) dans le référentiel en production.",
                          lien="#screening/screening-realtime")
     return _controle(
         "clients", "Criblage", "Référentiel clients", A_FAIRE,
-        "Aucune fiche client. Le criblage unitaire et le filtrage des paiements "
-        "fonctionnent sans, mais il n'y a rien à cribler en masse.",
+        "Aucun client dans le référentiel en production (les panels de cahier "
+        "de tests n'en font pas partie). Le criblage unitaire et le filtrage "
+        "des paiements fonctionnent sans, mais il n'y a rien à cribler en masse.",
         "Importez un fichier CSV de clients (colonnes CLIENT_BASE), ou branchez "
         "le dépôt CFT surveillé.",
         "#watchlist-mgmt/watchlist-import")
@@ -328,13 +406,13 @@ def _seuils(db) -> Dict[str, Any]:
     dit par quoi commencer, et son lien pointe vers ce premier geste — l'import
     — plutôt que vers l'écran des seuils où il n'y a rien à faire encore.
     """
-    from fiskr.database import ClientEntity
+    from fiskr.couverture import clients_en_production
     from fiskr.settings import score_thresholds
     seuils = score_thresholds(db)
     origine = seuils.get("source")
     coupure = seuils.get("cut_off_threshold")
     if origine == "config":
-        if not db.query(ClientEntity).count():
+        if not clients_en_production(db):
             return _controle(
                 "seuils", "Criblage", "Seuils de score", A_FAIRE,
                 f"Seuil de coupure à {coupure} — la valeur livrée, jamais revue "
@@ -615,7 +693,7 @@ def _sources_en_echec_repete(db) -> Dict[str, Any]:
 
 _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
                    _sources_automatiques, _sources_en_echec_repete,
-                   _homologation, _referentiel_clients,
+                   _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
                    _pieces_probantes, _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
