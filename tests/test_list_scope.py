@@ -52,6 +52,44 @@ def client():
     _cleanup_db()
 
 
+@pytest.fixture
+def liste_pep():
+    """
+    Une liste PEP en production, dont aucune fiche ne ressemble au profil
+    testé. Sans elle, restreindre à PEP ne teste plus une restriction : ça
+    teste un criblage contre le vide, que le produit refuse désormais.
+    """
+    from fiskr import api as api_mod
+    from fiskr.database import Snapshot, WatchlistEntity
+    from fiskr.settings import bump_watchlist_epoch
+    sid = f"test-scope-pep-{uuid.uuid4().hex[:8]}"
+    db = next(get_db())
+    try:
+        db.add(Snapshot(snapshot_id=sid, file_type="WATCHLIST_PEP",
+                        file_name=f"{sid}.csv", file_hash=uuid.uuid4().hex,
+                        record_count=1, uploaded_at=datetime.utcnow(), status="READY"))
+        db.add(WatchlistEntity(
+            snapshot_id=sid, entity_id=f"{sid}-1", entity_type="I",
+            primary_name="Aloysius Zzzzberg",
+            individual_name_parsed={"first_name": "Aloysius", "last_name": "Zzzzberg",
+                                    "maiden_name": ""},
+            aliases={"high_priority": [], "low_priority": []},
+            dates_of_birth=[], countries={}, entity_checksum="p" * 8))
+        db.commit()
+        bump_watchlist_epoch(db)
+        api_mod.load_watchlist_cache(db)
+        yield sid
+        db.query(WatchlistEntity).filter(WatchlistEntity.snapshot_id == sid).delete(
+            synchronize_session=False)
+        db.query(Snapshot).filter(Snapshot.snapshot_id == sid).delete(
+            synchronize_session=False)
+        db.commit()
+        bump_watchlist_epoch(db)
+        api_mod.load_watchlist_cache(db)
+    finally:
+        db.close()
+
+
 def _new_client_id():
     return f"test_scope_{uuid.uuid4().hex[:8]}"
 
@@ -90,8 +128,37 @@ def test_default_screening_is_unrestricted(client):
     assert tree["screening_lists_restriction"] == "ALL"
 
 
-def test_restriction_excludes_non_selected_lists(client):
-    # La seed Putin est en WATCHLIST_OFAC : restreindre a PEP => aucun candidat
+def test_restriction_a_une_liste_absente_de_la_production_est_refusee(client):
+    """
+    Ce test disait autrefois l'inverse : restreindre a WATCHLIST_PEP, absente
+    de la production, rendait « 0 candidat, aucune alerte » et journalisait
+    que ce client avait bien ete crible. Rien n'avait pourtant ete compare.
+
+    Une restriction a une liste absente n'est pas un criblage sans
+    correspondance : c'est un criblage qui n'a pas eu lieu, et la piece qui
+    en sortait etait fausse.
+    """
+    cid = _new_client_id()
+    reponse = client.post("/api/screen", json=_putin_payload(cid, ["WATCHLIST_PEP"]))
+    assert reponse.status_code == 409
+    detail = reponse.json()["detail"]
+    assert "WATCHLIST_PEP" in detail
+    assert "en production" in detail.lower()
+    # Et surtout : AUCUNE ligne de journal n'a ete ecrite pour ce client.
+    db = next(get_db())
+    try:
+        assert db.query(AuditTrail).filter(AuditTrail.client_id == cid).count() == 0
+    finally:
+        db.close()
+
+
+def test_restriction_a_une_liste_presente_qui_ne_matche_pas(client, liste_pep):
+    """
+    L'intention d'origine, tenue honnetement : la restriction exclut bien les
+    autres listes — a condition que la liste demandee soit, elle, en
+    production. Le criblage a alors reellement eu lieu, et le journal peut
+    l'ecrire.
+    """
     cid = _new_client_id()
     data = client.post("/api/screen", json=_putin_payload(cid, ["WATCHLIST_PEP"])).json()
     assert data["screening_lists"] == ["WATCHLIST_PEP"]

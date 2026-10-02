@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -29,7 +29,7 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
                             BLOCKING_FIELDS as _BLOCKING_FIELDS)
 from fiskr.scoring import match_entities, jaro_wink_similarity
-from fiskr.delta import calculate_delta, calculate_delta_db
+from fiskr.delta import calculate_delta_db
 from fiskr.tasks import _refresh_production_cache
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
@@ -172,6 +172,10 @@ watchlist_hash: str = "N/A"
 # Layout de blocking utilise pour CONSTRUIRE l'index en memoire : les sondes
 # du criblage doivent utiliser le meme (coherence index/sonde garantie)
 watchlist_index_layout: List[str] = ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
+# Types de liste REELLEMENT charges dans ce processus. Derive du cache a
+# chaque chargement, jamais tenu a la main : c'est la seule facon qu'il dise
+# la meme chose que ce contre quoi on crible.
+watchlist_types: set = set()
 
 def _entity_search_blob(ent: Dict[str, Any]) -> str:
     """Texte normalise (accents/casse) sur lequel la palette Ctrl+K cherche :
@@ -189,7 +193,7 @@ def _entity_search_blob(ent: Dict[str, Any]) -> str:
 
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
-    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index
+    global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index, watchlist_types
     
     # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
     snapshots = db.query(Snapshot).filter(
@@ -208,6 +212,7 @@ def load_watchlist_cache(db: Session):
         
     if not snapshots:
         logger.warning("No watchlist snapshots found in database to load cache.")
+        watchlist_types = set()
         return
         
     # Get active watchlist hash
@@ -251,6 +256,7 @@ def load_watchlist_cache(db: Session):
     watchlist_index = temp_index
     watchlist_index_layout = screening_layout
     watchlist_search_index = temp_search
+    watchlist_types = {e["_list_type"] for e in temp_store if e.get("_list_type")}
     # Frequence des mots de nom sur le corpus qui vient d'etre charge : c'est
     # la seule fois ou l'on tient l'univers crible en entier, et le compte doit
     # porter sur CE corpus, pas sur un autre. La table est posee dans le
@@ -424,6 +430,7 @@ def build_kpi_digest(db) -> Dict[str, Any]:
     """
     now = datetime.utcnow()
     day_ago = now - timedelta(hours=24)
+    from fiskr.fraicheur import a_homologuer
     open_q = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
     last_sync_by_source: Dict[str, str] = {}
     for row in db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(60).all():
@@ -440,8 +447,11 @@ def build_kpi_digest(db) -> Dict[str, Any]:
             Alert.due_at < now).count(),
         "Décisions en attente 4-yeux": db.query(Alert).filter(
             Alert.status == "PENDING_VALIDATION").count(),
-        "Snapshots à homologuer": db.query(Snapshot).filter(
-            Snapshot.status == "PENDING_REVIEW").count(),
+        "Listes à homologuer": a_homologuer(db),
+        # Le tour de table du matin disait combien de lots attendaient, jamais
+        # depuis quand la production est en retard — or c'est le retard qui
+        # engage : un gel s'applique des sa publication.
+        "Retard de la production": _ligne_de_retard(db),
         "Alertes créées (24 h)": db.query(Alert).filter(Alert.created_at >= day_ago).count(),
         "Alertes clôturées (24 h)": db.query(Alert).filter(
             Alert.decided_at.isnot(None), Alert.decided_at >= day_ago).count(),
@@ -451,6 +461,17 @@ def build_kpi_digest(db) -> Dict[str, Any]:
         # référentiel dans le planificateur
         "Qualité des données clients": _quality_digest_line(db),
     }
+
+
+def _ligne_de_retard(db) -> str:
+    """Ligne « retard » du digest, depuis la mesure unique de fiskr/fraicheur."""
+    from fiskr.fraicheur import mesurer, phrase_de_retard
+    etat = mesurer(db)
+    if not etat["listes_en_retard"]:
+        return "aucune — chaque liste en production est la dernière version"
+    return (f"{etat['listes_en_retard']} liste(s) sur {etat['listes_en_production']} "
+            f"criblent contre une version dépassée, la plus ancienne depuis "
+            f"{phrase_de_retard(etat['retard_max_heures'])}")
 
 
 def _quality_digest_line(db) -> str:
@@ -2840,6 +2861,11 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
             detail={"errors": report["errors"]}
         )
         
+    # Univers reel du criblage. Pose APRES le quality gate (un profil
+    # inexploitable se refuse pour ce qu'il est, pas au nom de l'installation)
+    # et AVANT tout calcul : ce qui suit n'aurait aucun sens sans liste.
+    exiger_un_univers(requested_lists)
+
     cleansed_client = client_dict.copy()
     
     # Override client fields with cleansed variables
@@ -3068,6 +3094,51 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "country_risk": country_risk.assess_client(client_dict),
     }
 
+def exiger_un_univers(requested_lists: Optional[List[str]] = None) -> List[str]:
+    """
+    Les listes contre lesquelles ce criblage va REELLEMENT porter — et un
+    refus quand il n'y en a aucune.
+
+    POURQUOI CE REFUS EXISTE
+    ------------------------
+    Sans univers, le moteur ne trouve aucun candidat et rend « aucune
+    correspondance ». Rien ne casse, rien n'alerte : le client repart avec un
+    quitus, et le journal de criblage — la piece produite en inspection —
+    ecrit que ce client a bien ete crible. C'est le meme defaut que le cache
+    vide qui rendait NO_MATCH sous Passenger, a ceci pres qu'il ne demande
+    aucune panne pour se produire : une installation neuve, une liste retiree
+    de la production, ou une restriction de perimetre visant une liste absente
+    suffisent.
+
+    `_validate_screening_lists` verifie qu'un NOM de liste est connu ; il ne
+    dit rien de sa presence en production. Les deux questions sont
+    differentes, et c'est la seconde qui decide de ce qui est crible.
+
+    Le refus est FRANC : rendre une decision serait ecrire une fausse piece,
+    et une fausse piece de conformite est pire que pas de piece du tout.
+    """
+    disponibles = set(watchlist_types)
+    if not disponibles:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Aucune liste n'est en production : rien à cribler. "
+                   "Un criblage rendu maintenant dirait « aucune correspondance » "
+                   "sans avoir comparé à quoi que ce soit. Importez ou "
+                   "synchronisez au moins une liste, puis recommencez.")
+    if not requested_lists:
+        return sorted(disponibles)
+    retenues = sorted(set(requested_lists) & disponibles)
+    if not retenues:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Aucune des listes demandées n'est en production : "
+                   f"{', '.join(sorted(requested_lists))}. "
+                   f"En production : {', '.join(sorted(disponibles))}. "
+                   f"Restreindre le périmètre à une liste absente rendrait "
+                   f"« aucune correspondance » sans rien avoir comparé.")
+    return retenues
+
+
 def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
     """Valide et normalise une restriction de perimetre (None = toutes listes)."""
     if not raw_lists:
@@ -3134,6 +3205,11 @@ async def screen_preview(
     countries = [c.strip().upper() for c in (country or "").split(",") if c.strip()]
     requested_lists = _validate_screening_lists(
         [v for v in (lists or "").split(",") if v.strip()])
+    # Meme refus que le criblage reglementaire : un criblage a blanc ne
+    # journalise rien, mais il repond a un humain qui en tirera une
+    # conclusion. « Aucune correspondance » sur un univers vide en est une
+    # fausse, journalisee ou non.
+    exiger_un_univers(requested_lists)
     return _screen_preview(db, name, type, dob, countries, requested_lists, limit)
 
 @app.post("/api/transactions/screen")
@@ -3173,6 +3249,10 @@ async def screen_transaction_message(
     # « N/A » comme hash de liste. Place apres le parsing : un message invalide
     # est rejete sans payer le chargement.
     _ensure_watchlist_cache(db)
+    # Et un cache CHARGE n'est pas un univers : sans liste en production, le
+    # filtrage rendrait PASS sur toutes les parties du paiement — un virement
+    # libere au nom d'une comparaison qui n'a pas eu lieu.
+    exiger_un_univers(requested_lists)
     try:
         result = screen_payment_message(
             db, parsed, watchlist_index, watchlist_version, watchlist_hash,
@@ -5482,6 +5562,12 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         # Execute desormais dans le demon travailleur : son cache de listes
         # demarre vide et n'est pas rafraichi par le veilleur du processus API
         _ensure_watchlist_cache(db)
+        # L'univers se verifie UNE fois, ici. `screen_client_profile` refuserait
+        # de toute facon, mais ligne par ligne : dix mille refus identiques
+        # noieraient la cause dans le detail de chaque client, alors que le
+        # defaut ne concerne aucun d'eux. La campagne echoue une seule fois,
+        # en disant pourquoi.
+        exiger_un_univers(requested_lists)
         for profile in profiles:
             try:
                 result = screen_client_profile(db, profile, username, requested_lists)
@@ -6778,10 +6864,12 @@ def build_activity_report(db, start: datetime, end: datetime) -> Dict[str, Any]:
         Alert.decided_at.isnot(None), Alert.decided_at >= start, Alert.decided_at < end)
 
     decided = alerts_decided_q.all()
-    delays = [
-        (a.decided_at - a.created_at).total_seconds() / 3600.0
-        for a in decided if a.created_at and a.decided_at and a.decided_at >= a.created_at
-    ]
+    # Le delai se mesure sur les DECISIONS (cf. fiskr/kpi.py), pas sur toute
+    # alerte portant une date de decision : une alerte rouverte en garde une,
+    # et la compter ici faisait diverger ce rapport du tableau de bord.
+    from fiskr.kpi import STATUTS_DECIDES, delai_moyen_secondes, en_heures
+    delai = delai_moyen_secondes(
+        (a.created_at, a.decided_at) for a in decided if a.status in STATUTS_DECIDES)
 
     return {
         "period": {"from": start.strftime("%Y-%m-%d"),
@@ -6807,7 +6895,8 @@ def build_activity_report(db, start: datetime, end: datetime) -> Dict[str, Any]:
             "decided_by_status": _count_by(
                 alerts_decided_q.with_entities(Alert.status, func.count(Alert.id))
                                 .group_by(Alert.status).all()),
-            "avg_decision_hours": round(sum(delays) / len(delays), 1) if delays else None,
+            "avg_decision_hours": en_heures(delai),
+            "avg_decision_seconds": delai,
             "escalations": db.query(AlertEvent).filter(
                 AlertEvent.action == "ESCALATED",
                 AlertEvent.timestamp >= start, AlertEvent.timestamp < end).count(),
@@ -6954,6 +7043,7 @@ async def get_sidebar_counters(
     portee est exactement celle du filtre, sur PostgreSQL comme sur SQLite.
     """
     from sqlalchemy import func, case, and_, or_
+    from fiskr.fraicheur import a_homologuer
     ouverte = Alert.status.in_(ALERT_OPEN_STATUSES)
 
     def _compte(condition):
@@ -6972,7 +7062,11 @@ async def get_sidebar_counters(
         "open_alerts_filtering": int(filtering),
         "pending_validation": int(pending_validation),
         "overdue_alerts": int(overdue),
-        "pending_reviews": db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count(),
+        # Ce que le relecteur a a faire (une unite par liste en retard), et non
+        # le nombre de lots empiles : cf. fiskr/fraicheur.a_homologuer.
+        "pending_reviews": a_homologuer(db),
+        "pending_snapshots": db.query(Snapshot).filter(
+            Snapshot.status == "PENDING_REVIEW").count(),
     }
 
 @app.get("/api/config")
@@ -7996,6 +8090,13 @@ async def download_sync_evidence(
 
 # Pieces justificatives des exclusions d'entites (valeur probante en audit)
 EXCLUSION_EVIDENCE_DIR = PROJECT_ROOT / "exclusion_evidence"
+
+# Une piece justificative vit en deux endroits : une ligne en base qui porte
+# son nom, et un fichier sur le disque. Les ecrans lisaient la ligne seule et
+# promettaient donc un telechargement sans jamais verifier qu'il aboutirait —
+# la promesse se rompait au clic, c'est-a-dire le jour du controle. Chaque
+# liste dit maintenant ce qu'elle a verifie (cf. fiskr/preuves.py).
+from fiskr.preuves import piece_presente
 
 class IngestionSettingsUpdate(BaseModel):
     require_approval: Optional[bool] = None
@@ -9437,7 +9538,11 @@ async def validate_fp_rule(
         old = db.query(FpRule).filter(FpRule.id == rule.replaces_rule_id).first()
         if old and old.status == "ACTIVE":
             old.status = "SUPERSEDED"
-            _log_rule_change(db, old, "SUPERSEDED" if False else "DISABLED", param_user["username"],
+            # Le journal dit ce qui arrive a la regle. Il ecrivait « DISABLED »
+            # (sous un ternaire `"SUPERSEDED" if False else ...`, branche morte)
+            # pendant que son statut passait a SUPERSEDED : un controleur lisant
+            # le journal croyait une regle coupee a la main, et non remplacee.
+            _log_rule_change(db, old, "SUPERSEDED", param_user["username"],
                              comment=f"Remplacée par #{rule.id} v{rule.version}.")
     rule.status = "ACTIVE"
     rule.enabled = True
@@ -10255,6 +10360,7 @@ async def list_review_entities(
                 "excluded": bool(r.excluded),
                 "exclusion_justification": r.exclusion_justification,
                 "exclusion_file_name": r.exclusion_file_name,
+                "exclusion_file_present": piece_presente(r.exclusion_file_path),
                 "excluded_by": r.excluded_by,
             }
             for r in rows
@@ -10393,6 +10499,31 @@ def _settle_sync_reports(db: Session, snapshot_id: str, new_status: str) -> None
         SyncReport.status == "PENDING_REVIEW",
     ).update({"status": new_status}, synchronize_session=False)
 
+def _retirer_les_versions_depassees(db: Session, approuve: Snapshot) -> int:
+    """
+    Les lots en attente PLUS ANCIENS que celui qu'on vient d'approuver, pour la
+    meme liste, passent en SUPERSEDED.
+
+    Ils ne portent plus rien : le delta du lot approuve, calcule contre
+    l'ancienne production, contient deja tout ce qu'ils contenaient. Les
+    laisser en file avait deux effets, mesures en production : la file ne se
+    vidait jamais (639 lots apres des homologations bien faites — un compteur
+    qui ne redescend pas est un compteur qu'on cesse de lire), et chacun
+    restait approuvable, c'est-a-dire capable de faire regresser la liste.
+
+    Les lots PLUS RECENTS restent en file : ils portent une realite que la
+    production n'a pas encore, et c'est au relecteur d'en decider. Les fiches
+    restent en base, comme pour tout SUPERSEDED — rien n'est detruit, la trace
+    reste lisible.
+    """
+    return db.query(Snapshot).filter(
+        Snapshot.file_type == approuve.file_type,
+        Snapshot.status == "PENDING_REVIEW",
+        Snapshot.snapshot_id != approuve.snapshot_id,
+        Snapshot.uploaded_at < approuve.uploaded_at,
+    ).update({"status": "SUPERSEDED"}, synchronize_session=False)
+
+
 def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any],
                           comment: Optional[str]) -> Dict[str, Any]:
     """
@@ -10405,6 +10536,21 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
     controles qu'approuvee seule — sans quoi le lot serait une porte derobee.
     """
     snap = _get_pending_snapshot(db, snapshot_id)
+
+    # Une version PLUS ANCIENNE que la production ne se promeut pas : elle
+    # ferait sortir de production, sans un mot, toutes les designations parues
+    # depuis. Releve en production : jusqu'a 21 lots empiles pour une meme
+    # liste, et une homologation groupee qui en accepte cinquante — « tout
+    # selectionner, approuver » suffisait a faire regresser une liste d'un mois.
+    from fiskr.fraicheur import est_une_regression
+    if est_une_regression(db, snap):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ce lot ({snap.file_type}, déposé le "
+                   f"{snap.uploaded_at:%d/%m/%Y %H:%M}) est plus ancien que la "
+                   f"version en production : l'approuver retirerait de la "
+                   f"production tout ce qui a paru depuis. Il est périmé — "
+                   f"rejetez-le, ou approuvez la version la plus récente.")
 
     # Filet de securite : si les exigences de justification ont durci depuis la
     # pose des exclusions, on refuse la promotion tant qu'elles ne sont pas conformes.
@@ -10450,6 +10596,7 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
     snap.review_comment = (comment or "").strip() or None
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     _settle_sync_reports(db, snap.snapshot_id, "SUCCESS")
+    perimes = _retirer_les_versions_depassees(db, snap)
     db.commit()
 
     job_token = f"approve:{snap.snapshot_id}"
@@ -10461,12 +10608,17 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                         "username": reviewer["username"]},
                 started_by=reviewer["username"],
                 dedupe_key=job_token, snapshot_id=snap.snapshot_id)
+    message = "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours."
+    if perimes:
+        message += (f" {perimes} version(s) plus ancienne(s) de cette liste, "
+                    f"devenue(s) sans objet, ont quitté la file d'homologation.")
     return {
-        "message": "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours.",
+        "message": message,
         "snapshot_id": snapshot_id,
         "file_type": snap.file_type,
         "status": snap.status,
         "excluded_count": len(excluded_rows),
+        "superseded_pending": perimes,
         "job_token": job_token,
     }
 
@@ -10851,6 +11003,7 @@ async def get_alert_casefile(
         ],
         "attachments": [
             {"id": att.id, "file_name": att.file_name, "comment": att.comment,
+             "file_present": piece_presente(att.file_path),
              "uploaded_by": att.uploaded_by,
              "uploaded_at": att.uploaded_at.isoformat() if att.uploaded_at else None}
             for att in attachments
@@ -12296,6 +12449,7 @@ async def get_alert_detail(
         "attachments": [
             {
                 "id": att.id, "file_name": att.file_name, "comment": att.comment,
+                "file_present": piece_presente(att.file_path),
                 "uploaded_by": att.uploaded_by,
                 "uploaded_at": att.uploaded_at.isoformat() if att.uploaded_at else None,
             }
@@ -13113,6 +13267,7 @@ def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
         "list_type": pair.list_type,
         "justification": pair.justification,
         "evidence_file_name": pair.evidence_file_name,
+        "evidence_file_present": piece_presente(pair.evidence_file_path),
         "created_by": pair.created_by,
         "created_at": pair.created_at.isoformat() if pair.created_at else None,
         "expires_at": pair.expires_at.isoformat() if pair.expires_at else None,
@@ -13412,195 +13567,11 @@ async def get_compliance_kpis(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Indicateurs de pilotage du dispositif : volumes et statuts d'alertes,
-    taux de faux positifs, delai moyen de decision, liste blanche, etat des
-    listes en production et historique des synchronisations.
+    Indicateurs de pilotage du dispositif. Le calcul vit dans fiskr/kpi.py :
+    une seule definition par indicateur, partagee avec le rapport d'activite.
     """
-    from sqlalchemy import func
-
-    # Alertes par statut
-    alert_counts = dict(
-        db.query(Alert.status, func.count(Alert.id)).group_by(Alert.status).all()
-    )
-    open_alerts = sum(alert_counts.get(s, 0) for s in ALERT_OPEN_STATUSES)
-    closed_fp = alert_counts.get("CLOSED_FALSE_POSITIVE", 0)
-    closed_tp = alert_counts.get("CLOSED_CONFIRMED", 0)
-    # CLOSED_BY_RULE est un statut CLOS, mais volontairement hors de ce taux :
-    # une alerte close par regle n'a ete instruite par personne, elle ne dit
-    # rien de la qualite de ce qui arrive a l'analyste. Le taux mesure donc les
-    # alertes INSTRUITES — et c'est pour cela que le volume absorbe par les
-    # regles doit etre publie A COTE : sans lui, plus les regles travaillent,
-    # moins l'ecran montre le bruit reellement produit par le dispositif.
-    closed_by_rule = alert_counts.get("CLOSED_BY_RULE", 0)
-    closed_total = closed_fp + closed_tp
-    fp_rate = round(closed_fp / closed_total * 100.0, 1) if closed_total else None
-
-    # Delai moyen de decision (creation -> cloture) sur les 500 dernieres closes
-    closed_rows = db.query(Alert.created_at, Alert.decided_at).filter(
-        Alert.status.in_(ALERT_CLOSED_STATUSES),
-        Alert.decided_at.isnot(None)
-    ).order_by(Alert.decided_at.desc()).limit(500).all()
-    if closed_rows:
-        avg_hours = sum(
-            (decided - created).total_seconds() for created, decided in closed_rows
-        ) / len(closed_rows) / 3600.0
-        avg_decision_hours = round(avg_hours, 1)
-    else:
-        avg_decision_hours = None
-
-    # Liste blanche active
-    now = datetime.utcnow()
-    active_whitelist = db.query(WhitelistPair).filter(
-        WhitelistPair.revoked_at.is_(None),
-        (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
-    ).count()
-
-    # Listes en production (entites par type) et snapshots par statut
-    ready_by_type = dict(
-        db.query(Snapshot.file_type, func.sum(Snapshot.record_count))
-          .filter(Snapshot.status == "READY", Snapshot.file_type.in_(WATCHLIST_FILE_TYPES))
-          .group_by(Snapshot.file_type).all()
-    )
-    snapshot_counts = dict(
-        db.query(Snapshot.status, func.count(Snapshot.snapshot_id)).group_by(Snapshot.status).all()
-    )
-
-    # Decisions d'audit par statut (volumetrie de criblage)
-    audit_counts = dict(
-        db.query(AuditTrail.status, func.count(AuditTrail.id)).group_by(AuditTrail.status).all()
-    )
-
-    # Dernieres synchronisations
-    recent_syncs = db.query(SyncReport).order_by(SyncReport.executed_at.desc()).limit(15).all()
-
-    # ---- Series temporelles 30 jours (accueil / tendances) ----
-    # func.date() est valide sur SQLite ET PostgreSQL
-    since = now - timedelta(days=30)
-    created_rows = (
-        db.query(func.date(Alert.created_at), Alert.channel, func.count(Alert.id))
-          .filter(Alert.created_at >= since)
-          .group_by(func.date(Alert.created_at), Alert.channel).all()
-    )
-    closed_rows_series = (
-        db.query(func.date(Alert.decided_at), func.count(Alert.id))
-          .filter(Alert.decided_at.isnot(None), Alert.decided_at >= since)
-          .group_by(func.date(Alert.decided_at)).all()
-    )
-    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(29, -1, -1)]
-    created_map: Dict[str, Dict[str, int]] = {}
-    for day, channel, count in created_rows:
-        day_key = str(day)[:10]
-        created_map.setdefault(day_key, {})[channel or "SCREENING"] = int(count)
-    closed_map = {str(day)[:10]: int(count) for day, count in closed_rows_series}
-    timeseries = [
-        {
-            "date": d,
-            "created_screening": created_map.get(d, {}).get("SCREENING", 0),
-            "created_filtering": created_map.get(d, {}).get("FILTERING", 0),
-            "closed": closed_map.get(d, 0),
-        }
-        for d in days
-    ]
-
-    # ---- Ventilations : alertes ouvertes par liste, traitement par analyste ----
-    open_by_list = dict(
-        db.query(Alert.list_type, func.count(Alert.id))
-          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
-          .group_by(Alert.list_type).all()
-    )
-    analyst_rows = (
-        db.query(Alert.decided_by, func.count(Alert.id))
-          .filter(Alert.status.in_(["CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE"]),
-                  Alert.decided_by.isnot(None))
-          .group_by(Alert.decided_by).all()
-    )
-    # Delai moyen de decision, par analyste, sur ses 200 dernieres decisions.
-    # C'etait UNE requete PAR analyste : le seul N+1 restant de l'application,
-    # sur un tableau de bord. Une fonction de fenetrage numerote les decisions
-    # de chaque analyste de la plus recente a la plus ancienne, et une seule
-    # requete rend les 200 premieres de chacun. La soustraction de dates reste
-    # en Python — elle n'est pas portable en SQL (`interval` PostgreSQL contre
-    # dates texte SQLite) et le resultat doit rester au chiffre pres.
-    from sqlalchemy import func as _f
-    rang = _f.row_number().over(partition_by=Alert.decided_by,
-                                order_by=Alert.decided_at.desc()).label("rang")
-    numerotees = (db.query(Alert.decided_by.label("analyste"),
-                           Alert.created_at.label("cree"),
-                           Alert.decided_at.label("decide"), rang)
-                    .filter(Alert.decided_by.isnot(None),
-                            Alert.decided_at.isnot(None))
-                    .subquery())
-    delais: Dict[str, List[float]] = {}
-    for analyste, cree, decide, _rang in db.query(numerotees).filter(
-            numerotees.c.rang <= 200).all():
-        delais.setdefault(analyste, []).append((decide - cree).total_seconds())
-
-    by_analyst = []
-    for username, decided_count in sorted(analyst_rows, key=lambda r: -r[1]):
-        secondes = delais.get(username) or []
-        avg_h = round(sum(secondes) / len(secondes) / 3600.0, 1) if secondes else None
-        by_analyst.append({"analyst": username, "decided": int(decided_count), "avg_decision_hours": avg_h})
-
-    # ---- Efficacite des regles anti-faux positifs (hit_count en base) ----
-    fp_rules_stats = [
-        {
-            "id": r.id, "name": r.name, "channel": r.channel, "status": r.status,
-            "version": r.version, "enabled": bool(r.enabled), "hit_count": int(r.hit_count or 0),
-        }
-        for r in db.query(FpRule)
-                   .filter(FpRule.status == "ACTIVE")
-                   .order_by(FpRule.hit_count.desc()).limit(20).all()
-    ]
-
-    # Alertes ouvertes les plus anciennes (liste « à traiter » de l'accueil)
-    oldest_open = (
-        db.query(Alert)
-          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
-          .order_by(Alert.created_at.asc()).limit(5).all()
-    )
-
-    return {
-        "alerts": {
-            "by_status": alert_counts,
-            "open": open_alerts,
-            "open_by_list_type": {k or "UNKNOWN": int(v) for k, v in open_by_list.items()},
-            "closed_false_positive": closed_fp,
-            "closed_confirmed": closed_tp,
-            "closed_by_rule": closed_by_rule,
-            "false_positive_rate_pct": fp_rate,
-            # Denominateur explicite : un taux sans son assiette ne se relit pas
-            # en controle, des mois plus tard.
-            "false_positive_rate_basis": closed_total,
-            "avg_decision_hours": avg_decision_hours,
-            "timeseries_30d": timeseries,
-            "by_analyst": by_analyst,
-            "oldest_open": [
-                {
-                    "id": a.id, "client_name": a.client_name, "watchlist_name": a.watchlist_name,
-                    "channel": a.channel, "status": a.status, "final_score": float(a.final_score or 0.0),
-                    "created_at": a.created_at.isoformat() if a.created_at else None,
-                }
-                for a in oldest_open
-            ],
-        },
-        "fp_rules": fp_rules_stats,
-        "whitelist_active_pairs": active_whitelist,
-        "screening": {"decisions_by_status": audit_counts},
-        "lists": {
-            "production_entities_by_type": {k: int(v or 0) for k, v in ready_by_type.items()},
-            "snapshots_by_status": snapshot_counts,
-        },
-        "recent_syncs": [
-            {
-                "source": r.source,
-                "executed_at": r.executed_at.isoformat() if r.executed_at else None,
-                "trigger": r.trigger,
-                "status": r.status,
-                "added": r.added_count, "modified": r.modified_count, "removed": r.removed_count,
-            }
-            for r in recent_syncs
-        ],
-    }
+    from fiskr.kpi import indicateurs
+    return indicateurs(db)
 
 # Serve static dashboard
 static_dir = PROJECT_ROOT / "fiskr" / "static"

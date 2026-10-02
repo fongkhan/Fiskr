@@ -187,15 +187,9 @@ def test_sans_referentiel_le_controle_des_seuils_dit_par_quoi_commencer(db, monk
     """
     monkeypatch.setattr("fiskr.settings.score_thresholds",
                         lambda db_: {"source": "config", "cut_off_threshold": 75.0})
+    monkeypatch.setattr("fiskr.couverture.clients_en_production", lambda db_: 0)
 
-    class _Vide:
-        def query(self, model):
-            return self
-
-        def count(self):
-            return 0
-
-    controle = _seuils(_Vide())
+    controle = _seuils(None)
     assert controle["etat"] == "A_FAIRE"
     assert "référentiel clients" in controle["constat"]
     assert "importez d'abord" in controle["remede"].lower()
@@ -207,15 +201,9 @@ def test_avec_un_referentiel_le_controle_renvoie_a_l_ecran_des_seuils(monkeypatc
     """Le portefeuille est là : la calibration devient possible, et le lien change."""
     monkeypatch.setattr("fiskr.settings.score_thresholds",
                         lambda db_: {"source": "config", "cut_off_threshold": 75.0})
+    monkeypatch.setattr("fiskr.couverture.clients_en_production", lambda db_: 4_000)
 
-    class _Peuple:
-        def query(self, model):
-            return self
-
-        def count(self):
-            return 4_000
-
-    controle = _seuils(_Peuple())
+    controle = _seuils(None)
     assert controle["etat"] == "A_FAIRE"
     assert "alerts-blocking" in controle["lien"]
     assert "importez d'abord" not in controle["remede"].lower()

@@ -15,9 +15,12 @@ rester au chiffre près.
 Deux choses que le regroupement ne doit pas avoir changées, et qui sont faciles
 à casser :
 
-* le **compte** de décisions filtre sur les statuts clos, le **délai** non — il
-  prend toute alerte portant une date de décision. Une alerte décidée puis
-  rouverte compte dans le délai et pas dans le compte ;
+* le **compte** et le **délai** portent sur la même population : les décisions
+  closes. Ce n'était pas le cas — le délai prenait toute alerte portant une date
+  de décision, si bien qu'une alerte décidée puis rouverte pesait dans la
+  moyenne d'un analyste sans figurer dans son compte. Une ligne qui annonçait
+  « 1 décision » affichait un délai qui n'était celui d'aucune décision. Le
+  calcul est désormais unique, dans fiskr/kpi.py ;
 * la borne des 200 est **par analyste**, pas globale.
 """
 import uuid
@@ -97,17 +100,24 @@ def test_le_delai_moyen_vaut_le_calcul_par_analyste(contexte):
     _, client = contexte
     servi = _par_analyste(client)
     for analyste, decisions in EQUIPE.items():
-        attendu = round(sum(h for h, _ in decisions) / len(decisions), 1)
+        closes = [h for h, statut in decisions if statut.startswith("CLOSED_")]
+        attendu = round(sum(closes) / len(closes), 1)
         assert servi[analyste]["avg_decision_hours"] == attendu, analyste
 
 
-def test_le_compte_et_le_delai_ne_lisent_pas_le_meme_perimetre(contexte):
-    """Bob a deux décisions datées mais une seule est close : son délai porte
-    sur les deux (1,5 h et 10 h → 5,75 → 5,8 h) et son compte sur une."""
+def test_le_compte_et_le_delai_lisent_le_meme_perimetre(contexte):
+    """
+    Ce test affirmait autrefois le contraire, sous le nom
+    `..._ne_lisent_pas_le_meme_perimetre` : Bob a deux alertes datées mais une
+    seule est une décision close, et son délai portait sur les deux (1,5 h et
+    10 h → 5,8 h) pendant que son compte n'en voyait qu'une. La ligne disait
+    « 1 décision, 5,8 h » pour une décision prise en 1,5 h.
+    """
     _, client = contexte
     bob = _par_analyste(client)[f"bob-{TAG}"]
     assert bob["decided"] == 1
-    assert bob["avg_decision_hours"] == 5.8
+    assert bob["avg_decision_hours"] == 1.5
+    assert bob["avg_decision_seconds"] == 5400
 
 
 def test_chaque_analyste_a_son_propre_delai(contexte):

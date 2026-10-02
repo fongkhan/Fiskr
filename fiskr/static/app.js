@@ -580,6 +580,30 @@ function formatDate(value) {
  return isNaN(d.getTime()) ? String(value) : d.toLocaleDateString(uiLocale());
 }
 
+// Une durée dans l'unité qu'un humain lirait. Le délai de décision s'affichait
+// « 0,0 h » pour deux décisions prises en deux minutes : arrondi au dixième
+// d'heure, ce chiffre se lisait « instantané » ou « pas de donnée ». Seule la
+// mesure exacte (en secondes) permet de choisir l'unité.
+function formatDuree(secondes) {
+ if (secondes === null || secondes === undefined || isNaN(secondes)) return "—";
+ const s = Math.max(0, Number(secondes));
+ if (s < 60) return "< 1 min";
+ if (s < 3600) return `${Math.round(s / 60)} min`;
+ if (s < 48 * 3600) return `${(s / 3600).toLocaleString(uiLocale(), { maximumFractionDigits: 1 })} h`;
+ return `${Math.round(s / 86400)} j`;
+}
+
+// Délai de décision d'un indicateur : la mesure exacte quand le serveur la
+// donne, l'arrondi historique (en heures) sinon.
+function formatDelaiDecision(source) {
+ if (!source) return "—";
+ if (source.avg_decision_seconds !== null && source.avg_decision_seconds !== undefined) {
+  return formatDuree(source.avg_decision_seconds);
+ }
+ if (source.avg_decision_hours === null || source.avg_decision_hours === undefined) return "—";
+ return formatDuree(source.avg_decision_hours * 3600);
+}
+
 // Temps relatif compact (« il y a 4 min ») pour les listes denses ; l'heure
 // exacte reste accessible en infobulle. `value` est un horodatage UTC naïf
 // du serveur (sans suffixe Z) ou déjà zoné.
@@ -7721,9 +7745,15 @@ async function openAlertModal(alertId) {
  }
 
  // Pieces jointes + selection de priorite (case management)
+ // Une piece dont le fichier a disparu ne se propose PAS au telechargement :
+ // le lien tiendrait une promesse que le clic romprait, et il la romprait le
+ // jour du controle. La reference reste affichee — elle est la trace que la
+ // piece a existe.
  const attachmentsHtml = (a.attachments || []).map(att => `
  <li style="font-size: 0.82rem; margin-bottom: 0.25rem;">
- <a href="/api/alerts/attachments/${att.id}" target="_blank" style="color: var(--color-accent);"> ${escapeHtml(att.file_name)}</a>
+ ${att.file_present === false
+   ? `<span title="Fichier introuvable sur le serveur" style="color: var(--text-muted); text-decoration: line-through;"> ${escapeHtml(att.file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : `<a href="/api/alerts/attachments/${att.id}" target="_blank" style="color: var(--color-accent);"> ${escapeHtml(att.file_name)}</a>`}
  <small style="color: var(--text-muted);"> — @${escapeHtml(att.uploaded_by)}, ${formatDateTime(att.uploaded_at)}${att.comment ? " · " + escapeHtml(att.comment) : ""}</small>
  </li>`).join("");
  const prioritySelector = !isClosed ? `
@@ -8089,7 +8119,9 @@ function renderWhitelistTable(items) {
  <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
  <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(p.list_type)}</td>
- <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;"> ${escapeHtml(p.evidence_file_name)}</a>` : ""}</td>
+ <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? (p.evidence_file_present === false
+   ? `<br><span title="Fichier introuvable sur le serveur" style="color: var(--text-muted); font-size: 0.75rem; text-decoration: line-through;"> ${escapeHtml(p.evidence_file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;"> ${escapeHtml(p.evidence_file_name)}</a>`) : ""}</td>
  <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString(uiLocale()) : ""}</small></td>
  <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString(uiLocale()) : "—"}</td>
  <td>${stateBadge(p.state)}</td>
@@ -8197,14 +8229,28 @@ async function fetchKpis() {
  // le dispositif produit réellement.
  tile("Clôturées par règle", a.closed_by_rule ?? 0, "var(--text-secondary)") +
  tile("Taux de faux positifs instruits", a.false_positive_rate_pct !== null && a.false_positive_rate_pct !== undefined ? a.false_positive_rate_pct + " %" : "—") +
- tile("Délai moyen de décision", a.avg_decision_hours !== null && a.avg_decision_hours !== undefined ? a.avg_decision_hours + " h" : "—") +
+ tile("Délai moyen de décision", formatDelaiDecision(a)) +
  tile("Paires en liste blanche", k.whitelist_active_pairs ?? 0);
 
  const listsBody = document.querySelector("#kpi-lists-table tbody");
  const byType = (k.lists || {}).production_entities_by_type || {};
- listsBody.innerHTML = Object.keys(byType).length
- ? Object.entries(byType).map(([t, n]) => `<tr><td>${listTypeBadge(t)}</td><td><strong>${n}</strong></td></tr>`).join("")
- : '<tr><td colspan="2" style="color: var(--text-muted); text-align: center;">Aucune liste en production.</td></tr>';
+ // La fraîcheur à côté du volume : une liste se juge sur les deux. Une liste
+ // vide se signale, une version plus récente en attente aussi — les deux
+ // passaient inaperçues tant que l'écran ne montrait que des nombres de fiches.
+ const fraicheur = {};
+ (((k.lists || {}).freshness || {}).by_list || []).forEach(l => { fraicheur[l.list_type] = l; });
+ const lignesListes = Object.entries(byType).sort((x, y) =>
+  ((fraicheur[y[0]] || {}).delay_hours || 0) - ((fraicheur[x[0]] || {}).delay_hours || 0));
+ listsBody.innerHTML = lignesListes.length
+ ? lignesListes.map(([t, n]) => {
+  const f = fraicheur[t] || {};
+  const retard = f.newer_versions_waiting
+   ? `<span class="badge ${f.delay_hours >= 168 ? "badge-danger" : "badge-warning"}" title="Une version plus récente attend l'homologation">${formatDuree(f.delay_hours * 3600)}</span>`
+   : `<span style="color: var(--text-muted);">À jour</span>`;
+  const fiches = n ? `<strong>${n}</strong>` : `<strong style="color: var(--color-alert);">0</strong> <span class="badge badge-danger">Liste vide</span>`;
+  return `<tr><td>${listTypeBadge(t)}</td><td>${fiches}</td><td>${f.production_since ? formatDate(f.production_since) : "—"}</td><td>${retard}</td></tr>`;
+ }).join("")
+ : '<tr><td colspan="4" style="color: var(--text-muted); text-align: center;">Aucune liste en production.</td></tr>';
 
  const syncsBody = document.querySelector("#kpi-syncs-table tbody");
  const syncs = k.recent_syncs || [];
@@ -8225,7 +8271,7 @@ async function fetchKpis() {
  ? analysts.map(r => `<tr>
  <td>@${escapeHtml(r.analyst)}</td>
  <td><strong>${r.decided}</strong></td>
- <td>${r.avg_decision_hours !== null && r.avg_decision_hours !== undefined ? r.avg_decision_hours + " h" : "—"}</td>
+ <td>${formatDelaiDecision(r)}</td>
  </tr>`).join("")
  : '<tr><td colspan="3" style="color: var(--text-muted); text-align: center;">Aucune alerte décidée.</td></tr>';
  }
@@ -8244,7 +8290,7 @@ async function fetchKpis() {
  }
  } catch (e) {
  console.error("Error fetching KPIs:", e);
- tableError("#kpi-lists-table", 2, "Indicateurs indisponibles.");
+ tableError("#kpi-lists-table", 4, "Indicateurs indisponibles.");
  tableError("#kpi-syncs-table", 4, "Indicateurs indisponibles.");
  tableError("#kpi-analysts-table", 3, "Indicateurs indisponibles.");
  tableError("#kpi-fprules-table", 3, "Indicateurs indisponibles.");
@@ -8376,8 +8422,19 @@ const DASHBOARD_WIDGETS = {
  "tile-4eyes": { cat: "kpi", icon: uiIcon("eye"), title: "4 yeux", sub: "décisions à valider",
  value: d => (d.alerts.by_status || {}).PENDING_VALIDATION || 0,
  go: "switchTab('screening'); switchSubTab('screening', 'alerts-screening')" },
- "tile-review": { cat: "kpi", icon: uiIcon("inbox"), title: "Homologation", sub: "snapshots en attente",
+ "tile-review": { cat: "kpi", icon: uiIcon("inbox"), title: "Homologation", sub: "listes à homologuer",
  value: d => d.counters.pending_reviews ?? 0,
+ go: "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')" },
+ // Depuis quand ce contre quoi on crible n'est plus la dernière version. Le
+ // volume des listes disait « combien », jamais « depuis quand » : relevé en
+ // production, toutes les listes avaient un mois de retard et aucun panneau
+ // ne le montrait.
+ "tile-freshness": { cat: "kpi", icon: uiIcon("clock"), title: "Fraîcheur", sub: "retard de la production",
+ value: d => {
+  const f = ((d.kpi || {}).lists || {}).freshness;
+  if (!f) return "—";
+  return f.lists_behind ? formatDuree(f.max_delay_hours * 3600) : "À jour";
+ },
  go: "switchTab('watchlist-mgmt'); switchSubTab('watchlist-mgmt', 'watchlist-review')" },
  "tile-overdue": { cat: "kpi", icon: uiIcon("clock"), title: "Retards SLA", sub: "alertes en dépassement",
  value: d => d.counters.overdue_alerts ?? 0,
@@ -8386,7 +8443,7 @@ const DASHBOARD_WIDGETS = {
  value: d => (d.alerts.false_positive_rate_pct ?? null) === null ? "—" : d.alerts.false_positive_rate_pct + " %",
  go: "switchTab('kpi')" },
  "tile-avg-delay": { cat: "kpi", icon: uiIcon("clock"), title: "Délai moyen", sub: "création → décision",
- value: d => (d.alerts.avg_decision_hours ?? null) === null ? "—" : d.alerts.avg_decision_hours + " h",
+ value: d => formatDelaiDecision(d.alerts),
  go: "switchTab('kpi')" },
 
  "chart-alerts-30d": { cat: "charts", icon: uiIcon("trend"), title: "Alertes sur 30 jours",
@@ -8452,6 +8509,7 @@ const DASHBOARD_DEFAULT_LAYOUT = [
  { id: "table-ma-journee", size: "md" },
  { id: "tile-screening", size: "sm" }, { id: "tile-filtering", size: "sm" },
  { id: "tile-4eyes", size: "sm" }, { id: "tile-review", size: "sm" },
+ { id: "tile-freshness", size: "sm" },
  { id: "tile-fp-rate", size: "sm" }, { id: "tile-avg-delay", size: "sm" },
  { id: "chart-alerts-30d", size: "md" }, { id: "chart-status", size: "md" },
  { id: "chart-lists", size: "md" }, { id: "table-todo", size: "md" },
@@ -9801,6 +9859,40 @@ async function openFpRule(ruleId) {
  document.getElementById("fprule-editor").innerHTML = fpRuleEditorHtml(rule);
  card.scrollIntoView({ behavior: "smooth" });
  if (rule.status === "DRAFT") loadFpRuleTests(ruleId);
+ loadFpRuleChanges(ruleId);
+}
+
+// Libellés du journal d'une règle. Une règle anti-faux positifs CLÔT des
+// alertes sans qu'aucun analyste ne les voie : qui l'a écrite, qui l'a
+// validée, qui l'a coupée sont les premières questions d'un contrôle. Le
+// journal existait côté serveur, l'éditeur lui réservait une place — et rien
+// ne venait jamais la remplir.
+const FP_RULE_CHANGE_LABELS = {
+ CREATED: "Création", UPDATED: "Modification", SUBMITTED: "Soumission en validation",
+ VALIDATED: "Validation (4-yeux)", REJECTED: "Renvoi en brouillon",
+ ENABLED: "Activation", DISABLED: "Désactivation", SUPERSEDED: "Remplacée par une nouvelle version",
+ DELETED: "Suppression",
+};
+
+async function loadFpRuleChanges(ruleId) {
+ const zone = document.getElementById("fprule-changes");
+ if (!zone) return;
+ try {
+  const resp = await apiFetch(`/api/fprules/${encodeURIComponent(ruleId)}/changes`);
+  if (!resp.ok) throw new Error(String(resp.status));
+  const items = (await resp.json()).items || [];
+  // La règle a pu être refermée ou une autre ouverte pendant l'attente.
+  if (currentFpRuleId !== ruleId || !document.getElementById("fprule-changes")) return;
+  zone.innerHTML = `<h4 style="font-size: 0.9rem; margin: 0 0 0.4rem;">Historique de la règle</h4>` + (items.length
+   ? `<ul style="list-style: none; margin: 0; padding: 0;">${items.map(c => `
+    <li style="font-size: 0.82rem; padding: 0.25rem 0; border-bottom: 1px solid var(--border-color);">
+     <strong>${escapeHtml(FP_RULE_CHANGE_LABELS[c.action] || c.action)}</strong>
+     <small style="color: var(--text-muted);"> — @${escapeHtml(c.changed_by || "?")}, ${formatDateTime(c.changed_at)}${c.comment ? " · " + escapeHtml(c.comment) : ""}</small>
+    </li>`).join("")}</ul>`
+   : `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0;">Aucune modification enregistrée.</p>`);
+ } catch (e) {
+  zone.innerHTML = `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0;">Historique indisponible.</p>`;
+ }
 }
 
 function fpRuleEditorHtml(rule) {
@@ -11741,7 +11833,7 @@ function renderNotifCenter() {
  if (c.open_alerts_filtering) all.push({ key: "filtering", count: c.open_alerts_filtering, icon: uiIcon("credit-card"), label: `${c.open_alerts_filtering} alerte(s) de filtrage ouverte(s)`, hash: "#filtering/alerts-filtering" });
  if (c.pending_validation) all.push({ key: "validation", count: c.pending_validation, icon: uiIcon("eye"), label: `${c.pending_validation} décision(s) en attente de validation 4-yeux`, hash: "#screening/alerts-screening" });
  if (c.overdue_alerts) all.push({ key: "overdue", count: c.overdue_alerts, icon: uiIcon("clock"), label: `${c.overdue_alerts} alerte(s) en retard SLA`, hash: "#screening/alerts-screening" });
- if (c.pending_reviews) all.push({ key: "reviews", count: c.pending_reviews, icon: uiIcon("inbox"), label: `${c.pending_reviews} snapshot(s) en attente d'homologation`, hash: "#watchlist-mgmt/watchlist-review" });
+ if (c.pending_reviews) all.push({ key: "reviews", count: c.pending_reviews, icon: uiIcon("inbox"), label: `${c.pending_reviews} liste(s) à homologuer`, hash: "#watchlist-mgmt/watchlist-review" });
  _lastTodoEntries = all;
  // Masqué tant que le compteur n'a pas DÉPASSÉ sa valeur au masquage
  const entries = all.filter(e => !(e.key in _notifDismissed.todo) || e.count > _notifDismissed.todo[e.key]);
@@ -12889,7 +12981,9 @@ function renderCasefile(cf) {
  </p>${inheritedHtml}`;
 
  const attachmentsHtml = (cf.attachments || []).map(att =>
- `<li>${escapeHtml(att.file_name)} <small style="color: var(--text-muted);">(@${escapeHtml(att.uploaded_by)})</small></li>`
+ `<li>${att.file_present === false
+   ? `<span style="color: var(--text-muted); text-decoration: line-through;">${escapeHtml(att.file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : escapeHtml(att.file_name)} <small style="color: var(--text-muted);">(@${escapeHtml(att.uploaded_by)})</small></li>`
  ).join("") || `<li style="color: var(--text-muted);">Aucune pièce jointe.</li>`;
 
  const eventsHtml = (cf.events || []).slice(-15).map(e => `
