@@ -220,16 +220,35 @@ def test_rescreen_targets_changed_entities_only(db):
 
 
 def test_rescreen_respects_whitelist(db):
+    """
+    Une paire dont RIEN n'a changé depuis sa décision absorbe toujours.
+
+    Réécrit (lot « liste blanche suivie ») : la paire était insérée sans rien
+    dire de ce qu'elle couvrait, et ce test figeait qu'elle absorbe quand même
+    — exactement ce qui laissait une fiche modifiée retomber en WHITELISTED
+    (DGT/ACPR, 18 mars 2026, §169). L'intention est gardée : la paire porte
+    désormais les empreintes de sa décision, posées par le code de la pose
+    (ici depuis les données en base, comme pour les Good Guys du cahier de
+    tests), et la fiche criblée est celle qu'elle couvre. Le cas inverse — la
+    fiche a changé — est dans tests/test_liste_blanche_suivie.py.
+    """
+    from fiskr.empreintes import empreintes_de_reference, poser_les_empreintes
+
     _seed_client_base(db)
-    db.add(WhitelistPair(client_id="CUST-777", watchlist_entity_id="DGT-2",
-                         justification="FP avéré", created_by="reviseur1"))
-    db.commit()
     _seed_watchlist_snapshot(db, "wl-only", [
         _watchlist_entity("wl-only", "DGT-2", "Igor PETROV", "Igor", "PETROV"),
     ])
+    paire = WhitelistPair(client_id="CUST-777", watchlist_entity_id="DGT-2",
+                          justification="FP avéré", created_by="reviseur1")
+    reference = empreintes_de_reference(db, "CUST-777", "DGT-2")
+    assert not reference["manque"], reference
+    poser_les_empreintes(paire, reference)
+    db.add(paire)
+    db.commit()
 
     result = rescreen_after_snapshot_change(db, "WATCHLIST_DGT", "wl-only", None)
     assert result["whitelisted_suppressed"] == 1
+    assert result["whitelist_stale"] == 0
     assert result["new_alerts"] == 0
     assert db.query(Alert).count() == 0
 

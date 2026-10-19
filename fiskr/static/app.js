@@ -8090,9 +8090,19 @@ async function fetchWhitelist(page = null) {
  const params = new URLSearchParams({ page: String(whitelistPage), page_size: "100" });
  const listFilterEl = document.getElementById("whitelist-list-filter");
  if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+ const stateFilterEl = document.getElementById("whitelist-state-filter");
+ if (stateFilterEl && stateFilterEl.value) params.set("state", stateFilterEl.value);
  const response = await apiFetch(`/api/whitelist?${params}`);
  if (!response.ok) return;
  const data = await response.json();
+ // Le compte des paires a réexaminer est rendu quel que soit le filtre :
+ // c'est lui qui demande une action. Rien n'est affiché quand il est nul.
+ const staleNotice = document.getElementById("whitelist-stale-notice");
+ if (staleNotice) {
+ staleNotice.classList.toggle("hidden", !data.stale_total);
+ const staleCount = document.getElementById("whitelist-stale-count");
+ if (staleCount) staleCount.textContent = String(data.stale_total || 0);
+ }
  renderWhitelistTable(data.items || []);
  renderQueuePagination("whitelist-pagination", data.page, data.total, data.page_size, "fetchWhitelist");
  } catch (e) {
@@ -8110,12 +8120,23 @@ function renderWhitelistTable(items) {
  return;
  }
  const stateBadge = (state) => {
- const map = { ACTIVE: ["var(--success-soft-text)", "ACTIVE"], EXPIRED: ["var(--color-warning)", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
+ const map = { ACTIVE: ["var(--success-soft-text)", "ACTIVE"], STALE: ["var(--color-alert)", "À RÉEXAMINER"], EXPIRED: ["var(--color-warning)", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
  const [color, label] = map[state] || ["#9ca3af", state];
  return `<span style="color: ${color}; font-weight: 600; font-size: 0.8rem;">${label}</span>`;
  };
+ // Ce qui a changé depuis la décision : libellé rendu par le serveur
+ // (fiskr/empreintes.py, MOTIFS_DE_REEXAMEN), jamais recopié ici.
+ const staleReason = (p) => p.state === "STALE" && p.stale_reason_label
+ ? `<br><small style="color: var(--text-muted);">${escapeHtml(p.stale_reason_label)}</small>` : "";
+ const actions = (p) => {
+ const revoke = `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>`;
+ if (p.state === "STALE") return `<button class="btn btn-sm btn-primary" onclick="reconductWhitelistPair(${p.id})">Reconduire</button> ${revoke}`;
+ return p.state === "ACTIVE" ? revoke : "";
+ };
+ // Une paire à réexaminer n'est pas estompée comme une paire close : elle
+ // attend une décision.
  tbody.innerHTML = items.map(p => `
- <tr ${p.state !== "ACTIVE" ? 'style="opacity: 0.55;"' : ""}>
+ <tr ${p.state !== "ACTIVE" && p.state !== "STALE" ? 'style="opacity: 0.55;"' : ""}>
  <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
  <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(p.list_type)}</td>
@@ -8124,10 +8145,34 @@ function renderWhitelistTable(items) {
    : `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;"> ${escapeHtml(p.evidence_file_name)}</a>`) : ""}</td>
  <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString(uiLocale()) : ""}</small></td>
  <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString(uiLocale()) : "—"}</td>
- <td>${stateBadge(p.state)}</td>
- <td>${p.state === "ACTIVE" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>` : ""}</td>
+ <td>${stateBadge(p.state)}${staleReason(p)}</td>
+ <td>${actions(p)}</td>
  </tr>
  `).join("");
+}
+
+async function reconductWhitelistPair(pairId) {
+ const comment = await promptDialog("Reconduire la paire de liste blanche", {
+ message: "Vous avez examiné ce qui a changé (événement WHITELIST_STALE de l'alerte) et le faux positif demeure. Motif obligatoire : la paire couvrira la fiche et le client tels qu'ils ont été criblés en dernier.",
+ textarea: true, placeholder: "Motif du maintien en liste blanche..."
+ });
+ if (comment === null) return;
+ try {
+ const response = await apiFetch(`/api/whitelist/${pairId}/reconduct`, {
+ method: "POST",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ comment })
+ });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "Reconduction refusée."), "error");
+ return;
+ }
+ showToast(data.message, "success");
+ fetchWhitelist();
+ } catch (e) {
+ console.error("Error reconducting whitelist pair:", e);
+ }
 }
 
 async function revokeWhitelistPair(pairId) {
@@ -10704,7 +10749,8 @@ const ADMIN_ACTION_LABELS = {
  SNAPSHOT_REPAIRED: "Snapshot réparé",
  RELATION_CREATED: "Relation créée", RELATION_DELETED: "Relation supprimée",
  // Alertes et rétention
- WHITELIST_REVOKED: "Liste blanche révoquée", RETENTION_PURGE: "Purge de rétention",
+ WHITELIST_REVOKED: "Liste blanche révoquée", WHITELIST_RECONDUCTED: "Liste blanche reconduite",
+ RETENTION_PURGE: "Purge de rétention",
  NOTIFICATION_RESENT: "Notification renvoyée", NOTIFICATION_DELETED: "Notification supprimée",
  NOTIFICATIONS_PURGED: "Notifications purgées",
  // Exploitation
@@ -11989,7 +12035,7 @@ async function openClient360(clientId) {
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `
- <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
+ <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.state === "STALE" && p.stale_reason_label ? " (" + escapeHtml(p.stale_reason_label) + ")" : ""}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
 
  body.innerHTML = `
  ${kycHtml}

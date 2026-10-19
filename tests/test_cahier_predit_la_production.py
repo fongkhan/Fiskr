@@ -125,10 +125,19 @@ def test_le_rang_de_la_meilleure_correspondance_vaut_un():
 
 def test_un_client_en_liste_blanche_compte_quand_meme_ses_correspondances():
     """Sinon le volume annoncé baisserait dès qu'une paire est blanchie, alors
-    que les autres correspondances du même client existent toujours."""
-    index = _IndexUnique([_fiche(i) for i in range(12)])
-    resultat = screenpool.screen_one(CLIENT, index, _cfg(),
-                                     {("C-1", "CP-0")}, [])
+    que les autres correspondances du même client existent toujours.
+
+    La liste blanche du cahier porte désormais les empreintes de chaque paire
+    (fiskr.empreintes) : comme en production, une paire n'absorbe que la fiche
+    et le client qu'elle couvre. Ce test passait un simple ensemble de couples
+    ; la paire est maintenant posée sur la fiche CP-0 et le client criblés —
+    l'intention est inchangée."""
+    from fiskr.empreintes import EmpreintesDePaire, empreinte_client
+    fiches = [{**_fiche(i), "entity_checksum": f"chk-CP-{i}"} for i in range(12)]
+    index = _IndexUnique(fiches)
+    liste_blanche = {("C-1", "CP-0"): EmpreintesDePaire(
+        1, "chk-CP-0", empreinte_client(CLIENT))}
+    resultat = screenpool.screen_one(CLIENT, index, _cfg(), liste_blanche, [])
     categorie, detail = resultat
     assert categorie == "whitelisted"
     agg = screenpool.new_partial()

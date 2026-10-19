@@ -83,6 +83,11 @@ def _whitelist(client, client_id, entity_id=PUTIN_ENTITY_ID, justification="Faux
 
 def test_whitelist_creation_governance(client):
     cid = _new_client_id()
+    # Le couple est crible AVANT d'etre blanchi : une paire porte desormais ce
+    # que sa decision couvre (fiskr.empreintes), et la pose sur un couple que
+    # rien ne decrit est refusee (tests/test_liste_blanche_suivie.py). Les
+    # etapes de gouvernance verifiees ici sont inchangees.
+    _screen_putin(client, cid)
 
     # 'user' simple -> 403
     _override_user("analyste1", "user")
@@ -107,6 +112,7 @@ def test_whitelist_file_requirement_and_evidence(client):
     _override_user("reviseur1", "reviewer")
 
     cid = _new_client_id()
+    _screen_putin(client, cid)   # couple crible avant d'etre blanchi (empreintes)
     # Piece exigee -> 400 sans fichier
     assert _whitelist(client, cid).status_code == 400
     # Avec fichier -> OK + retelechargeable
@@ -147,6 +153,10 @@ def test_whitelisted_pair_suppresses_alert_with_audit_trace(client):
 
 def test_revocation_and_expiry_restore_alerts(client):
     cid = _new_client_id()
+    # Le couple est crible avant d'etre blanchi : la paire couvre ce criblage
+    # (fiskr.empreintes). Sans lui, la pose est refusee — rien ne dirait
+    # quelle identite elle couvre.
+    _screen_putin(client, cid)
     pair_id = _whitelist(client, cid).json()["id"]
 
     # Paire active -> supprimee
@@ -163,6 +173,7 @@ def test_revocation_and_expiry_restore_alerts(client):
 
     # Paire expiree -> ne supprime pas non plus
     cid2 = _new_client_id()
+    _screen_putin(client, cid2)
     response = client.post("/api/whitelist", data={
         "client_id": cid2, "watchlist_entity_id": PUTIN_ENTITY_ID,
         "justification": "Test expiration", "expires_at": "2020-01-01"

@@ -219,7 +219,16 @@ EVENT_CATALOG: Dict[str, Event] = {
         urgency=DIGEST, link="#alerts/alerts-screening",
     ),
     "whitelist_changed": Event(
-        label="Liste blanche : paire créée ou révoquée",
+        label="Liste blanche : paire créée, reconduite ou révoquée",
+        category=CATEGORY_SCREENING, audience=("reviewer",),
+        urgency=DIGEST, link="#alerts/alerts-whitelist",
+    ),
+    "whitelist_stale": Event(
+        # La fiche listee ou le client a change depuis la decision d'une paire
+        # (DGT/ACPR, 18 mars 2026, §169) : elle n'absorbe plus, l'alerte est
+        # deja ouverte. Le reviseur doit la reconduire ou la retirer — une
+        # action, pas une urgence : rien n'est plus supprime en silence.
+        label="Liste blanche : paire à réexaminer (fiche ou client modifié)",
         category=CATEGORY_SCREENING, audience=("reviewer",),
         urgency=DIGEST, link="#alerts/alerts-whitelist",
     ),

@@ -1495,8 +1495,18 @@
  <div class="card result-card">
  <h2>Liste Blanche (paires client × listé)</h2>
  <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
+ <p class="section-desc">Une paire n'absorbe que tant que la fiche listée et l'identification du client sont celles de sa décision. Dès que l'une change, l'alerte s'ouvre et dit ce qui a changé, et la paire passe « À réexaminer » : reconduisez-la ou révoquez-la.</p>
+ <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
  <div class="form-group" style="max-width: 260px;">
  <select id="whitelist-list-filter" data-combobox onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
+ </div>
+ <div class="form-group" style="max-width: 220px;">
+ <select id="whitelist-state-filter" onchange="fetchWhitelist(1)" title="Filtrer par état">
+ <option value="">Tous les états</option>
+ <option value="STALE">À réexaminer</option>
+ </select>
+ </div>
+ <p id="whitelist-stale-notice" class="hidden" style="margin: 0;"><span id="whitelist-stale-count" class="status-badge warning">0</span> <span>paire(s) à réexaminer</span></p>
  </div>
  <div class="table-container max-height-table">
  <table id="whitelist-table">

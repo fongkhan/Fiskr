@@ -82,13 +82,18 @@ def projection_for(rule_snaps: Sequence[Any]) -> Tuple[str, ...]:
 # ------------------ CORPS DU CRIBLAGE (un client) ------------------
 
 def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
-               screening_cfg, whitelist_keys: Set[Tuple[str, str]],
+               screening_cfg, whitelist_keys: Dict[Tuple[str, str], Any],
                rules: Sequence[Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
     Crible UN client contre l'index. Retourne (categorie, detail) :
     ("alert", paire), ("whitelisted", None), ("rule", paire enrichie de la
     regle), ou None si aucun rapprochement. C'est LE code commun des chemins
     serie et parallele : ils ne peuvent pas diverger.
+
+    `whitelist_keys` : paires actives par couple (client, entite), avec les
+    empreintes de leur decision (backtest._active_whitelist_keys). Une paire
+    n'absorbe que si la fiche et le client sont ceux qu'elle couvre — la meme
+    regle qu'en production (fiskr.empreintes.motif_de_reexamen).
     """
     from fiskr.fprules import build_screening_ctx, run_rule
 
@@ -127,7 +132,13 @@ def screen_one(client: Dict[str, Any], index: Dict[str, List[Dict[str, Any]]],
         return None
 
     meilleur_score = round(float(best.get("final_score", 0)), 2)
-    if (client.get("client_id"), best_ent.get("entity_id")) in whitelist_keys:
+    paire_blanche = (whitelist_keys.get((client.get("client_id"), best_ent.get("entity_id")))
+                     if whitelist_keys else None)
+    if paire_blanche is not None:
+        from fiskr.empreintes import empreinte_client, motif_de_reexamen
+        if motif_de_reexamen(paire_blanche, best_ent, empreinte_client(client)) is not None:
+            paire_blanche = None   # fiche ou client change : la paire n'absorbe pas
+    if paire_blanche is not None:
         # `client_id` et `score` voyagent AUSSI sur ce sort-la : sans eux,
         # deux passes ne peuvent pas savoir qu'elles parlent du meme client, ni
         # laquelle a vu la meilleure correspondance.

@@ -4,7 +4,9 @@ production (sync, upload manuel ou approbation d'homologation), le referentiel
 clients est re-crible contre les SEULES entites nouvelles ou modifiees.
 Les nouveaux hits ouvrent des alertes de travail (dedupliquees) ; les paires
 en liste blanche sont supprimees de facon tracee (statut WHITELISTED dans le
-journal d'audit). Fournit aussi le lookback manuel (guidance Wolfsberg).
+journal d'audit) TANT QUE la fiche et le client sont ceux de leur decision —
+une fiche modifiee rouvre l'alerte (fiskr.empreintes). Fournit aussi le
+lookback manuel (guidance Wolfsberg).
 """
 import logging
 import time
@@ -120,6 +122,10 @@ def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
       - `new_alerts`        : alertes OUVERTES par ce passage ;
       - `redetected_alerts` : alertes deja existantes, re-confirmees ;
       - `closed_by_rule`    : ouvertes puis closes par une regle, en clair.
+
+    `whitelist_stale` : correspondances qu'une paire de liste blanche n'a PAS
+    absorbees parce que la fiche ou le client a change depuis sa decision
+    (fiskr.empreintes) — elles ont suivi le chemin des autres.
     """
     return {
         "changed_entities": int(changed_entities),
@@ -129,6 +135,7 @@ def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
         "closed_by_rule": 0,
         "rule_suppressed": 0,
         "whitelisted_suppressed": 0,
+        "whitelist_stale": 0,
     }
 
 
@@ -188,12 +195,17 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         from fiskr.fprules import evaluate_fp_rules, build_screening_ctx, annotate_suppression
         from fiskr.alerts import whitelisted_pairs, open_or_redetect_alerts
         from fiskr.database import log_compliance_decisions
+        from fiskr.empreintes import empreinte_client, examiner_la_paire, notifier_les_bascules
 
         client_ref = client.get("client_id")
         hits = sorted(hits, key=lambda h: -h["final_score"])
         paires = whitelisted_pairs(
             db, client_ref,
             [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits])
+        # Identification du client telle que CE criblage l'a vue : journalisee
+        # avec chaque decision, c'est ce qu'une paire posee depuis cette
+        # alerte couvrira (fiskr.empreintes).
+        empreinte = empreinte_client(client)
 
         from fiskr.fprules import active_rules
         from fiskr.settings import perimeter_overrides
@@ -201,15 +213,25 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         classement = perimeter_overrides(db)
 
         a_journaliser = []
+        reexamens: Dict[int, Dict[str, Any]] = {}
         for position, hit in enumerate(hits, start=1):
             fiche = hit.get("watchlist_entity") or {}
+            hit["client_fingerprint"] = empreinte
             paire = paires.get(fiche.get("entity_id"))
             if paire is not None:
-                hit["status"] = "WHITELISTED"
-                hit["whitelist_pair_id"] = paire.id
-                result["whitelisted_suppressed"] += 1
-                a_journaliser.append((hit, None))
-                continue
+                reexamen = examiner_la_paire(db, paire, fiche, empreinte)
+                if reexamen is None:
+                    hit["status"] = "WHITELISTED"
+                    hit["whitelist_pair_id"] = paire.id
+                    result["whitelisted_suppressed"] += 1
+                    a_journaliser.append((hit, None))
+                    continue
+                # La fiche ou le client a change depuis la decision : la paire
+                # ne couvre plus cette correspondance, qui suit le chemin de
+                # toutes les autres (regles comprises).
+                hit["whitelist_stale"] = {"pair_id": paire.id, "reason": reexamen["motif"]}
+                reexamens[id(hit)] = reexamen
+                result["whitelist_stale"] += 1
             ctx = build_screening_ctx(client, fiche, hit,
                                       hits_count=len(hits), hit_rank=position,
                                       perimeter_overrides=classement)
@@ -224,7 +246,8 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             db, client,
             [(h.get("watchlist_entity") or {}, h) for h, _r in a_journaliser],
             watchlist_version, watchlist_hash, commit=False)
-        a_alerter = [{"audit": ligne, "match": h, "rule": r}
+        a_alerter = [{"audit": ligne, "match": h, "rule": r,
+                      "whitelist_stale": reexamens.get(id(h))}
                      for (h, r), ligne in zip(a_journaliser, lignes)
                      if h.get("status") == "ALERT"]
         if not a_alerter:
@@ -243,6 +266,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             result["new_alerts"] += int(compte.get("opened", 0))
             result["redetected_alerts"] += int(compte.get("redetected", 0))
             result["closed_by_rule"] += int(compte.get("closed_by_rule", 0))
+        notifier_les_bascules(db, reexamens.values())
 
     # ---- Phase 1 : trouver les correspondances (calcul pur, parallelisable) ----
     # Le re-criblage repasse TOUTE la base clients apres chaque mise en
@@ -315,7 +339,8 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         f"{result['new_alerts']} alerte(s) ouverte(s), "
         f"{result['redetected_alerts']} re-détectée(s), "
         f"{result['closed_by_rule']} close(s) par règle, "
-        f"{result['whitelisted_suppressed']} supprimée(s) par liste blanche."
+        f"{result['whitelisted_suppressed']} supprimée(s) par liste blanche, "
+        f"{result['whitelist_stale']} non absorbée(s) (paire à réexaminer)."
     )
     return result
 

@@ -2665,11 +2665,17 @@ def _match_allege(resultat: Dict[str, Any]) -> Dict[str, Any]:
     Elle reste rendue EN ENTIER sur `best_match`, et ECRITE dans le journal
     d'audit immuable de CHAQUE correspondance : la base fait foi, la reponse
     n'a pas a la retransporter autant de fois qu'il y a de correspondances.
+
+    Meme traitement pour l'empreinte du client (fiskr.empreintes) : identique
+    sur chaque correspondance d'un meme criblage, journalisee avec chacune,
+    rendue une fois sur `best_match`. Repetee sur chaque ligne, elle rompait
+    le meme contrat (mesure : +10,6 % entre 60 et 200 candidats).
     """
-    if "name_rarity" not in resultat:
+    if "name_rarity" not in resultat and "client_fingerprint" not in resultat:
         return resultat
     allege = dict(resultat)
-    del allege["name_rarity"]
+    allege.pop("name_rarity", None)
+    allege.pop("client_fingerprint", None)
     return allege
 
 
@@ -2817,7 +2823,12 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         client_dict["client_type"] = "PP"
     else:
         client_dict["client_type"] = "PM"
-        
+    # Identification du client telle que CE criblage la recoit, avant tout
+    # nettoyage (le re-criblage, lui, ne nettoie pas) : journalisee avec chaque
+    # decision, comparee a celle des paires de liste blanche (fiskr.empreintes).
+    from fiskr.empreintes import empreinte_client, examiner_la_paire, notifier_les_bascules
+    empreinte = empreinte_client(client_dict)
+
     # Evaluate Data Quality. Canal CRIBLAGE : la normalisation de la sonde
     # client obeit aux capacites du moteur (translitteration par ecriture,
     # diacritiques, suffixes juridiques), contrairement a l'ingestion.
@@ -2901,9 +2912,13 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     # Audit trail persistence
     audit_id = None
     alert_id = None
+    best_alert = None
     whitelist_pair_id = None
     hits_summary = {"hits": 0, "opened": 0, "closed_by_rule": 0,
                     "redetected": 0, "whitelisted": 0,
+                    # Paires qui n'ont PAS absorbe : fiche ou client change
+                    # depuis leur decision (l'alerte s'ouvre et le dit)
+                    "whitelist_stale": 0,
                     # Ventilation par perimetre : sur SANCTION, un ecart entre
                     # ce qui est trouve et ce qui reste ouvert doit sauter aux
                     # yeux — c'est le perimetre ou un manquement est
@@ -2930,17 +2945,27 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         classement = perimeter_overrides(db) if hits else {}
 
         a_journaliser: List[Any] = []
+        reexamens: Dict[int, Dict[str, Any]] = {}
         for position, hit in enumerate(hits, start=1):
             fiche = hit.get("watchlist_entity") or {}
+            hit["client_fingerprint"] = empreinte
             paire = paires.get(fiche.get("entity_id"))
             if paire is not None:
-                hit["status"] = "WHITELISTED"
-                hit["whitelist_pair_id"] = paire.id
-                hits_summary["whitelisted"] += 1
-                if hit is best_match:
-                    whitelist_pair_id = paire.id
-                a_journaliser.append((hit, None))
-                continue
+                reexamen = examiner_la_paire(db, paire, fiche, empreinte)
+                if reexamen is None:
+                    hit["status"] = "WHITELISTED"
+                    hit["whitelist_pair_id"] = paire.id
+                    hits_summary["whitelisted"] += 1
+                    if hit is best_match:
+                        whitelist_pair_id = paire.id
+                    a_journaliser.append((hit, None))
+                    continue
+                # La fiche ou le client a change depuis la decision de la
+                # paire : elle ne couvre plus cette correspondance, qui suit le
+                # chemin de toutes les autres — l'alerte s'ouvre et dit pourquoi.
+                hit["whitelist_stale"] = {"pair_id": paire.id, "reason": reexamen["motif"]}
+                reexamens[id(hit)] = reexamen
+                hits_summary["whitelist_stale"] += 1
             # Regle des 50 % : risque herite par detention majoritaire du
             # liste matche (informatif, trace dans le decision_tree). Calcule
             # pour la meilleure correspondance — c'est celle qui porte le
@@ -2964,6 +2989,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         # seuil (« ce client a bien ete crible, meilleur score X »).
         if not hits:
             best_match["screening_lists_restriction"] = requested_lists or "ALL"
+            best_match["client_fingerprint"] = empreinte
             fiche = best_match.get("watchlist_entity") or {}
             if fiche.get("entity_id"):
                 inherited = compute_inherited_risk(db, fiche["entity_id"], max_depth=2)
@@ -2985,7 +3011,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
 
         # Une decision ALERT ouvre (ou re-detecte) une alerte de travail —
         # pour CHAQUE correspondance retenue, pas seulement la meilleure.
-        a_alerter = [{"audit": ligne, "match": hit, "rule": regle}
+        a_alerter = [{"audit": ligne, "match": hit, "rule": regle,
+                      "whitelist_stale": reexamens.get(id(hit))}
                      for (hit, regle), ligne in zip(a_journaliser, lignes)
                      if hit.get("status") == "ALERT"]
         if not a_alerter:
@@ -3010,6 +3037,22 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                 if entree["match"] is best_match:
                     alert_id = identifiant
                     break
+            # La meilleure correspondance que la liste blanche n'a PAS
+            # absorbee (`hits` est trie par score), et son alerte. Distincte
+            # de `best_match` des qu'une paire couvre la meilleure : une
+            # campagne classait alors le client « sans correspondance » alors
+            # qu'une autre venait d'ouvrir une alerte.
+            retenue = a_alerter[0]
+            fiche_retenue = retenue["match"].get("watchlist_entity") or {}
+            best_alert = {
+                "entity_id": fiche_retenue.get("entity_id"),
+                "primary_name": fiche_retenue.get("primary_name"),
+                "list_type": fiche_retenue.get("_list_type"),
+                "final_score": retenue["match"].get("final_score"),
+                "audit_trail_id": retenue["audit"].id,
+                "alert_id": resultat_alertes["alert_ids"][0],
+            }
+        notifier_les_bascules(db, reexamens.values())
     else:
         # Log dummy NO_MATCH result
         no_match_result = {
@@ -3052,6 +3095,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "hits": hits_summary,
         "audit_trail_id": audit_id,
         "alert_id": alert_id,
+        "best_alert": best_alert,
         "whitelisted": whitelist_pair_id is not None,
         "whitelist_pair_id": whitelist_pair_id,
         "screening_lists": requested_lists or "ALL",
@@ -4712,11 +4756,9 @@ def _touch_official_reference_date(reference: Optional[str]):
 
 
 # Colonnes exclues du recalcul de checksum (traces de gouvernance, pas des
-# donnees de la fiche) — s'ajoutent aux cles deja filtrees par compute_checksum
-_CHECKSUM_EXCLUDED_COLS = {
-    "modified_by", "modified_at", "excluded", "exclusion_justification",
-    "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
-}
+# donnees de la fiche) : definies a cote de compute_checksum, la liste blanche
+# les lit aussi pour son champ-a-champ.
+from fiskr.database import CHECKSUM_EXCLUDED_COLS as _CHECKSUM_EXCLUDED_COLS
 
 
 class WatchlistEntityPatch(BaseModel):
@@ -5568,19 +5610,39 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                 result = screen_client_profile(db, profile, username, requested_lists)
                 best = result.get("best_match") or {}
                 wl_entity = best.get("watchlist_entity") or {}
-                result_status = best.get("status") or "NO_MATCH"
+                # Le sort d'un client se derive de TOUTES ses correspondances :
+                # la liste blanche n'efface que la paire qu'elle couvre. Lu sur
+                # la seule meilleure, un client dont la meilleure etait blanchie
+                # partait en « sans correspondance » alors qu'une autre venait
+                # d'ouvrir une alerte — et le filtre ALERT de la campagne
+                # restait vide.
+                retenue = result.get("best_alert")
+                if retenue:
+                    resultat_client = {
+                        "status": "ALERT", "final_score": retenue["final_score"],
+                        "watchlist_entity_id": retenue["entity_id"],
+                        "watchlist_name": retenue["primary_name"],
+                        "list_type": retenue["list_type"],
+                        "audit_id": retenue["audit_trail_id"],
+                        "alert_id": retenue["alert_id"],
+                    }
+                else:
+                    resultat_client = {
+                        "status": best.get("status") or "NO_MATCH",
+                        "final_score": best.get("final_score"),
+                        "watchlist_entity_id": wl_entity.get("entity_id"),
+                        "watchlist_name": wl_entity.get("primary_name"),
+                        "list_type": wl_entity.get("_list_type"),
+                        "audit_id": result.get("audit_trail_id"),
+                        "alert_id": result.get("alert_id"),
+                    }
+                result_status = resultat_client["status"]
                 db.add(BatchResult(
                     campaign_id=campaign_id,
                     client_id=profile.get("client_id"),
                     client_name=(result.get("client_quality_report") or {}).get("cleansed_name")
                                 or profile.get("client_company_name") or profile.get("client_last_name"),
-                    status=result_status,
-                    final_score=best.get("final_score"),
-                    watchlist_entity_id=wl_entity.get("entity_id"),
-                    watchlist_name=wl_entity.get("primary_name"),
-                    list_type=wl_entity.get("_list_type"),
-                    audit_id=result.get("audit_trail_id"),
-                    alert_id=result.get("alert_id"),
+                    **resultat_client,
                 ))
                 # Deux chiffres, deux questions. `hits` compte ce que le
                 # criblage a TROUVE au-dessus du seuil ; `opened`, ce qu'il a
@@ -13436,12 +13498,22 @@ class WhitelistRevokeRequest(BaseModel):
 class RescreenRunRequest(BaseModel):
     file_type: Optional[str] = None
 
+class WhitelistReconductRequest(BaseModel):
+    comment: str
+
 def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
+    from fiskr.empreintes import MOTIFS_DE_REEXAMEN, motif_en_attente
     now = datetime.utcnow()
+    motif = motif_en_attente(pair)
     if pair.revoked_at:
         state = "REVOKED"
     elif pair.expires_at and pair.expires_at <= now:
         state = "EXPIRED"
+    elif motif is not None:
+        # Toujours en vigueur (ni revoquee ni expiree), mais elle n'absorbe
+        # plus : la fiche ou le client a change depuis sa decision, ou rien
+        # ne dit ce qu'elle couvrait. A reconduire ou a retirer.
+        state = "STALE"
     else:
         state = "ACTIVE"
     return {
@@ -13461,6 +13533,14 @@ def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
         "revoked_at": pair.revoked_at.isoformat() if pair.revoked_at else None,
         "revoke_comment": pair.revoke_comment,
         "state": state,
+        # Ce que la decision couvre, et d'ou on le sait : la ligne du journal
+        # d'audit lue, ou les donnees en base au moment de la pose (NULL des
+        # deux : paire anterieure au suivi, rien n'est etabli).
+        "stale_reason": motif,
+        "stale_reason_label": MOTIFS_DE_REEXAMEN.get(motif) if motif else None,
+        "stale_since": pair.stale_since.isoformat() if pair.stale_since else None,
+        "fingerprinted_at": pair.fingerprinted_at.isoformat() if pair.fingerprinted_at else None,
+        "fingerprint_audit_id": pair.fingerprint_audit_id,
     }
 
 @app.post("/api/whitelist")
@@ -13481,12 +13561,18 @@ async def create_whitelist_pair(
     WHITELISTED dans le journal d'audit). Justification et piece jointe
     exigees selon les reglages modulaires.
     """
+    from fiskr.empreintes import empreintes_de_reference, motif_en_attente, poser_les_empreintes
     client_id = client_id.strip()
     watchlist_entity_id = watchlist_entity_id.strip()
     if not client_id or not watchlist_entity_id:
         raise HTTPException(status_code=400, detail="client_id et watchlist_entity_id sont requis.")
 
-    if is_whitelisted(db, client_id, watchlist_entity_id):
+    existante = is_whitelisted(db, client_id, watchlist_entity_id)
+    if existante:
+        if motif_en_attente(existante) is not None:
+            raise HTTPException(status_code=409, detail=(
+                "Une paire existe déjà pour ce couple client × listé, à réexaminer : "
+                "reconduisez-la ou retirez-la depuis l'écran Liste blanche."))
         raise HTTPException(status_code=409, detail="Une paire active existe déjà pour ce couple client × listé.")
 
     requirements = whitelist_requirements(db)
@@ -13502,6 +13588,15 @@ async def create_whitelist_pair(
             expires_dt = datetime.strptime(expires_at.strip()[:10], "%Y-%m-%d")
         except ValueError:
             raise HTTPException(status_code=400, detail="Format de date d'expiration invalide (attendu: YYYY-MM-DD).")
+
+    # Ce que la decision couvre (fiskr.empreintes) : une paire qui ne le sait
+    # pas couvrirait toute version future de la fiche et du client — refus
+    # franc, AVANT d'ecrire la piece sur le disque.
+    reference = empreintes_de_reference(db, client_id, watchlist_entity_id)
+    if reference["manque"]:
+        raise HTTPException(status_code=409, detail=(
+            "Impossible d'établir ce que cette décision couvre : "
+            + " ; ".join(reference["manque"]) + "."))
 
     evidence_name = None
     evidence_path = None
@@ -13536,6 +13631,7 @@ async def create_whitelist_pair(
         created_by=reviewer["username"],
         expires_at=expires_dt,
     )
+    poser_les_empreintes(pair, reference)
     db.add(pair)
     db.commit()
     db.refresh(pair)
@@ -13571,6 +13667,7 @@ async def create_whitelist_pairs_bulk(
     Les paires deja actives sont sautees (pas d'echec global). La piece jointe
     eventuelle reste du ressort de la pose unitaire.
     """
+    from fiskr.empreintes import empreintes_de_reference, poser_les_empreintes
     if not payload.pairs:
         raise HTTPException(status_code=400, detail="Aucune paire fournie.")
     if len(payload.pairs) > 500:
@@ -13601,6 +13698,14 @@ async def create_whitelist_pairs_bulk(
         if is_whitelisted(db, client_id, entity_id):
             skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "paire déjà active"})
             continue
+        # Ce que la decision couvre : la version de la fiche et le pseudo-client
+        # que le cahier de tests a montres (fiskr.empreintes). Une paire qui ne
+        # peut pas l'etablir est sautee, motif a l'appui, sans faire echouer le lot.
+        reference = empreintes_de_reference(db, client_id, entity_id)
+        if reference["manque"]:
+            skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id,
+                            "reason": " ; ".join(reference["manque"])})
+            continue
         # Type de liste : fourni par le rapport de backtest, sinon derive du cache
         list_type = (p.list_type or "").strip() or types_par_id.get(entity_id)
         pair = WhitelistPair(
@@ -13612,6 +13717,7 @@ async def create_whitelist_pairs_bulk(
             justification=justification or None,
             created_by=reviewer["username"],
         )
+        poser_les_empreintes(pair, reference)
         db.add(pair)
         created.append({"client_id": client_id, "watchlist_entity_id": entity_id})
     db.commit()
@@ -13629,25 +13735,99 @@ async def create_whitelist_pairs_bulk(
 async def list_whitelist_pairs(
     active_only: bool = Query(False),
     list_type: Optional[str] = Query(None),
+    state: Optional[str] = Query(None, description="STALE : paires à réexaminer seulement"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Liste des paires en liste blanche avec leur etat (active / expiree / revoquee)."""
+    """
+    Liste des paires en liste blanche avec leur etat (active / a reexaminer /
+    expiree / revoquee). `stale_total` compte les paires en vigueur qui
+    n'absorbent plus — la fiche ou le client a change depuis leur decision —,
+    quel que soit le filtre : c'est le chiffre qui demande une action.
+    """
+    from fiskr.empreintes import filtre_a_reexaminer
+    now = datetime.utcnow()
+    en_vigueur = (WhitelistPair.revoked_at.is_(None),
+                  (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now))
+    if state and state.strip().upper() not in ("STALE",):
+        raise HTTPException(status_code=400, detail="Filtre d'état inconnu (attendu : STALE).")
     query = db.query(WhitelistPair)
-    if active_only:
-        now = datetime.utcnow()
-        query = query.filter(
-            WhitelistPair.revoked_at.is_(None),
-            (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
-        )
+    if active_only or state:
+        query = query.filter(*en_vigueur)
+    if state:
+        query = query.filter(filtre_a_reexaminer(WhitelistPair))
     query = _apply_list_type_filter(query, WhitelistPair.list_type, list_type)
     total = query.count()
     rows = query.order_by(WhitelistPair.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
+    stale_total = db.query(WhitelistPair).filter(
+        *en_vigueur, filtre_a_reexaminer(WhitelistPair)).count()
     return {"total": total, "page": page, "page_size": page_size,
+            "stale_total": stale_total,
             "items": [_whitelist_summary(p) for p in rows]}
+
+@app.post("/api/whitelist/{pair_id}/reconduct")
+async def reconduct_whitelist_pair(
+    pair_id: int,
+    payload: WhitelistReconductRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Reconduit une paire a reexaminer : l'analyste a regarde ce qui a change
+    (evenement WHITELIST_STALE de l'alerte) et confirme le faux positif. Les
+    empreintes du DERNIER criblage journalise du couple remplacent celles de
+    la decision precedente ; l'ancienne et la nouvelle vont au journal
+    d'administration, avec le motif. La paire absorbe a nouveau.
+
+    Refusee sur une paire qui couvre deja ce qu'elle voit : reconduire sans
+    rien a reexaminer serait une signature sans objet.
+    """
+    from fiskr.empreintes import (MOTIFS_DE_REEXAMEN, empreintes_de_reference,
+                                  motif_en_attente, poser_les_empreintes)
+    pair = db.query(WhitelistPair).filter(WhitelistPair.id == pair_id).first()
+    if not pair:
+        raise HTTPException(status_code=404, detail="Paire introuvable.")
+    if pair.revoked_at:
+        raise HTTPException(status_code=409, detail="Paire révoquée : posez-en une nouvelle.")
+    if pair.expires_at and pair.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=409, detail="Paire expirée : posez-en une nouvelle.")
+    motif = motif_en_attente(pair)
+    if motif is None:
+        raise HTTPException(status_code=409, detail=(
+            "Rien à réexaminer : aucun criblage n'a vu la fiche ou le client changer "
+            "depuis la décision de cette paire."))
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un motif est requis pour reconduire une paire.")
+    reference = empreintes_de_reference(db, pair.client_id, pair.watchlist_entity_id)
+    if reference["manque"]:
+        raise HTTPException(status_code=409, detail=(
+            "Impossible d'établir ce que cette décision couvre : "
+            + " ; ".join(reference["manque"]) + "."))
+    avant = {"entity_checksum": pair.entity_checksum,
+             "client_fingerprint": pair.client_fingerprint,
+             "fingerprint_audit_id": pair.fingerprint_audit_id,
+             "stale_reason": motif}
+    poser_les_empreintes(pair, reference)
+    log_admin_action(db, reviewer["username"], "WHITELIST_RECONDUCTED",
+                     target=f"{pair.client_id} × {pair.watchlist_entity_id}",
+                     before=avant,
+                     after={"entity_checksum": pair.entity_checksum,
+                            "client_fingerprint": pair.client_fingerprint,
+                            "fingerprint_audit_id": pair.fingerprint_audit_id},
+                     detail=f"{MOTIFS_DE_REEXAMEN[motif]} — {comment}")
+    db.commit()
+    emit(db, "whitelist_changed", {
+        "Action": "paire reconduite", "Client": pair.client_name or pair.client_id,
+        "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
+        "Liste": pair.list_type or "—", "Par": reviewer["username"],
+        "Motif du réexamen": MOTIFS_DE_REEXAMEN[motif], "Commentaire": comment,
+    })
+    return {"message": "Paire reconduite : elle couvre de nouveau ce couple.",
+            **_whitelist_summary(pair)}
 
 @app.post("/api/whitelist/{pair_id}/revoke")
 async def revoke_whitelist_pair(

@@ -1040,6 +1040,24 @@ class WhitelistPair(Base):
     revoked_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_comment = Column(Text, nullable=True)
+    # Ce que la decision a COUVERT (fiskr/empreintes.py) : la version de la
+    # fiche listee et les elements d'identification du client que le moteur
+    # lit. Une paire qui ne les gardait pas couvrait toute version future de
+    # la mesure — la v2 d'une fiche ajoutant le passeport du client retombait
+    # en WHITELISTED (lignes directrices DGT/ACPR du 18 mars 2026, §169).
+    # NULL : paire anterieure au suivi, traitee comme a reexaminer.
+    entity_checksum = Column(String(64), nullable=True)
+    client_fingerprint = Column(String(64), nullable=True)
+    # Ligne du journal d'audit d'ou viennent les empreintes ; NULL quand elles
+    # ont ete lues dans les donnees en base (cahier de tests, couple jamais
+    # crible en production). `fingerprinted_at` date la pose : creation ou
+    # derniere reconduction.
+    fingerprint_audit_id = Column(Integer, nullable=True)
+    fingerprinted_at = Column(DateTime, nullable=True)
+    # Pose par le criblage qui a vu une empreinte differente ; leve par la
+    # reconduction. Motif : fiskr.empreintes.MOTIFS_DE_REEXAMEN.
+    stale_since = Column(DateTime, nullable=True)
+    stale_reason = Column(String(30), nullable=True)
 
 class LearnedEquivalence(Base):
     """
@@ -1482,6 +1500,15 @@ def init_db():
             ],
             "whitelist_pairs": [
                 ("list_type", "VARCHAR(30)"),
+                # Empreintes de la decision : NULL sur les paires existantes,
+                # JAMAIS remplies par la migration — une empreinte posee ici
+                # serait celle du jour de la mise a jour, pas de la decision.
+                ("entity_checksum", "VARCHAR(64)"),
+                ("client_fingerprint", "VARCHAR(64)"),
+                ("fingerprint_audit_id", "INTEGER"),
+                ("fingerprinted_at", "TIMESTAMP"),
+                ("stale_since", "TIMESTAMP"),
+                ("stale_reason", "VARCHAR(30)"),
             ],
             "users": [
                 ("failed_login_count", "INTEGER"),
@@ -1718,6 +1745,16 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
         # journal et alertes deviennent atomiques.
         db.flush()
     return lignes
+
+# Colonnes exclues du recalcul de checksum d'une fiche listee (traces de
+# gouvernance, pas des donnees de la fiche) — s'ajoutent aux cles deja filtrees
+# par compute_checksum. Lue par la correction manuelle (fiskr.api) ET par le
+# champ-a-champ de la liste blanche (fiskr.empreintes) : une seule definition.
+CHECKSUM_EXCLUDED_COLS = frozenset({
+    "modified_by", "modified_at", "excluded", "exclusion_justification",
+    "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
+})
+
 
 # Helper function to compute entity checksums
 def compute_checksum(data: dict) -> str:

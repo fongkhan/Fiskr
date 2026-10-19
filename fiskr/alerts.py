@@ -110,9 +110,17 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
     toutes creees.
 
     `correspondances` : sequence de {"audit": AuditTrail, "match": dict,
-    "rule": FpRule|None}. Une correspondance portant une regle est creee PUIS
-    cloturee CLOSED_BY_RULE, avec le nom et la version de la regle en clair —
-    jamais supprimee en silence.
+    "rule": FpRule|None, "whitelist_stale": dict|None}. Une correspondance
+    portant une regle est creee PUIS cloturee CLOSED_BY_RULE, avec le nom et la
+    version de la regle en clair — jamais supprimee en silence. Une
+    correspondance qu'une paire de liste blanche n'a pas absorbee parce que la
+    fiche ou le client a change depuis sa decision (fiskr.empreintes) porte son
+    reexamen : l'alerte recoit un evenement WHITELIST_STALE qui le dit.
+
+    `alert_ids` est ALIGNE sur `correspondances` (meme rang, meme alerte). Il
+    listait les alertes re-detectees d'abord et les nouvelles ensuite : un
+    appelant qui les rapprochait par rang attribuait a la meilleure
+    correspondance l'alerte d'une autre des que les deux sortes se melaient.
 
     Les notifications individuelles s'arretent a `NOTIFY_BURST_MAX` et cedent
     la place a une seule notification de volumetrie.
@@ -120,6 +128,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
     resultat = {"alert_ids": [], "opened": 0, "closed_by_rule": 0, "redetected": 0}
     if not correspondances:
         return resultat
+    alertes_par_rang: List[Optional[Alert]] = [None] * len(correspondances)
 
     ids_fiches = [(c["match"].get("watchlist_entity") or {}).get("entity_id", "NONE")
                   for c in correspondances]
@@ -141,16 +150,18 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
     evenements: List[AlertEvent] = []
     a_notifier: List[Alert] = []
 
-    for correspondance in correspondances:
+    for rang, correspondance in enumerate(correspondances):
         audit = correspondance["audit"]
         match = correspondance["match"]
         regle = correspondance.get("rule")
         fiche = match.get("watchlist_entity") or {}
         wl_id = fiche.get("entity_id", "NONE")
         supprimee = regle is not None
+        reexamen = correspondance.get("whitelist_stale")
 
         deja = existantes.get(wl_id)
         if deja is not None:
+            alertes_par_rang[rang] = deja
             if match["final_score"] > deja.final_score:
                 deja.final_score = match["final_score"]
             if deja.list_type is None and fiche.get("_list_type"):
@@ -172,7 +183,14 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
                               f"(score {match['final_score']:.1f}, audit #{audit.id}).{detail_suffix}")
                 evenements.append(AlertEvent(alert_id=deja.id, username=username,
                                              action="REDETECTED", detail=detail))
-            resultat["alert_ids"].append(deja.id)
+            # Une paire qui VIENT de basculer le dit aussi sur l'alerte deja
+            # ouverte ; sur une paire deja signalee, ce serait une ligne par
+            # criblage qui n'apprend rien. (Sans identifiant : alerte creee
+            # plus haut dans ce meme lot, qui porte deja l'evenement.)
+            if reexamen and reexamen.get("nouveau") and deja.id is not None:
+                evenements.append(AlertEvent(alert_id=deja.id, username=username,
+                                             action="WHITELIST_STALE",
+                                             detail=reexamen["detail"]))
             resultat["redetected"] += 1
             continue
 
@@ -194,6 +212,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
                 f"(#{regle.id} v{regle.version}). Conservée pour l'audit (ACPR/FED)."
             )
         db.add(alerte)
+        alertes_par_rang[rang] = alerte
         # La dedup vaut AUSSI a l'interieur d'un meme criblage : deux fiches
         # portant le meme entity_id ne doivent pas ouvrir deux alertes.
         existantes[wl_id] = alerte
@@ -216,14 +235,22 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
         evenements.append(AlertEvent(
             alert_id=alerte.id, username=username, action="CREATED",
             detail=f"Alerte créée par le criblage (score {match['final_score']:.1f}).{detail_suffix}"))
+        # Toute alerte nee d'une paire qui n'a pas absorbe dit pourquoi, meme
+        # si la paire etait deja signalee : sans cette ligne, l'analyste qui
+        # a clos la precedente ne comprendrait pas qu'elle revienne.
+        reexamen = correspondance.get("whitelist_stale")
+        if reexamen:
+            evenements.append(AlertEvent(
+                alert_id=alerte.id, username=username, action="WHITELIST_STALE",
+                detail=reexamen["detail"]))
         if regle is not None:
             evenements.append(AlertEvent(
                 alert_id=alerte.id, username="fp-rule", action="RULE_SUPPRESSED",
                 detail=(f"Auto-clôturée CLOSED_BY_RULE par la règle « {regle.name} » "
                         f"(#{regle.id} v{regle.version}).")))
-        resultat["alert_ids"].append(alerte.id)
         correspondance.pop("_alerte", None)
         correspondance.pop("_regle", None)
+    resultat["alert_ids"] = [a.id for a in alertes_par_rang]
 
     db.add_all(evenements)
     # Charges utiles de notification composees AVANT le commit : apres, la

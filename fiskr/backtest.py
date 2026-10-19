@@ -196,9 +196,10 @@ class _RuleSnapshot(NamedTuple):
     code: str
 
 
-def _active_whitelist_keys(db) -> Set[Tuple[str, str]]:
+def _active_whitelist_keys(db) -> Dict[Tuple[str, str], Any]:
     """
-    Couples (client, entite) de liste blanche ACTIFS, charges EN UNE REQUETE.
+    Paires de liste blanche ACTIVES, indexees par couple (client, entite),
+    chargees EN UNE REQUETE.
 
     Le criblage a blanc interrogeait la base pour chaque client en alerte
     (`is_whitelisted`). Outre le cout — une requete par alerte —, ces lectures
@@ -206,14 +207,28 @@ def _active_whitelist_keys(db) -> Set[Tuple[str, str]]:
     pendant toute la duree du cahier de tests. La table est une liste curee a la
     main : la charger entierement coute une requete et tient en memoire.
 
-    Meme filtre que `is_whitelisted` (non revoquee, non expiree).
+    Chaque couple porte les EMPREINTES de sa decision (fiskr.empreintes) : en
+    production, une paire dont la fiche ou le client a change n'absorbe plus.
+    Le cahier doit predire la production — une liste candidate qui modifie une
+    fiche blanchie y rouvre donc l'alerte, comme elle le fera apres
+    homologation.
+
+    Meme filtre que `is_whitelisted` (non revoquee, non expiree) ; premiere
+    paire par couple, comme `whitelisted_pairs`.
     """
+    from fiskr.empreintes import EmpreintesDePaire
     now = datetime.utcnow()
-    rows = db.query(WhitelistPair.client_id, WhitelistPair.watchlist_entity_id).filter(
+    rows = db.query(WhitelistPair.client_id, WhitelistPair.watchlist_entity_id,
+                    WhitelistPair.id, WhitelistPair.entity_checksum,
+                    WhitelistPair.client_fingerprint, WhitelistPair.stale_since,
+                    WhitelistPair.stale_reason).filter(
         WhitelistPair.revoked_at.is_(None),
         (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
-    ).all()
-    return {(r[0], r[1]) for r in rows}
+    ).order_by(WhitelistPair.id).all()
+    paires: Dict[Tuple[str, str], Any] = {}
+    for r in rows:
+        paires.setdefault((r[0], r[1]), EmpreintesDePaire(*r[2:]))
+    return paires
 
 
 def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
@@ -358,7 +373,9 @@ def _engine_fingerprint(db, current_rules) -> str:
         for r in db.query(AppSetting.key, AppSetting.value).all()
     )
     regles = sorted((r.id, getattr(r, "code", "") or "") for r in (current_rules or []))
-    liste_blanche = sorted(_active_whitelist_keys(db))
+    # Couples ET empreintes : une reconduction ou un reexamen change le verdict
+    # d'un cahier sans changer la liste des couples.
+    liste_blanche = sorted(_active_whitelist_keys(db).items())
     # Journal des editions manuelles : deux entiers suffisent a detecter toute
     # correction survenue depuis le cahier precedent (table de petite taille).
     editions = db.query(func.count(WatchlistEntityChange.id),

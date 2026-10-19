@@ -167,7 +167,9 @@ def test_alerts_queue_pagination(client):
 
 def test_whitelist_pagination_shape(client):
     data = client.get("/api/whitelist", params={"page": 1, "page_size": 1}).json()
-    assert set(data.keys()) == {"total", "page", "page_size", "items"}
+    # `stale_total` (paires a reexaminer, tous filtres confondus) s'ajoute a la
+    # forme paginee : c'est le compteur de l'ecran (tests/test_liste_blanche_suivie.py)
+    assert set(data.keys()) == {"total", "page", "page_size", "items", "stale_total"}
     assert data["page"] == 1 and data["page_size"] == 1
     assert len(data["items"]) <= 1
     assert client.get("/api/whitelist", params={"page_size": 500}).status_code == 422
