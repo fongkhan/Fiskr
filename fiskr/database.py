@@ -386,6 +386,13 @@ class Job(Base):
     # Execution
     claimed_by = Column(String(100), nullable=True)    # "host:pid"
     heartbeat_at = Column(DateTime, nullable=True)
+    # Dernier instant ou le TRAVAIL a avance (phase ou compteur changes). Le
+    # battement de coeur dit que le PROCESSUS vit ; il est rafraichi pour tous
+    # les jobs du demon par un fil independant, donc il ne dit rien d'un job
+    # dont le fil d'execution est bloque. Releve en production : une
+    # synchronisation PEP « en cours » 26 jours, phase HASH, 0 fiche traitee,
+    # battement vieux de 5 secondes. NULL : job anterieur a la mesure.
+    progress_at = Column(DateTime, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
@@ -1221,7 +1228,36 @@ def verify_password(password: str, stored_hash: str, stored_salt: str) -> bool:
 
 # Setup Database Engine
 db_config = config.get("database", {})
-pg_url = db_config.get("url", "postgresql://postgres:postgres@localhost:5432/fiskr")
+
+
+def url_postgresql(url: str) -> str:
+    """
+    Le pilote PostgreSQL, nomme explicitement dans l'URL.
+
+    POURQUOI
+    --------
+    `postgresql://…` laisse SQLAlchemy choisir le pilote, et SQLAlchemy 2.1 a
+    change ce choix : psycopg2 jusqu'en 2.0, psycopg (v3) depuis. Le projet
+    declare psycopg2 (requirements.txt) et `sqlalchemy>=2.0` sans borne : une
+    reinstallation des dependances sur le serveur aurait donc fait echouer
+    l'import du pilote — et `init_db` attrapait l'echec pour se REPLIER SUR
+    SQLITE. Une production reinstallee aurait tourne sur une base locale vide,
+    avec pour seule trace un avertissement dans le journal. Constate dans un
+    environnement neuf : « Failed to connect to PostgreSQL: No module named
+    'psycopg'. Falling back to SQLite. »
+
+    Une URL qui nomme deja son pilote est laissee telle quelle ; l'ancien
+    schema `postgres://` (Heroku et d'autres) est accepte aussi.
+    """
+    url = (url or "").strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+pg_url = url_postgresql(db_config.get("url", "postgresql://postgres:postgres@localhost:5432/fiskr"))
 sqlite_path = db_config.get("sqlite_path", "fiskr.sqlite3")
 fallback = db_config.get("fallback_to_sqlite", True)
 
@@ -1265,18 +1301,60 @@ def _tune_sqlite(eng):
             cursor.close()
 
 
+def options_postgresql() -> dict:
+    """
+    Options du moteur PostgreSQL : une connexion coupee doit se VOIR, vite.
+
+    Le moteur etait cree avec le seul `connect_timeout`. Sur l'hebergement de
+    production, le serveur ferme les connexions restees inactives : la
+    synchronisation DFAT, dont le telechargement pend neuf minutes avant
+    d'echouer, finissait ainsi en « server closed the connection
+    unexpectedly » — l'erreur de base masquait la vraie (le portail qui ne
+    repond pas). Et une connexion coupee sans que le client en soit prevenu
+    (TCP a demi ouvert) laisse un appel bloque sans fin : c'est le profil
+    d'une synchronisation PEP restee « en cours » 26 jours.
+
+    - `pool_pre_ping` : une connexion reprise du pool est verifiee avant usage,
+      et remplacee si le serveur l'a fermee entre-temps ;
+    - `pool_recycle` : aucune connexion n'est gardee plus de 30 minutes ;
+    - keepalives TCP : une connexion morte est detectee en ~2 minutes au lieu
+      de jamais (ou de deux heures, le defaut du systeme).
+    """
+    return {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "connect_args": {
+            "connect_timeout": 3,
+            "keepalives": 1,
+            "keepalives_idle": 60,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+    }
+
+
 def init_db():
     global engine, SessionLocal
     try:
         if pg_url.startswith("postgresql"):
             logger.info("Attempting to connect to PostgreSQL database...")
-            engine = create_engine(pg_url, connect_args={"connect_timeout": 3})
+            engine = create_engine(pg_url, **options_postgresql())
             # Test connection
             with engine.connect() as conn:
                 pass
             logger.info("Successfully connected to PostgreSQL.")
         else:
             raise ValueError("Not a PostgreSQL URL")
+    except ImportError as e:
+        # Un pilote absent n'est pas une base injoignable : c'est une
+        # installation incomplete. S'en accommoder en basculant sur SQLite
+        # ferait tourner une production sur une base locale vide sans le dire
+        # (cf. url_postgresql). L'echec est franc.
+        logger.error(f"Pilote PostgreSQL introuvable ({e}) : installez les "
+                     f"dependances (pip install -r requirements.txt).")
+        raise RuntimeError(
+            f"Pilote PostgreSQL introuvable : {e}. Repli sur SQLite refusé — "
+            f"il ferait tourner l'application sur une base locale vide.") from e
     except Exception as e:
         if fallback:
             try:

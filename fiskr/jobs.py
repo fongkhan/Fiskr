@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, Optional
+from typing import List, Any, Callable, Dict, Optional
 
 from sqlalchemy import update as sa_update
 
@@ -44,6 +44,21 @@ TASKS: Dict[str, Callable] = {}
 # Battement de coeur : au-dela, un RUNNING est repute mort (6 battements de
 # 15 s manques)
 STALE_AFTER = timedelta(seconds=90)
+
+# Au-dela de ce delai SANS PROGRESSION, un RUNNING est repute fige, quel que
+# soit son battement de coeur (cf. Job.progress_at). Six heures : la plus
+# longue phase silencieuse connue (construction d'index sur 750 000 fiches)
+# dure quelques minutes, et une synchronisation complete de la plus grosse
+# liste moins d'une heure. Reglable par jobs.stall_after_hours.
+DEFAULT_STALL_AFTER_H = 6.0
+
+
+def stall_after() -> timedelta:
+    try:
+        heures = float((config.get("jobs") or {}).get("stall_after_hours", DEFAULT_STALL_AFTER_H))
+    except (TypeError, ValueError):
+        heures = DEFAULT_STALL_AFTER_H
+    return timedelta(hours=max(heures, 0.5))
 
 # Taille maximale du rapport persiste (les listes de details sont deja
 # tronquees en amont : 200 paires, 25 exemples — cette garde est un filet)
@@ -112,6 +127,7 @@ class JobContext:
         self.mirror_registry = mirror_registry
         self.result: Optional[Dict[str, Any]] = None
         self._last_flush = 0.0
+        self._last_progress = None
 
     def update(self, *, phase: str, processed: int = 0, total: Optional[int] = None,
                snapshot_id: Optional[str] = None) -> None:
@@ -120,18 +136,26 @@ class JobContext:
                                      total=total, snapshot_id=snapshot_id,
                                      kind=self.kind, label=self.label,
                                      started_by=self.started_by)
+        etat = (phase, int(processed or 0))
+        a_avance = etat != self._last_progress
         now = time.monotonic()
-        if now - self._last_flush < self._FLUSH_EVERY_S:
+        if now - self._last_flush < self._FLUSH_EVERY_S and not a_avance:
             return
         self._last_flush = now
+        self._last_progress = etat
+        valeurs = dict(
+            phase=phase, processed=int(processed or 0),
+            total=int(total) if total else Job.total,
+            snapshot_id=snapshot_id if snapshot_id else Job.snapshot_id,
+            heartbeat_at=datetime.utcnow(),
+        )
+        # Seule une progression REELLE date le travail : un tick qui repete la
+        # meme phase et le meme compteur n'est qu'un battement de plus.
+        if a_avance:
+            valeurs["progress_at"] = datetime.utcnow()
         session = _fresh_session()
         try:
-            session.execute(sa_update(Job).where(Job.id == self.job_id).values(
-                phase=phase, processed=int(processed or 0),
-                total=int(total) if total else Job.total,
-                snapshot_id=snapshot_id if snapshot_id else Job.snapshot_id,
-                heartbeat_at=datetime.utcnow(),
-            ))
+            session.execute(sa_update(Job).where(Job.id == self.job_id).values(**valeurs))
             session.commit()
         except Exception:
             session.rollback()  # la progression n'est jamais bloquante
@@ -300,7 +324,7 @@ def claim_next(session, claimer: str) -> Optional[int]:
         sa_update(Job)
         .where(Job.id == row.id, Job.status == "QUEUED")
         .values(status="RUNNING", claimed_by=claimer, attempts=Job.attempts + 1,
-                started_at=now, heartbeat_at=now, phase="PARSE")
+                started_at=now, heartbeat_at=now, progress_at=now, phase="PARSE")
     )
     session.commit()
     if res.rowcount != 1:  # un concurrent l'a pris (chemin repli uniquement)
@@ -338,7 +362,7 @@ def run_job(job_id: int) -> None:
                 sa_update(Job).where(Job.id == job_id, Job.status == "QUEUED")
                 .values(status="RUNNING", claimed_by=worker_id(),
                         attempts=Job.attempts + 1, started_at=datetime.utcnow(),
-                        heartbeat_at=datetime.utcnow())
+                        heartbeat_at=datetime.utcnow(), progress_at=datetime.utcnow())
             )
             session.commit()
             if res.rowcount != 1:
@@ -397,6 +421,14 @@ def finish_job(job_id: int, status: str, *, error: Optional[str] = None,
     try:
         job = session.get(Job, job_id)
         if job is None:
+            return
+        if job.status == "ERROR" and (job.error or "").startswith(PREFIXE_FIGE):
+            # Le garde-fou l'a declare fige et a libere sa place ; un fil qui
+            # se reveille des heures plus tard ne doit pas reecrire l'histoire
+            # (ni rendre « DONE » un travail qu'un autre passage a peut-etre
+            # deja refait). Son issue tardive est journalisee, pas appliquee.
+            logger.warning(f"Job #{job_id} declare fige puis termine ({status}) : "
+                           f"issue tardive ignoree.")
             return
         job.status = status
         job.error = error
@@ -467,6 +499,53 @@ def requeue_stale(session, worker_present: Optional[bool] = None) -> int:
     return touched
 
 
+PREFIXE_FIGE = "Figé :"
+
+
+def declarer_figes(session, claimer: Optional[str] = None,
+                   maintenant: Optional[datetime] = None) -> List[Job]:
+    """
+    Les RUNNING dont le TRAVAIL n'a pas avance depuis `stall_after()` passent
+    en ERROR, et leur cle d'exclusivite est donc liberee.
+
+    `requeue_stale` juge sur le battement de coeur, et ne peut rien contre ce
+    cas-ci : le battement est rafraichi pour tous les jobs du demon par un fil
+    independant, si bien qu'un job dont le fil d'execution est bloque — un
+    appel reseau ou une connexion de base qui ne rendra jamais la main — garde
+    un pouls parfait. Releve en production : une synchronisation PEP RUNNING
+    depuis 26 jours, 0 fiche, battement frais. Tant qu'il vivait, sa cle
+    `sync:pep` interdisait toute nouvelle synchronisation PEP, et il occupait
+    l'un des deux emplacements du demon.
+
+    On ne peut pas tuer un fil Python : declarer le job fige libere la file,
+    mais l'emplacement reste pris tant que le processus vit. C'est pourquoi le
+    demon se recycle ensuite (cf. worker._heartbeat_loop).
+    """
+    maintenant = maintenant or datetime.utcnow()
+    seuil = maintenant - stall_after()
+    q = session.query(Job).filter(Job.status == "RUNNING")
+    if claimer is not None:
+        q = q.filter(Job.claimed_by == claimer)
+    figes = []
+    for job in q.all():
+        repere = job.progress_at or job.started_at
+        if repere is None or repere >= seuil:
+            continue
+        heures = int((maintenant - repere).total_seconds() // 3600)
+        job.status = "ERROR"
+        job.finished_at = maintenant
+        job.error = (f"{PREFIXE_FIGE} aucune progression depuis {heures} h "
+                     f"(phase {job.phase or '?'}, {int(job.processed or 0)} traité(s)). "
+                     f"Le travail a été arrêté pour libérer la file ; il sera "
+                     f"relancé à son prochain horaire.")
+        figes.append(job)
+    if figes:
+        session.commit()
+        for job in figes:
+            logger.error(f"Job {job.kind} « {job.label or job.token} » fige : {job.error}")
+    return figes
+
+
 def purge_old(session, keep_days: int = 30) -> int:
     cutoff = datetime.utcnow() - timedelta(days=keep_days)
     n = session.query(Job).filter(
@@ -498,12 +577,15 @@ def mirror_progress(token: Optional[str], *, phase: str, processed: int = 0,
         job = latest_by_token(session, token)
         if job is None or job.status not in ("QUEUED", "RUNNING"):
             return
-        session.execute(sa_update(Job).where(Job.id == job.id).values(
+        valeurs = dict(
             phase=phase, processed=int(processed or 0),
             total=int(total) if total else Job.total,
             snapshot_id=snapshot_id if snapshot_id else Job.snapshot_id,
             heartbeat_at=datetime.utcnow(),
-        ))
+        )
+        if (job.phase, int(job.processed or 0)) != (phase, int(processed or 0)):
+            valeurs["progress_at"] = datetime.utcnow()
+        session.execute(sa_update(Job).where(Job.id == job.id).values(**valeurs))
         session.commit()
     except Exception:
         session.rollback()

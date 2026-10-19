@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a job frozen for 26 days with a perfect pulse, and a database driver left to chance (production audit, 19 October 2026)
+
+A read-only audit through the diagnostic endpoint built for exactly that, three weeks after the previous one.
+
+**"Synchronisation PEP" had been RUNNING since 23 September** — 26 days, phase HASH, zero records processed — with a heartbeat five seconds old and `heartbeat_stale: false`. The job heartbeat is refreshed for *every* job of the daemon by an independent thread: it says the process is alive, and nothing about a job whose execution thread is stuck on a call that will never return. All the consequences were silent: its `sync:pep` exclusivity key forbade any new PEP synchronisation (the PEP list in production dates from 1 September), it held one of the daemon's two slots, and both the diagnostic and the commissioning screen said "the daemon is beating".
+
+- **Progress is dated separately from the pulse** (`Job.progress_at`), and only *real* progress dates it: a tick that repeats the same phase and counter is one more heartbeat, nothing else — otherwise a loop republishing "HASH, 0" every second would grant itself a certificate of life and the defect would merely move.
+- **A RUNNING job without progress beyond `jobs.stall_after_hours` (6 h) is declared frozen** by the daemon itself: ERROR with the reason, its queue freed, an immediate notification. Six hours is far beyond the longest known silent phase (minutes) and a full synchronisation of the largest list (under an hour).
+- **The daemon then recycles itself.** A Python thread cannot be killed, and pool threads are not daemons: without a forced exit, the process would wait for the stuck thread forever and never give the slot back. It stops, then exits with code 75 after a 30-second grace; the supervisor (cron, or the API's autostart) starts a fresh one. Verified in a real subprocess holding a thread blocked for an hour. `jobs.recycle_on_stall: false` disables it.
+- A thread that wakes up after being declared frozen does not rewrite history: its late outcome is logged, not applied.
+- The diagnostic now shows `progress_age_s` and `progress_stale` next to the heartbeat, and the commissioning control no longer says "the daemon is beating" over a frozen job.
+
+**PostgreSQL connections that can be seen dying.** The DFAT synchronisation ends every night on "server closed the connection unexpectedly": the server closes connections left idle in a transaction while the Australian portal stays silent for nine minutes, and the database error masks the real one. The engine was created with `connect_timeout` alone. It now gets `pool_pre_ping`, a 30-minute `pool_recycle` and explicit TCP keepalives (a dead connection seen in about two minutes rather than two hours, or never — the profile of the frozen PEP job), each option checked against libpq itself. And a synchronisation now ends its read transaction before downloading, so no connection sits idle-in-transaction across a network wait.
+
+**A database driver left to chance, found in passing.** `postgresql://…` let SQLAlchemy pick the driver, and SQLAlchemy 2.1 switched it from psycopg2 to psycopg (v3). The project declares psycopg2 and an unbounded `sqlalchemy>=2.0`, and `init_db` caught the import failure to **fall back to SQLite**. Seen in a fresh environment: "Failed to connect to PostgreSQL: No module named 'psycopg'. Falling back to SQLite." A production whose dependencies were reinstalled would have run on an empty local database, with one warning in a log as the only trace. The URL now names its driver (`postgresql+psycopg2://`, `postgres://` accepted too), and a missing driver is a hard error rather than a silent fallback — falling back stays reserved for a database that is genuinely unreachable.
+
+**Not fixable from the code, stated plainly:** production is still on commit `87b9a4b`, from before PR #92. None of the four batches merged since — including the freshness control, the approval that no longer regresses lists and the Canadian list — runs there yet; the review badge reads 1,081 pending batches. Deploying is the operator's gesture.
+
+29 tests pin the batch, in two new files.
+
 ### Fixed — a month-old production behind an all-green screen (production audit, 1 October 2026)
 
 A read-only audit of the production installation, a month after the previous one. Its headline: **every list in production was between 29 and 69 days old** — OFAC 33 days, DGT (the French national freeze register, an autonomous legal obligation) 33, EU 51, OFSI 69 — while each night a newer version arrived in review and stayed there. **639 batches** had piled up, up to 21 for a single list, carrying 7.46 million entity rows: eleven times the whole production. And the commissioning screen was **entirely green**. Every control told the truth about what it looked at — the configuration ("a review is required", "automatic retrieval is on") — and none looked at the result. An asset freeze applies on publication; a referential a month behind is a compliance failure, and it was not saying so.

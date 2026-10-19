@@ -111,6 +111,15 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_LISTS, audience=("admin",),
         urgency=DIGEST, link="#watchlists/watchlists-sources",
     ),
+    "job_fige": Event(
+        # IMMEDIAT : un travail fige bloque sa file pour toujours (sa cle
+        # d'exclusivite interdit toute relance) et rien d'autre ne le dit —
+        # son battement de coeur reste parfait. Le demon le declare et se
+        # recycle ; l'exploitant doit savoir que ca s'est produit, et quoi.
+        label="Travail figé arrêté par le démon",
+        category=CATEGORY_LISTS, audience=("admin",),
+        urgency=IMMEDIATE, link="#settings/settings-integrations",
+    ),
     "sync_error": Event(
         label="Échec de synchronisation d'une source",
         category=CATEGORY_LISTS, audience=("admin",),

@@ -152,6 +152,28 @@ def _demon(db) -> Dict[str, Any]:
     vivant = bool(battement and battement.heartbeat_at
                   and battement.heartbeat_at > datetime.utcnow() - timedelta(seconds=180))
     if vivant:
+        # Un demon qui bat peut porter un travail qui n'avance plus : le
+        # battement est rafraichi pour tous ses jobs par un fil independant.
+        # Releve en production : « Le demon bat » affiche ici pendant qu'une
+        # synchronisation PEP etait figee depuis 26 jours.
+        from fiskr.jobs import stall_after
+        seuil = datetime.utcnow() - stall_after()
+        figes = [j for j in db.query(Job).filter(Job.status == "RUNNING").all()
+                 if (j.progress_at or j.started_at) and (j.progress_at or j.started_at) < seuil]
+        if figes:
+            pire = min(figes, key=lambda j: j.progress_at or j.started_at)
+            depuis = datetime.utcnow() - (pire.progress_at or pire.started_at)
+            return _controle(
+                "demon", "Socle", "Démon travailleur", BLOQUANT,
+                f"Le démon bat, mais {len(figes)} travail(aux) n'avancent plus : "
+                f"« {pire.label or pire.token} » sans progression depuis "
+                f"{int(depuis.total_seconds() // 3600)} h (phase {pire.phase or '?'}). "
+                f"Tant qu'il reste « en cours », il bloque toute relance de la même "
+                f"tâche et occupe un emplacement du démon.",
+                "Un démon à jour déclare ce travail figé et se relance de lui-même. "
+                "Si ce constat persiste, le démon tourne sur un code antérieur : "
+                "redémarrez-le (python -m fiskr.worker) après avoir mis le code à jour.",
+                "#settings/settings-integrations")
         return _controle("demon", "Socle", "Démon travailleur", OK,
                          "Le démon bat ; les travaux de fond sont pris en charge.")
 

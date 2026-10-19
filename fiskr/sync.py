@@ -1497,6 +1497,14 @@ def _run_list_replacement_sync(
     previous_id = previous.snapshot_id if previous else None
     snap_id = None
     try:
+        # La transaction ouverte par les lectures ci-dessus se TERMINE avant
+        # le telechargement, qui peut durer des minutes : une connexion restee
+        # inactive en transaction est fermee par le serveur de production, et
+        # la synchronisation finissait sur une erreur de base qui masquait la
+        # vraie (DFAT : « server closed the connection unexpectedly » apres neuf
+        # minutes d'un portail muet). La connexion retourne au pool ; la suite
+        # en reprend une verifiee (cf. database.options_postgresql).
+        db.commit()
         logger.info(f"Sync {source}: telechargement de {url}")
         if fetcher is None:
             # Telechargement instrumente (octets recus / taille annoncee) et

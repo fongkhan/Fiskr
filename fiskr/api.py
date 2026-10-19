@@ -7875,6 +7875,13 @@ async def diagnostic_jobs(
             "heartbeat_stale": j.heartbeat_at is None
                 or (now - j.heartbeat_at) > job_queue.STALE_AFTER,
             "running_for_s": _age(j.started_at),
+            # Le battement dit que le PROCESSUS vit, la progression que le
+            # TRAVAIL avance. Ce diagnostic ne montrait que le premier : il a
+            # affiche « heartbeat_stale: false » 26 jours durant pour une
+            # synchronisation figee (cf. jobs.declarer_figes).
+            "progress_age_s": _age(j.progress_at or j.started_at),
+            "progress_stale": (j.progress_at or j.started_at) is not None
+                and (now - (j.progress_at or j.started_at)) > job_queue.stall_after(),
         })
         running.append(row)
     queued = []

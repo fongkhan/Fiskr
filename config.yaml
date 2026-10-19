@@ -68,6 +68,13 @@ jobs:
   # fige), le pool est arrete et le cahier de tests repart en sequentiel au
   # lieu de bloquer la file pour toujours. Minimum 60 s.
   screen_stall_timeout_s: 900
+  # Travail fige : un job « en cours » dont la progression (phase, compteur)
+  # n'a pas bouge depuis ce delai est arrete, sa file liberee, et le demon se
+  # relance pour recuperer l'emplacement que le fil bloque retient. Le
+  # battement de coeur ne suffit pas a le voir : il reste parfait (constate en
+  # production : une synchronisation figee 26 jours, battement frais).
+  stall_after_hours: 6
+  recycle_on_stall: true
   # L'API demarre le demon elle-meme s'il est absent (indispensable en
   # hebergement mutualise Passenger, sans systemd)
   autostart: true
