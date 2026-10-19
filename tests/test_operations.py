@@ -259,7 +259,8 @@ def test_digest_content_and_setting(client):
         db.close()
     for key in ("Alertes ouvertes — criblage", "Alertes ouvertes — filtrage",
                 "Alertes en retard SLA", "Décisions en attente 4-yeux",
-                "Snapshots à homologuer", "Alertes créées (24 h)",
+                "Listes à homologuer", "Retard de la production",
+                "Alertes créées (24 h)",
                 "Alertes clôturées (24 h)", "Dernières synchronisations"):
         assert key in digest, f"cle manquante au digest : {key}"
     assert digest["Alertes ouvertes — criblage"] >= 1

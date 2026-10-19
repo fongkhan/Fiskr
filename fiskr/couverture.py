@@ -56,6 +56,24 @@ def _snapshots_clients(db):
         Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
 
 
+def clients_en_production(db) -> int:
+    """
+    Le nombre de clients du referentiel EN PRODUCTION — la seule definition.
+
+    La mise en service comptait toutes les lignes de la table des clients,
+    panels de cahier de tests compris. Releve en production : « Referentiel
+    clients : 2 500 fiches en base — OK », juste au-dessus de « Couverture du
+    criblage : aucun referentiel clients en production ». Les 2 500 etaient
+    les trois panels de test (1 000 + 1 000 + 500) ; il n'y avait aucun client.
+    Deux controles du meme ecran se contredisaient, et le vert etait faux.
+    """
+    snap_ids = _snapshots_clients(db)
+    if not snap_ids:
+        return 0
+    return int(db.query(ClientEntity.id).filter(
+        ClientEntity.snapshot_id.in_(snap_ids)).count())
+
+
 def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, Any]:
     """
     Combien de clients en production n'ont aucune décision de criblage.

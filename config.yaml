@@ -213,9 +213,17 @@ sync:
   # jeux d'intitules de colonnes sont acceptes.
   canada:
     enabled: false
-    # Le CSV a ete retire (404) : le XML fait foi, et porte en plus les
-    # navires designes avec leur numero OMI.
-    url: "https://www.international.gc.ca/world-monde/assets/office_docs/international_relations-relations_internationales/sanctions/sema-lmes.xml"
+    # Le CSV officiel a ete retire (404), et le XML qui l'a remplace ne porte
+    # AUCUN NOM (mesure le 01/10/2026 : 5 708 enregistrements, quatre balises
+    # mal etiquetees — annexe, numero, code, date). Branche dessus, le produit
+    # lisait zero fiche chaque nuit et la liste etait vide en production.
+    #   "opensanctions" -> jeu ca_dfatd_sema_sanctions (targets.simple.csv),
+    #                      voie par defaut ; licence OpenSanctions requise en
+    #                      usage commercial, comme les autres sources du registre.
+    #   "csv"           -> CSV officiel, si Affaires mondiales Canada le republie.
+    # Une url vide prend le defaut du format ; une url .xml est ignoree.
+    format: "opensanctions"
+    url: ""
   # Liste consolidee australienne (DFAT) - opt-in. Reunit les sanctions
   # onusiennes transposees et les designations autonomes australiennes.
   # L'extension de l'url choisit le lecteur : .csv (natif) ou .xlsx, cette

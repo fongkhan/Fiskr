@@ -115,8 +115,15 @@ def test_stored_delta_served_without_recompute(client, db_session, monkeypatch):
                  previous_snapshot_id=production.snapshot_id)
 
     def _boom(*a, **k):
-        raise AssertionError("calculate_delta ne doit pas etre appele sur le chemin memorise")
-    monkeypatch.setattr(api_module, "calculate_delta", _boom)
+        raise AssertionError("aucun delta ne doit etre recalcule sur le chemin memorise")
+    # api.py n'importe plus `calculate_delta` (import mort, retire) : la garde
+    # vise donc les deux calculs a leur source ET le seul nom encore importe
+    # par l'application. Patcher un attribut absent aurait fait passer le test
+    # pour une raison qui n'a rien a voir avec ce qu'il verifie.
+    import fiskr.delta as delta_module
+    monkeypatch.setattr(delta_module, "calculate_delta", _boom)
+    monkeypatch.setattr(delta_module, "calculate_delta_db", _boom)
+    monkeypatch.setattr(api_module, "calculate_delta_db", _boom)
 
     data = client.get(f"/api/review/snapshots/{pending.snapshot_id}").json()
     assert data["delta_source"] == "stored"

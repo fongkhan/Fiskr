@@ -2095,6 +2095,21 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
     )
 
 
+def parse_canada_opensanctions_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Sanctions autonomes canadiennes (SEMA) agregees par OpenSanctions
+    (`ca_dfatd_sema_sanctions`, format targets.simple.csv). Voie par defaut :
+    le XML officiel ne porte aucun nom (cf. sync.DEFAULT_CANADA_URL). Meme
+    reserve de licence que les autres jeux OpenSanctions.
+    """
+    return parse_opensanctions_simple_csv(
+        file_path,
+        id_prefix="CAN",
+        origin="OpenSanctions SEMA (CA)",
+        designation_reasons="Sanctions autonomes canadiennes (SEMA)",
+    )
+
+
 def parse_seco_opensanctions_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
     """
     Parse le jeu de donnees SECO agrege par OpenSanctions (`ch_seco_sanctions`,

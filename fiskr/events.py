@@ -270,6 +270,17 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_GOVERNANCE, audience=("admin",),
         urgency=DIGEST, link="#settings",
     ),
+    "retention_pieces_en_souffrance": Event(
+        # IMMEDIAT, contrairement a la purge elle-meme : une piece probante
+        # qui n'a pas pu etre archivee, ou un fichier reste sur le disque
+        # alors que la base le dit purge, sont deux situations ou l'inaction
+        # coute — la premiere se rattrape tant que le fichier est la, la
+        # seconde est une donnee qui devait disparaitre et n'a pas disparu.
+        # Les mettre dans un recapitulatif du lendemain les noierait.
+        label="Pièces probantes en souffrance après une purge",
+        category=CATEGORY_GOVERNANCE, audience=("admin",),
+        urgency=IMMEDIATE, link="#settings/settings-retention",
+    ),
     "resource_mining": Event(
         # Une passe qui applique des equivalences elargit le perimetre des
         # alertes : le responsable doit l'apprendre sans avoir a ouvrir l'ecran

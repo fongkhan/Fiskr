@@ -63,6 +63,11 @@ def contexte(monkeypatch):
 
     monkeypatch.setattr(api_module, "watchlist_index", _IndexUnique())
     monkeypatch.setattr(api_module, "watchlist_store", fiches)
+    # Le cache simulé porte aussi son univers : le criblage refuse désormais de
+    # répondre quand aucune liste n'est chargée, et cet univers se dérive du
+    # même corpus que l'index (cf. api.exiger_un_univers).
+    monkeypatch.setattr(api_module, "watchlist_types",
+                        {f["_list_type"] for f in fiches if f.get("_list_type")})
     monkeypatch.setattr(api_module, "watchlist_hash", f"h-{TAG}")
     monkeypatch.setattr(api_module, "_ensure_watchlist_cache", lambda db: None)
 
@@ -278,7 +283,13 @@ def test_aucune_LECTURE_ne_croit_avec_le_nombre_de_hits(contexte, monkeypatch):
         lectures = []
 
         def _ecoute(conn, cursor, statement, params, context, executemany):
-            if " ".join(statement.split()).lower().startswith("select"):
+            requete = " ".join(statement.split()).lower()
+            # Le journal des envois est lu par le fil d'expedition des
+            # notifications, qui tourne EN PARALLELE du criblage : ses lectures
+            # tombaient au hasard dans l'une ou l'autre fenetre de mesure et
+            # rendaient ce test instable (28/29 lectures d'un passage a l'autre,
+            # sur master comme ailleurs). Elles ne sont pas sur le chemin mesure.
+            if requete.startswith("select") and "from notification_deliveries" not in requete:
                 lectures.append(1)
 
         event.listen(Engine, "before_cursor_execute", _ecoute)
@@ -291,6 +302,10 @@ def test_aucune_LECTURE_ne_croit_avec_le_nombre_de_hits(contexte, monkeypatch):
     # Comparaison au-dessus du plafond de notification (10) : en dessous, le
     # nombre de notifications individuelles fait bouger le compte pour une
     # raison qui n'a rien d'un N+1 de criblage.
+    # Passage de chauffe, non compte : equivalences apprises et reglages sont
+    # mis en cache au premier criblage du processus. Sans lui, la PREMIERE
+    # mesure payait ces lectures et l'ordre des mesures decidait du verdict.
+    _compte(fiches[:11], f"C-{TAG}-chauffe")
     avec_11 = _compte(fiches[:11], f"C-{TAG}-a")
     avec_12 = _compte(fiches, f"C-{TAG}-b")
     assert avec_12 <= avec_11, (

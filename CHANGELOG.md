@@ -9,6 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a month-old production behind an all-green screen (production audit, 1 October 2026)
+
+A read-only audit of the production installation, a month after the previous one. Its headline: **every list in production was between 29 and 69 days old** — OFAC 33 days, DGT (the French national freeze register, an autonomous legal obligation) 33, EU 51, OFSI 69 — while each night a newer version arrived in review and stayed there. **639 batches** had piled up, up to 21 for a single list, carrying 7.46 million entity rows: eleven times the whole production. And the commissioning screen was **entirely green**. Every control told the truth about what it looked at — the configuration ("a review is required", "automatic retrieval is on") — and none looked at the result. An asset freeze applies on publication; a referential a month behind is a compliance failure, and it was not saying so.
+
+**Freshness, measured once** (`fiskr/fraicheur.py`). For each list: when its production version dates from, how many newer versions wait, and since when — measured from the *oldest* waiting version, since that is when production stopped being current. A pending batch older than production is a separate kind: obsolete, not late. A new commissioning control reads this measure and goes BLOQUANT beyond a week of lag (ATTENTION beyond 48 h — the time of a review, weekend included), naming the worst lists. The KPI endpoint, the home page (a new "Freshness" tile), the per-list table of the indicators screen and the morning digest all read the same measure; none recomputes it.
+
+**Approval can no longer regress a list, and the queue drains.** Approving the latest version left the older ones in the queue — it never went down, so people stopped reading it — and each of them stayed approvable: approving one afterwards would have silently removed from production everything published since. With 21 stacked batches per list and a bulk approval accepting fifty, "select all, approve" was enough. A batch older than production is now refused with the reason, and approving a version moves the older pending ones of the same list to SUPERSEDED (kept, no longer approvable). In a bulk, both orders now converge on the most recent version. The sidebar badge counts **lists to approve** rather than stacked batches: 29 gestures, where it announced 639.
+
+**A read that yields nothing is a failure, not an empty list.** The Canadian list had been **empty in production since 5 August**. Its URL had moved to XML, its reader had stayed CSV: zero records every night, and the report said "0 records read: content identical to the active list" — zero compared with zero. The first of those empty batches had even been approved. Any sync whose downloaded file yields no record now ends in an explicit ERROR, production untouched, and the commissioning screen names production lists that hold no record. Worse, measured on the file itself: **the official Canadian XML carries no names at all** (5,708 records, four mislabelled tags — schedule, item, a code, a date). Canada therefore gets the SECO pattern: an OpenSanctions route (`ca_dfatd_sema_sanctions`) by default, the official CSV as an option should it return, and an XML URL left in a configuration is ignored rather than failing nightly. Verified against the live sources: **0 → 5,620 records**, and the exact production failure (official XML through the CSV reader) now reports an error instead of "identical".
+
+**The KPIs, checked against raw data.** Volumes agree across endpoints (670,864 entities in both). What did not hold:
+- the average decision delay was **defined three times** — dashboard, per-analyst row and activity report each used a different population; a row could announce "1 decision" with the delay of a reopened alert. One definition now lives in `fiskr/kpi.py`, shared by all three (one existing test pinned the divergence and has been rewritten, saying so);
+- two decisions taken in two minutes displayed "0.0 h" — read as "instantaneous" or "no data". The exact measure in seconds now travels next to the historical rounding, and the screen picks the unit;
+- "Client referential: 2,500 records — OK" was counting **the three test panels**, right above a control saying no referential was in production. Both now read one definition of the production referential.
+
+**Refactoring, deliberately targeted.** The KPI computation left `api.py` for `fiskr/kpi.py` (the endpoint is now one call); freshness and the client referential each have a single definition; dead imports are gone; a dead ternary (`"SUPERSEDED" if False else "DISABLED"`) that logged a replaced anti-false-positive rule as *disabled by hand* is fixed. No large-scale split of `api.py` in this batch: mixing it with behaviour fixes would make both harder to review.
+
+**Ergonomics.** The anti-false-positive rule editor reserved a slot for the rule's change history — the governance record of who wrote, validated or switched off a rule that closes alerts nobody sees — and nothing ever filled it. It is now loaded, with a label for every action actually journalled (a test keeps the two sets equal). A table guard caught an error state whose colspan no longer spanned the widened indicators table.
+
+34 tests pin the batch, in two new files; verified in a real browser (home, indicators, commissioning, rule editor), zero JavaScript errors.
+
+### Fixed — "no match" when there was nothing to match against
+
+The gravest instance of the class so far, because it needs no failure to occur and because what it produces is a **false compliance record**.
+
+With no list in production, the engine finds no candidate and returns "no match". Nothing breaks, nothing alerts: the client walks away with a clean bill, and the screening journal — the piece produced during an inspection — records that they were duly screened. It takes no outage: a fresh installation, a list pulled out of production, or a simple scope restriction naming an absent list is enough.
+
+The existing check was asking the wrong question. `_validate_screening_lists` verifies that a list **name** is known to the product; it says nothing about whether that list is **in production**. The two are different questions, and it is the second that decides what actually gets screened. Restricting the scope to `WATCHLIST_PEP` on an installation that does not carry it returned a serene "0 candidates, no alert" — with an audit-trail line to match.
+
+**The refusal is blunt, on all four paths**: regulatory screening, dry-run screening, ISO 20022 payment filtering, and mass campaigns. Rendering a decision would mean writing a false record, and a false compliance record is worse than no record at all. On the payment path the stake is plainer still: a transfer released as PASS on the strength of a comparison that never happened.
+
+Three decisions shape it. The universe is **derived from the loaded cache** rather than kept by hand — two separately maintained inventories eventually diverge, and the one that lies is always the one being read. The refusal comes **after the quality gate**, so an unusable profile is refused for what it is rather than in the name of the installation's state — otherwise the user corrects the wrong thing. And a campaign checks **once**, up front: `screen_client_profile` would refuse anyway, but row by row, and ten thousand identical refusals would bury the cause in the detail of each client when the defect concerns none of them.
+
+The message says what an answer would have been worth, not just that one is impossible: "impossible" reads as a passing outage and invites a retry. A partially available restriction still goes through — one absent list among present ones does not cancel a screening, the universe is simply rendered as it is.
+
+**One existing test asserted the old behaviour** and has been rewritten. It restricted to a list absent from production and expected "0 candidates, no alert" plus an audit line. Its original intent — that a restriction really does exclude the other lists — is now held honestly, against a PEP list actually placed in production for the test. What replaces the old assertion is the refusal, plus the fact that **no journal line is written at all** for that client.
+
+14 tests pin the batch.
+
+### Fixed — a purge that promised to be reversible, and destroyed the one thing anyone would ask for again
+
+The class hunt continues: *what the product asserts without having checked it*. This one was written in plain words at the top of the retention module — "the purge stays reversible offline" — while the archive held only the **rows** of alert attachments: id, name, path. The file itself went to `os.remove`. Restoring that archive gave back references to destroyed files, which is exactly the state the previous batch made visible on screen. **Evidence does not reconstitute itself.**
+
+The file now travels with its row: it is copied into the purge archive before deletion, under a name carrying the attachment's id — two alerts can both have uploaded "scan.pdf", and the archive must not lose one. The archived row names the copy, so the piece is found rather than guessed at: without that back-reference the archive would hold an original path that no longer designates anything.
+
+**Two opposite situations came out of the same code path, and neither was said out loud.**
+
+When the copy fails, the piece is **still there** and there is a window to act — so the alert is not purged at all. Kept a month longer it will be purged on the next pass; destroyed without a copy, never. Only the alert concerned is spared: one stubborn file must not freeze the whole purge.
+
+When deleting the file fails, the opposite happens: the row goes, the file stays. The database says "purged" while the data is still on disk — the exact reverse of what a retention policy promises, and nothing in the application showed it. The purge does not stop (interrupting would decide in the operator's place, which is this module's stated design), but a dedicated **immediate** notification now names both cases, and the administration journal — the append-only trace read during an audit — carries the count of pieces copied.
+
+Immediate and not digested, deliberately: a piece in limbo can be recovered while the file is still there, and a summary the next morning would drown it. The signal fires **even when nothing was deleted at all** — an alert spared because its evidence could not be copied produces precisely zero deletions, and that is the case where one must speak. And it stays silent on a clean purge: a signal that fires every time is a signal people filter.
+
+12 tests pin the batch, including the case where two attachments share a filename and the one where a spared alert produces no deletion.
+
+### Added — what the product asserts without having checked it
+
+The audit turned up the same defect three times, in three unrelated places: the journal marked "sent" without looking at whether the send succeeded, a control judged the daemon on its pulse rather than on its consequences, and a counter was about to measure a file's decoded size where it is the wire that gets paid for. **This batch hunts the class, not the instance.** Two more catches in the same register.
+
+**A piece of evidence lives in two places at once: a row in the database carrying its name, and a file on disk.** The screens read the row. The download reads the file — and discovered its absence at the moment someone clicked. In a compliance product that moment has a name: the audit. Evidence does not reconstitute itself, so the question has to be asked **cold**, while a backup can still answer it.
+
+`fiskr/preuves.py` inventories the three families of evidence — alert attachments, whitelist justifications, exclusion justifications — comparing what the base *announces* against what is *there*. A new commissioning control raises the count and names the families concerned, never the intact ones: an alarm that lists what is fine is an alarm people stop reading. Its remedy says explicitly not to delete the reference — **erasing the row of a vanished piece would erase the trace that it ever existed**, which is the opposite of the service rendered. And a partial inventory says so rather than announcing "all present" after looking at a third.
+
+Three states, not two, throughout: a piece **present**, a piece **missing**, and a row **with no piece at all**. A declared absence and a broken promise do not read alike, and only the second is a defect. The screens follow: a piece whose file is gone keeps its name — struck through, badged "file not found" — and is no longer offered as a download. The link would hold a promise the click would break, and it would break it on the day of the audit.
+
+One performance decision, carrying a lesson this repository has already paid for. The listed-entities table holds millions of rows and no evidence column is indexed there; the query therefore filters on `excluded IS TRUE` first, which is what the partial index `ix_wl_entities_excluded` covers — the same query without it took 21 to 35 seconds in production to return zero rows. The criterion subtracts nothing: a record carries an exclusion justification only if it is excluded, and both columns are written together.
+
+**Second catch, one layer lower: `smtplib.sendmail` only raises when *every* recipient is refused.** A partial refusal comes back in a dictionary nobody was reading, and the caller concluded "sent". Two addresses out of five refused cannot be written as a successful send in the very record produced to prove someone was warned. The raised error now **names the refused addresses** with the server's own codes — and does not name the ones that were served. The defect is latent on the current installation (measured: 200 rows out of 200 carry a single recipient), which is exactly why it deserved fixing before it stopped being latent.
+
+22 tests pin the batch. Verified in a real browser: a whitelist justification whose file was removed shows struck through with its badge and no link, one that is present keeps its download link, and the commissioning control found the missing piece and named its family. Zero JavaScript errors.
+
 ### Changed — EUR-Lex through the door meant for machines, and a daemon judged on its consequences
 
 Two decisions taken by the operator on the audit's findings, and applied here.
