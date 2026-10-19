@@ -28,7 +28,12 @@ from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.database import get_db, Alert, BatchCampaign, ClientEntity, WhitelistPair
 
-PUTIN_ENTITY_ID = "WL-001"  # seed watchlist.json
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
+PUTIN_ENTITY_ID = "WL-001"  # jeu de démonstration watchlist.json
 CSV = ("client_id,client_type,client_first_name,client_last_name,"
        "client_dob,client_gender,nationality\n"
        "{cid},PP,Vladimir,Putin,1952-10-07,M,RU\n")

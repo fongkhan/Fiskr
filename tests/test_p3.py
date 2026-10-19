@@ -339,6 +339,9 @@ def test_transaction_endpoint_rejects_bad_xml(client):
     assert response.status_code == 400
 
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_transaction_endpoint_pass(client):
     xml = PAIN_001_XML.replace("Igor PETROV", "Zzyzx Qwortan") \
                       .replace("ACME Corp", "Blorptech Vexatron") \

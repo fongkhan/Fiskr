@@ -55,6 +55,9 @@ def test_la_borne_est_celle_que_la_base_sait_stocker():
 
 # ------------------ CRIBLAGE UNITAIRE ------------------
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_un_nom_de_longueur_reelle_passe(client):
     """310 caractères : le plus long nom réel du corpus de production."""
     reponse = client.post("/api/screen", json={
@@ -63,6 +66,9 @@ def test_un_nom_de_longueur_reelle_passe(client):
     assert reponse.status_code == 200, reponse.text
 
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_un_nom_a_la_borne_passe(client):
     reponse = client.post("/api/screen", json={
         "client_id": "C-LONG", "client_type": "PM",

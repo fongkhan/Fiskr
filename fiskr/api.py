@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
 from fiskr import rarete
+from fiskr import univers
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
                             BLOCKING_FIELDS as _BLOCKING_FIELDS)
@@ -169,8 +170,14 @@ watchlist_index: Dict[str, List[Dict[str, Any]]] = {}
 # Index de recherche plein texte de la palette Ctrl+K : (blob normalise, entite).
 # Construit avec le cache — la recherche globale ne touche jamais la base.
 watchlist_search_index: List[Tuple[str, Dict[str, Any]]] = []
-watchlist_version: str = "Database Active Snapshot"
-watchlist_hash: str = "N/A"
+# Reference de l'univers CHARGE dans ce processus (fiskr/univers.py) : version
+# lisible et empreinte, posees par `load_watchlist_cache` avec le cache meme
+# qu'elles decrivent. La version etait une constante (« Database Active
+# Snapshot ») et l'empreinte le hash du seul lot le plus recent : le journal
+# citait le meme univers pour deux criblages qui n'avaient pas compare au meme.
+watchlist_reference = univers.VIDE
+watchlist_version: str = univers.VIDE.version
+watchlist_hash: str = univers.EMPREINTE_VIDE
 # Layout de blocking utilise pour CONSTRUIRE l'index en memoire : les sondes
 # du criblage doivent utiliser le meme (coherence index/sonde garantie)
 watchlist_index_layout: List[str] = ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
@@ -203,35 +210,56 @@ def _valeur_de_cache(valeur):
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
     global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index, watchlist_types
-    
-    # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
-    snapshots = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY"
-    ).order_by(Snapshot.uploaded_at.desc()).all()
+    global watchlist_reference, watchlist_version
+
+    # Ce chargement est aussi celui que declenche l'EPOQUE, dans les processus
+    # qui n'ont pas fait le changement (autres processus web, demon). Or les
+    # capacites du moteur et le reglage des ressources vivent dans des caches
+    # de processus que seul le processus qui recoit le PUT vidait : reproduit,
+    # un demon recharge apres la coupure de `adjust.dob` la voyait toujours
+    # active, et rebatissait son index avec. Les cles de l'index dependent de
+    # ces deux reglages : ils sont relus ICI, avant de batir quoi que ce soit.
+    caps.invalidate_context()
+    resource_tables.invalidate_context()
+    univers.invalider()
+
+    # Les lots READY des types WATCHLIST_* : la definition de l'univers vit
+    # dans fiskr/univers.py, ce chargement la lit.
+    #
+    # Aucun semis. Quand rien n'est en production, ce chargement versait le
+    # fichier de demonstration watchlist.json (5 fiches) dans la base, sous le
+    # type WATCHLIST_OFAC et au statut READY : sur une installation neuve, le
+    # premier criblage rendait NO_MATCH avec une ligne d'audit, la mise en
+    # service affichait « 1 liste en production », et le refus
+    # `exiger_un_univers` ne mordait jamais. Le cache reste desormais VIDE et le
+    # criblage est refuse ; une demonstration est un geste explicite
+    # (python tools/charger_demo.py).
+    snapshots = univers.lots_en_production(db)
 
     if not snapshots:
-        # Fallback: Ingest watchlist.json if it exists to seed the database
-        seed_watchlist_json(db)
-        # Re-fetch
-        snapshots = db.query(Snapshot).filter(
-            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-            Snapshot.status == "READY"
-        ).order_by(Snapshot.uploaded_at.desc()).all()
-        
-    if not snapshots:
+        # Le cache precedent ne decrit plus rien de ce qui est en production :
+        # il est vide, et sa reference avec lui, plutot que garde a cote d'un
+        # univers declare vide.
         logger.warning("No watchlist snapshots found in database to load cache.")
         watchlist_types = set()
+        watchlist_store = []
+        watchlist_index = {}
+        watchlist_search_index = []
+        watchlist_reference = univers.VIDE
+        watchlist_version = univers.VIDE.version
+        watchlist_hash = univers.EMPREINTE_VIDE
+        rarete.installer(None)
         return
-        
-    # Get active watchlist hash
-    active_hash = snapshots[0].file_hash
-    watchlist_hash = active_hash
-    
+
     # Load all entities for these active snapshots (excluded entities stay out
     # of production but are kept in DB for audit; NULL = legacy rows, not excluded)
     snapshot_ids = [s.snapshot_id for s in snapshots]
     snapshot_types = {s.snapshot_id: s.file_type for s in snapshots}
+    # Reference calculee sur les lots MEMES qui vont etre charges, et avant les
+    # fiches : une exclusion posee pendant la lecture laisse une empreinte plus
+    # ancienne que le cache — un rechargement de plus au prochain changement
+    # d'epoque —, jamais un cache plus ancien que l'empreinte qu'il cite.
+    reference = univers.calculer(db, snapshots)
     entities = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True)
@@ -271,6 +299,12 @@ def load_watchlist_cache(db: Session):
     watchlist_index_layout = screening_layout
     watchlist_search_index = temp_search
     watchlist_types = {e["_list_type"] for e in temp_store if e.get("_list_type")}
+    # La reference est posee AVEC l'index qu'elle decrit, jamais avant : un
+    # criblage servi pendant le chargement citerait sinon le nouvel univers en
+    # comparant a l'ancien.
+    watchlist_reference = reference
+    watchlist_version = reference.version
+    watchlist_hash = reference.empreinte
     # Frequence des mots de nom sur le corpus qui vient d'etre charge : c'est
     # la seule fois ou l'on tient l'univers crible en entier, et le compte doit
     # porter sur CE corpus, pas sur un autre. La table est posee dans le
@@ -278,92 +312,6 @@ def load_watchlist_cache(db: Session):
     rarete.installer(rarete.construire(temp_store, "SCREENING", watchlist_hash))
     logger.info(f"Loaded {len(watchlist_store)} active database entities into memory across {len(watchlist_index)} blocking blocks.")
 
-def seed_watchlist_json(db: Session):
-    """Seeds the DB watchlist from watchlist.json if DB is empty."""
-    watchlist_path = PROJECT_ROOT / "watchlist.json"
-    if not watchlist_path.exists():
-        return
-        
-    logger.info("Seeding database watchlist from watchlist.json...")
-    try:
-        with open(watchlist_path, "rb") as f:
-            content = f.read()
-            fhash = hashlib.sha256(content).hexdigest()
-            data = json.loads(content)
-            
-        snap_id = f"seed-snap-{str(uuid.uuid4())[:8]}"
-        snap = Snapshot(
-            snapshot_id=snap_id,
-            file_type="WATCHLIST_OFAC",
-            file_name="watchlist.json",
-            file_hash=fhash,
-            record_count=len(data),
-            status="READY"
-        )
-        db.add(snap)
-        
-        for idx, item in enumerate(data):
-            entity_id = item.get("entity_id") or f"WL-SEED-{idx}"
-            
-            # Map parsed fields
-            parsed = item.get("individual_name_parsed") or {}
-            aliases = item.get("aliases") or []
-            if not isinstance(aliases, dict):
-                # Classify aliases dynamically
-                from fiskr.ingest import categorize_aliases
-                raw_aliases = [{"name": a, "type": "Strong"} for a in aliases if a]
-                aliases = categorize_aliases(raw_aliases)
-                
-            countries = item.get("countries") or {}
-            
-            # Create checksum
-            ent_checksum = compute_checksum(item)
-            
-            raw_etype = item.get("entity_type", "I")
-            etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
-            
-            alt_addrs = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
-            
-            db_ent = WatchlistEntity(
-                snapshot_id=snap_id,
-                entity_id=entity_id,
-                entity_type=etype,
-                primary_name=item.get("primary_name", ""),
-                individual_name_parsed=parsed,
-                aliases=aliases,
-                dates_of_birth=item.get("dates_of_birth", []),
-                date_of_death=item.get("date_of_death"),
-                is_deceased=str(item.get("is_deceased", "False")).lower() == "true",
-                gender=item.get("gender") or (item.get("genders", ["U"])[0] if item.get("genders") else "U"),
-                countries=countries,
-                # New fields
-                place_of_birth=item.get("place_of_birth"),
-                address=item.get("address") or item.get("adress"),
-                city=item.get("city"),
-                state=item.get("state"),
-                country=item.get("country"),
-                origin=item.get("origin"),
-                designation=item.get("designation"),
-                designation_reasons=item.get("designation_reasons"),
-                additional_informations=item.get("additional_informations") or item.get("additional_info"),
-                alternative_addresses=alt_addrs,
-                imo_number=item.get("imo_number"),
-                aircraft_tail_number=item.get("aircraft_tail_number"),
-                lei_number=item.get("lei_number"),
-                national_registry_ids=item.get("national_registry_ids"),
-                other_registration_ids=item.get("other_registration_ids"),
-                passport_documents=item.get("passport_documents"),
-                national_id_documents=item.get("national_id_documents"),
-                other_id_documents=item.get("other_id_documents"),
-                entity_checksum=ent_checksum
-            )
-            db.add(db_ent)
-            
-        db.commit()
-        logger.info("Successfully seeded database watchlist snapshot.")
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to seed watchlist from JSON: {e}")
 
 # Executeurs de sync par source (planification cron individuelle)
 _SYNC_RUNNERS = {
@@ -841,6 +789,11 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
                         f"{real_count} fiche(s) réellement présentes."),
             )
         db.commit()
+        if any(s.status == "READY" and s.file_type in WATCHLIST_FILE_TYPES for s in stuck):
+            # Une liste vient d'entrer en production. Le demon, qui porte cette
+            # reparation, ne peut pas toucher la memoire des processus web :
+            # seule l'epoque leur dit de recharger — et de changer d'empreinte.
+            bump_watchlist_epoch(db)
         logger.warning(
             f"Snapshots réparés au démarrage : {summary['repaired']} remis en production, "
             f"{summary['failed']} marqués en erreur (aucune fiche)."
@@ -5385,20 +5338,20 @@ async def delete_relationship(
 
 def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
     """
-    Hash et volume du referentiel EN PRODUCTION, lus en base.
+    Empreinte, composition et volume du referentiel EN PRODUCTION, lus en base.
 
-    Meme regle que le cache moteur (`load_watchlist_cache`) : les snapshots
-    READY de type WATCHLIST_*, le plus recent donnant le hash opposable.
-    Deux requetes bornees, servies par les index de consultation.
+    Meme definition que le cache moteur et le journal d'audit
+    (fiskr/univers.py). Ce badge publiait le hash du lot le plus recent — une
+    empreinte pour 39 listes, qui ne bougeait ni quand on homologuait un autre
+    lot, ni quand on excluait ou corrigeait une fiche.
     """
-    snapshots = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY",
-    ).order_by(Snapshot.uploaded_at.desc()).all()
-    if not snapshots:
+    snapshots = univers.lots_en_production(db)
+    reference = univers.calculer(db, snapshots)
+    if reference.vide:
         # Aucun referentiel en production : le badge affiche son etat vide
         # (« NONE »), jamais un hash inventé.
-        return {"version": watchlist_version, "hash": None, "count": 0}
+        return {"version": reference.version, "hash": None, "count": 0,
+                "composition": []}
     # Meme univers que la consultation paginee (snapshots READY de type
     # WATCHLIST_*, fiches non exclues), donc meme chiffre et meme memorisation :
     # ce badge est charge a CHAQUE ouverture de page, et ce COUNT porte sur
@@ -5407,7 +5360,9 @@ def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
         WatchlistEntity.snapshot_id.in_([s.snapshot_id for s in snapshots]),
         WatchlistEntity.excluded.isnot(True),
     ))
-    return {"version": watchlist_version, "hash": snapshots[0].file_hash, "count": int(count)}
+    return {"version": reference.version, "hash": reference.empreinte, "count": int(count),
+            "composition": [{"file_type": t, "snapshot_id": s}
+                            for t, s in reference.composition]}
 
 
 @app.get("/api/watchlist/summary")
@@ -6523,6 +6478,7 @@ def _audit_row(r: AuditTrail, *, details: bool) -> Dict[str, Any]:
     if details:
         row["decision_tree"] = r.decision_tree
         row["config_state"] = r.config_state
+        row["watchlist_composition"] = r.watchlist_composition
     return row
 
 
@@ -8718,6 +8674,13 @@ async def update_engine_settings(
         # rebatir aussi. L'epoque est le seul canal qui les previent.
         _refresh_production_cache(db)
         reloaded = True
+    elif delta:
+        # Canal FILTERING : l'index de criblage n'en depend pas, celui du
+        # filtrage se rebatit seul (sa signature porte les capacites du canal).
+        # Mais l'invalidation ci-dessus ne vaut que pour CE processus : sans
+        # epoque, les autres processus web filtraient indefiniment avec les
+        # capacites d'avant. L'epoque leur fait relire le reglage.
+        bump_watchlist_epoch(db)
 
     log_admin_action(
         db, param_user["username"], "ENGINE_UPDATED", target=f"engine:{payload.channel}",
@@ -13419,7 +13382,9 @@ document de travail issu du journal d'audit immuable (audit #{alert.audit_id}).<
 {field("Score de base", tree.get("base_score"))}
 {field("Hard match", "Oui — " + str(tree.get("hard_match_details", "")) if tree.get("hard_match_triggered") else "Non")}
 {field("Seuil appliqué", tree.get("cut_off_applied"))}
-{field("Version de watchlist", audit.watchlist_version if audit else None)}
+{field("Version de watchlist", univers.version_citee(audit.watchlist_version) if audit else None)}
+{field("Empreinte de l'univers criblé", audit.watchlist_hash if audit else None)}
+{field("Listes en production", univers.composition_citee(audit.watchlist_composition) if audit else None)}
 {adj_rows}
 {field("Règle anti-FP appliquée", f"{fp_rule.get('name')} (v{fp_rule.get('version')})" if fp_rule else None)}
 </table>

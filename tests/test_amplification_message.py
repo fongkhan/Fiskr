@@ -73,6 +73,9 @@ def test_exactement_a_la_borne_le_message_est_accepte():
     assert not isinstance(exc.value, MessageTropVolumineux)
 
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_l_endpoint_refuse_en_413_et_pas_en_500():
     """Un 500 laisserait croire à un défaut du serveur : c'est le message
     qui est hors limites, et l'opérateur peut agir."""

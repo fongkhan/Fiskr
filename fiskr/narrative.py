@@ -74,7 +74,11 @@ def compose_deterministic_narrative(alert, audit, events: List[Any]) -> str:
         f"avec un score final de {alert.final_score:.1f} %."
     )
     if audit is not None and audit.watchlist_version:
-        lines.append(f"Version des listes au moment de la décision : {audit.watchlist_version}.")
+        from fiskr import univers
+        lines.append(f"Version des listes au moment de la décision : "
+                     f"{univers.version_citee(audit.watchlist_version)}.")
+        lines.append(f"Listes en production au moment de la décision : "
+                     f"{univers.composition_citee(getattr(audit, 'watchlist_composition', None))}.")
 
     # --- Analyse du matching ---
     lines.append("")

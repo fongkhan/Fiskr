@@ -53,25 +53,39 @@ def test_production_watchlist_reference_reads_the_database():
     Le re-criblage tourne desormais dans le demon, qui ne voit pas le cache
     memoire du processus API : la reference tracee au journal d'audit
     immuable doit etre derivee de la base, pas des globales d'api.py.
+
+    Reecrit avec la reference d'univers (fiskr/univers.py). Ce test epinglait
+    le defaut : il exigeait la version constante « Database Active Snapshot »
+    et, pour empreinte, le hash du snapshot READY le plus recent — une
+    empreinte qui ne bougeait pas quand on homologuait un autre lot. Son
+    intention (la base fait foi, pas la memoire d'api.py) est conservee ; ce
+    qu'il exige maintenant, c'est l'empreinte de TOUS les lots en production.
     """
+    from fiskr import univers
+
     db = next(get_db())
     marker = f"test_worker_{uuid.uuid4().hex[:8]}"
     snap = Snapshot(
         snapshot_id=str(uuid.uuid4()), file_type="WATCHLIST_EU",
         file_name=f"{marker}.csv", file_hash=f"hash_{marker}",
         status="READY", record_count=1,
-        # Le plus recent des snapshots READY : date volontairement future
         uploaded_at=datetime.utcnow() + timedelta(days=1),
     )
     db.add(snap)
     db.commit()
+    # Une liste entre en production : l'epoque le dit, comme pour tout geste
+    # reel (la reference lue en base est memorisee par epoque).
+    bump_watchlist_epoch(db)
     try:
-        version, file_hash = production_watchlist_reference(db)
-        assert version == "Database Active Snapshot"
-        assert file_hash == f"hash_{marker}"
+        version, empreinte = production_watchlist_reference(db)
+        attendue = univers.calculer(db)
+        assert empreinte == attendue.empreinte != f"hash_{marker}"
+        assert version == attendue.version != univers.VERSION_HISTORIQUE
+        assert ("WATCHLIST_EU", snap.snapshot_id) in attendue.composition
     finally:
         db.query(Snapshot).filter(Snapshot.snapshot_id == snap.snapshot_id).delete()
         db.commit()
+        bump_watchlist_epoch(db)
         db.close()
 
 

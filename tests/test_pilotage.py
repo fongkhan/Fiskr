@@ -22,6 +22,11 @@ from fiskr.database import get_db, Alert, AlertEvent, AuditTrail, AdminAuditLog,
 from fiskr.retention import run_retention, ARCHIVE_DIR
 from fiskr.settings import SETTING_RETENTION, SETTING_ALERT_FOUR_EYES, SETTING_DIGEST
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 
 def _override_user(username: str, role: str = "user"):
     app.dependency_overrides[get_current_user] = lambda: {

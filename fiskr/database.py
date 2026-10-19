@@ -240,6 +240,12 @@ class AuditTrail(Base):
     config_state = Column(JSON, nullable=False)
     watchlist_version = Column(String(50), nullable=False)
     watchlist_hash = Column(String(64), nullable=False)
+    # Composition de l'univers crible : [[type de liste, lot], ...] des lots en
+    # production au moment de la decision (fiskr/univers.py). L'empreinte dit
+    # SI deux decisions ont compare au meme univers ; la composition dit
+    # LEQUEL, sans avoir a reconstituer l'historique des homologations.
+    # NULL sur les lignes anterieures (journal immuable, jamais reecrit).
+    watchlist_composition = Column(JSON, nullable=True)
     # Type de liste d'origine du liste (WATCHLIST_OFAC, WATCHLIST_UN...) —
     # NULL sur les enregistrements anterieurs a l'ajout (journal immuable,
     # jamais reecrit) et sur les decisions sans candidat
@@ -327,19 +333,18 @@ WATCHLIST_FILE_TYPES = [
 
 def production_watchlist_reference(db) -> tuple:
     """
-    (version, empreinte) des listes EN PRODUCTION, derivees de la base.
+    (version, empreinte) de l'univers EN PRODUCTION, derivees de la base.
 
-    Miroir exact de ce que `load_watchlist_cache` pose dans le processus API
-    (version constante, empreinte = hash du snapshot READY le plus recent).
     Le re-criblage execute dans le demon travailleur trace cette reference au
     journal d'audit : il ne peut pas lire le cache memoire d'un autre
-    processus, et un audit portant « N/A » serait faux.
+    processus, et un audit portant « N/A » serait faux. La definition vit dans
+    fiskr/univers.py — elle etait recopiee ici, et la copie avait herite du
+    defaut de l'original : une version constante et le hash du seul lot le
+    plus recent.
     """
-    snap = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY",
-    ).order_by(Snapshot.uploaded_at.desc()).first()
-    return "Database Active Snapshot", (snap.file_hash if snap else "N/A")
+    from fiskr import univers
+    reference = univers.reference_en_production(db)
+    return reference.version, reference.empreinte
 
 
 JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "ERROR", "CANCELLED")
@@ -1473,6 +1478,7 @@ def init_db():
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),
+                ("watchlist_composition", "JSON"),
             ],
             "whitelist_pairs": [
                 ("list_type", "VARCHAR(30)"),
@@ -1602,6 +1608,19 @@ def get_db():
     finally:
         db.close()
 
+def _composition_de(wl_hash: str):
+    """
+    Composition de l'univers d'empreinte `wl_hash`, relue depuis l'empreinte
+    meme qui va etre ecrite — jamais transportee a cote par l'appelant : deux
+    valeurs passees separement finissent par decrire deux univers. None quand
+    ce processus ne connait pas cette empreinte (appelant qui ne crible pas
+    contre l'univers en production : la composition n'est pas inventee).
+    """
+    from fiskr import univers
+    reference = univers.connue(wl_hash)
+    return reference.composition_journal() if reference is not None else None
+
+
 def log_compliance_decision(
     db,
     client: dict,
@@ -1636,6 +1655,7 @@ def log_compliance_decision(
         config_state=config_audit,
         watchlist_version=wl_version,
         watchlist_hash=wl_hash,
+        watchlist_composition=_composition_de(wl_hash),
         list_type=watchlist_entry.get("_list_type")
     )
     db.add(db_entry)
@@ -1667,6 +1687,7 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
         cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
     client_ref = client.get("entity_id") or client.get("client_id")
+    composition = _composition_de(wl_hash)
 
     lignes = []
     for watchlist_entry, scoring_result in decisions:
@@ -1683,6 +1704,7 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
             config_state=config_audit,
             watchlist_version=wl_version,
             watchlist_hash=wl_hash,
+            watchlist_composition=composition,
             list_type=watchlist_entry.get("_list_type"),
         ))
     db.add_all(lignes)

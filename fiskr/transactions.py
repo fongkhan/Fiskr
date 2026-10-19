@@ -328,11 +328,18 @@ def _filtering_index(entities: List[Dict[str, Any]], filtering_cfg: Dict[str, An
 # d'aplatissement — dix-neuf secondes payees dans la requete HTTP, sur le canal
 # dont l'exigence premiere est le temps de reponse.
 #
-# La signature couvre TOUT ce qui change les cles : l'empreinte des listes en
-# production, le layout du canal, les capacites du moteur (translitteration,
+# La signature couvre TOUT ce qui change les cles : l'empreinte de l'univers
+# en production, le layout du canal, les capacites du moteur (translitteration,
 # phonetique) et les equivalences linguistiques actives. La restriction de
 # listes n'y figure PAS : elle s'applique a la selection des candidats, pas a
 # la construction de l'index.
+#
+# L'empreinte est celle de fiskr/univers.py : tous les lots en production,
+# leurs exclusions et le journal des corrections. Elle etait le hash du SEUL
+# lot depose le plus recemment — reproduit : une DGT deposee a T+1h,
+# homologuee apres une OFAC deposee a T+2h, ne changeait pas la signature ;
+# l'index n'etait pas reconstruit, et un paiement a la personne qu'elle
+# designait passait en PASS, zero candidat.
 _CACHE_INDEX_FILTRAGE: Dict[str, Any] = {"signature": None, "index": None}
 _VERROU_INDEX_FILTRAGE = threading.Lock()
 

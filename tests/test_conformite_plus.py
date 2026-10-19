@@ -297,6 +297,9 @@ def test_hook_screening_with_api_key_and_idempotency(client):
         app.dependency_overrides[get_current_user] = saved_override
 
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_hook_hmac_signature_enforced(client, monkeypatch):
     tag = uuid.uuid4().hex[:6]
     full_key = _create_api_key(client)

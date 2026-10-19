@@ -89,21 +89,30 @@ def test_summary_reads_the_database_not_the_process_memory(ctx, cache_vide):
     assert data["count"] > 0, "le referentiel n'est pas vide en base"
 
 
-def test_summary_hash_is_the_latest_ready_snapshot(ctx, cache_vide):
-    """Meme regle que le cache moteur : le snapshot READY le plus recent."""
+def test_summary_hash_is_the_universe_fingerprint(ctx, cache_vide):
+    """
+    Meme definition que le cache moteur et le journal d'audit : l'empreinte de
+    l'univers en production (fiskr/univers.py).
+
+    Reecrit : ce test exigeait le hash du snapshot READY le plus recent —
+    « meme regle que le cache moteur », qui avait le meme defaut. Une empreinte
+    pour toutes les listes, qui ne bougeait ni a l'homologation d'un autre lot,
+    ni a une exclusion, ni a une correction de fiche.
+    """
+    from fiskr import univers
     db = ctx["db"]
-    attendu = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(api.WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY",
-    ).order_by(Snapshot.uploaded_at.desc()).first()
+    attendu = univers.calculer(db)
     data = ctx["client"].get("/api/watchlist/summary").json()
-    assert data["hash"] == attendu.file_hash
+    assert data["hash"] == attendu.empreinte
+    assert {"file_type": "WATCHLIST_DGT", "snapshot_id": SNAP} in data["composition"]
 
 
 def test_summary_never_invents_a_hash_without_production(ctx, cache_vide, monkeypatch):
     """Sans referentiel en production, le badge affiche son etat vide (le
     frontal rend « NONE ») — jamais un hash fabrique."""
-    monkeypatch.setattr(api, "WATCHLIST_FILE_TYPES", ["WATCHLIST_TYPE_INEXISTANT"])
+    from fiskr import univers
+    # Le perimetre des lots en production se lit dans fiskr/univers.py.
+    monkeypatch.setattr(univers, "_types_de_listes", lambda: ["WATCHLIST_TYPE_INEXISTANT"])
     data = ctx["client"].get("/api/watchlist/summary").json()
     assert data["hash"] is None and data["count"] == 0
 

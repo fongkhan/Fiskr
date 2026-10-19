@@ -21,6 +21,11 @@ from fiskr.transactions import parse_iso20022_payment, screen_payment_message
 from fiskr.blocking import generate_blocking_keys
 from fiskr.config import config
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 
 def _override_user(username: str, role: str):
     app.dependency_overrides[get_current_user] = lambda: {

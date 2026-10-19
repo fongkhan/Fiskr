@@ -341,6 +341,17 @@ def _fraicheur_des_listes(db) -> Dict[str, Any]:
     """
     from fiskr.fraicheur import mesurer, phrase_de_retard
     etat = mesurer(db)
+    if not etat["listes_en_production"]:
+        # Rien a dater. « Chaque liste en production est la derniere version »
+        # est vrai de zero liste : c'est le vert qu'affichait une installation
+        # neuve. Le controle « Listes en production » porte deja le bloquant ;
+        # celui-ci ne le repete pas, il cesse seulement d'affirmer.
+        return _controle(
+            "fraicheur", "Listes", "Fraîcheur des listes", A_FAIRE,
+            "Aucune liste en production : rien à dater.",
+            "La fraîcheur se mesure dès qu'une liste est en production (voir "
+            "« Listes en production »).",
+            "#watchlist-mgmt/watchlist-review")
     if not etat["listes_en_retard"]:
         perimes = etat["lots_perimes"]
         return _controle(

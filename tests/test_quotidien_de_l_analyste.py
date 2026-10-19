@@ -161,6 +161,9 @@ def client_en_production():
     db.close()
 
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_un_client_du_referentiel_se_recrible_a_la_demande(client, client_en_production):
     _connecte("user")
     reponse = client.post(f"/api/clients/{client_en_production}/screen")

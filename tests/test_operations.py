@@ -19,6 +19,11 @@ from fiskr.auth import get_current_user, totp_code, verify_totp, generate_totp_s
 from fiskr.database import get_db, User, Alert, AlertEvent, AdminAuditLog, AppSetting
 from fiskr.settings import digest_settings, SETTING_DIGEST
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 STRONG_PW = "OperationsFort2026"
 
 

@@ -109,6 +109,9 @@ def test_assess_endpoint(client):
 
 # ------------------ ENRICHISSEMENT DU CRIBLAGE (sans impact moteur) ------------------
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_screen_result_carries_country_risk_without_touching_score(client):
     # Un profil neutre rattaché à l'Iran : aucun nom listé, mais risque
     # géographique signalé — le score reste NO_MATCH (le moteur n'est pas touché).

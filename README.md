@@ -273,6 +273,7 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
 * **Vérification rapide d'un nom** (`GET /api/screen/preview`) : criblage flou d'un nom saisi à la volée avec le **même moteur** que la production (blocking, translittération, phonétique, ajustements, seuils par liste) mais **strictement en lecture** — aucune ligne d'audit, aucune alerte. Le contrôle d'appoint (levée de doute, entrée en relation) qui manquait à côté du criblage réglementaire tracé (`POST /api/screen`). Méthode GET, donc accessible à l'auditeur. Sans pays fourni, la recherche balaie toutes les partitions pays pour ne rater aucune fiche ; la lentille GAFI est réutilisée.
 * **Risque géographique GAFI/FATF** (`fiskr/country_risk.py`, `GET /api/country-risk`) : lentille **complémentaire** au criblage par nom — signale les clients et parties de paiement rattachés à une juridiction sous **appel à l'action** (contre-mesures : Iran, Corée du Nord, Myanmar) ou sous **surveillance renforcée** (grey list, 22 juridictions au 19 juin 2026), qu'un nom soit listé ou non. **Hors du moteur de score** : n'altère ni score, ni verdict, ni `decision_tree`. Référentiel daté (`as_of`) **surchargeable à chaud** via le bloc `country_risk` de `config.yaml` — les révisions du GAFI (~3×/an) n'exigent aucun redéploiement.
 * **Filtrage transactionnel ISO 20022** : criblage de toutes les parties d'un message `pain.001` / `pacs.008`, verdict `PASS`/`HIT`, audit + alertes.
+* **Contre quoi chaque décision a été rendue** (`fiskr/univers.py`) : chaque ligne du journal d'audit porte l'**empreinte de l'univers criblé** — tous les lots en production (type, lot, hash du fichier, nombre de fiches), leurs fiches exclues et le dernier identifiant du journal des corrections de fiches — et sa **composition** (`watchlist_composition` : les couples type × lot en production). La version (« Univers 3fa9c2e1b4d0 (39 lots) ») en dérive. Une seule définition, que lisent le journal, l'index de filtrage ISO 20022, la table de rareté, le rapport d'alerte imprimable, le narratif et le badge « Hash actif » (`GET /api/watchlist/summary`, qui rend aussi la composition). Homologuer un lot qui n'est pas le dernier déposé, exclure ou corriger une fiche change l'empreinte. Les décisions antérieures gardent ce qu'elles portent ; une pièce qui les cite précise que leur libellé constant « Database Active Snapshot » ne désignait pas l'univers criblé.
 * **Pilotage** : KPI conformité (`GET /api/kpi`) — taux de faux positifs, délais de décision, volumétrie, synchronisations, **séries temporelles 30 jours**, ventilation par analyste et par liste, efficacité des règles anti-faux positifs.
 
 * **Case management** : priorité explicite par alerte (CRITIQUE sur hard match, modifiable et journalisée), **échéances SLA** par priorité (réglage à chaud, badge « ⏰ En retard »), pièces jointes justificatives, **rapport d'alerte imprimable** (`GET /api/alerts/{id}/report`, prêt ACPR/FED).
@@ -538,6 +539,10 @@ Processus API (×N, Passenger/uvicorn)      Démon travailleur (×1, verrou floc
   base et chaque processus API recharge son cache local (vérification toutes
   les 5 s). Plusieurs processus API sont donc **sûrs** — la restriction
   historique à un seul worker ne s'applique qu'au mode dégradé `thread`.
+  Ce rechargement relit aussi les **capacités du moteur** et l'activation des
+  ressources linguistiques avant de rebâtir l'index : une capacité coupée
+  depuis un processus atteint les autres, sur les deux canaux (criblage et
+  filtrage incrémentent l'époque).
 
 Réglages (`config.yaml`, section `jobs:` — lus au démarrage du processus) :
 
@@ -715,6 +720,17 @@ Ouvrez votre navigateur sur : **`http://127.0.0.1:8000/`**
 > théorique — elle a été constatée en production, sur un SMTP correctement
 > déclaré dont chaque envoi tombait en délai dépassé.
 
+> **Démonstration : un geste explicite.** Une base vide reste vide : aucune
+> liste n'entre en production d'elle-même, et le criblage est refusé (409)
+> tant qu'aucune ne l'est. Pour une installation de démonstration,
+> `python tools/charger_demo.py` pose le jeu `watchlist.json` (cinq fiches,
+> lot `demo-watchlist-…`, type `WATCHLIST_OFAC` par défaut, `--type` pour un
+> autre) ; l'outil refuse de s'ajouter à des listes déjà en production
+> (`--force` pour passer outre) et `--retirer` enlève ses lots. Ce jeu entrait
+> autrefois tout seul en production, sous le type OFAC, dès qu'aucune liste
+> n'était READY — et la mise en service affichait alors « 1 liste en
+> production ».
+
 Le dashboard interactif se compose de 7 onglets principaux :
 * **Gestion des Watchlists** : **Consultation en direct de la base de données des listés** (`GET /api/watchlist/db` — recherche **sur n'importe quel champ** via le sélecteur de champ (`search_field` : alias, pays, adresses, documents, référence officielle… ou « tout champ »), **tolérante aux fautes de frappe** (repli fuzzy Jaro-Winkler classé par similarité, uniquement quand la recherche exacte ne donne rien), filtres par liste et par statut, pagination côté serveur ; y compris hors production : snapshots en attente d'homologation, remplacés, rejetés et entités exclues), fenêtre de détails des 26 attributs AML, **édition contrôlée des fiches en production** (`PATCH /api/watchlist/entity/{id}`, réservée aux rôles reviewer/admin) avec **journal des modifications** immuable (qui, quand, avant → après, consultable dans la fiche) et **référence officielle datée** (extraite des sources UE/ONU/DGT/OFSI ; sa date de mise à jour peut être ramenée à la date du jour lors d'un patch), **import de fichiers** (sous-onglet dédié), **Snapshots & Comparateur** (Delta Engine, filtre par liste), sources automatiques, **mode homologation** et ajouts manuels via formulaire adaptatif.
 * **Criblage** : Crible temps réel unitaire (Sandbox avec champs s'adaptant au type de tiers), crible de masse (simulateur batch) et **filtrage transactionnel ISO 20022** (messages `pain.001` / `pacs.008`). Les trois acceptent un **périmètre de listes restreint** (`screening_lists`, défaut toutes — toute restriction est tracée dans l'audit) ; un criblage en alerte affiche un **lien direct « Instruire l'alerte »**.
@@ -729,7 +745,7 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète — **1 862 fonctions de test** réparties sur 179
+Exécutez la suite complète — **1 873 fonctions de test** réparties sur 180
 fichiers — avec pytest :
 ```bash
 python -m pytest

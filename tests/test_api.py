@@ -3,6 +3,11 @@ from fastapi.testclient import TestClient
 from fiskr.api import app
 from fiskr.auth import get_current_user
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 
 
 @pytest.fixture
@@ -28,7 +33,7 @@ def test_get_watchlist(client):
     assert "hash" in data
 
 def test_screen_valid_client(client):
-    # Screen Vladimir Putin - should trigger an alert against WL-001 (seeded watchlist item)
+    # Screen Vladimir Putin - should trigger an alert against WL-001 (jeu de démonstration)
     payload = {
         "client_id": "CUST-0091",
         "client_type": "PP",

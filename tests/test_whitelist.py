@@ -16,7 +16,12 @@ from fiskr.settings import (
     SETTING_WHITELIST_JUSTIFICATION_REQUIRED, SETTING_WHITELIST_FILE_REQUIRED
 )
 
-PUTIN_ENTITY_ID = "WL-001"  # watchlist.json seed
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
+PUTIN_ENTITY_ID = "WL-001"  # jeu de démonstration watchlist.json
 
 
 def _override_user(username: str, role: str):
