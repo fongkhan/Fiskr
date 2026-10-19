@@ -45,7 +45,10 @@ def _cleanup_db():
         if aids:
             db.query(AlertEvent).filter(AlertEvent.alert_id.in_(aids)).delete(synchronize_session=False)
             db.query(Alert).filter(Alert.id.in_(aids)).delete(synchronize_session=False)
-        db.query(HookDelivery).filter(HookDelivery.idempotency_key.like("test_cfp_%")).delete(synchronize_session=False)
+        # Par appelant : la cle d'idempotence n'est plus stockee en clair
+        # (empreinte de appelant + point d'entree + cle), un prefixe de test
+        # ne la retrouverait plus.
+        db.query(HookDelivery).filter(HookDelivery.caller.like("apikey:test_cfp_%")).delete(synchronize_session=False)
         keys = db.query(ApiKey).filter(ApiKey.name.like("test_cfp_%")).all()
         for k in keys:
             db.delete(k)

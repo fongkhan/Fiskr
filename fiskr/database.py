@@ -1177,6 +1177,13 @@ class HookDelivery(Base):
     l'identique en cas de retransmission (retries reseau de l'appelant).
     Table auto-nettoyee : les livraisons de plus de 90 jours sont purgees
     opportunistement a chaque appel de webhook.
+
+    `idempotency_key` ne stocke plus la cle telle que l'appelant l'a choisie,
+    mais « sha256:<empreinte de (appelant, point d'entree, cle)> » : la cle
+    etait cherchee dans toute la table, si bien que la cle « 42 » d'un SI
+    rejouait a un AUTRE SI le criblage d'un autre client (cf.
+    api._hook_idempotency_replay). Les lignes anterieures gardent leur cle
+    brute : aucune recherche ne peut plus les atteindre.
     """
     __tablename__ = "hook_deliveries"
 
@@ -1187,6 +1194,14 @@ class HookDelivery(Base):
     status_code = Column(Integer, nullable=False, default=200)
     response_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Empreinte SHA-256 du corps de la requete d'origine. Une cle ne rejoue
+    # que SA requete : un autre corps sous la meme cle est refuse (422), il ne
+    # recoit pas la reponse d'une autre. NULL : livraison anterieure a la
+    # mesure, ou trace sans cle (`auto:`).
+    request_sha256 = Column(String(64), nullable=True)
+    # Rejeu : id de la livraison d'origine dont la reponse a ete renvoyee. Une
+    # retransmission est un appel recu, la supervision doit la compter.
+    replay_of = Column(Integer, nullable=True)
 
 
 import secrets

@@ -161,15 +161,26 @@ def test_screening_never_clears_a_listed_party_on_an_empty_cache(ctx, cache_vide
 def test_screening_endpoints_all_guarantee_their_cache():
     """Garde-fou de regression : tout endpoint qui crible doit s'assurer du
     cache. Controle sur l'arbre syntaxique — une mention en commentaire ne
-    compte pas, seul un APPEL compte."""
+    compte pas, seul un APPEL compte.
+
+    Reecrit avec le partage du chemin de fraicheur : la garantie vit
+    desormais dans `cribler_un_profil` / `cribler_la_requete`, que les routes
+    appellent. Un appel compte donc s'il atteint `_ensure_watchlist_cache`
+    directement OU par une fonction qui y mene (fermeture calculee sur le
+    module, pas une liste de noms). Les webhooks entrent dans la liste des
+    routes criblantes : le criblage temps reel par webhook n'y figurait pas, et
+    c'est precisement lui qui criblait sans garantir son cache."""
     import ast
     import inspect as _inspect
 
     arbre = ast.parse(_inspect.getsource(api).lstrip())
     routes = {}
+    appels_de = {}
     for noeud in ast.walk(arbre):
         if not isinstance(noeud, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        appels_de[noeud.name] = {n.func.id for n in ast.walk(noeud)
+                                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         chemins = [
             d.args[0].value for d in noeud.decorator_list
             if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
@@ -179,12 +190,19 @@ def test_screening_endpoints_all_guarantee_their_cache():
         for chemin in chemins:
             routes[chemin] = noeud
 
-    criblants = ["/api/screen", "/api/screen/preview", "/api/transactions/screen"]
+    garants = {"_ensure_watchlist_cache"}
+    while True:
+        plus = {nom for nom, appels in appels_de.items() if appels & garants} - garants
+        if not plus:
+            break
+        garants |= plus
+
+    criblants = ["/api/screen", "/api/screen/preview", "/api/transactions/screen",
+                 "/api/hooks/screening", "/api/hooks/client-upsert",
+                 "/api/clients/{client_id}/screen"]
     for chemin in criblants:
         noeud = routes.get(chemin)
         assert noeud is not None, f"route {chemin} introuvable"
-        appels = {n.func.id for n in ast.walk(noeud)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "_ensure_watchlist_cache" in appels, (
+        assert noeud.name in garants, (
             f"{chemin} crible sans garantir son cache : sur un index vide il "
             f"rend NO_MATCH silencieusement")

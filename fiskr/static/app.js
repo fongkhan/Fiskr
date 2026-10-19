@@ -11268,12 +11268,18 @@ async function fetchHookStats() {
  const recent = (data.recent || []).map(r => {
  const code = r.status_code || 0;
  const codeColor = code >= 400 ? "var(--color-alert)" : "var(--color-safe, #22c55e)";
+ // Un refus est tracé sans sa clé (rien à rejouer) : « sans clé » y
+ // affirmerait une absence d'en-tête que la trace ne connaît pas.
  return `<tr>
  <td>${r.created_at ? formatDateTime(r.created_at) : "—"}</td>
  <td><code>${escapeHtml(r.endpoint || "?")}</code></td>
  <td>${escapeHtml(r.caller || "?")}</td>
  <td style="color: ${codeColor}; font-weight: 600;">${code || "—"}</td>
- <td>${r.idempotent
+ <td>${r.replayed
+ ? `<span title="Retransmission : réponse d'origine renvoyée, rien n'a été recriblé ni réappliqué">rejouée</span>`
+ : code >= 400
+ ? '<span style="color: var(--text-muted);" title="Refus : tracé, sans réponse conservée ni rejeu possible">—</span>'
+ : r.idempotent
  ? '<span title="Clé X-Idempotency-Key fournie par l\'appelant"> idempotent</span>'
  : '<span style="color: var(--text-muted);" title="Sans en-tête X-Idempotency-Key : tracé mais jamais rejoué">— sans clé</span>'}</td>
  </tr>`;
@@ -11285,6 +11291,8 @@ async function fetchHookStats() {
  <small style="color: var(--text-muted);">livraisons sur ${data.window_days || 30} j</small></div>
  <div><strong style="font-size: 1.4rem; color: ${errColor};">${nb(totals.errors)}</strong><br>
  <small style="color: var(--text-muted);">erreurs (HTTP ≥ 400)</small></div>
+ <div title="Retransmissions servies avec la réponse d'origine : même appelant, même point d'entrée, même corps"><strong style="font-size: 1.4rem;">${nb(totals.replays)}</strong><br>
+ <small style="color: var(--text-muted);">rejeux</small></div>
  <div><strong style="font-size: 1.4rem;">${nb(totals.callers)}</strong><br>
  <small style="color: var(--text-muted);">appelant(s) distinct(s)</small></div>
  <div><strong style="font-size: 1.4rem;">${nb(totals.all_time)}</strong><br>

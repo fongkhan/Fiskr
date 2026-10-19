@@ -18,6 +18,7 @@ from typing import List, Optional, Dict, Any, Tuple
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -86,6 +87,7 @@ from fiskr.sync import (
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
+from fiskr.identification import elements_d_identification
 from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
 from fiskr.transactions import (parse_iso20022_payment, screen_payment_message,
                                 MessageTropVolumineux, MAX_PARTIES_PAR_MESSAGE)
@@ -3154,6 +3156,36 @@ def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
         return None  # toutes les listes = aucune restriction
     return requested
 
+
+def cribler_un_profil(db: Session, client_dict: Dict[str, Any], username: str,
+                      requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Criblage unitaire declenche par une requete : cache moteur garanti charge
+    ET a l'epoque courante, puis le cœur partage `screen_client_profile`.
+
+    Le chemin de fraicheur n'est ecrit qu'ici, et chaque route le prend. Il
+    etait recopie route par route, et le webhook temps reel l'avait oublie :
+    sous Passenger (pas de lifespan, pas de veilleur d'epoque), un processus
+    neuf repondait 409 « Aucune liste n'est en production » avec une liste
+    READY en base, et un processus dont une autre route avait charge le cache
+    criblait contre la version de ce moment-la — mesure : une DGT mise en
+    production designant le client, NO_MATCH journalise par le webhook, ALERT
+    rendu par /api/screen pour le meme profil.
+    """
+    _ensure_watchlist_cache(db)
+    return screen_client_profile(db, client_dict, username, requested_lists)
+
+
+def cribler_la_requete(db: Session, payload: ScreenClientRequest, username: str) -> Dict[str, Any]:
+    """Criblage temps reel d'une charge utile /api/screen — la meme fonction
+    pour la route humaine et pour le webhook du SI amont."""
+    client_dict = payload.model_dump()
+    # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
+    client_dict.pop("screening_lists", None)
+    requested_lists = _validate_screening_lists(payload.screening_lists)
+    return cribler_un_profil(db, client_dict, username, requested_lists)
+
+
 @app.post("/api/screen")
 async def screen_client(
     request: ScreenClientRequest,
@@ -3174,13 +3206,9 @@ async def screen_client(
     jamais charge son cache. Le premier criblage apres un redemarrage paie
     donc le chargement ; c'est le prix de la justesse sur un endpoint
     reglementaire, et le seul chemin ou il se paie encore.
+    La garantie vit dans `cribler_un_profil`, partagee avec les webhooks.
     """
-    _ensure_watchlist_cache(db)
-    client_dict = request.model_dump()
-    # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
-    client_dict.pop("screening_lists", None)
-    requested_lists = _validate_screening_lists(request.screening_lists)
-    return screen_client_profile(db, client_dict, current_user["username"], requested_lists)
+    return cribler_la_requete(db, request, current_user["username"])
 
 
 @app.get("/api/screen/preview")
@@ -6582,10 +6610,14 @@ async def screen_existing_client(
     if row is None:
         raise HTTPException(status_code=404,
                             detail="Client introuvable dans le référentiel en production.")
-    client_dict = {c.name: getattr(row, c.name) for c in row.__table__.columns
-                   if c.name not in ("id", "snapshot_id", "entity_checksum")}
-    _ensure_watchlist_cache(db)
-    return screen_client_profile(db, client_dict, current_user["username"], None)
+    return cribler_un_profil(db, _profil_du_referentiel(row), current_user["username"], None)
+
+
+def _profil_du_referentiel(row: ClientEntity) -> Dict[str, Any]:
+    """Profil de criblage d'une fiche du referentiel : toutes ses colonnes,
+    hors la plomberie de stockage."""
+    return {c.name: getattr(row, c.name) for c in row.__table__.columns
+            if c.name not in ("id", "snapshot_id", "entity_checksum")}
 
 
 @app.get("/api/clients/{client_id}/overview")
@@ -12028,40 +12060,115 @@ def _hook_purge_expired(db: Session) -> None:
     ).delete(synchronize_session=False)
 
 
-def _hook_idempotency_replay(db: Session, request: Request) -> Tuple[Optional[str], Optional[JSONResponse]]:
-    """Si X-Idempotency-Key correspond a une livraison connue, rejoue la
-    reponse d'origine a l'identique."""
+def _hook_empreinte_corps(body: bytes) -> str:
+    """
+    Empreinte SHA-256 de ce que la requete DEMANDE : le JSON canonique (cles
+    triees, sans blancs) quand le corps se lit — une retransmission qui
+    reserialise le meme objet dans un autre ordre reste la meme requete —,
+    les octets bruts sinon (un corps illisible est refuse juste apres, 422).
+    """
+    try:
+        canon = json.dumps(json.loads(body), sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8")
+    except (ValueError, TypeError):
+        canon = body
+    return hashlib.sha256(canon).hexdigest()
+
+
+def _hook_portee_de_cle(current_user: Dict[str, Any], endpoint: str, key: str) -> str:
+    """
+    Ce qui est stocke et cherche pour une cle d'idempotence : l'empreinte du
+    triplet (appelant, point d'entree, cle). L'appelant est la cle d'API
+    elle-meme (son identifiant, pas seulement son nom, que deux cles peuvent
+    partager).
+    """
+    appelant = f"{current_user.get('id')}:{current_user.get('username')}"
+    portee = "\x1f".join((appelant, endpoint, key))
+    return "sha256:" + hashlib.sha256(portee.encode("utf-8")).hexdigest()
+
+
+def _hook_idempotency_replay(db: Session, request: Request, endpoint: str,
+                             current_user: Dict[str, Any], body: bytes
+                             ) -> Tuple[Optional[Tuple[str, str]], Optional[JSONResponse]]:
+    """
+    Si X-Idempotency-Key designe une livraison de CE meme appelant sur CE meme
+    point d'entree, rejoue la reponse d'origine a l'identique — a condition que
+    le corps soit celui d'origine.
+
+    La cle etait cherchee dans toute la table, sans l'appelant, le point
+    d'entree ni le contenu. Mesure : le SI A crible « Jean Dupont » sous la cle
+    « 42 », le SI B envoie « Vladimir Putin » sous « 42 » — 200, rejoue, la
+    ligne d'audit de A, aucune ligne pour B, aucune alerte. Un upsert client
+    envoye sous « 42 » recevait la reponse du criblage et n'etait jamais
+    applique. Une cle choisie par l'appelant n'a de sens que chez lui.
+
+    Meme cle, autre corps : refus 422 explicite. Rejouer serait rendre la
+    decision d'une autre requete ; traiter serait trahir la promesse faite a
+    la cle — l'appelant a un defaut de generation de cles, il doit le voir.
+
+    Les livraisons anterieures a cette mesure (cle brute, sans empreinte) ne
+    sont plus atteignables par aucune recherche : on ne peut pas prouver
+    qu'une retransmission est la meme requete, elle est donc traitee a neuf —
+    un vrai criblage plutot qu'une reponse empruntee. Elles s'eteignent a
+    90 jours avec la purge.
+
+    Retourne ((portee, empreinte) ou None, reponse rejouee ou None).
+    """
     key = (request.headers.get("X-Idempotency-Key") or "").strip()
     if not key:
         return None, None
     if len(key) > 200:
         raise HTTPException(status_code=400, detail="X-Idempotency-Key : 200 caractères maximum.")
-    existing = db.query(HookDelivery).filter(HookDelivery.idempotency_key == key).first()
-    if existing:
-        return key, JSONResponse(
-            status_code=existing.status_code,
-            content=existing.response_json,
-            headers={"X-Idempotency-Replayed": "true"},
-        )
-    return key, None
+    cle = (_hook_portee_de_cle(current_user, endpoint, key), _hook_empreinte_corps(body))
+    existing = db.query(HookDelivery).filter(HookDelivery.idempotency_key == cle[0]).first()
+    if existing is None:
+        return cle, None
+    if existing.request_sha256 != cle[1]:
+        raise HTTPException(
+            status_code=422,
+            detail="X-Idempotency-Key déjà utilisée par cet appelant sur ce point "
+                   "d'entrée pour une requête DIFFÉRENTE (corps différent) : la "
+                   "réponse d'origine ne vaut pas pour celle-ci et n'est pas "
+                   "rejouée. Rien n'a été criblé ni modifié. Une clé "
+                   "d'idempotence désigne une seule requête : générez-en une "
+                   "nouvelle pour chaque demande distincte.")
+    # Un rejeu est un appel recu : sans trace, une retransmission en boucle du
+    # SI amont serait invisible en supervision.
+    _hook_store_delivery(db, None, endpoint, current_user["username"],
+                         existing.status_code, replay_of=existing.id)
+    return cle, JSONResponse(
+        status_code=existing.status_code,
+        content=existing.response_json,
+        headers={"X-Idempotency-Replayed": "true"},
+    )
 
 
-def _hook_store_delivery(db: Session, key: Optional[str], endpoint: str,
+def _hook_store_delivery(db: Session, cle: Optional[Tuple[str, str]], endpoint: str,
                          caller: str, status_code: int,
-                         response: Optional[Dict[str, Any]] = None) -> None:
+                         response: Optional[Dict[str, Any]] = None,
+                         replay_of: Optional[int] = None) -> None:
     """
     Trace TOUTE livraison de webhook — le tableau de bord a besoin des appels
     sans en-tete d'idempotence, qui sont la majorite. Sans cle appelant, une
     cle serveur « auto:<uuid> » est generee : elle n'est jamais retransmise,
     donc jamais rejouee par erreur. La reponse n'est stockee que pour les cles
     appelant (seule raison d'etre du champ : le rejeu ; un arbre de decision
-    de criblage pese plusieurs Ko).
+    de criblage pese plusieurs Ko), avec l'empreinte du corps qui l'a produite.
+    Un rejeu est trace comme une livraison `auto:` qui pointe sur l'origine.
+
+    La reponse est stockee telle que FastAPI la SERIALISE (`jsonable_encoder`),
+    c'est-a-dire telle que l'appelant l'a recue : la fiche listee d'une
+    correspondance porte des dates (`modified_at` d'une fiche corrigee), qu'une
+    colonne JSON refuse brutes — la trace leverait apres coup, et l'appelant
+    recevrait une 500 sans rien a rejouer a sa retransmission.
     """
-    auto = not key
+    auto = cle is None
     db.add(HookDelivery(
-        idempotency_key=key or f"auto:{uuid.uuid4()}",
+        idempotency_key=f"auto:{uuid.uuid4()}" if auto else cle[0],
+        request_sha256=None if auto else cle[1],
         endpoint=endpoint, caller=caller, status_code=status_code,
-        response_json=None if auto else response,
+        response_json=None if auto else jsonable_encoder(response),
+        replay_of=replay_of,
     ))
     _hook_purge_expired(db)
     db.commit()
@@ -12088,23 +12195,21 @@ async def hook_screening(
     Webhook entrant de criblage temps reel (SI amont -> Fiskr) : meme charge
     utile que POST /api/screen, authentifie par cle d'API fsk_ (+ signature
     HMAC-SHA256 si hooks.secret est configure), idempotent par X-Idempotency-Key
-    (la reponse d'origine est rejouee a la retransmission). Meme cœur de
-    criblage que le temps reel : audit immuable et alerte crees a l'identique.
+    (la reponse d'origine est rejouee a la retransmission du MEME corps par le
+    MEME appelant). Meme fonction que le temps reel (`cribler_la_requete`) :
+    meme fraicheur du cache, audit immuable et alerte crees a l'identique.
     """
     try:
         body = await _verify_hook_request(request, current_user)
-        key, replay = _hook_idempotency_replay(db, request)
+        cle, replay = _hook_idempotency_replay(db, request, "screening", current_user, body)
         if replay is not None:
             return replay
         try:
             payload = ScreenClientRequest.model_validate_json(body)
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
-        client_dict = payload.model_dump()
-        client_dict.pop("screening_lists", None)
-        requested_lists = _validate_screening_lists(payload.screening_lists)
-        result = screen_client_profile(db, client_dict, current_user["username"], requested_lists)
-        _hook_store_delivery(db, key, "screening", current_user["username"], 200, result)
+        result = cribler_la_requete(db, payload, current_user["username"])
+        _hook_store_delivery(db, cle, "screening", current_user["username"], 200, result)
         return result
     except HTTPException as exc:
         # Les refus post-authentification sont traces (signature, charge utile,
@@ -12142,6 +12247,80 @@ class HookClientUpsert(BaseModel):
     client_status: Optional[str] = None
 
 
+def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
+                          changed_fields: List[str], identification: List[str],
+                          username: str) -> Dict[str, Any]:
+    """
+    Crible la fiche que le SI amont vient de creer ou de modifier, quand il le
+    faut, et dit franchement ce qui a ete fait.
+
+    Le webhook modifiait la fiche SANS la cribler : un client cree par le CRM,
+    ou dont le nom venait de changer, restait hors criblage jusqu'au prochain
+    lookback. Lignes directrices conjointes DGT/ACPR sur le gel des avoirs
+    (18 mars 2026) : cribler avant toute entree en relation (§122) et « a
+    chaque mise a jour des elements d'identification » (§141).
+
+    - creation : toujours criblee ;
+    - mise a jour : criblee si un element d'identification a change — la
+      liste est RELEVEE sur le moteur (fiskr/identification.py), pas recopiee ;
+      sinon, rien n'est recrible et la reponse le dit ;
+    - aucune liste en production (409 de `exiger_un_univers`) ou profil
+      refuse par le quality gate (400) : la fiche reste enregistree, et la
+      reponse dit qu'elle n'a PAS ete criblee — jamais « aucune
+      correspondance » pour une comparaison qui n'a pas eu lieu.
+
+    Meme cœur que le temps reel (`cribler_un_profil`) : fraicheur du cache,
+    journal d'audit, alertes. Le criblage valide la fiche dans la meme
+    transaction que son journal ; un echec imprevu annule les deux, et la
+    retransmission du SI recommencera tout.
+    """
+    if operation == "updated" and not identification:
+        neutres = ", ".join(changed_fields)
+        return {
+            "performed": False, "reason": "NO_IDENTIFICATION_CHANGE",
+            "identification_fields_changed": [],
+            "summary": (f"non recriblée : aucun élément d'identification n'a changé "
+                        f"(champs modifiés, sans effet sur le criblage : {neutres})."
+                        if neutres else "non recriblée : aucun champ n'a changé."),
+        }
+    db.flush()
+    try:
+        result = cribler_un_profil(db, _profil_du_referentiel(row), username, None)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            reason = "NO_LIST_IN_PRODUCTION"
+            summary = ("NON criblée : aucune liste n'est en production, la fiche n'a été "
+                       "comparée à rien. Recriblez-la (POST /api/clients/{id}/screen) "
+                       "dès qu'une liste est en production.")
+        elif exc.status_code == status.HTTP_400_BAD_REQUEST:
+            reason = "QUALITY_GATE_REJECTED"
+            summary = ("NON criblée : le profil est refusé par le contrôle qualité "
+                       "(voir detail) ; complétez la fiche.")
+        else:
+            raise
+        return {"performed": False, "reason": reason,
+                "identification_fields_changed": identification,
+                "summary": summary, "detail": exc.detail}
+    best = result.get("best_match") or {}
+    statut = best.get("status") or "NO_MATCH"
+    summary = f"criblée contre les listes en production : {statut}"
+    if result.get("alert_id"):
+        summary += f", alerte #{result['alert_id']}"
+    return {
+        "performed": True,
+        "reason": "CREATED" if operation == "created" else "IDENTIFICATION_CHANGED",
+        "identification_fields_changed": identification,
+        "summary": summary + ".",
+        "status": statut,
+        "final_score": best.get("final_score"),
+        "audit_trail_id": result.get("audit_trail_id"),
+        "alert_id": result.get("alert_id"),
+        "hits": result.get("hits"),
+        # Meme contrat que POST /api/hooks/screening
+        "result": result,
+    }
+
+
 @app.post("/api/hooks/client-upsert")
 async def hook_client_upsert(
     request: Request,
@@ -12153,10 +12332,13 @@ async def hook_client_upsert(
     dernier referentiel CLIENT_BASE en production : mise a jour par client_id
     ou creation. Trace au journal des actions d'administration
     (CLIENT_UPSERT_HOOK), idempotent par X-Idempotency-Key.
+
+    Une creation, ou une mise a jour d'un element d'identification, CRIBLE la
+    fiche (voir `_cribler_apres_upsert`) : la reponse porte le resultat.
     """
     try:
         body = await _verify_hook_request(request, current_user)
-        key, replay = _hook_idempotency_replay(db, request)
+        cle, replay = _hook_idempotency_replay(db, request, "client-upsert", current_user, body)
         if replay is not None:
             return replay
         try:
@@ -12189,26 +12371,34 @@ async def hook_client_upsert(
             existing.entity_checksum = compute_checksum(values)
             action_detail = "updated"
             changed_fields = sorted(before.keys())
+            row = existing
         else:
-            db.add(ClientEntity(snapshot_id=snap.snapshot_id,
-                                entity_checksum=compute_checksum(values), **values))
+            row = ClientEntity(snapshot_id=snap.snapshot_id,
+                               entity_checksum=compute_checksum(values), **values)
+            db.add(row)
             snap.record_count = (snap.record_count or 0) + 1
             action_detail = "created"
             changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
 
+        identification = elements_d_identification(changed_fields)
         log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
                          target=payload.client_id,
                          after={"operation": action_detail, "fields": changed_fields,
+                                "identification_fields": identification,
                                 "snapshot_id": snap.snapshot_id})
+        screening = _cribler_apres_upsert(db, row, action_detail, changed_fields,
+                                          identification, current_user["username"])
         db.commit()
         result = {
-            "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} dans le référentiel en production.",
+            "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} "
+                       f"dans le référentiel en production — {screening['summary']}",
             "operation": action_detail,
             "client_id": payload.client_id,
             "snapshot_id": snap.snapshot_id,
             "changed_fields": changed_fields,
+            "screening": screening,
         }
-        _hook_store_delivery(db, key, "client-upsert", current_user["username"], 200, result)
+        _hook_store_delivery(db, cle, "client-upsert", current_user["username"], 200, result)
         return result
     except HTTPException as exc:
         if exc.status_code != status.HTTP_403_FORBIDDEN:
@@ -12223,7 +12413,7 @@ async def get_hook_stats(
 ):
     """
     Supervision des webhooks entrants : volumes par endpoint et par appelant,
-    erreurs, serie des 30 derniers jours et dernieres livraisons. Ni la charge
+    erreurs, rejeux, serie des 30 derniers jours et dernieres livraisons. Ni la charge
     utile de reponse ni la cle d'idempotence ne sont exposees (la cle est
     choisie par l'appelant : elle peut porter une reference metier sensible).
     """
@@ -12235,17 +12425,24 @@ async def get_hook_stats(
     by_caller: Dict[str, Dict[str, int]] = {}
     daily: Dict[str, Dict[str, int]] = {}
     errors = 0
+    # Rejeux : retransmissions servies avec la reponse d'origine, sans
+    # recriblage. Comptes a part — un SI qui retransmet en boucle se voit ici.
+    replays = 0
     for row in rows:
         failed = int(row.status_code or 200) >= 400
+        rejeu = row.replay_of is not None
         errors += 1 if failed else 0
+        replays += 1 if rejeu else 0
         for bucket, key in ((by_endpoint, row.endpoint or "?"), (by_caller, row.caller or "?")):
-            entry = bucket.setdefault(key, {"count": 0, "errors": 0})
+            entry = bucket.setdefault(key, {"count": 0, "errors": 0, "replays": 0})
             entry["count"] += 1
             entry["errors"] += 1 if failed else 0
+            entry["replays"] += 1 if rejeu else 0
         day = (row.created_at or datetime.utcnow()).strftime("%Y-%m-%d")
-        slot = daily.setdefault(day, {"count": 0, "errors": 0})
+        slot = daily.setdefault(day, {"count": 0, "errors": 0, "replays": 0})
         slot["count"] += 1
         slot["errors"] += 1 if failed else 0
+        slot["replays"] += 1 if rejeu else 0
 
     recent = db.query(HookDelivery).order_by(
         HookDelivery.created_at.desc(), HookDelivery.id.desc()).limit(20).all()
@@ -12254,6 +12451,7 @@ async def get_hook_stats(
         "totals": {
             "deliveries": len(rows),
             "errors": errors,
+            "replays": replays,
             "callers": len(by_caller),
             "all_time": db.query(func.count(HookDelivery.id)).scalar() or 0,
         },
@@ -12267,7 +12465,11 @@ async def get_hook_stats(
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "endpoint": r.endpoint, "caller": r.caller,
                 "status_code": r.status_code,
-                "idempotent": not str(r.idempotency_key or "").startswith("auto:"),
+                # Un rejeu porte une cle serveur `auto:`, mais l'appelant avait
+                # bien fourni une cle : c'est elle qui a ete rejouee.
+                "idempotent": (r.replay_of is not None
+                               or not str(r.idempotency_key or "").startswith("auto:")),
+                "replayed": r.replay_of is not None,
             }
             for r in recent
         ],
