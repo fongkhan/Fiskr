@@ -11,7 +11,7 @@ import secrets
 import logging
 import shutil
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -193,6 +193,13 @@ def _entity_search_blob(ent: Dict[str, Any]) -> str:
     return strip_accents(" | ".join(p for p in parts if p)).upper()
 
 
+def _valeur_de_cache(valeur):
+    """Une colonne telle que le cache de criblage doit la porter : serialisable."""
+    if isinstance(valeur, (datetime, date_type)):
+        return valeur.isoformat()
+    return valeur
+
+
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
     global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index, watchlist_types
@@ -240,8 +247,13 @@ def load_watchlist_cache(db: Session):
     screening_cfg = blocking_config_for(screening_layout)
 
     for ent in entities:
-        # Convert SQLAlchemy object to dictionary for cache
-        ent_dict = {c.name: getattr(ent, c.name) for c in ent.__table__.columns}
+        # Convert SQLAlchemy object to dictionary for cache. Les dates y
+        # voyagent en ISO 8601 : la fiche rencontree finit dans l'arbre de
+        # decision, que la colonne JSON du journal refuse brut — une fiche
+        # corrigee a la main (`modified_at`) rendait tout criblage qui la
+        # touchait en 500, sans ligne d'audit.
+        ent_dict = {c.name: _valeur_de_cache(getattr(ent, c.name))
+                    for c in ent.__table__.columns}
         # Type de liste d'origine : permet les seuils de cut-off par liste
         ent_dict["_list_type"] = snapshot_types.get(ent.snapshot_id)
         temp_store.append(ent_dict)
