@@ -1544,6 +1544,13 @@
             zh: "新增 $1 项，移除 $2 项，$3 项未变。",
             ar: "$1 مضافة، $2 محذوفة، $3 دون تغيير." }],
         // Homologation groupée : les lots que le motif commun couvre, nommés
+        // Historique des homologations : les décisions antérieures au dossier
+        [/^(\d+) décision\(s\) antérieure\(s\) au dossier d'homologation, du (.+) au (.+) : le lot garde son réviseur et sa date, mais ni delta ni cahier de tests figés à la décision\.$/, {
+            en: "$1 decision(s) predating the approval file, from $2 to $3: the batch keeps its reviewer and date, but no delta or test book frozen at the decision.",
+            de: "$1 Entscheidung(en) vor Einführung der Freigabeakte, vom $2 bis $3: der Stapel behält Prüfer und Datum, aber weder Delta noch Testbuch, die bei der Entscheidung festgehalten wurden.",
+            es: "$1 decisión(es) anterior(es) al expediente de homologación, del $2 al $3: el lote conserva su revisor y su fecha, pero ni delta ni cuaderno de pruebas fijados en la decisión.",
+            zh: "$1 项决定早于审批档案（$2 至 $3）：批次保留审核人和日期，但没有在决定时固定的差异和测试簿。",
+            ar: "$1 قرار سابق لملف الاعتماد، من $2 إلى $3: تحتفظ الدفعة بمراجعها وتاريخها، دون فرق أو دفتر اختبارات مثبَّت عند القرار." }],
         [/^(\d+) liste\(s\) au cahier de tests WARN ou périmé : (.+)\. Le motif saisi sera tracé au dossier d'homologation de chacune\.$/, {
             en: "$1 list(s) with a WARN or stale test book: $2. The reason entered will be recorded in the approval file of each.",
             de: "$1 Liste(n) mit Testheft WARN oder veraltet: $2. Die eingegebene Begründung wird in der Freigabeakte jeder Liste festgehalten.",

@@ -10801,7 +10801,54 @@ async def list_review_history(
     rows = query.order_by(ReviewRecord.decided_at.desc(), ReviewRecord.id.desc()) \
                 .offset(offset).limit(limit).all()
     return {"total": total, "limit": limit, "offset": offset,
-            "history": [_review_record_row(r) for r in rows]}
+            "history": [_review_record_row(r) for r in rows],
+            "decisions_sans_dossier": _decisions_sans_dossier(db, file_type, decision)}
+
+
+# Statuts d'un lot DECIDE, par decision : une approbation laisse le lot READY,
+# puis SUPERSEDED quand une version plus recente le remplace.
+_STATUTS_DE_LA_DECISION = {"APPROVED": ("READY", "SUPERSEDED"), "REJECTED": ("REJECTED",)}
+
+
+def _decisions_sans_dossier(db: Session, file_type: Optional[str],
+                            decision: Optional[str]) -> Dict[str, Any]:
+    """
+    Decisions d'homologation que l'historique ne montre pas : celles prises
+    avant que le dossier d'homologation n'existe (commit 7861bbc, 17 aout
+    2026).
+
+    Releve en production le 20 octobre 2026 : 560 notifications « liste
+    approuvee » pour 251 dossiers. Ce n'etait pas un doublon : sur chaque
+    jour ou les deux existent, une notification par dossier. Les quelque 309
+    approbations anterieures au 19 aout n'ont pas de dossier — l'historique,
+    qui comptait 251 homologations, ne disait pas qu'il commencait la.
+
+    Le lot garde son decideur et sa date (`reviewed_by`, `reviewed_at`, poses a
+    chaque decision depuis l'origine) : on les compte et on les date, sans
+    fabriquer de dossier — un dossier reconstitue apres coup affirmerait un
+    delta et un cahier de tests que personne n'a vus a la decision.
+    """
+    from sqlalchemy import func
+    from fiskr.database import ReviewRecord
+
+    statuts = []
+    voulues = [d.strip().upper() for d in (decision or "").split(",") if d.strip()]
+    for d, s in _STATUTS_DE_LA_DECISION.items():
+        if not voulues or d in voulues:
+            statuts.extend(s)
+    if not statuts:
+        return {"count": 0, "du": None, "au": None}
+    query = db.query(func.count(Snapshot.snapshot_id), func.min(Snapshot.reviewed_at),
+                     func.max(Snapshot.reviewed_at)).filter(
+        Snapshot.reviewed_at.isnot(None),
+        Snapshot.status.in_(statuts),
+        ~Snapshot.snapshot_id.in_(db.query(ReviewRecord.snapshot_id)),
+    )
+    if file_type:
+        query = query.filter(Snapshot.file_type == file_type.strip().upper())
+    n, du, au = query.one()
+    return {"count": int(n or 0), "du": du.isoformat() if du else None,
+            "au": au.isoformat() if au else None}
 
 
 @app.get("/api/review/history/{record_id}")

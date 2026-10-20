@@ -7263,6 +7263,16 @@ async function fetchReviewHistory(page = 1) {
   const pages = Math.max(1, Math.ceil(total / HISTORY_PER_PAGE));
   const countEl = document.getElementById("history-count");
   if (countEl) countEl.textContent = `${total} homologation(s)`;
+  // Les décisions antérieures au dossier d'homologation : comptées et datées,
+  // pour que l'historique ne passe pas pour complet.
+  const sansDossier = document.getElementById("history-sans-dossier");
+  const avant = data.decisions_sans_dossier || {};
+  if (sansDossier) {
+   sansDossier.classList.toggle("hidden", !avant.count);
+   if (avant.count) {
+    sansDossier.textContent = `${avant.count} décision(s) antérieure(s) au dossier d'homologation, du ${formatDate(avant.du)} au ${formatDate(avant.au)} : le lot garde son réviseur et sa date, mais ni delta ni cahier de tests figés à la décision.`;
+   }
+  }
   const label = document.getElementById("history-page-label");
   if (label) label.textContent = `Page ${historyPage} / ${pages}`;
   const prev = document.getElementById("history-prev");
