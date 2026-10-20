@@ -1770,7 +1770,12 @@ th.sortable.sort-desc::after {
     width: auto;
 }
 
-.filter-bar select {
+/* La barre de statuts de la file d'alertes est une barre de filtres : sans
+   cette règle, chaque liste déroulante prenait la ligne entière (règle
+   globale `select { width: 100% }`), et quatre filtres occupaient quatre
+   lignes avant la première alerte. */
+.filter-bar select,
+.alerts-status-filters select {
     flex: 0 1 auto;
     width: auto;
     min-width: 150px;
