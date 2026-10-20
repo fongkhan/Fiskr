@@ -35,6 +35,16 @@ comprises — jamais une liste de types recopiee ici. Une liste rangee hors
 sanction n'ouvre pas de mesure ; un type inconnu, si (meme regle que le
 perimetre : le doute penche vers ce qui ne fait rien perdre).
 
+UN CLIENT REPUTE DETENU OU CONTROLE
+-----------------------------------
+Un vrai positif sur une PARTIE LIEE du client (beneficiaire effectif,
+mandataire, dirigeant, associe — fiskr/parties.py) n'ouvre pas de mesure a lui
+seul (§144). Il en ouvre une quand les parties confirmees rendent le client
+repute detenu (50 % cumules, §131 : gel) ou controle (une partie designee peut
+engager ses fonds, §133 et §144 : suspension et interrogation de la DG
+Tresor) — voir `ouvrir_si_detention`. La mesure porte son fondement et le
+calcul qui l'etablit ; le registre la met en avant.
+
 CE QUI N'EST PAS FAIT
 ---------------------
 La declaration d'homonymie (LD §167 : alerte qu'on ne parvient pas a lever) a
@@ -121,9 +131,17 @@ class RefusDeGel(Exception):
 
 def est_due(alert: Alert, surcharges: Optional[Dict[str, str]] = None) -> bool:
     """Une mesure est due quand une alerte est CONFIRMEE sur une liste du
-    perimetre SANCTION. C'est un du, pas une option : rien ne la desactive."""
+    perimetre SANCTION. C'est un du, pas une option : rien ne la desactive.
+
+    Sauf sur une alerte de PARTIE LIEE (fiskr/parties.py) : confirmer que le
+    beneficiaire effectif d'ACME est la personne designee ne gele pas ACME a
+    lui seul — « dans les autres cas, l'organisme financier n'a pas a geler
+    les fonds de la personne morale (par exemple, lorsque le beneficiaire
+    effectif n'est qu'actionnaire minoritaire) » (LD §144). Ce qui est du se
+    decide sur la detention ou le controle du client (`ouvrir_si_detention`)."""
     from fiskr.perimeters import est_sanction
-    return alert.status == "CLOSED_CONFIRMED" and est_sanction(alert.list_type, surcharges)
+    return (alert.partie_liee_id is None and alert.status == "CLOSED_CONFIRMED"
+            and est_sanction(alert.list_type, surcharges))
 
 
 def _snapshots_de_listes(db) -> List[str]:
@@ -181,6 +199,8 @@ def ouvrir_si_due(db, alert: Alert, username: str) -> Optional[MesureDeGel]:
     l'analyse « a permis de s'assurer » de l'identite (LD §182).
     """
     from fiskr.settings import perimeter_overrides
+    if alert.partie_liee_id is not None:
+        return ouvrir_si_detention(db, alert, username)
     if not est_due(alert, perimeter_overrides(db)):
         return None
     if db.query(MesureDeGel.id).filter(MesureDeGel.alert_id == alert.id).first():
@@ -188,14 +208,101 @@ def ouvrir_si_due(db, alert: Alert, username: str) -> Optional[MesureDeGel]:
     return _ouvrir(db, alert, ACTION_PAR_DEFAUT, username, alert.decided_at)
 
 
+# ------------------------------------------------------------ detention reputee
+
+def mesure_de_detention_en_vigueur(db, client_id: Optional[str]) -> Optional[MesureDeGel]:
+    """La mesure ouverte parce que ce client est repute detenu ou controle, si
+    elle n'est pas levee : une seule a la fois — un second vrai positif sur une
+    autre partie la confirme, il n'en ouvre pas une autre."""
+    if not client_id:
+        return None
+    return db.query(MesureDeGel).filter(
+        MesureDeGel.client_id == client_id, MesureDeGel.fondement.isnot(None),
+        MesureDeGel.statut != STATUT_LEVEE).order_by(MesureDeGel.id.asc()).first()
+
+
+def ouvrir_si_detention(db, alert: Alert, username: str) -> Optional[MesureDeGel]:
+    """
+    Confirmation d'une alerte de PARTIE LIEE (fiskr/parties.py) : le client
+    est-il desormais repute detenu ou controle par une personne designee ?
+    L'historique de l'alerte le DIT dans les deux cas — un vrai positif sur une
+    liste de gel sans mesure doit se lire comme une decision, pas comme un oubli.
+
+    LE GESTE, SELON LE FONDEMENT
+    - Detention reputee, 50 % ou plus cumules (LD §131) : « les fonds et
+      ressources economiques de ces [entites] doivent etre geles » ; l'exemple
+      des LD est celui-ci (30 % + 25 %, « devrait etre gelee »). Mesure GEL :
+      le client passe GELE des que la date d'effet est posee, et la
+      declaration a la DG Tresor est due immediatement (§180-182).
+    - Controle par une partie designee qui peut engager les fonds (§133,
+      §144) : les LD ne disent pas « gelez » mais « il s'abstient d'executer
+      l'operation et interroge la DG Tresor sur son traitement ». Mesure
+      SUSPENSION D'UNE MISE A DISPOSITION — une des actions a declarer (§181) :
+      elle ne marque PAS le client gele, et sa declaration est l'interrogation
+      de la DG Tresor. Si la DG Tresor repond « gelez », l'humain requalifie
+      la mesure (action GEL) tant qu'elle n'est pas declaree, ou en ouvre une
+      seconde.
+    Ni l'un ni l'autre : rien n'est ouvert (§144, actionnaire minoritaire).
+    En cas de doute, l'analyste ouvre lui-meme la suspension (`ouvrir`).
+    """
+    from fiskr import parties as parties_liees
+    from fiskr.perimeters import est_sanction
+    from fiskr.settings import perimeter_overrides
+    surcharges = perimeter_overrides(db)
+    if alert.status != "CLOSED_CONFIRMED" or not est_sanction(alert.list_type, surcharges):
+        return None
+    # La session de l'API ne vide pas d'elle-meme (autoflush coupe) : sans
+    # cela, l'evaluation relirait CETTE alerte encore ouverte, et le 25 % qui
+    # franchit le seuil ne serait jamais compte.
+    db.flush()
+    evaluation = parties_liees.evaluer_la_detention(db, alert.client_id, surcharges)
+    phrase = parties_liees.phrase_de_detention(evaluation, alert.client_name)
+    if not evaluation["reputee"]:
+        db.add(AlertEvent(
+            alert_id=alert.id, username=username, action="DETENTION_NON_ETABLIE",
+            detail=(f"{phrase} Pas de gel des avoirs du client à ce titre (LD §144). En cas "
+                    f"de doute sur le contrôle, suspendez et interrogez la DG Trésor : "
+                    f"mesure « suspension d'une mise à disposition ».")))
+        return None
+    deja = mesure_de_detention_en_vigueur(db, alert.client_id)
+    if deja is not None:
+        db.add(AlertEvent(
+            alert_id=alert.id, username=username, action="DETENTION_REPUTEE",
+            detail=(f"{phrase} Mesure de gel #{deja.id} déjà ouverte à ce titre (alerte "
+                    f"#{deja.alert_id}) : aucune autre n'est ouverte.")))
+        return None
+    detention = evaluation["fondement"] == parties_liees.FONDEMENT_DETENTION
+    mesure = _ouvrir(db, alert, "GEL" if detention else "SUSPENSION_MISE_A_DISPOSITION",
+                     username, alert.decided_at)
+    mesure.fondement = evaluation["fondement"]
+    mesure.detention = evaluation
+    geste = ("geler les avoirs du client et déclarer le gel à la DG Trésor (LD §131, §180-182)"
+             if detention else
+             "s'abstenir d'exécuter toute opération du client et interroger la DG Trésor sur "
+             "son traitement (LD §144) — la déclaration de cette mesure est cette interrogation")
+    db.add(AlertEvent(
+        alert_id=alert.id, username=username, action="DETENTION_REPUTEE",
+        detail=f"{phrase} Mesure de gel #{mesure.id} ouverte : {geste}."))
+    return mesure
+
+
 def ouvrir(db, alert: Alert, type_action: str, username: str) -> MesureDeGel:
     """Mesure SUPPLEMENTAIRE sur une alerte confirmee : un credit arrive sur le
-    compte gele, une tentative de contournement — chacune se declare (§181)."""
+    compte gele, une tentative de contournement — chacune se declare (§181).
+
+    Sur une alerte de partie liee confirmee, c'est aussi le geste du DOUTE
+    (LD §144 : « en cas de doute, il s'abstient d'executer l'operation et
+    interroge la DG Tresor ») : l'analyste ouvre la suspension que la
+    detention reputee n'a pas ouverte d'elle-meme."""
+    from fiskr.perimeters import est_sanction
     from fiskr.settings import perimeter_overrides
     code = (type_action or "").strip().upper()
     if code not in ACTIONS:
         raise RefusDeGel(f"Action inconnue ({', '.join(ACTIONS)}).")
-    if not est_due(alert, perimeter_overrides(db)):
+    surcharges = perimeter_overrides(db)
+    partie_confirmee = (alert.partie_liee_id is not None and alert.status == "CLOSED_CONFIRMED"
+                        and est_sanction(alert.list_type, surcharges))
+    if not (est_due(alert, surcharges) or partie_confirmee):
         if alert.status != "CLOSED_CONFIRMED":
             raise RefusDeGel("Seule une alerte confirmée (vrai positif) porte une mesure de gel.", 409)
         raise RefusDeGel("Cette liste est hors du périmètre SANCTION : elle n'impose aucun gel, "
@@ -699,7 +806,17 @@ def serialiser(db, mesure: MesureDeGel, seuil_heures: Optional[int] = None,
         "radiation_a_examiner": radiation_a_examiner(mesure),
         "radiation_constatee_le": iso(mesure.radiation_constatee_le),
         "radiation_detail": mesure.radiation_detail,
+        # Client repute detenu ou controle par ses parties liees : le registre
+        # le met en avant, le calcul fige a l'ouverture l'accompagne
+        "fondement": mesure.fondement,
+        "fondement_label": _libelle_de_fondement(mesure.fondement),
+        "detention": mesure.detention,
     }
+
+
+def _libelle_de_fondement(code: Optional[str]) -> Optional[str]:
+    from fiskr.parties import FONDEMENTS
+    return FONDEMENTS.get(code) if code else None
 
 
 def vocabulaire() -> Dict[str, Any]:

@@ -54,7 +54,7 @@ from fiskr.database import (
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES, ALERT_PRIORITY_LABELS,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
     BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
-    NotificationDelivery, LearnedEquivalence
+    NotificationDelivery, LearnedEquivalence, PartieLiee
 )
 from fiskr.alerts import (open_or_redetect_alerts,
                           is_whitelisted, whitelisted_pairs, compute_due_at,
@@ -2940,12 +2940,17 @@ SCREEN_MAX_MATCHES = 50
 
 
 def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: str,
-                          requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
+                          requested_lists: Optional[List[str]] = None,
+                          partie: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Cœur du criblage unitaire, PARTAGE entre l'endpoint temps réel /api/screen
     et les campagnes batch : quality gate -> blocking -> scoring -> liste
     blanche -> règles anti-faux positifs -> journal d'audit -> alerte.
     Lève HTTPException 400 si le quality gate rejette le profil.
+
+    `partie` : le profil est celui d'une PARTIE LIEE du client
+    (fiskr/parties.py, `contexte`) — même cœur, et le journal comme l'alerte
+    sont ceux du client, la partie nommée (cf. `cribler_un_profil`).
     """
     client_dict = dict(client_dict)
     # Normalize client_type to PP/PM for internal validation and scoring engine
@@ -3134,7 +3139,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         lignes = log_compliance_decisions(
             db, client_dict,
             [(m.get("watchlist_entity") or {}, m) for m, _ in a_journaliser],
-            watchlist_version, watchlist_hash, commit=False)
+            watchlist_version, watchlist_hash, commit=False, partie=partie)
         for (hit, _regle), ligne in zip(a_journaliser, lignes):
             if hit is best_match:
                 audit_id = ligne.id
@@ -3157,7 +3162,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                 detail_suffix=(
                     f" [Criblage restreint aux listes : {', '.join(requested_lists)}]"
                     if requested_lists else ""
-                ))
+                ), partie=partie)
             hits_summary["opened"] = resultat_alertes["opened"]
             hits_summary["closed_by_rule"] = resultat_alertes["closed_by_rule"]
             hits_summary["redetected"] = resultat_alertes["redetected"]
@@ -3207,7 +3212,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
             dummy_wl,
             no_match_result,
             watchlist_version,
-            watchlist_hash
+            watchlist_hash,
+            partie=partie
         )
         audit_id = audit_record.id
         
@@ -3310,9 +3316,66 @@ def cribler_un_profil(db: Session, client_dict: Dict[str, Any], username: str,
     criblait contre la version de ce moment-la — mesure : une DGT mise en
     production designant le client, NO_MATCH journalise par le webhook, ALERT
     rendu par /api/screen pour le meme profil.
+
+    Les PARTIES LIEES du client (beneficiaires effectifs, mandataires,
+    dirigeants, associes — fiskr/parties.py) sont criblees dans la foulee, par
+    le meme cœur : LD DGT/ACPR §117 et §141, et la Commission des sanctions de
+    l'ACPR (9 fevrier 2022, n° 2020-11, §27) qui sanctionne un dispositif
+    « aucun filtrage des mandataires et des beneficiaires effectifs n'etant
+    realise ». La reponse les detaille (`parties`) ; `best_match` et
+    `alert_id` restent ceux du client lui-meme (contrat historique).
     """
     _ensure_watchlist_cache(db)
-    return screen_client_profile(db, client_dict, username, requested_lists)
+    resultat = screen_client_profile(db, client_dict, username, requested_lists)
+    # Meme cache, meme univers que le client : les parties sont criblees ici,
+    # sous la garantie de fraicheur que cette fonction vient de prendre. Une
+    # partie que le contrôle qualite refuse est dite NON criblee — jamais
+    # « aucune correspondance » — et n'empeche pas les autres de l'etre.
+    resultat["parties"] = []
+    for ctx, profil in _parties_a_cribler(db, client_dict):
+        try:
+            r = screen_client_profile(db, profil, username, requested_lists, partie=ctx)
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_400_BAD_REQUEST:
+                raise
+            resultat["parties"].append({
+                "partie": ctx, "performed": False, "reason": "QUALITY_GATE_REJECTED",
+                "summary": "NON criblée : identité refusée par le contrôle qualité.",
+                "detail": exc.detail})
+            continue
+        resultat["parties"].append(_resume_du_criblage_de_partie(ctx, r))
+    return resultat
+
+
+def _parties_a_cribler(db: Session, client_dict: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """(contexte, profil) de chaque partie active du client (fiskr/parties.py)."""
+    from fiskr import parties as parties_liees
+    client_id = client_dict.get("client_id")
+    if not client_id:
+        return []
+    actives = parties_liees.parties_actives(db, [client_id]).get(client_id, [])
+    nom_client = parties_liees.nom_d_affichage(client_dict) or client_id
+    sortie = []
+    for partie in actives:
+        sortie.append((parties_liees.contexte(partie, nom_client),
+                       parties_liees.profil_de_criblage(partie)))
+    return sortie
+
+
+def _resume_du_criblage_de_partie(ctx: Dict[str, Any], r: Dict[str, Any]) -> Dict[str, Any]:
+    best = r.get("best_match") or {}
+    retenue = r.get("best_alert") or {}
+    return {
+        "partie": ctx, "performed": True,
+        "status": best.get("status") or "NO_MATCH",
+        "final_score": best.get("final_score"),
+        "audit_trail_id": r.get("audit_trail_id"),
+        # L'alerte a instruire : celle de la meilleure correspondance que la
+        # liste blanche n'a pas absorbee (meme regle que pour le client)
+        "alert_id": retenue.get("alert_id") or r.get("alert_id"),
+        "watchlist_name": retenue.get("primary_name"),
+        "hits": r.get("hits"),
+    }
 
 
 def cribler_la_requete(db: Session, payload: ScreenClientRequest, username: str) -> Dict[str, Any]:
@@ -3622,7 +3685,7 @@ def _valider_correspondance(file_type: str, brut: Optional[str],
     return propre
 
 _APERCU_LIGNES = 10
-_APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU")
+_APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU", "CLIENT_PARTIES")
 
 @app.post("/api/ingest/preview")
 async def preview_ingest(
@@ -3649,7 +3712,7 @@ async def preview_ingest(
 
     # Même plafond que l'import réel : la porte de l'aperçu ne peut pas être
     # plus large que celle qu'elle précède.
-    nature = "clients" if file_type == "CLIENT_BASE" else "liste"
+    nature = "clients" if file_type in ("CLIENT_BASE", "CLIENT_PARTIES") else "liste"
     # Même dossier temporaire que l'import réel, et un nom qui dit ce que
     # c'est : un aperçu abandonné doit se reconnaître d'un coup d'œil.
     temp_dir = PROJECT_ROOT / "temp_ingestion"
@@ -3675,7 +3738,13 @@ async def preview_ingest(
         for brut in parse_csv_file(str(chemin), delimiter=delimiter,
                                    mapping_dict=correspondance or None):
             item = ensure_parsed_name(_normaliser_ligne_csv(file_type, dict(brut)))
-            report = evaluate_and_clean(item)
+            if file_type == "CLIENT_PARTIES":
+                # Même lecture que l'import (rôle, détention, identité) : une
+                # ligne que l'import refusera ne s'affiche pas « acceptée ».
+                lue, motifs = _partie_de_la_ligne(item)
+                report = {"is_valid": lue is not None, "errors": motifs}
+            else:
+                report = evaluate_and_clean(item)
             if report["is_valid"]:
                 acceptees += 1
             else:
@@ -3754,6 +3823,20 @@ _CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "dates_of_birth": ("dob", "birth_date"),
         "origin": (),
     },
+}
+
+# Fichier des parties liées (fiskr/parties.py) : une ligne par partie — le
+# client auquel elle appartient, son ou ses rôles, sa détention, son pouvoir
+# d'engager les fonds — et son identité dans les MÊMES colonnes que le
+# référentiel clients, dérivées de sa table : un bénéficiaire effectif se lit
+# comme un client (`_colonnes_client_de_la_ligne`).
+_CHAMPS_CSV["CLIENT_PARTIES"] = {
+    "client_id": (),
+    "partie_id": ("party_id",),
+    "role": ("roles",),
+    **{champ: autres for champ, autres in _CHAMPS_CSV["CLIENT_BASE"].items() if champ != "client_id"},
+    "pourcentage_detention": ("ownership_pct",),
+    "peut_engager_les_fonds": ("can_commit_funds",),
 }
 
 # Champs attendus par type, dans l'ordre d'affichage : DÉRIVÉS de la table.
@@ -3933,6 +4016,185 @@ def ingest_snapshot(
         # ici que si la soumission n'a pas eu lieu (refus, echec d'upload)
         if not keep_temp_file and temp_file_path.exists():
             os.remove(temp_file_path)
+
+
+
+def _colonnes_client_de_la_ligne(item: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Les colonnes d'une fiche client lues d'une ligne d'import CSV (apres le
+    Quality Gate, dont le genre resolu). UNE lecture, partagee par le
+    referentiel clients (CLIENT_BASE) et par le fichier des parties liees
+    (CLIENT_PARTIES, fiskr/parties.py) : un beneficiaire effectif s'identifie
+    exactement comme un client — memes colonnes, memes formats (pays separes
+    par des virgules, documents en JSON).
+    """
+    # Split countries
+    countries_obj = {
+        "nationality": [c.strip() for c in (item.get("nationality") or "").split(",") if c],
+        "residence": [c.strip() for c in (item.get("residence") or "").split(",") if c],
+        "birth_country": [c.strip() for c in (item.get("birth_country") or "").split(",") if c],
+        "registration_country": [c.strip() for c in (item.get("registration_country") or "").split(",") if c]
+    }
+    alt_addrs_client = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
+    return dict(
+        client_id=item.get("client_id"),
+        client_type=item.get("client_type"),
+        client_first_name=item.get("client_first_name"),
+        client_last_name=item.get("client_last_name"),
+        client_maiden_name=item.get("client_maiden_name"),
+        client_aliases=_client_alias_list(item),
+        client_company_name=item.get("client_company_name"),
+        client_dob=item.get("client_dob"),
+        client_gender=report["resolved_gender"],
+        client_is_deceased=str(item.get("client_is_deceased", "False")).lower() == "true",
+        client_countries=countries_obj,
+        # New fields
+        client_place_of_birth=item.get("client_place_of_birth") or item.get("place_of_birth"),
+        client_address=item.get("client_address") or item.get("address") or item.get("adress"),
+        client_city=item.get("client_city") or item.get("city"),
+        client_state=item.get("client_state") or item.get("state"),
+        client_country=item.get("client_country") or item.get("country"),
+        client_origin=item.get("client_origin") or item.get("origin"),
+        client_designation=item.get("client_designation") or item.get("designation"),
+        client_additional_informations=item.get("client_additional_informations") or item.get("additional_informations") or item.get("additional_info"),
+        client_alternative_addresses=alt_addrs_client,
+        client_date_of_death=item.get("client_date_of_death") or item.get("date_of_death"),
+        client_lei_number=item.get("client_lei_number"),
+        client_national_registry_ids=json.loads(item.get("client_national_registry_ids", "[]")) if item.get("client_national_registry_ids") else [],
+        client_other_registration_ids=json.loads(item.get("client_other_registration_ids", "[]")) if item.get("client_other_registration_ids") else [],
+        client_passport_documents=json.loads(item.get("client_passport_documents", "[]")) if item.get("client_passport_documents") else [],
+        client_national_id_documents=json.loads(item.get("client_national_id_documents", "[]")) if item.get("client_national_id_documents") else [],
+        client_other_id_documents=json.loads(item.get("client_other_id_documents", "[]")) if item.get("client_other_id_documents") else [],
+        # Champs etendus KYC
+        client_iban=item.get("client_iban") or item.get("iban") or None,
+        client_bic=item.get("client_bic") or item.get("bic") or None,
+        client_tax_id=item.get("client_tax_id") or item.get("tax_id") or None,
+        client_phone=item.get("client_phone") or item.get("phone") or None,
+        client_email=item.get("client_email") or item.get("email") or None,
+        client_website=item.get("client_website") or item.get("website") or None,
+        client_crypto_wallets=parse_multi_value(item, "client_crypto_wallets", "crypto_wallets"),
+        client_risk_rating=(item.get("client_risk_rating") or "").strip().upper() or None,
+        client_pep_flag=str(item.get("client_pep_flag", "")).strip().lower() in ("true", "1", "oui", "yes"),
+        client_segment=item.get("client_segment") or None,
+        client_activity_sector=item.get("client_activity_sector") or None,
+        client_activity_countries=[c.strip().upper() for c in (item.get("client_activity_countries") or "").split(",") if c.strip()],
+        client_relationship_start=item.get("client_relationship_start") or None,
+        client_status=(item.get("client_status") or "").strip().upper() or None,
+    )
+
+
+def _partie_de_la_ligne(item: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """
+    (partie lue, motifs de refus) d'une ligne du fichier des parties liées.
+    Appelée à l'identique par l'aperçu et par l'import : ce que l'aperçu dit
+    accepté est ce que l'import écrit.
+
+    L'identité est celle d'un client — même Quality Gate, mêmes colonnes
+    (`_colonnes_client_de_la_ligne`) — restreinte aux éléments
+    d'identification que le moteur lit (fiskr/parties.py, `champs_d_identite`).
+    """
+    from fiskr import parties as parties_liees
+    if not str(item.get("client_id") or "").strip():
+        return None, ["client_id manquant : la ligne ne dit pas de quel client elle est la partie."]
+    report = evaluate_and_clean(item)
+    if not report["is_valid"]:
+        return None, [str(e) for e in (report.get("errors") or [])]
+    champs = set(parties_liees.champs_d_identite())
+    identite = {k: v for k, v in _colonnes_client_de_la_ligne(item, report).items() if k in champs}
+    try:
+        lue = parties_liees.lire_une_partie(
+            identite, roles=item.get("role"), pourcentage=item.get("pourcentage_detention"),
+            peut_engager=item.get("peut_engager_les_fonds"), partie_id=item.get("partie_id"))
+    except parties_liees.RefusDePartie as refus:
+        return None, [str(refus)]
+    return lue, []
+
+
+def _importer_les_parties(db: Session, chemin, delimiter: str,
+                          column_mapping: Optional[Dict[str, str]], snap_id: str,
+                          username: str, rejets: "_CompteurDeRejets") -> Tuple[int, Dict[str, Any]]:
+    """
+    Import du fichier des parties liées (fiskr/parties.py). Rend (parties
+    enregistrées, bilan).
+
+    CONTRAT DU FICHIER : pour chaque client qu'il NOMME, le fichier porte le
+    jeu complet de ses parties — il remplace celui en base (parties nouvelles
+    créées, connues mises à jour en place, absentes retirées). Un client que
+    le fichier ne nomme pas garde ses parties : un fichier partiel n'efface
+    personne. Un client dont UNE ligne est refusée n'est pas mis à jour du
+    tout : remplacer son jeu sans la ligne refusée retirerait une partie que
+    le SI déclare encore.
+    """
+    from fiskr import parties as parties_liees
+    par_client: Dict[str, List[Dict[str, Any]]] = {}
+    refuses: Dict[str, int] = {}
+    for item in parse_csv_file(str(chemin), delimiter=delimiter,
+                               mapping_dict=column_mapping or None):
+        item = _normaliser_ligne_csv("CLIENT_PARTIES", item)
+        client_ref = str(item.get("client_id") or "").strip()
+        lue, motifs = _partie_de_la_ligne(item)
+        if lue is None:
+            rejets.ajouter({"errors": [f"{client_ref or '?'} : {m}" for m in motifs]})
+            if client_ref:
+                refuses[client_ref] = refuses.get(client_ref, 0) + 1
+            continue
+        par_client.setdefault(client_ref, []).append(lue)
+
+    bilan: Dict[str, Any] = {"clients": 0, "creees": 0, "modifiees": 0, "reactivees": 0,
+                             "retirees": 0, "inchangees": 0, "clients_modifies": [],
+                             "clients_non_mis_a_jour": []}
+    enregistrees = 0
+    for client_ref in sorted(par_client):
+        if client_ref in refuses:
+            continue
+        try:
+            resultat = parties_liees.remplacer_les_parties(
+                db, client_ref, par_client[client_ref], source=parties_liees.SOURCE_IMPORT,
+                source_ref=snap_id, username=username)
+        except parties_liees.RefusDePartie as refus:
+            rejets.ajouter({"errors": [f"{client_ref} : {refus}"]})
+            refuses[client_ref] = refuses.get(client_ref, 0) + 1
+            continue
+        bilan["clients"] += 1
+        for cle in ("creees", "modifiees", "reactivees", "retirees", "inchangees"):
+            bilan[cle] += resultat[cle]
+        if resultat["identite_changee"]:
+            bilan["clients_modifies"].append(client_ref)
+        enregistrees += len(par_client[client_ref])
+    bilan["clients_non_mis_a_jour"] = sorted(refuses)
+    db.flush()
+    return enregistrees, bilan
+
+
+def _cribler_apres_import_des_parties(db: Session, bilan: Dict[str, Any],
+                                      username: str) -> Dict[str, Any]:
+    """
+    Les clients dont une identité de partie vient de changer sont « modifiés »
+    au sens du criblage (fiskr/rescreen.py : l'empreinte de la relation couvre
+    ses parties). Le criblage des clients nouveaux ou modifiés de chaque
+    référentiel en production qui les porte les reprend — eux et leurs
+    parties, et eux seuls : les autres ont la même empreinte qu'hier.
+    """
+    modifies = bilan.get("clients_modifies") or []
+    if not modifies:
+        return {"launched": False, "reason": "NO_IDENTITY_CHANGE",
+                "message": "Aucune identité de partie n'a changé : rien à recribler."}
+    lots = set()
+    for debut in range(0, len(modifies), 800):   # plafond de parametres SQLite
+        lots.update(lot for (lot,) in db.query(ClientEntity.snapshot_id).join(
+            Snapshot, Snapshot.snapshot_id == ClientEntity.snapshot_id).filter(
+            Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY",
+            ClientEntity.client_id.in_(modifies[debut:debut + 800])).distinct().all())
+    lots = sorted(lots)
+    if not lots:
+        return {"launched": False, "reason": "NO_CLIENT_IN_PRODUCTION",
+                "message": (f"Les parties de {len(modifies)} client(s) ne sont PAS criblées : "
+                            f"aucun de ces clients n'est au référentiel en production. Elles le "
+                            f"seront avec leur client, quand il y entrera.")}
+    resultats = [_cribler_le_referentiel_importe(db, lot, username) for lot in lots]
+    return {"launched": any(r.get("launched") for r in resultats), "lots": lots,
+            "resultats": resultats,
+            "message": " ".join(dict.fromkeys(r["message"] for r in resultats))}
 
 
 class _CompteurDeRejets:
@@ -4344,68 +4606,20 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     fins_illisibles += 1
 
                 ent_checksum = compute_checksum(item)
-                
-                # Split countries
-                countries_obj = {
-                    "nationality": [c.strip() for c in (item.get("nationality") or "").split(",") if c],
-                    "residence": [c.strip() for c in (item.get("residence") or "").split(",") if c],
-                    "birth_country": [c.strip() for c in (item.get("birth_country") or "").split(",") if c],
-                    "registration_country": [c.strip() for c in (item.get("registration_country") or "").split(",") if c]
-                }
-                
-                alt_addrs_client = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                 db_ent = ClientEntity(
                     snapshot_id=snap_id,
-                    client_id=item.get("client_id"),
-                    client_type=item.get("client_type"),
-                    client_first_name=item.get("client_first_name"),
-                    client_last_name=item.get("client_last_name"),
-                    client_maiden_name=item.get("client_maiden_name"),
-                    client_aliases=_client_alias_list(item),
-                    client_company_name=item.get("client_company_name"),
-                    client_dob=item.get("client_dob"),
-                    client_gender=report["resolved_gender"],
-                    client_is_deceased=str(item.get("client_is_deceased", "False")).lower() == "true",
-                    client_countries=countries_obj,
-                    # New fields
-                    client_place_of_birth=item.get("client_place_of_birth") or item.get("place_of_birth"),
-                    client_address=item.get("client_address") or item.get("address") or item.get("adress"),
-                    client_city=item.get("client_city") or item.get("city"),
-                    client_state=item.get("client_state") or item.get("state"),
-                    client_country=item.get("client_country") or item.get("country"),
-                    client_origin=item.get("client_origin") or item.get("origin"),
-                    client_designation=item.get("client_designation") or item.get("designation"),
-                    client_additional_informations=item.get("client_additional_informations") or item.get("additional_informations") or item.get("additional_info"),
-                    client_alternative_addresses=alt_addrs_client,
-                    client_date_of_death=item.get("client_date_of_death") or item.get("date_of_death"),
-                    client_lei_number=item.get("client_lei_number"),
-                    client_national_registry_ids=json.loads(item.get("client_national_registry_ids", "[]")) if item.get("client_national_registry_ids") else [],
-                    client_other_registration_ids=json.loads(item.get("client_other_registration_ids", "[]")) if item.get("client_other_registration_ids") else [],
-                    client_passport_documents=json.loads(item.get("client_passport_documents", "[]")) if item.get("client_passport_documents") else [],
-                    client_national_id_documents=json.loads(item.get("client_national_id_documents", "[]")) if item.get("client_national_id_documents") else [],
-                    client_other_id_documents=json.loads(item.get("client_other_id_documents", "[]")) if item.get("client_other_id_documents") else [],
-                    # Champs etendus KYC
-                    client_iban=item.get("client_iban") or item.get("iban") or None,
-                    client_bic=item.get("client_bic") or item.get("bic") or None,
-                    client_tax_id=item.get("client_tax_id") or item.get("tax_id") or None,
-                    client_phone=item.get("client_phone") or item.get("phone") or None,
-                    client_email=item.get("client_email") or item.get("email") or None,
-                    client_website=item.get("client_website") or item.get("website") or None,
-                    client_crypto_wallets=parse_multi_value(item, "client_crypto_wallets", "crypto_wallets"),
-                    client_risk_rating=(item.get("client_risk_rating") or "").strip().upper() or None,
-                    client_pep_flag=str(item.get("client_pep_flag", "")).strip().lower() in ("true", "1", "oui", "yes"),
-                    client_segment=item.get("client_segment") or None,
-                    client_activity_sector=item.get("client_activity_sector") or None,
-                    client_activity_countries=[c.strip().upper() for c in (item.get("client_activity_countries") or "").split(",") if c.strip()],
-                    client_relationship_start=item.get("client_relationship_start") or None,
                     client_relationship_end=fin_de_relation,
-                    client_status=(item.get("client_status") or "").strip().upper() or None,
-                    entity_checksum=ent_checksum
+                    entity_checksum=ent_checksum,
+                    **_colonnes_client_de_la_ligne(item, report),
                 )
                 db.add(db_ent)
                 record_count += 1
                 if record_count % _INGEST_COMMIT_EVERY == 0:
                     snap = _ingest_progress_tick(db, snap, record_count, progress_id)
+
+        elif file_type == "CLIENT_PARTIES":
+            record_count, bilan_parties = _importer_les_parties(
+                db, temp_file_path, delimiter, column_mapping, snap_id, username, rejets)
 
         # Update Snapshot status. En mode homologation, les watchlists attendent
         # un pointage humain (PENDING_REVIEW) et restent hors du cache de criblage.
@@ -4450,6 +4664,18 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
                 "Importé par": username, "Snapshot": snap_id,
             })
+        elif file_type == "CLIENT_PARTIES":
+            # Ce que le fichier a changé, dit en clair — et les clients qu'il
+            # n'a PAS mis à jour, nommés : leurs parties restent celles d'avant.
+            message = (f"{record_count} partie(s) liée(s) enregistrée(s) pour "
+                       f"{bilan_parties['clients']} client(s) : {bilan_parties['creees']} "
+                       f"nouvelle(s), {bilan_parties['modifiees'] + bilan_parties['reactivees']} "
+                       f"modifiée(s), {bilan_parties['retirees']} retirée(s).")
+            non = bilan_parties["clients_non_mis_a_jour"]
+            if non:
+                message += (f" {len(non)} client(s) NON mis à jour (ligne refusée) : leurs "
+                            f"parties restent celles d'avant — {', '.join(non[:10])}"
+                            + (" …" if len(non) > 10 else "") + ".")
         else:
             message = f"{record_count} fiches importées et mises en production."
             emit(db, "list_import_done", {
@@ -4457,6 +4683,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Importé par": username, "Snapshot": snap_id,
             })
         criblage = None
+        if file_type == "CLIENT_PARTIES":
+            criblage = _cribler_apres_import_des_parties(db, bilan_parties, username)
+            message = f"{message} {criblage['message']}"
         if file_type == "CLIENT_BASE" and snap.status == "READY":
             # Contrôle de complétude en tâche de fond : hors de la requête
             # (un référentiel volumineux doublerait le temps d'import perçu)
@@ -5457,7 +5686,10 @@ def _relation_view(rel: EntityRelationship, names: Dict[str, str]) -> Dict[str, 
         "created_at": rel.created_at.isoformat() if rel.created_at else None,
     }
 
-OWNERSHIP_THRESHOLD_PCT = 50.0
+# LD DGT/ACPR §131 : la definition vit dans fiskr/parties.py, que la detention
+# reputee d'un client par ses parties liees lit aussi.
+from fiskr.parties import SEUIL_DE_DETENTION_PCT as OWNERSHIP_THRESHOLD_PCT
+from fiskr.parties import FONDEMENTS as FONDEMENTS_DE_DETENTION
 
 
 def _listed_entity_ids(db: Session, entity_ids) -> set:
@@ -7096,6 +7328,22 @@ async def get_client_overview(
     pairs = db.query(WhitelistPair).filter(WhitelistPair.client_id == client_id) \
               .order_by(WhitelistPair.created_at.desc()).all()
 
+    # Parties liees (fiskr/parties.py) : qui, a quel titre, quelle detention —
+    # et leurs alertes, toutes rattachees a ce client. La detention reputee se
+    # lit sur les parties CONFIRMEES (vrais positifs du perimetre SANCTION).
+    from fiskr import parties as parties_liees
+    actives = parties_liees.parties_actives(db, [client_id]).get(client_id, [])
+    noms_de_parties = {p.id: p.nom for p in actives}
+    manquantes = {r.partie_liee_id for r in audits if r.partie_liee_id} - set(noms_de_parties)
+    if manquantes:
+        noms_de_parties.update({p.id: p.nom for p in db.query(PartieLiee).filter(
+            PartieLiee.id.in_(sorted(manquantes))).all()})
+    alertes_par_partie: Dict[int, List[Alert]] = {}
+    for a in db.query(Alert).filter(Alert.client_id == client_id,
+                                    Alert.partie_liee_id.isnot(None)).all():
+        alertes_par_partie.setdefault(a.partie_liee_id, []).append(a)
+    detention = parties_liees.evaluer_la_detention(db, client_id, perimeter_overrides(db))
+
     return {
         "client_id": client_id,
         "kyc": kyc,
@@ -7104,11 +7352,23 @@ async def get_client_overview(
                 "id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None,
                 "watchlist_id": r.watchlist_id, "watchlist_name": r.watchlist_name,
                 "final_score": r.final_score, "status": r.status, "list_type": r.list_type,
+                # Decision sur une partie liee : laquelle (NULL : le client)
+                "partie_liee_id": r.partie_liee_id,
+                "partie_nom": noms_de_parties.get(r.partie_liee_id) if r.partie_liee_id else None,
             }
             for r in audits
         ],
         "alerts": [_alert_summary(a) for a in alerts],
         "whitelist_pairs": [_whitelist_summary(p) for p in pairs],
+        "parties": [{
+            **parties_liees.vue(p),
+            "alertes_ouvertes": sum(1 for a in alertes_par_partie.get(p.id, [])
+                                    if a.status in ALERT_OPEN_STATUSES),
+            "alertes_confirmees": sum(1 for a in alertes_par_partie.get(p.id, [])
+                                      if a.status == "CLOSED_CONFIRMED"),
+        } for p in actives],
+        "detention": {**detention,
+                      "fondement_label": parties_liees.FONDEMENTS.get(detention["fondement"] or "")},
         "counts": {
             "screenings": db.query(AuditTrail).filter(AuditTrail.client_id == client_id).count(),
             "alerts": db.query(Alert).filter(Alert.client_id == client_id).count(),
@@ -11500,6 +11760,10 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
         "lapsed_since": alert.lapsed_since.isoformat() if alert.lapsed_since else None,
         "lapsed_reason": alert.lapsed_reason,
         "delisted_at": alert.delisted_at.isoformat() if alert.delisted_at else None,
+        # Correspondance sur une partie liee du client (fiskr/parties.py) : la
+        # chaine qui la rattache au client, figee a la creation
+        "partie_liee_id": alert.partie_liee_id,
+        "via_partie": alert.via_partie,
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -12774,6 +13038,19 @@ def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[st
         "personne_concernee": _personne_concernee(db, alert) if alert is not None
                               else {"nom_complet": mesure.client_name},
         "operation_concernee": operation,
+        # Client repute detenu ou controle par ses parties liees
+        # (fiskr/parties.py) : le fondement et le calcul fige a l'ouverture
+        "detention_ou_controle": ({
+            "fondement": FONDEMENTS_DE_DETENTION.get(mesure.fondement),
+            "cumul_pct": (mesure.detention or {}).get("cumul_pct"),
+            "seuil_pct": (mesure.detention or {}).get("seuil_pct"),
+            "parties": [
+                f"{p.get('nom')}"
+                + (f" — {p['pourcentage_detention']:g} %" if p.get("pourcentage_detention") else "")
+                + (" — peut engager les fonds" if p.get("peut_engager_les_fonds") else "")
+                + f" — {', '.join(p.get('personnes_designees') or [])}"
+                for p in (mesure.detention or {}).get("parties") or []],
+        } if mesure.fondement else None),
         "traitement_alerte": {
             "score_final": alert.final_score if alert else None,
             "correspondance_exacte": bool(tree.get("hard_match_triggered", False)),
@@ -12834,6 +13111,13 @@ def _render_gel_draft_html(mesure: MesureDeGel, draft: Dict[str, Any], generated
                            "type_message": "Type de message", "partie_en_cause": "Partie en cause",
                            "role_partie": "Rôle de la partie"})
         + "</tbody></table>") if operation else ""
+    detention = draft.get("detention_ou_controle")
+    detention_html = (
+        "<h2>Détention ou contrôle par une personne désignée (LD DGT/ACPR §131, §133, §144)</h2>"
+        "<table><tbody>"
+        + rows(detention, {"fondement": "Fondement", "cumul_pct": "Détention cumulée (%)",
+                           "seuil_pct": "Seuil (%)", "parties": "Parties liées confirmées"})
+        + "</tbody></table>") if detention else ""
     listee = draft["personne_listee"]
     absente = ("" if listee["presente_dans_les_listes_en_production"] else
                "<p class=\"sub\">⚠ La fiche n'est plus présente dans les listes en production : "
@@ -12886,6 +13170,7 @@ th {{ background: #f0f0f0; width: 240px; }}
     "adresse": "Adresse", "ville": "Ville", "pays": "Pays", "nationalites": "Nationalité(s)",
     "iban": "IBAN", "bic": "BIC", "entree_en_relation": "Entrée en relation",
     "reference_interne": "Référence interne"})}</tbody></table>
+{detention_html}
 {operation_html}
 <h2>5. Traitement de l'alerte</h2>
 <table><tbody>{rows(draft['traitement_alerte'], {"score_final": "Score final (%)",
@@ -13737,6 +14022,28 @@ class HookClientUpsert(BaseModel):
     # effacerait sinon la date posee par l'import. `null` explicite l'efface.
     client_relationship_end: Optional[str] = None
     client_status: Optional[str] = None
+    # Parties liees (fiskr/parties.py). CONTRAT : la charge utile remplace
+    # toute la fiche, mais PAS les parties quand elle n'en dit rien — champ
+    # absent ou null : parties inchangees (un SI qui ignore ce champ, et ils
+    # l'ignorent tous aujourd'hui, ne doit pas effacer les beneficiaires
+    # effectifs connus). Une liste, meme vide, est le jeu COMPLET : elle
+    # remplace celui en base, et une partie qui n'y figure plus est retiree.
+    parties: Optional[List["HookPartieLiee"]] = None
+
+
+class HookPartieLiee(BaseModel):
+    # Reference amont de la personne ; absente : calculee de son identite
+    partie_id: Optional[str] = Field(None, max_length=100)
+    roles: List[str] = Field(..., min_length=1)
+    # Elements d'identification d'un client, et eux seuls : la liste est
+    # celle que le moteur lit (fiskr/identification.py), verifiee par
+    # fiskr/parties.py — un champ inconnu est refuse, pas ignore.
+    identite: Dict[str, Any]
+    pourcentage_detention: Optional[float] = None
+    peut_engager_les_fonds: Optional[bool] = None
+
+
+HookClientUpsert.model_rebuild()
 
 
 def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
@@ -13754,8 +14061,10 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
 
     - creation : toujours criblee ;
     - mise a jour : criblee si un element d'identification a change — la
-      liste est RELEVEE sur le moteur (fiskr/identification.py), pas recopiee ;
-      sinon, rien n'est recrible et la reponse le dit ;
+      liste est RELEVEE sur le moteur (fiskr/identification.py), pas recopiee —
+      ou si l'identite d'une partie liee a change (`identification` porte
+      alors « parties_liees ») ; sinon, rien n'est recrible et la reponse le
+      dit ;
     - aucune liste en production (409 de `exiger_un_univers`) ou profil
       refuse par le quality gate (400) : la fiche reste enregistree, et la
       reponse dit qu'elle n'a PAS ete criblee — jamais « aucune
@@ -13802,9 +14111,23 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
     summary = f"criblée contre les listes en production : {statut}"
     if result.get("alert_id"):
         summary += f", alerte #{result['alert_id']}"
+    # Un NO_MATCH du client avec un beneficiaire effectif en alerte ne doit pas
+    # se lire « rien » : les parties sont dites, et ce qui ne va pas, nomme.
+    parties_criblees = result.get("parties") or []
+    if parties_criblees:
+        en_alerte = [p for p in parties_criblees if p.get("alert_id")]
+        refusees = [p for p in parties_criblees if not p.get("performed")]
+        summary += f" ; parties liées : {len(parties_criblees) - len(refusees)} criblée(s)"
+        if en_alerte:
+            summary += ", en alerte : " + ", ".join(
+                f"#{p['alert_id']} ({p['partie']['chaine']})" for p in en_alerte)
+        if refusees:
+            summary += f", {len(refusees)} NON criblée(s) (contrôle qualité)"
     return {
         "performed": True,
-        "reason": "CREATED" if operation == "created" else "IDENTIFICATION_CHANGED",
+        "reason": ("CREATED" if operation == "created"
+                   else "PARTIES_CHANGED" if identification == ["parties_liees"]
+                   else "IDENTIFICATION_CHANGED"),
         "identification_fields_changed": identification,
         "summary": summary + ".",
         "status": statut,
@@ -13812,6 +14135,7 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
         "audit_trail_id": result.get("audit_trail_id"),
         "alert_id": result.get("alert_id"),
         "hits": result.get("hits"),
+        "parties": parties_criblees,
         # Meme contrat que POST /api/hooks/screening
         "result": result,
     }
@@ -13853,7 +14177,19 @@ async def hook_client_upsert(
                 detail="Aucune base clients en production : importez d'abord un référentiel CLIENT_BASE."
             )
 
-        values = payload.model_dump()
+        values = payload.model_dump(exclude={"parties"})
+        # Parties liees lues et verifiees AVANT toute ecriture : une partie
+        # refusee ne laisse pas une fiche modifiee derriere elle.
+        from fiskr import parties as parties_liees
+        parties_lues = None
+        if payload.parties is not None:
+            try:
+                parties_lues = [parties_liees.lire_une_partie(
+                    p.identite, roles=p.roles, pourcentage=p.pourcentage_detention,
+                    peut_engager=p.peut_engager_les_fonds, partie_id=p.partie_id)
+                    for p in payload.parties]
+            except parties_liees.RefusDePartie as refus:
+                raise HTTPException(status_code=422, detail=f"Partie liée refusée : {refus}")
         avertissements: List[str] = []
         if "client_relationship_end" not in payload.model_fields_set:
             values.pop("client_relationship_end")
@@ -13908,9 +14244,25 @@ async def hook_client_upsert(
             changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
 
         identification = elements_d_identification(changed_fields)
+        if parties_lues is None:
+            bilan_parties = {"applied": False,
+                             "summary": "inchangées : la charge utile ne porte pas de parties."}
+        else:
+            try:
+                bilan_parties = parties_liees.remplacer_les_parties(
+                    db, payload.client_id, parties_lues, source=parties_liees.SOURCE_WEBHOOK,
+                    source_ref=current_user["username"], username=current_user["username"])
+            except parties_liees.RefusDePartie as refus:
+                raise HTTPException(status_code=422, detail=f"Partie liée refusée : {refus}")
+            bilan_parties = {"applied": True, "received": len(parties_lues), **bilan_parties}
+            # Une identite de partie creee, modifiee ou retiree est une mise a
+            # jour des elements d'identification de la relation (LD §141).
+            if bilan_parties["identite_changee"] and "parties_liees" not in identification:
+                identification = identification + ["parties_liees"]
         trace = {"operation": action_detail, "fields": changed_fields,
                  "identification_fields": identification,
-                 "snapshot_id": snap.snapshot_id}
+                 "snapshot_id": snap.snapshot_id,
+                 "parties": {k: v for k, v in bilan_parties.items() if k != "summary"}}
         if gel_maintenu:
             # Un SI qui tente de degeler un client se retrouve au journal
             trace["status_kept_frozen"] = {k: gel_maintenu[k] for k in
@@ -13928,6 +14280,7 @@ async def hook_client_upsert(
             "client_id": payload.client_id,
             "snapshot_id": snap.snapshot_id,
             "changed_fields": changed_fields,
+            "parties": bilan_parties,
             "screening": screening,
             "frozen": gel_maintenu,
             "warnings": avertissements,
@@ -14150,12 +14503,19 @@ async def list_alerts(
         suivis = {r.alert_id for r in db.query(AlertFollower).filter(
             AlertFollower.username == current_user["username"],
             AlertFollower.alert_id.in_([a.id for a in rows])).all()}
+    # Parties liees des alertes de la page, en une requete : la file nomme
+    # la partie sous le client (fiskr/parties.py)
+    from fiskr import parties as parties_liees
+    ids_parties = sorted({a.partie_liee_id for a in rows if a.partie_liee_id is not None})
+    vues_parties = {p.id: parties_liees.vue(p) for p in db.query(PartieLiee).filter(
+        PartieLiee.id.in_(ids_parties)).all()} if ids_parties else {}
     return {
         "total": total,
         "open_count": open_count,
         "page": page,
         "page_size": page_size,
-        "items": [{**_alert_summary(a), "following_me": a.id in suivis} for a in rows],
+        "items": [{**_alert_summary(a), "following_me": a.id in suivis,
+                   "partie": vues_parties.get(a.partie_liee_id)} for a in rows],
     }
 
 @app.get("/api/alerts/{alert_id}")
@@ -14238,6 +14598,43 @@ async def get_alert_detail(
         "ppe_vocabulaire": dossiers_ppe.vocabulaire(),
         # Client et personne listee cote a cote (fiskr/comparaison.py)
         "comparison": _comparaison_de_l_alerte(db, alert, audit),
+        # Partie liee du client sur laquelle porte la correspondance, et ce que
+        # ses parties confirmees etablissent de la detention du client
+        **_partie_de_l_alerte(db, alert, audit),
+    }
+
+
+def _partie_de_l_alerte(db: Session, alert: Alert, audit: Optional[AuditTrail]) -> Dict[str, Any]:
+    """
+    Sur une alerte de partie liee (fiskr/parties.py) : la partie telle que le
+    criblage l'a vue (arbre journalise) et telle qu'elle est aujourd'hui, la
+    detention reputee du client, et si le geste du doute (suspendre et
+    interroger la DG Tresor, LD §144) est ouvert a l'analyste.
+    """
+    if alert.partie_liee_id is None:
+        return {"partie_liee": None}
+    from fiskr import parties as parties_liees
+    surcharges = perimeter_overrides(db)
+    ligne = db.get(PartieLiee, alert.partie_liee_id)
+    vue = parties_liees.vue(ligne) if ligne is not None else None
+    vue_criblee = ((audit.decision_tree or {}).get("partie_liee") if audit else None) or {}
+    detention = parties_liees.evaluer_la_detention(db, alert.client_id, surcharges)
+    from fiskr.perimeters import est_sanction
+    doute = (alert.status == "CLOSED_CONFIRMED" and est_sanction(alert.list_type, surcharges)
+             and not detention["reputee"]
+             and not db.query(MesureDeGel.id).filter(MesureDeGel.alert_id == alert.id).first())
+    return {
+        "partie_liee": {
+            "actuelle": vue,
+            "criblee": vue_criblee,
+            "chaine": alert.via_partie or vue_criblee.get("chaine"),
+            "retiree": ligne is not None and ligne.retiree_le is not None,
+            "roles": [{"code": r, "libelle": parties_liees.ROLES.get(r, r)}
+                      for r in (vue_criblee.get("roles") or (ligne.roles if ligne else []) or [])],
+        },
+        "detention": {**detention,
+                      "fondement_label": parties_liees.FONDEMENTS.get(detention["fondement"] or "")},
+        "gel_doute_possible": bool(doute),
     }
 
 
@@ -14249,12 +14646,15 @@ _SOURCES_DE_COMPARAISON = {
     "AUDIT_NOM": "Client hors référentiel, criblé avant que le journal ne porte son identification : seul son nom est restituable",
     "FICHE_RENCONTREE": "Version de la fiche rencontrée par ce criblage",
     "FICHE_EN_PRODUCTION": "Version en production (la ligne d'audit de ce criblage n'est plus disponible)",
+    "PARTIE_LIEE": "Partie liée du client (bénéficiaire effectif, mandataire, dirigeant ou associé)",
+    "PARTIE_JOURNALISEE": "Identité de la partie liée journalisée par ce criblage (partie retirée depuis par la source)",
 }
 _NOTES_DE_COMPARAISON = {
     "CLIENT_MODIFIE": "L'identification du client a changé depuis ce criblage : le tableau compare le référentiel actuel, l'explication du score porte sur l'identification criblée.",
     "FICHE_PURGEE": "La version rencontrée n'est plus conservée en base : elle est restituée depuis le journal d'audit.",
     "FICHE_CORRIGEE": "La fiche a été corrigée depuis ce criblage : le tableau compare la version rencontrée, la fiche complète montre la version corrigée.",
     "FICHE_PLUS_RECENTE": "Une version plus récente de cette fiche est en production.",
+    "PARTIE_MODIFIEE": "L'identité de la partie liée a changé depuis ce criblage : le tableau compare son identité actuelle, l'explication du score porte sur l'identité criblée.",
 }
 
 
@@ -14341,9 +14741,22 @@ def _comparaison_de_l_alerte(db: Session, alert: Alert,
         return {"available": False,
                 "reason": "Ni la ligne d'audit ni la production ne décrivent plus cette fiche : rien à comparer."}
 
-    referentiel = None if str(alert.client_id or "").startswith("TXN:") \
+    # Alerte de partie liee (fiskr/parties.py) : la colonne « client » est la
+    # PARTIE — c'est son identite que le moteur a comparee, pas celle d'ACME.
+    partie = db.get(PartieLiee, alert.partie_liee_id) if alert.partie_liee_id is not None else None
+    referentiel = None if (str(alert.client_id or "").startswith("TXN:")
+                           or alert.partie_liee_id is not None) \
         else _fiche_du_referentiel(db, alert.client_id)
-    if referentiel is not None:
+    if partie is not None and partie.retiree_le is None:
+        from fiskr.parties import profil_de_criblage
+        source_client, profil = "PARTIE_LIEE", profil_de_criblage(partie)
+        if arbre.get("client_fingerprint") and \
+                empreinte_client(profil) != arbre.get("client_fingerprint"):
+            notes.append("PARTIE_MODIFIEE")
+    elif alert.partie_liee_id is not None and arbre.get("client_identification"):
+        source_client = "PARTIE_JOURNALISEE"
+        profil = {"client_type": audit.client_type, **arbre["client_identification"]}
+    elif referentiel is not None:
         source_client, profil = "REFERENTIEL", _profil_du_referentiel(referentiel)
         if arbre.get("client_fingerprint") and \
                 empreinte_client(profil) != arbre.get("client_fingerprint"):

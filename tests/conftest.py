@@ -129,7 +129,7 @@ _INT_PK_TABLES = (
     "BatchResult", "BatchCampaign",
     "NotificationDelivery", "HookDelivery", "LearnedEquivalence",
     "WhitelistPair", "SavedView", "UserDashboard", "ApiKey", "SyncReport", "AdminAuditLog",
-    "ScreeningPass", "ClientEntity", "WatchlistEntity", "Job",
+    "ScreeningPass", "PartieLiee", "ClientEntity", "WatchlistEntity", "Job",
 )
 
 

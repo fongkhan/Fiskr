@@ -63,7 +63,12 @@ const LIST_TYPE_LABELS = {
  WATCHLIST_WB_DEBARRED: "Banque mondiale — fournisseurs exclus (voie ouverte)",
  WATCHLIST_IL_CRYPTO: "Israël — portefeuilles crypto désignés",
  CLIENT_BASE: "Base clients",
+ CLIENT_PARTIES: "Parties liées des clients",
 };
+
+// Imports qui ne sont pas des listes : ni filtre de liste, ni périmètre de
+// criblage, ni lookback ne les proposent.
+const TYPES_HORS_LISTES = new Set(["CLIENT_BASE", "CLIENT_PARTIES"]);
 
 // ------------------ CATALOGUE DES SOURCES OFFICIELLES ------------------
 // La seule source de vérité du front : l'écran Sources, les libellés des
@@ -320,7 +325,7 @@ function remplirTypesDeListePourLookback() {
  // vocabulaire partagé des types de liste.
  if (!select || select.options.length > 1) return;
  for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
- if (value === "CLIENT_BASE") continue;
+ if (TYPES_HORS_LISTES.has(value)) continue;
  const option = document.createElement("option");
  option.value = value;
  option.textContent = label;
@@ -363,7 +368,7 @@ async function lancerLookback() {
 function listTypeFilterOptions(withUnknown) {
  let html = '<option value="">Toutes les listes</option>';
  for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
- if (value === "CLIENT_BASE") continue;
+ if (TYPES_HORS_LISTES.has(value)) continue;
  html += `<option value="${value}">${label}</option>`;
  }
  if (withUnknown) html += '<option value="UNKNOWN">Inconnue (antérieur)</option>';
@@ -1019,6 +1024,7 @@ const ALERT_EVENT_LABELS = {
  GEL_DECLARE: "Gel déclaré à la DG Trésor", GEL_LEVE: "Gel levé",
  GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
  GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
+ DETENTION_REPUTEE: "Client réputé détenu ou contrôlé", DETENTION_NON_ETABLIE: "Détention ou contrôle non établi",
  WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
  DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
  LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
@@ -2359,7 +2365,7 @@ function initListTypeControls() {
  const container = document.getElementById(containerId);
  if (!container) continue;
  container.innerHTML = Object.entries(LIST_TYPE_LABELS)
- .filter(([value]) => value !== "CLIENT_BASE")
+ .filter(([value]) => !TYPES_HORS_LISTES.has(value))
  .map(([value, label]) => `
  <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.85rem;">
  <input type="checkbox" class="${containerId}-cb" value="${value}" checked> ${label}
@@ -3037,7 +3043,7 @@ function toggleManualFormFields() {
 function populateManualListSelects() {
  const options = ['<option value="">Générique (par défaut)</option>']
  .concat(Object.entries(LIST_TYPE_LABELS)
- .filter(([type]) => type !== "CLIENT_BASE")
+ .filter(([type]) => !TYPES_HORS_LISTES.has(type))
  .map(([type, label]) => `<option value="${type}">${escapeHtml(label)}</option>`))
  .join("");
  document.querySelectorAll(".manual-list-select").forEach(sel => {
@@ -3383,6 +3389,10 @@ function toggleSsieOptions() {
  // choix à faire là où le format est publié par l'émetteur.
  const btn = document.getElementById("apercu-ingest-btn");
  if (btn) btn.classList.toggle("hidden", !TYPES_AVEC_APERCU.includes(fileType));
+ // Le format du fichier des parties liées n'est publié par personne : il se
+ // dit ici, au moment où on le choisit.
+ const aideParties = document.getElementById("aide-parties-liees");
+ if (aideParties) aideParties.classList.toggle("hidden", fileType !== "CLIENT_PARTIES");
  const zone = document.getElementById("apercu-import");
  if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
  // Une correspondance appartient à un fichier et à un type : la garder au
@@ -3398,7 +3408,7 @@ function toggleSsieOptions() {
 // qui ne correspond à rien, et un criblage qui répond « aucune correspondance »
 // sans jamais se plaindre.
 
-const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU"];
+const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU", "CLIENT_PARTIES"];
 
 // Correspondance en cours d'édition : {champ_du_moteur: colonne_du_fichier}.
 // L'aperçu la rejoue à chaque application, l'import la porte, et le serveur
@@ -3646,6 +3656,24 @@ async function signalerCriblageDesClients(criblage) {
  }
 }
 
+// Le fichier des parties liées recrible les clients dont une partie a changé
+// d'identité (fiskr/api.py, `_cribler_apres_import_des_parties`) : par le
+// même travail qu'un import de référentiel, référentiel par référentiel. Rien
+// à recribler, ou des clients absents du référentiel : chacun se dit à part —
+// « aucune liste n'est en production » serait faux.
+function signalerCriblageDesParties(criblage) {
+ if (criblage.reason === "NO_IDENTITY_CHANGE") {
+  showToast("Aucune identité de partie n'a changé : rien à recribler.", "info", 7000);
+  return;
+ }
+ if (criblage.reason === "NO_CLIENT_IN_PRODUCTION") {
+  showToast("Ces parties ne sont PAS criblées : leurs clients ne sont pas au référentiel en production.", "error", 10000);
+  return;
+ }
+ const premier = (criblage.resultats || [])[0];
+ if (premier) signalerCriblageDesClients(premier);
+}
+
 // Handle Snapshot Ingestion (Upload file)
 async function handleIngestion(event) {
  event.preventDefault();
@@ -3747,7 +3775,10 @@ async function handleIngestion(event) {
  // Un référentiel clients part au criblage dès son entrée en production.
  // L'import annonçait « Successfully imported 406 items » sans cribler
  // personne : il dit maintenant ce qui se passe, et où en lire le résultat.
- if (data.criblage) signalerCriblageDesClients(data.criblage);
+ if (data.criblage) {
+  if (fileType === "CLIENT_PARTIES") signalerCriblageDesParties(data.criblage);
+  else signalerCriblageDesClients(data.criblage);
+ }
  fileInput.value = "";
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
@@ -4885,9 +4916,13 @@ async function handleScreening(event) {
 
  // Continuité criblage -> alerte : lien direct vers l'alerte ouverte
  const alertLink = document.getElementById("screening-alert-link");
+ // Les parties liées du client (bénéficiaires effectifs, mandataires…) sont
+ // criblées avec lui : leurs alertes sont les siennes, et se proposent ici.
+ const alertesDesParties = (data.parties || []).filter(p => p.alert_id).map(p =>
+ `<button class="btn btn-sm btn-secondary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${p.alert_id});"><span>Instruire l'alerte de la partie liée</span> #${p.alert_id}</button>`).join(" ");
  if (alertLink) {
- if (data.alert_id) {
- alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button>`;
+ if (data.alert_id || alertesDesParties) {
+ alertLink.innerHTML = (data.alert_id ? `<button class="btn btn-sm btn-primary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button> ` : "") + alertesDesParties;
  alertLink.classList.remove("hidden");
  } else {
  alertLink.classList.add("hidden");
@@ -4906,7 +4941,7 @@ async function handleScreening(event) {
  }
  }
  // Une decision ALERT ouvre une alerte de travail : rafraichir le badge
- if (data.alert_id) { fetchAlerts("SCREENING"); refreshSidebarCounters(); }
+ if (data.alert_id || alertesDesParties) { fetchAlerts("SCREENING"); refreshSidebarCounters(); }
  } catch (e) {
  console.error("Error screening:", e);
  showToast("Erreur réseau lors de l'appel au moteur.", "error");
@@ -8362,7 +8397,7 @@ function renderAlertsTable(channel, items) {
  tbody.innerHTML = items.map(a => {
  const subject = channel === "FILTERING"
  ? describeFilteringSubject(a)
- : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+ : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>${a.partie ? "<br>" + partieLieeHtml(a.partie) : ""}`;
  const etoile = a.following_me
  ? `<span class="etoile-suivi" title="Vous suivez ce dossier" aria-hidden="true">★</span> ` : "";
  const selectable = !a.status.startsWith("CLOSED");
@@ -8494,6 +8529,7 @@ async function openAlertModal(alertId) {
  </span>
  </p>
  ${bandeauCaduciteHtml(a)}
+ ${blocPartieLiee(a, roles.includes("auditor"))}
  ${blocComparaison(a)}
  <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
@@ -8528,6 +8564,59 @@ async function openAlertModal(alertId) {
  } catch (e) {
  console.error("Error opening alert:", e);
  }
+}
+
+// ------------------ PARTIES LIÉES (fiskr/parties.py) ------------------
+// Une correspondance sur le bénéficiaire effectif, le mandataire, le dirigeant
+// ou l'associé d'un client est l'alerte du CLIENT : l'écran nomme la partie
+// sous lui. Rôles, nom et mentions en nœuds texte séparés — chacun se traduit,
+// le nom ne se traduit pas.
+
+function _pourcentageLisible(valeur) {
+ return valeur == null ? "—" : `${Number(valeur).toLocaleString(uiLocale())} %`;
+}
+
+function partieLieeHtml(p) {
+ if (!p) return "";
+ const roles = (p.roles || []).map(r => `<span>${escapeHtml(r.libelle)}</span>`).join(" · ");
+ const pct = p.pourcentage_detention != null ? ` · ${escapeHtml(_pourcentageLisible(p.pourcentage_detention))}` : "";
+ const engage = p.peut_engager_les_fonds ? ` · <span>peut engager les fonds</span>` : "";
+ return `<small class="partie-liee"><span>Via la partie liée</span> ${roles} : <strong>${escapeHtml(p.nom)}</strong>${pct}${engage}</small>`;
+}
+
+function blocDetentionHtml(d) {
+ if (!d) return "";
+ if (d.reputee) {
+  return `<div class="anomaly-item" style="color: var(--color-alert); font-weight: 600;"><span>Client réputé détenu ou contrôlé par une personne désignée</span> — <span>${escapeHtml(d.fondement_label || "")}</span></div>`;
+ }
+ // Sous le seuil : seulement s'il y a déjà un vrai positif à additionner —
+ // un cumul nul ne dit rien à personne.
+ if (!(d.parties || []).length) return "";
+ return `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.3rem 0;"><span>Détention cumulée des parties confirmées</span> : ${escapeHtml(_pourcentageLisible(d.cumul_pct))} · <span>seuil</span> ${escapeHtml(_pourcentageLisible(d.seuil_pct))}</p>`;
+}
+
+function blocPartieLiee(a, auditeur) {
+ const pl = a.partie_liee;
+ if (!pl) return "";
+ const p = pl.actuelle || pl.criblee || {};
+ const roles = (pl.roles || []).map(r => `<span>${escapeHtml(r.libelle)}</span>`).join(" · ");
+ const doute = a.gel_doute_possible && !auditeur
+  ? `<button class="btn btn-sm btn-secondary" style="margin-top: 0.4rem;" onclick="ouvrirMesureDeGel(${a.id}, 'SUSPENSION_MISE_A_DISPOSITION')">En cas de doute : suspendre et interroger la DG Trésor</button>`
+  : "";
+ return `<div style="margin: 0.75rem 0 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px;">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.4rem;">Partie liée du client</h3>
+  <p style="font-size: 0.82rem; color: var(--text-muted); margin: 0 0 0.4rem;"><span>L'alerte est celle du client : la correspondance porte sur une personne de sa relation.</span></p>
+  ${pl.retiree ? `<div class="anomaly-item warning" style="font-size: 0.82rem;">Partie retirée depuis par la source.</div>` : ""}
+  <div class="details-grid">
+   <div class="details-item"><strong>Rôle</strong><span>${roles || "—"}</span></div>
+   <div class="details-item"><strong>Nom</strong><span>${escapeHtml(p.nom || "—")}</span></div>
+   <div class="details-item"><strong>Naissance</strong><span>${escapeHtml(p.dob || "—")}</span></div>
+   <div class="details-item"><strong>Détention</strong><span>${escapeHtml(_pourcentageLisible(p.pourcentage_detention))}</span></div>
+   <div class="details-item"><strong>Peut engager les fonds</strong><span>${p.peut_engager_les_fonds ? "Oui" : "Non"}</span></div>
+  </div>
+  ${blocDetentionHtml(a.detention)}
+  ${doute}
+ </div>`;
 }
 
 // ------------------ CLIENT ET PERSONNE LISTÉE CÔTE À CÔTE ------------------
@@ -8839,6 +8928,7 @@ function _blocMesure(m, vocab, isReviewer, auditeur) {
    <strong><span>Mesure de gel</span> #${m.id}</strong> ${badgeStatutGel(m)}
    <small style="color: var(--text-muted);"><span>ouverte à la confirmation</span> · ${formatDateTime(m.ouverte_le)} · @${escapeHtml(m.ouverte_par || "")}</small>
   </div>
+  ${m.fondement ? `<p style="font-size: 0.85rem; color: var(--color-alert); font-weight: 600; margin: 0 0 0.4rem;">${escapeHtml(m.fondement_label || "")}</p>` : ""}
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${m.radiation_a_examiner ? `
@@ -8990,7 +9080,7 @@ async function fetchGels() {
    <tr>
     <td>#${m.id}</td>
     <td>${formatDateTime(m.ouverte_le)}</td>
-    <td>${escapeHtml(m.client_name)}</td>
+    <td>${escapeHtml(m.client_name)}${m.fondement ? `<br><span class="badge badge-danger" style="font-size: 0.7rem; white-space: normal;">${escapeHtml(m.fondement_label || "")}</span>` : ""}</td>
     <td>${escapeHtml(m.watchlist_name)}</td>
     <td>${m.list_type ? listTypeBadge(m.list_type) : "—"}</td>
     <td>${escapeHtml(m.type_action_label)}</td>
@@ -13487,7 +13577,20 @@ async function recriblerClient(clientId) {
  // L'alerte à instruire : celle de la meilleure correspondance que la liste
  // blanche n'a pas absorbée (`best_alert`), à défaut celle de la meilleure.
  const alerteId = (data.best_alert && data.best_alert.alert_id) || data.alert_id;
- if (alerteId) {
+ // Une partie liée en alerte est une alerte du client : « aucune
+ // correspondance » ne se dit pas tant qu'elle existe.
+ const partieEnAlerte = (data.parties || []).find(p => p.alert_id);
+ if (!alerteId && partieEnAlerte) {
+ showToast("Criblage terminé : une partie liée du client est en alerte.", "warning", 9000, {
+ label: "Ouvrir l'alerte", suffixe: `#${partieEnAlerte.alert_id}`,
+ run: () => {
+ document.getElementById("client360-modal")?.classList.add("hidden");
+ switchTab("screening"); switchSubTab("screening", "alerts-screening");
+ openAlertModal(partieEnAlerte.alert_id);
+ },
+ });
+ refreshAlertQueues?.();
+ } else if (alerteId) {
  showToast("Criblage terminé : correspondance au-dessus du seuil.", "warning", 9000, {
  label: "Ouvrir l'alerte", suffixe: `#${alerteId}`,
  run: () => {
@@ -13549,19 +13652,32 @@ async function openClient360(clientId) {
  const screeningsHtml = (d.screenings || []).slice(0, 15).map(s => `
  <tr>
  <td>${formatDateTime(s.timestamp)}</td>
- <td>${escapeHtml(s.watchlist_name || "—")}</td>
+ <td>${escapeHtml(s.watchlist_name || "—")}${s.partie_nom ? `<br><small style="color: var(--text-muted);"><span>Via la partie liée</span> : ${escapeHtml(s.partie_nom)}</small>` : ""}</td>
  <td>${s.list_type ? listTypeBadge(s.list_type) : "—"}</td>
  <td>${s.final_score !== null && s.final_score !== undefined ? s.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${escapeHtml(statusLabel(s.status))}</td>
  </tr>`).join("");
 
+ const partiesParId = Object.fromEntries((d.parties || []).map(p => [p.id, p]));
  const alertsHtml = (d.alerts || []).slice(0, 15).map(a => `
  <tr>
  <td>#${a.id}</td><td>${formatDateTime(a.created_at)}</td>
- <td>${escapeHtml(a.watchlist_name)}</td>
+ <td>${escapeHtml(a.watchlist_name)}${a.partie_liee_id && partiesParId[a.partie_liee_id] ? "<br>" + partieLieeHtml(partiesParId[a.partie_liee_id]) : ""}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${escapeHtml(statusLabel(a.status))}</td>
  <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('${(a.channel || "SCREENING") === "FILTERING" ? "filtering" : "screening"}'); openAlertModal(${a.id})"></button></td>
+ </tr>`).join("");
+
+ // Bénéficiaires effectifs, mandataires, dirigeants, associés : criblés avec
+ // le client, leurs alertes sont les siennes (fiskr/parties.py).
+ const partiesHtml = (d.parties || []).map(p => `
+ <tr>
+ <td>${(p.roles || []).map(r => `<span>${escapeHtml(r.libelle)}</span>`).join(" · ")}</td>
+ <td>${escapeHtml(p.nom)}</td>
+ <td>${escapeHtml(p.dob || "—")}</td>
+ <td>${escapeHtml(_pourcentageLisible(p.pourcentage_detention))}</td>
+ <td>${p.peut_engager_les_fonds ? "Oui" : "Non"}</td>
+ <td>${p.alertes_ouvertes ? `<strong style="color: var(--color-alert);">${p.alertes_ouvertes}</strong>` : "0"}${p.alertes_confirmees ? ` · <span>confirmée(s)</span> ${p.alertes_confirmees}` : ""}</td>
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `
@@ -13569,6 +13685,14 @@ async function openClient360(clientId) {
 
  body.innerHTML = `
  ${kycHtml}
+ <div class="modal-section">
+ <h4><span>Parties liées</span> (${(d.parties || []).length})</h4>
+ ${blocDetentionHtml(d.detention)}
+ ${partiesHtml ? `<div class="table-container" style="max-height: 190px;"><table>
+ <thead><tr><th>Rôle</th><th>Nom</th><th>Naissance</th><th>Détention</th><th>Peut engager les fonds</th><th>Alertes ouvertes</th></tr></thead>
+ <tbody>${partiesHtml}</tbody></table></div>`
+ : '<p style="font-size: 0.85rem; color: var(--text-muted);">Aucune partie liée déclarée (bénéficiaire effectif, mandataire, dirigeant, associé) : seul le client est criblé.</p>'}
+ </div>
  <div class="modal-section">
  <h4>Criblages (${d.counts.screenings})</h4>
  ${screeningsHtml ? `<div class="table-container" style="max-height: 190px;"><table>

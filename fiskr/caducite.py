@@ -323,6 +323,13 @@ def examiner_les_caduques(db, file_type: str, fiches: List[Dict[str, Any]],
     par_id = {f["entity_id"]: f for f in fiches if f.get("entity_id")}
     if not par_id:
         return 0
+
+    def couple(alerte: Alert) -> Tuple[Any, ...]:
+        # Une alerte de partie liee (fiskr/parties.py) se juge sur SA partie :
+        # le re-criblage note (client, fiche, partie) quand une partie franchit.
+        cle = (alerte.client_id, alerte.watchlist_entity_id)
+        return cle + ((alerte.partie_liee_id,) if alerte.partie_liee_id is not None else ())
+
     # Les alertes ouvertes de la liste, rapprochees ICI des fiches criblees :
     # une requete quel que soit leur nombre. Le lookback en passe l'univers
     # entier (des centaines de milliers de fiches) : des tranches d'IN
@@ -332,10 +339,15 @@ def examiner_les_caduques(db, file_type: str, fiches: List[Dict[str, Any]],
         Alert.status.in_(ALERT_OPEN_STATUSES),
         (Alert.channel == "SCREENING") | (Alert.channel.is_(None))).all()
         if a.watchlist_entity_id in par_id
-        and (a.client_id, a.watchlist_entity_id) not in franchies]
+        and couple(a) not in franchies]
     if not candidates:
         return 0
     clients = _clients_du_referentiel(db, {a.client_id for a in candidates if a.client_id})
+    from fiskr.database import PartieLiee
+    from fiskr.parties import contexte, profil_de_criblage
+    ids_parties = sorted({a.partie_liee_id for a in candidates if a.partie_liee_id is not None})
+    parties = {p.id: p for p in db.query(PartieLiee).filter(
+        PartieLiee.id.in_(ids_parties)).all()} if ids_parties else {}
     wl_version, wl_hash = production_watchlist_reference(db)
     now = maintenant or datetime.utcnow()
     caduques = 0
@@ -343,14 +355,23 @@ def examiner_les_caduques(db, file_type: str, fiches: List[Dict[str, Any]],
         client = clients.get(alerte.client_id)
         if client is None:
             continue
+        profil, partie = client, None
+        if alerte.partie_liee_id is not None:
+            ligne_partie = parties.get(alerte.partie_liee_id)
+            # Partie que la source ne declare plus : le re-criblage ne l'a pas
+            # confrontee, rien ne mesure qu'elle passe sous le seuil.
+            if ligne_partie is None or ligne_partie.retiree_le is not None:
+                continue
+            partie = contexte(ligne_partie, alerte.client_name)
+            profil = profil_de_criblage(ligne_partie)
         fiche = par_id[alerte.watchlist_entity_id]
-        score = match_entities(client, fiche, config)
+        score = match_entities(profil, fiche, config)
         if score.get("status") == "ALERT":
             continue
         score["watchlist_entity"] = fiche
-        score["client_fingerprint"] = empreinte_client(client)
-        ligne = log_compliance_decisions(db, client, [(fiche, score)], wl_version, wl_hash,
-                                         commit=False)[0]
+        score["client_fingerprint"] = empreinte_client(profil)
+        ligne = log_compliance_decisions(db, profil, [(fiche, score)], wl_version, wl_hash,
+                                         commit=False, partie=partie)[0]
         seuil = score.get("cut_off_applied")
         # « au re-criblage », pas « apres la mise a jour » : un lookback rend
         # aussi caduque une alerte dont la fiche n'a pas change (seuil releve).

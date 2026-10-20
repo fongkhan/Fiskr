@@ -566,9 +566,13 @@ def client_screening_task(ctx: jobs.JobContext, *, snapshot_id: str,
                 phase="RESCREEN", processed=done, total=total, snapshot_id=snapshot_id),
             started_by=username)
         cribles = int(result.get("clients_screened") or 0)
+        # Les parties liees (fiskr/parties.py) sont criblees avec leur client :
+        # le compte les dit, sans les confondre avec les clients.
+        parties = int(result.get("parties_screened") or 0)
         message = (f"{cribles} client(s) nouveau(x) ou modifié(s) criblé(s) contre les listes "
-                   f"en production ; {result.get('unchanged_clients', 0)} inchangé(s), non "
-                   f"recriblé(s).")
+                   f"en production"
+                   + (f", avec {parties} partie(s) liée(s)" if parties else "")
+                   + f" ; {result.get('unchanged_clients', 0)} inchangé(s), non recriblé(s).")
         mouvements = sum(int(result.get(cle) or 0)
                          for cle in ("new_alerts", "redetected_alerts", "closed_by_rule"))
         if mouvements:

@@ -93,15 +93,13 @@ def champs_client_cribles() -> Tuple[str, ...]:
 
     Echec franc si le releve ne trouve rien : une empreinte calculee sur rien
     couvrirait tout.
+
+    Le filtre vit dans fiskr/identification.py (`champs_du_profil_lus_par_le_
+    moteur`) : l'identite d'une partie liee (fiskr/parties.py) le lit aussi,
+    et deux copies du meme filtre finiraient par diverger.
     """
-    from fiskr.identification import champs_lus_par_le_moteur
-    champs = {c for c in champs_lus_par_le_moteur()
-              if c.startswith(("client_", "transaction_"))}
-    champs.discard("client_id")
-    if not champs:
-        raise RuntimeError("Aucun champ client lu par le moteur n'a été trouvé : "
-                           "l'empreinte du client ne peut pas être établie.")
-    return tuple(sorted(champs))
+    from fiskr.identification import champs_du_profil_lus_par_le_moteur
+    return champs_du_profil_lus_par_le_moteur()
 
 
 def _canonique(valeur: Any) -> Any:

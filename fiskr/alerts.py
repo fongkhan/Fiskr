@@ -222,7 +222,8 @@ NOTIFY_BURST_MAX = 10
 def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
                             client_id: Optional[str], username: str,
                             channel: str = "SCREENING",
-                            detail_suffix: str = "") -> Dict[str, Any]:
+                            detail_suffix: str = "",
+                            partie: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Ouvre (ou re-detecte) une alerte pour CHAQUE correspondance au-dessus du
     seuil, en un seul aller-retour de base.
@@ -248,11 +249,19 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
 
     Les notifications individuelles s'arretent a `NOTIFY_BURST_MAX` et cedent
     la place a une seule notification de volumetrie.
+
+    `partie` : les correspondances portent sur une PARTIE LIEE du client
+    (fiskr/parties.py). L'alerte reste celle du client (`client_id`), la
+    partie y est nommee, et la deduplication porte sur (client, fiche,
+    partie) : l'alerte du client lui-meme et celles de ses parties ne se
+    confondent pas.
     """
     resultat = {"alert_ids": [], "opened": 0, "closed_by_rule": 0, "redetected": 0}
     if not correspondances:
         return resultat
     alertes_par_rang: List[Optional[Alert]] = [None] * len(correspondances)
+    partie_id = (partie or {}).get("id")
+    via = f" — {partie['chaine']}." if partie else ""
 
     ids_fiches = [(c["match"].get("watchlist_entity") or {}).get("entity_id", "NONE")
                   for c in correspondances]
@@ -264,6 +273,8 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
         for alerte in db.query(Alert).filter(
                 Alert.client_id == client_id,
                 Alert.watchlist_entity_id.in_([i for i in dict.fromkeys(ids_fiches) if i]),
+                (Alert.partie_liee_id == partie_id) if partie_id is not None
+                else Alert.partie_liee_id.is_(None),
                 Alert.status.in_(statuts)).all():
             existantes.setdefault(alerte.watchlist_entity_id, alerte)
 
@@ -333,7 +344,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
                               f"(v{regle.version}, audit #{audit.id}).{detail_suffix}")
                 else:
                     detail = (f"Re-détectée lors d'un nouveau criblage "
-                              f"(score {match['final_score']:.1f}, audit #{audit.id}).{detail_suffix}")
+                              f"(score {match['final_score']:.1f}, audit #{audit.id}).{detail_suffix}{via}")
                 evenements.append(AlertEvent(alert_id=deja.id, username=username,
                                              action="REDETECTED", detail=detail))
             if refranchit:
@@ -362,6 +373,8 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
             status="CLOSED_BY_RULE" if supprimee else "OPEN",
             priority=priorite,
             due_at=None if supprimee else _echeance(sla, priorite, now),
+            partie_liee_id=partie_id,
+            via_partie=(partie or {}).get("chaine"),
         )
         if supprimee:
             alerte.decided_by = "fp-rule"
@@ -393,7 +406,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
         match = correspondance["match"]
         evenements.append(AlertEvent(
             alert_id=alerte.id, username=username, action="CREATED",
-            detail=f"Alerte créée par le criblage (score {match['final_score']:.1f}).{detail_suffix}"))
+            detail=f"Alerte créée par le criblage (score {match['final_score']:.1f}).{detail_suffix}{via}"))
         # Toute alerte nee d'une paire qui n'a pas absorbe dit pourquoi, meme
         # si la paire etait deja signalee : sans cette ligne, l'analyste qui
         # a clos la precedente ne comprendrait pas qu'elle revienne.
@@ -421,6 +434,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
         "Client": a.client_name, "Fiche listée": a.watchlist_name,
         "Liste": a.list_type, "Score": f"{a.final_score:.1f}",
         "Échéance": a.due_at.isoformat() if a.due_at else "—",
+        **({"Partie liée": a.via_partie} if a.via_partie else {}),
     } for a in a_notifier[:NOTIFY_BURST_MAX]]
     resume = None
     if len(a_notifier) > NOTIFY_BURST_MAX:

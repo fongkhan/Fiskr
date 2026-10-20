@@ -196,15 +196,21 @@ def test_l_alarme_precede_le_tableau():
 
 
 def test_le_bouton_d_apercu_ne_s_offre_que_pour_les_types_couverts():
+    """Réécrit avec le fichier des parties liées (CLIENT_PARTIES, tests/
+    test_parties_liees.py) : un import CSV de plus, qui a son aperçu. Le test
+    épinglait la liste exacte des deux types ; ce qu'il garde, c'est la règle —
+    le frontal et le serveur couvrent les MÊMES types, et seulement des CSV."""
     src = _lire("app.js")
-    assert 'const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU"]' in src
+    m_front = re.search(r'const TYPES_AVEC_APERCU = \[([^\]]*)\]', src)
+    assert m_front
+    types_front = set(re.findall(r'"([A-Z_]+)"', m_front.group(1)))
     assert "TYPES_AVEC_APERCU.includes(fileType)" in src
     # Le frontal et le serveur doivent couvrir les MÊMES types
     serveur = open(os.path.join(os.path.dirname(STATIC), "api.py"), encoding="utf-8").read()
     m = re.search(r'_APERCU_TYPES = \(([^)]*)\)', serveur)
     assert m
     types_serveur = set(re.findall(r'"([A-Z_]+)"', m.group(1)))
-    assert types_serveur == {"CLIENT_BASE", "WATCHLIST_EU"}, types_serveur
+    assert types_serveur == types_front == {"CLIENT_BASE", "WATCHLIST_EU", "CLIENT_PARTIES"}, types_serveur
     page = _lire("index.html")
     assert 'id="apercu-ingest-btn"' in page and 'onclick="apercuAvantImport()"' in page
     assert 'id="apercu-import"' in page
