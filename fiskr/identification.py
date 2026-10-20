@@ -121,6 +121,43 @@ def elements_d_identification(champs) -> list:
     return sorted(c for c in champs if c in lus)
 
 
+@lru_cache(maxsize=1)
+def champs_du_profil_lus_par_le_moteur() -> Tuple[str, ...]:
+    """
+    Les elements d'identification d'un PROFIL client, tels qu'un appelant les
+    porte : les champs `client_*` (et `transaction_*` pour les identifiants de
+    moyen de transport) que le releve a vus lire. La sonde note aussi les cles
+    internes que le moteur derive en chemin (`primary_name`, `__joker_*`...) :
+    elles ne sont pas des champs qu'on saisit. `client_id` n'en est pas : c'est
+    la cle de la relation, pas un element d'identification de la personne.
+
+    Lu par l'empreinte d'une paire de liste blanche (fiskr/empreintes.py) et
+    par l'identite d'une partie liee (fiskr/parties.py) : un beneficiaire
+    effectif s'identifie avec les MEMES champs que le client — ceux que le
+    moteur sait comparer, et rien d'autre.
+
+    Echec franc si le releve ne trouve rien : une identite definie sur rien
+    couvrirait tout.
+    """
+    champs = {c for c in champs_lus_par_le_moteur()
+              if c.startswith(("client_", "transaction_"))}
+    champs.discard("client_id")
+    if not champs:
+        raise RuntimeError("Aucun champ client lu par le moteur n'a été trouvé : "
+                           "l'identification d'un profil ne peut pas être établie.")
+    return tuple(sorted(champs))
+
+
+# Cle d'un profil client qui porte les profils de ses parties liees
+# (fiskr/parties.py) : beneficiaires effectifs, mandataires, dirigeants,
+# associes. Ce ne sont pas des champs que le moteur lit sur le client — chaque
+# partie est criblee pour elle-meme —, mais elles entrent dans l'empreinte
+# d'identification de la RELATION : un beneficiaire effectif ajoute ou
+# renomme est une « mise a jour des elements d'identification » (LD DGT/ACPR
+# §141), et l'import suivant doit recribler ce client et ses parties.
+CLE_DES_PARTIES = "_parties_liees"
+
+
 def empreinte_d_identification(profil) -> str:
     """
     Empreinte des elements d'identification d'un profil client : ce que le
@@ -134,9 +171,19 @@ def empreinte_d_identification(profil) -> str:
     lire un champ de plus, toutes les empreintes changent — et le prochain
     import recrible tout le monde, ce qui est juste, puisque le criblage
     d'hier n'avait pas regarde ce champ.
+
+    Les parties liees du profil (`CLE_DES_PARTIES`) y entrent par leurs
+    propres elements d'identification. Un client SANS partie garde exactement
+    l'empreinte d'avant : la mise a jour ne recrible personne pour rien.
     """
     lus = champs_lus_par_le_moteur()
     identite = {cle: profil[cle] for cle in sorted(lus) if cle in profil}
+    parties = profil.get(CLE_DES_PARTIES)
+    if parties:
+        identite[CLE_DES_PARTIES] = sorted(
+            json.dumps({cle: partie[cle] for cle in sorted(lus) if cle in partie},
+                       sort_keys=True, default=str, ensure_ascii=False)
+            for partie in parties)
     return hashlib.sha256(json.dumps(identite, sort_keys=True, default=str,
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 

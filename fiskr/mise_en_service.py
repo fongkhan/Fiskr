@@ -687,9 +687,13 @@ def _conservation(db) -> Dict[str, Any]:
     vider la base par inadvertance.
 
     Le contrôle se pose ici et pas seulement à l'instant du réglage : une
-    politique se change un jour et se vit des années. Une purge sous le
-    plancher légal doit rester lisible longtemps après la personne qui l'a
-    décidée — c'est précisément ce qu'un contrôle vient chercher.
+    politique se change un jour et se vit des années.
+
+    La purge applique désormais elle-même le plancher (fiskr/conservation.py :
+    cinq années civiles depuis la fin de la relation), donc une politique plus
+    courte ne détruit plus rien trop tôt. Le point reste en ATTENTION parce que
+    l'écran annonce alors une durée que le produit n'applique pas — et c'est
+    celle-là qu'un registre des traitements recopiera.
     """
     from fiskr.settings import (retention_policy, retention_sous_la_duree_legale,
                                 DUREE_LEGALE_JOURS)
@@ -697,17 +701,17 @@ def _conservation(db) -> Dict[str, Any]:
     if not ecarts:
         return _controle(
             "conservation", "Exploitation", "Conservation des pièces probantes", OK,
-            f"Journal de criblage et alertes clôturées conservés au moins "
-            f"{DUREE_LEGALE_JOURS} jours (cinq ans).",
+            f"Journal de criblage et alertes clôturées réglés à {DUREE_LEGALE_JOURS} "
+            f"jours au moins (cinq années civiles) ou sans limite ; la purge compte "
+            f"depuis la fin de la relation d'affaires.",
             lien="#settings/settings-governance")
     return _controle(
         "conservation", "Exploitation", "Conservation des pièces probantes", ATTENTION,
         " ; ".join(e["message"] for e in ecarts)
-        + " Le produit fonctionne ; c'est la preuve qui manquera le jour où on "
-          "la demandera, et elle ne se reconstitue pas.",
-        "Portez ces durées à 1825 jours au moins (0 = conservation illimitée), "
-        "ou assurez-vous que l'archive de purge est bien externalisée et "
-        "conservée le temps requis.",
+        + " Rien n'est purgé trop tôt, mais la durée affichée n'est pas celle "
+          "que le produit applique.",
+        f"Portez ces durées à {DUREE_LEGALE_JOURS} jours au moins (0 = conservation "
+        f"illimitée) : le réglage dira alors ce que fait la purge.",
         "#settings/settings-retention")
 
 
@@ -903,6 +907,64 @@ def _declarations_de_gel(db) -> Dict[str, Any]:
         "Aucune mesure de gel en attente de déclaration au registre.", lien=lien)
 
 
+def _dossiers_ppe(db) -> Dict[str, Any]:
+    """
+    Les PPE confirmees ont-elles leur decision d'entrer ou de rester en
+    relation ?
+
+    R.561-20-2 1° reserve cette decision a l'organe executif ou a la personne
+    qu'il habilite ; avant le dossier PPE, une PPE confirmee se closait sans
+    rien qui la suive. Ce controle lit les dossiers — la meme definition du
+    retard que la notification et l'indicateur (fiskr/kpi.py) — et nomme les
+    PPE confirmees restees sans dossier (confirmees avant lui) dont le delai,
+    compte depuis leur confirmation, est depasse.
+    """
+    from datetime import datetime, timedelta
+    from fiskr.ppe import alertes_confirmees_sans_dossier, dossiers_en_retard
+    from fiskr.settings import ppe_decision_delai_jours
+    seuil = ppe_decision_delai_jours(db)
+    lien = "#screening/alerts-ppe"
+    titre = "Décisions sur les relations avec des PPE"
+    limite = datetime.utcnow() - timedelta(days=seuil)
+    orphelines = alertes_confirmees_sans_dossier(db)
+    orphelines_en_retard = [a for a in orphelines if a.decided_at is None or a.decided_at < limite]
+    if orphelines_en_retard:
+        noms = ", ".join(f"alerte #{a.id} {a.client_name} × {a.watchlist_name}"
+                         for a in orphelines_en_retard[:5])
+        return _controle(
+            "ppe", "Criblage", titre, BLOQUANT,
+            f"{len(orphelines_en_retard)} PPE confirmée(s) depuis plus de {seuil} jours sans "
+            f"dossier : {noms}{' …' if len(orphelines_en_retard) > 5 else ''}. Aucune décision "
+            f"d'entrer ou de rester en relation n'y est tracée (CMF R.561-20-2 1°).",
+            "Ouvrez chaque alerte et créez son dossier PPE (bouton « Ouvrir le dossier PPE ») : "
+            "son délai courra depuis la confirmation. Faites-y décider la relation par une "
+            "personne habilitée.", lien,
+            constat_public=f"{len(orphelines_en_retard)} PPE confirmée(s) depuis plus de "
+                           f"{seuil} jours sans dossier ni décision tracée.")
+    en_retard = dossiers_en_retard(db)
+    if en_retard:
+        noms = ", ".join(f"#{d.id} {d.client_name} × {d.watchlist_name}" for d in en_retard[:5])
+        return _controle(
+            "ppe", "Criblage", titre, BLOQUANT,
+            f"{len(en_retard)} dossier(s) PPE sans décision plus de {seuil} jours après la "
+            f"confirmation : {noms}{' …' if len(en_retard) > 5 else ''}. La relation court sans "
+            f"la décision que R.561-20-2 1° réserve à l'organe exécutif ou à la personne qu'il "
+            f"habilite.",
+            "Complétez l'origine des fonds et du patrimoine, puis faites décider la relation par "
+            "une personne habilitée (rôle réviseur) qui n'a pas instruit l'alerte.", lien,
+            constat_public=f"{len(en_retard)} dossier(s) PPE sans décision plus de {seuil} "
+                           f"jours après la confirmation.")
+    if orphelines:
+        return _controle(
+            "ppe", "Criblage", titre, ATTENTION,
+            f"{len(orphelines)} PPE confirmée(s) sans dossier, encore dans le délai de "
+            f"{seuil} jours.",
+            "Ouvrez leur dossier PPE depuis l'alerte : sans lui, rien ne portera la décision.",
+            lien)
+    return _controle("ppe", "Criblage", titre, OK,
+                     f"Aucun dossier PPE sans décision au-delà de {seuil} jours.", lien=lien)
+
+
 # Fenetre d'observation des echecs de synchronisation : assez large pour
 # distinguer un incident d'une panne installee, assez courte pour qu'une
 # source reparee sorte vite du constat.
@@ -957,7 +1019,7 @@ _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production, _sources_de_
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
-                   _declarations_de_gel, _pieces_probantes, _smtp)
+                   _declarations_de_gel, _dossiers_ppe, _pieces_probantes, _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
 
 
@@ -1015,8 +1077,11 @@ _CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
 # La couverture du criblage y est aussi : un referentiel que rien n'a confronte
 # a la version en production depuis une semaine est un defaut de conformite,
 # pas un detail d'ecran. Son comptage est borne (PLAFOND_DE_COMPTAGE).
+# Les dossiers PPE aussi : quelques lectures d'index (dossiers sans decision,
+# PPE confirmees sans dossier, filtrees en SQL sur les types PEP), et leur
+# constat public ne nomme personne.
 _CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
-                          _fraicheur_des_listes, _declarations_de_gel,
+                          _fraicheur_des_listes, _declarations_de_gel, _dossiers_ppe,
                           _couverture_du_criblage)
 
 

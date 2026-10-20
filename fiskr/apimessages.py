@@ -270,6 +270,43 @@ TEMPLATES = [
         "zh": "决定已确认，警报已关闭——确认真阳性。已开立冻结措施 #{0}：须立即向 DG Trésor 申报（筛查 → 冻结登记册）。",
         "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد. فُتح تدبير التجميد رقم {0}: "
               "التصريح للمديرية العامة للخزينة واجب فوراً (الفحص ← سجل التجميد)."}),
+    # PPE confirmee : la validation annonce le dossier ouvert (api._message_de_dossier_ppe),
+    # et dit quand le SI amont ne declare pas le client PPE
+    (re.compile(r"^Décision validée, alerte close — vrai positif confirmé\. Dossier PPE #(\d+) ouvert : "
+                r"décision d'entrer ou de rester en relation à prendre par une personne habilitée "
+                r"\(Criblage → Dossiers PPE\)\.$"), {
+        "en": "Decision validated, alert closed — confirmed true positive. PEP case #{0} opened: the "
+              "decision to enter into or maintain the relationship is to be taken by an authorised "
+              "person (Screening → PEP cases).",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — bestätigter echter Treffer. PEP-Akte #{0} "
+              "eröffnet: die Entscheidung über Aufnahme oder Fortführung der Beziehung trifft eine "
+              "befugte Person (Screening → PEP-Akten).",
+        "es": "Decisión validada, alerta cerrada — verdadero positivo confirmado. Expediente PEP #{0} "
+              "abierto: la decisión de iniciar o mantener la relación corresponde a una persona "
+              "habilitada (Cribado → Expedientes PEP).",
+        "zh": "决定已确认，警报已关闭——确认真阳性。已开立 PEP 档案 #{0}：建立或维持业务关系的决定须由获授权人员作出（筛查 → PEP 档案）。",
+        "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد. فُتح ملف الشخص المعرّض سياسياً رقم {0}: "
+              "يعود قرار إقامة العلاقة أو مواصلتها إلى شخص مخوَّل (الفحص ← ملفات الأشخاص المعرّضين سياسياً)."}),
+    (re.compile(r"^Décision validée, alerte close — vrai positif confirmé\. Dossier PPE #(\d+) ouvert : "
+                r"décision d'entrer ou de rester en relation à prendre par une personne habilitée "
+                r"\(Criblage → Dossiers PPE\)\. PPE non déclarée par le SI amont : la classification "
+                r"du client y est à corriger\.$"), {
+        "en": "Decision validated, alert closed — confirmed true positive. PEP case #{0} opened: the "
+              "decision to enter into or maintain the relationship is to be taken by an authorised "
+              "person (Screening → PEP cases). PEP not declared by the upstream system: the client's "
+              "classification must be corrected there.",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — bestätigter echter Treffer. PEP-Akte #{0} "
+              "eröffnet: die Entscheidung über Aufnahme oder Fortführung der Beziehung trifft eine "
+              "befugte Person (Screening → PEP-Akten). Vom vorgelagerten System nicht als PEP "
+              "gemeldet: die Einstufung des Kunden ist dort zu korrigieren.",
+        "es": "Decisión validada, alerta cerrada — verdadero positivo confirmado. Expediente PEP #{0} "
+              "abierto: la decisión de iniciar o mantener la relación corresponde a una persona "
+              "habilitada (Cribado → Expedientes PEP). PEP no declarada por el sistema de origen: la "
+              "clasificación del cliente debe corregirse allí.",
+        "zh": "决定已确认，警报已关闭——确认真阳性。已开立 PEP 档案 #{0}：建立或维持业务关系的决定须由获授权人员作出（筛查 → PEP 档案）。上游系统未申报为 PEP：须在上游系统中更正客户分类。",
+        "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد. فُتح ملف الشخص المعرّض سياسياً رقم {0}: "
+              "يعود قرار إقامة العلاقة أو مواصلتها إلى شخص مخوَّل (الفحص ← ملفات الأشخاص المعرّضين سياسياً). "
+              "لم يصرّح النظام المصدر بأنه شخص معرّض سياسياً: يجب تصحيح تصنيف العميل هناك."}),
     (re.compile(r"^Compte temporairement verrouillé après trop d'échecs\. Réessayez dans (\d+) minute\(s\)\.$"), {
         "en": "Account temporarily locked after too many failures. Try again in {0} minute(s).",
         "de": "Konto nach zu vielen Fehlversuchen vorübergehend gesperrt. Erneut versuchen in {0} Minute(n).",

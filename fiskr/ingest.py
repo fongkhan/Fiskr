@@ -2039,7 +2039,7 @@ def parse_opensanctions_simple_csv(
     file_path: str,
     id_prefix: str = "PEP",
     origin: str = "OpenSanctions PEP",
-    designation_reasons: str = "Personne Politiquement Exposée (PEP)",
+    designation_reasons: Optional[str] = None,
     pep: bool = False,
 ) -> Generator[Dict[str, Any], None, None]:
     """
@@ -2048,7 +2048,9 @@ def parse_opensanctions_simple_csv(
     Le format est le meme pour tous les jeux de donnees du fournisseur : seuls
     changent le prefixe d'identifiant, la provenance affichee et le motif de
     designation. C'est ce qui permet de brancher une seconde source (SECO) sur
-    le meme lecteur sans le dupliquer.
+    le meme lecteur sans le dupliquer. La ligne est lue par
+    `parse_ligne_opensanctions`, que le lecteur du format imbrique (PEP)
+    partage : les deux formats donnent la meme fiche d'identite.
 
     `pep` : la colonne `sanctions` n'a pas le meme sens partout. Sur la liste
     PEP elle tient lieu de fonction (`pep_role`) ; sur une liste de sanctions
@@ -2058,6 +2060,19 @@ def parse_opensanctions_simple_csv(
     n'ont rien de PEP, la ou les regles anti-faux positifs et l'ecran de fiche
     lisent une fonction politique.
 
+    Sur la liste PEP, ce format NE DIT PAS la qualite de la personne : ses
+    colonnes (id, schema, name, aliases, birth_date, countries, addresses,
+    identifiers, sanctions, phones, emails, program_ids, dataset, first_seen,
+    last_seen, last_change — opensanctions.org/docs/bulk/csv) ne portent ni
+    topics `role.pep` / `role.rca`, ni fonction, ni dates d'occupation.
+    Mesure sur la publication du 19 octobre 2026 (11 674 premieres lignes) :
+    `sanctions` vide sur 100 % des lignes, aucune colonne `position`. Le meme
+    export range parmi ses 720 374 cibles 8 761 proches (topic `role.rca`
+    seul), indiscernables ici d'une PPE. Chaque fiche recevait pourtant
+    « Personne Politiquement Exposée (PEP) ». Elle porte desormais la qualite
+    « non precisee par la source » ; le format imbrique la lit
+    (`parse_pep_targets_nested_json`).
+
     Les sanctions sont rangees (`_sanction_stable`) : le fournisseur ne
     garantit pas leur ordre, et `designation` — la premiere — changeait chaque
     nuit sans que rien change.
@@ -2065,70 +2080,306 @@ def parse_opensanctions_simple_csv(
     with open(file_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            row = {(k or "").strip().lower(): (v or "") for k, v in row.items()}
-            os_id = row.get("id", "").strip()
-            name = row.get("name", "").strip()
-            if not os_id or not name:
+            fiche = parse_ligne_opensanctions(row, id_prefix, origin, designation_reasons, pep)
+            if fiche is not None:
+                yield fiche
+
+
+def parse_ligne_opensanctions(row: Dict[str, Any], id_prefix: str, origin: str,
+                              designation_reasons: Optional[str], pep: bool
+                              ) -> Optional[Dict[str, Any]]:
+    """Une ligne du format plat OpenSanctions -> fiche au schema pivot (None
+    sans identifiant ni nom). Sur la liste PEP, la qualite n'est pas lue —
+    le format ne la porte pas — et la fiche le DIT."""
+    row = {(k or "").strip().lower(): (v or "") for k, v in row.items()}
+    os_id = row.get("id", "").strip()
+    name = row.get("name", "").strip()
+    if not os_id or not name:
+        return None
+    schema = row.get("schema", "").strip().lower()
+    entity_type = _PEP_SCHEMA_TO_TYPE.get(schema, "E")
+
+    aliases_raw = [{"name": a, "type": "Strong"} for a in _csv_multi(row.get("aliases"))]
+    dobs = [d for d in (
+        _normalize_partial_date(b) for b in _csv_multi(row.get("birth_date"))
+    ) if d]
+    countries = [c.upper() for c in _csv_multi(row.get("countries")) if c]
+    addresses = _csv_multi(row.get("addresses"))
+    identifiers = _csv_multi(row.get("identifiers"))
+    # Seules les sanctions sont rangees ici : leur ordre change d'une
+    # publication a l'autre (mesure ci-dessus), celui des adresses et
+    # identifiants non, et les colonnes de type liste sont rangees par
+    # l'empreinte elle-meme (database.normaliser_fiche).
+    sanctions = sorted({_sanction_stable(s) for s in _csv_multi(row.get("sanctions"))} - {""})
+    # `position` : colonne absente du format publie (mesure ci-dessus), lue
+    # si un fichier fabrique a la main la porte.
+    positions = sanctions or _csv_multi(row.get("position"))
+    # Champs etendus : contacts + fonction PEP + premiere apparition
+    pep_phones = _csv_multi(row.get("phones"))
+    pep_emails = _csv_multi(row.get("emails"))
+    pep_first_seen = _extract_iso_date(row.get("first_seen", ""))
+    qualite = None
+    if pep:
+        from fiskr.ppe import QUALITE_NON_PRECISEE, motif_de_fiche
+        qualite = QUALITE_NON_PRECISEE
+        designation_reasons = motif_de_fiche(qualite)
+
+    return {
+        "entity_id": f"{id_prefix}-{os_id}",
+        "entity_type": entity_type,
+        "primary_name": name,
+        "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
+        "aliases": categorize_aliases(aliases_raw),
+        "dates_of_birth": sorted(set(dobs)),
+        "date_of_death": None,
+        "is_deceased": False,
+        "gender": "U",
+        "countries": {
+            "citizenship": sorted(set(countries)),
+            "residence": [],
+            "birth_country": [],
+            "jurisdiction_country": []
+        },
+        "place_of_birth": None,
+        "address": addresses[0] if addresses else None,
+        "alternative_addresses": addresses[1:],
+        "country": None,
+        "designation": positions[0] if positions else None,
+        "designation_reasons": designation_reasons,
+        "additional_informations": "; ".join(identifiers) or None,
+        "pep_role": ("; ".join(positions) or None) if pep else None,
+        "pep_qualite": qualite,
+        "sanction_programs": sanctions if not pep else [],
+        "listed_on": pep_first_seen,
+        "phone_numbers": pep_phones,
+        "email_addresses": pep_emails,
+        "origin": origin,
+        "imo_number": None,
+        "aircraft_tail_number": None,
+        "lei_number": None,
+        "national_registry_ids": [],
+        "other_registration_ids": [{"id_type": "OpenSanctionsId", "number": os_id}],
+        "passport_documents": [],
+        "national_id_documents": [],
+        "other_id_documents": []
+    }
+
+
+# ------------------ PEP AU FORMAT IMBRIQUE (targets.nested.json) ------------------
+# Le format plat ne dit pas la qualite ; l'export FollowTheMoney imbrique, si :
+# une cible par ligne, avec ses topics (`role.pep` : la personne exerce une
+# fonction ; `role.rca` : « relative or close associate »), ses occupations
+# (`positionOccupancies`, entites Occupancy avec startDate / endDate / status
+# et le poste), et ses liens Family / Associate vers la PPE, la personne liee
+# incluse avec ses propres topics. Mesure sur l'export du 19 octobre 2026
+# (720 374 cibles) : 698 487 `role.pep` dont 642 121 avec occupations et
+# 169 507 dont TOUTES les occupations sont terminees ; 8 761 `role.rca` seuls,
+# dont 6 834 portent un lien Family et 1 928 un lien Associate ; 13 126 sans
+# l'un ni l'autre (souvent un seul topic `poi`).
+#
+# Quand chacun s'applique : `parse_pep_targets` lit le premier octet utile du
+# fichier — « { » : ce format, sinon le format plat (repli explicite, qui dit
+# « qualite non precisee »). L'export plat FtM (`entities.ftm.json`) passe par
+# le meme lecteur, mais sans les jointures : il donne les topics, pas les
+# occupations ni les liens. Taille : 1,35 Go pour l'export imbrique contre
+# 181 Mo pour le plat (meme publication) — au-dessus du plafond de
+# telechargement de fiskr/limites.py (512 Mo), c'est pourquoi le plat reste
+# la voie par defaut.
+
+# Proprietes FtM dont le format plat tire ses colonnes, relevees sur les
+# 11 674 cibles communes aux deux exports : alias (name 4 294, alias 1 754,
+# previousName 1), pays (citizenship 9 518, country 2 847, birthCountry 18,
+# nationality 1), identifiants (wikidataId 6 862, taxNumber 681, idNumber 92,
+# passportNumber 1). Les memes ici : un changement de format ne doit pas se
+# lire comme un changement d'identite.
+_FTM_NOMS = ("name", "alias", "previousName")
+_FTM_PAYS = ("citizenship", "country", "birthCountry", "nationality")
+_FTM_IDENTIFIANTS = ("wikidataId", "taxNumber", "idNumber", "passportNumber")
+_LIENS_MAX = 10
+
+
+def _ftm_textes(proprietes: Dict[str, Any], cles) -> List[str]:
+    vus: List[str] = []
+    for cle in cles:
+        for valeur in proprietes.get(cle) or []:
+            if isinstance(valeur, str) and valeur.strip() and valeur.strip() not in vus:
+                vus.append(valeur.strip())
+    return vus
+
+
+def _fin_de_periode(brute: Optional[str]) -> Optional[str]:
+    """Borne HAUTE d'une date partielle : « 2019 » -> 2019-12-31, « 2019-05 »
+    -> 2019-05-31. Une fin de fonction lue « 1er janvier » ferait dire a la
+    regle des douze mois qu'une exposition est echue jusqu'a un an trop tot."""
+    match = re.match(r"^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?", (brute or "").strip())
+    if not match:
+        return None
+    annee, mois, jour = int(match.group(1)), match.group(2), match.group(3)
+    if mois is None:
+        return f"{annee:04d}-12-31"
+    mois = int(mois)
+    if jour is None:
+        import calendar
+        jour = calendar.monthrange(annee, mois)[1]
+    return f"{annee:04d}-{mois:02d}-{int(jour):02d}"
+
+
+def _occupations_ftm(proprietes: Dict[str, Any], aujourd_hui: str) -> List[Dict[str, Any]]:
+    occupations = []
+    for occ in proprietes.get("positionOccupancies") or []:
+        if not isinstance(occ, dict):
+            continue
+        op = occ.get("properties") or {}
+        postes = []
+        for poste in op.get("post") or []:
+            if isinstance(poste, dict):
+                noms = (poste.get("properties") or {}).get("name") or []
+                postes.append(poste.get("caption") or (noms[0] if noms else None))
+        debut = min((d for d in op.get("startDate") or [] if d), default=None)
+        fins = [f for f in (_fin_de_periode(d) for d in op.get("endDate") or []) if f]
+        fin = max(fins) if fins else None
+        statuts = {s.lower() for s in op.get("status") or []}
+        # Terminee : la source le dit, ou une fin passee sans « current ». Une
+        # fin a venir (mandat qui court jusqu'en 2028) n'est pas une fin.
+        terminee = "ended" in statuts or (fin is not None and fin <= aujourd_hui
+                                          and "current" not in statuts)
+        occupations.append({"poste": next((p for p in postes if p), None), "debut": debut,
+                            "fin": fin, "terminee": terminee})
+    return occupations
+
+
+def _liens_ftm(proprietes: Dict[str, Any], identifiant: str) -> List[Dict[str, Any]]:
+    """Les liens Family / Associate de la personne, l'AUTRE cote nomme : sur
+    une entite Family, `person` est la personne de reference et `relative`
+    son parent (`relationship` dit lequel) ; sur Associate, `person` et
+    `associate`. La personne vue depuis ses deux cotes possibles."""
+    from fiskr.ppe import QUALITE_ASSOCIE, QUALITE_FAMILLE
+    liens = []
+    for cle, nature, autre_cote in (("familyRelative", QUALITE_FAMILLE, "person"),
+                                    ("familyPerson", QUALITE_FAMILLE, "relative"),
+                                    ("associations", QUALITE_ASSOCIE, "person"),
+                                    ("associates", QUALITE_ASSOCIE, "associate")):
+        for lien in proprietes.get(cle) or []:
+            if not isinstance(lien, dict):
                 continue
-            schema = row.get("schema", "").strip().lower()
-            entity_type = _PEP_SCHEMA_TO_TYPE.get(schema, "E")
+            lp = lien.get("properties") or {}
+            relation = "; ".join(r for r in lp.get("relationship") or [] if r) or None
+            for autre in lp.get(autre_cote) or []:
+                if isinstance(autre, dict):
+                    if autre.get("id") == identifiant:
+                        continue
+                    topics = (autre.get("properties") or {}).get("topics") or []
+                    liens.append({"nature": nature, "relation": relation,
+                                  "personne": autre.get("caption"), "personne_id": autre.get("id"),
+                                  "personne_ppe": "role.pep" in topics})
+                elif isinstance(autre, str) and autre != identifiant:
+                    # Identifiant seul : la qualite de l'autre n'est pas lue
+                    liens.append({"nature": nature, "relation": relation, "personne": None,
+                                  "personne_id": autre, "personne_ppe": None})
+    return liens
 
-            aliases_raw = [{"name": a, "type": "Strong"} for a in _csv_multi(row.get("aliases"))]
-            dobs = [d for d in (
-                _normalize_partial_date(b) for b in _csv_multi(row.get("birth_date"))
-            ) if d]
-            countries = [c.upper() for c in _csv_multi(row.get("countries")) if c]
-            addresses = _csv_multi(row.get("addresses"))
-            identifiers = _csv_multi(row.get("identifiers"))
-            # Seules les sanctions sont rangees ici : leur ordre change d'une
-            # publication a l'autre (mesure ci-dessous), celui des adresses et
-            # identifiants non, et les colonnes de type liste sont rangees par
-            # l'empreinte elle-meme (database.normaliser_fiche).
-            sanctions = sorted({_sanction_stable(s) for s in _csv_multi(row.get("sanctions"))} - {""})
-            positions = sanctions or _csv_multi(row.get("position"))
-            # Champs etendus : contacts + fonction PEP + premiere apparition
-            pep_phones = _csv_multi(row.get("phones"))
-            pep_emails = _csv_multi(row.get("emails"))
-            pep_first_seen = _extract_iso_date(row.get("first_seen", ""))
 
-            yield {
-                "entity_id": f"{id_prefix}-{os_id}",
-                "entity_type": entity_type,
-                "primary_name": name,
-                "individual_name_parsed": {"first_name": "", "last_name": "", "maiden_name": ""},
-                "aliases": categorize_aliases(aliases_raw),
-                "dates_of_birth": sorted(set(dobs)),
-                "date_of_death": None,
-                "is_deceased": False,
-                "gender": "U",
-                "countries": {
-                    "citizenship": sorted(set(countries)),
-                    "residence": [],
-                    "birth_country": [],
-                    "jurisdiction_country": []
-                },
-                "place_of_birth": None,
-                "address": addresses[0] if addresses else None,
-                "alternative_addresses": addresses[1:],
-                "country": None,
-                "designation": positions[0] if positions else None,
-                "designation_reasons": designation_reasons,
-                "additional_informations": "; ".join(identifiers) or None,
-                "pep_role": ("; ".join(positions) or None) if pep else None,
-                "sanction_programs": sanctions if not pep else [],
-                "listed_on": pep_first_seen,
-                "phone_numbers": pep_phones,
-                "email_addresses": pep_emails,
-                "origin": origin,
-                "imo_number": None,
-                "aircraft_tail_number": None,
-                "lei_number": None,
-                "national_registry_ids": [],
-                "other_registration_ids": [{"id_type": "OpenSanctionsId", "number": os_id}],
-                "passport_documents": [],
-                "national_id_documents": [],
-                "other_id_documents": []
+def _qualite_ftm(topics, liens: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    """(qualite lue, liens qui la fondent). `role.pep` fait la PPE. Sinon, un
+    lien vers une personne `role.pep` dit famille ou associe — la relation est
+    lue, pas supposee ; a defaut, un `role.rca` sans lien lisible reste un
+    « proche » que la source ne range pas. Ni topic ni lien : non precisee."""
+    from fiskr.ppe import (QUALITE_ASSOCIE, QUALITE_FAMILLE, QUALITE_NON_PRECISEE,
+                           QUALITE_PPE, QUALITE_PROCHE)
+    if "role.pep" in topics:
+        return QUALITE_PPE, []
+    vers_ppe = [l for l in liens if l["personne_ppe"]]
+    fondement = vers_ppe or (liens if "role.rca" in topics else [])
+    natures = {l["nature"] for l in fondement}
+    for qualite in (QUALITE_FAMILLE, QUALITE_ASSOCIE):
+        if qualite in natures:
+            return qualite, [l for l in fondement if l["nature"] == qualite][:_LIENS_MAX]
+    return (QUALITE_PROCHE if "role.rca" in topics else QUALITE_NON_PRECISEE), []
+
+
+def parse_pep_targets_nested_json(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Parse le dataset PEP OpenSanctions au format imbrique (`targets.nested.json`,
+    une cible FtM par ligne) : la meme fiche d'identite que le format plat
+    (`parse_ligne_opensanctions`), plus ce que le plat ne porte pas — la
+    qualite LUE (PPE, membre de la famille, personne etroitement associee,
+    proche, non precisee), les fonctions avec leurs dates, la fin de la
+    derniere fonction quand toutes sont terminees, et les liens vers la PPE.
+    """
+    from fiskr.ppe import QUALITE_PPE, motif_de_fiche
+    from datetime import datetime
+    aujourd_hui = datetime.utcnow().date().isoformat()
+    with open(file_path, "r", encoding="utf-8-sig") as f:
+        for numero, ligne in enumerate(f, start=1):
+            ligne = ligne.strip()
+            if not ligne:
+                continue
+            try:
+                cible = json.loads(ligne)
+            except ValueError:
+                logger.warning(f"PEP (format imbrique) : ligne {numero} illisible, ignoree.")
+                continue
+            if not isinstance(cible, dict) or not cible.get("target"):
+                continue
+            p = cible.get("properties") or {}
+            identifiant = str(cible.get("id") or "")
+            nom = cible.get("caption") or next(iter(_ftm_textes(p, ("name",))), "")
+            ligne_plate = {
+                "id": identifiant, "schema": cible.get("schema") or "", "name": nom,
+                "aliases": ";".join(n for n in _ftm_textes(p, _FTM_NOMS) if n != nom),
+                "birth_date": ";".join(_ftm_textes(p, ("birthDate",))),
+                "countries": ";".join(_ftm_textes(p, _FTM_PAYS)),
+                "addresses": ";".join(_ftm_textes(p, ("address",))),
+                "identifiers": ";".join(_ftm_textes(p, _FTM_IDENTIFIANTS)),
+                "phones": ";".join(_ftm_textes(p, ("phone",))),
+                "emails": ";".join(_ftm_textes(p, ("email",))),
+                "first_seen": cible.get("first_seen") or "",
             }
+            fiche = parse_ligne_opensanctions(ligne_plate, "PEP", "OpenSanctions PEP", None, pep=True)
+            if fiche is None:
+                continue
+            topics = set(p.get("topics") or [])
+            qualite, liens = _qualite_ftm(topics, _liens_ftm(p, identifiant))
+            occupations = _occupations_ftm(p, aujourd_hui)
+            # En cours d'abord, puis la fin la plus recente : c'est la fonction
+            # qui fonde l'exposition qu'on lit en premier
+            en_cours = [o for o in occupations if not o["terminee"]]
+            terminees = sorted((o for o in occupations if o["terminee"]),
+                               key=lambda o: o["fin"] or "", reverse=True)
+            ordonnees = en_cours + terminees
+            fonctions = [
+                f"{o['poste'] or 'Fonction sans intitulé'} ({o['debut'] or '?'} – "
+                f"{o['fin'] if o['terminee'] and o['fin'] else ('fin non datée' if o['terminee'] else 'en cours')})"
+                for o in ordonnees
+            ] or _ftm_textes(p, ("position",))
+            fin = None
+            if occupations and not en_cours and all(o["fin"] for o in occupations):
+                fin = max(o["fin"] for o in occupations)
+            yield {
+                **fiche,
+                "designation": (ordonnees[0]["poste"] if ordonnees else
+                                (fonctions[0] if fonctions else None)) if qualite == QUALITE_PPE else None,
+                "designation_reasons": motif_de_fiche(qualite),
+                "pep_role": ("; ".join(fonctions) or None) if qualite == QUALITE_PPE else None,
+                "pep_qualite": qualite,
+                "pep_fin_de_fonction": fin if qualite == QUALITE_PPE else None,
+                "pep_liens": liens or None,
+            }
+
+
+def parse_pep_targets(file_path: str) -> Generator[Dict[str, Any], None, None]:
+    """
+    Le dataset PEP OpenSanctions, dans le format QU'ON LUI DONNE : le premier
+    octet utile decide — « { » : export imbrique (ou FtM plat), qui porte la
+    qualite ; sinon `targets.simple.csv`, repli explicite qui ne la porte pas
+    et le dit sur chaque fiche. L'import manuel et la synchronisation passent
+    par ici : un seul aiguillage.
+    """
+    with open(file_path, "rb") as f:
+        debut = f.read(4096).lstrip(b"\xef\xbb\xbf \t\r\n")
+    if debut.startswith(b"{"):
+        return parse_pep_targets_nested_json(file_path)
+    return parse_pep_targets_csv(file_path)
 
 
 # Champs que la correction de `pep_role` (lecteur ci-dessus) deplace ou
@@ -2187,13 +2438,54 @@ def forme_corrigee_du_lecteur(avant: Dict[str, Any], apres: Dict[str, Any],
     return False
 
 
+# Champs que la lecture de la qualite PEP (lecteur ci-dessus) remplace sur une
+# fiche lue au format plat — et eux seuls.
+CHAMPS_DE_LA_QUALITE = frozenset({"designation_reasons", "pep_qualite"})
+
+
+def qualite_lue_par_le_lecteur(avant: Dict[str, Any], apres: Dict[str, Any],
+                               changements: List[str]) -> Optional[bool]:
+    """
+    Deux versions d'une fiche PEP qui ne different QUE par ce que le lecteur
+    cesse d'affirmer : avant, « Personne Politiquement Exposée (PEP) » sur
+    chaque fiche, proche compris ; apres, au format plat, « qualite non
+    precisee par la source ». La source n'a pas change : c'est le lecteur qui
+    ne dit plus ce qu'il n'a pas lu. Sans cette reconnaissance, le premier lot
+    PEP apres le deploiement annoncerait ses 709 511 fiches « modifiees » —
+    le bruit que le delta a appris a ne plus faire.
+
+    Seule la qualite « non precisee » est une forme. Une qualite LUE (format
+    imbrique : PPE, famille, associe) est une information nouvelle de la
+    source, que le reviseur doit voir : elle reste une modification.
+    True : equivalence verifiee ; None : ce n'est pas ce cas.
+    """
+    from fiskr.ppe import ANCIEN_MOTIF_PEP, QUALITE_NON_PRECISEE, motif_de_fiche
+    if not changements or not {c.split(".")[0] for c in changements} <= CHAMPS_DE_LA_QUALITE:
+        return None
+    if avant.get("pep_qualite") or (avant.get("designation_reasons") or "").strip() != ANCIEN_MOTIF_PEP:
+        return None
+    if apres.get("pep_qualite") != QUALITE_NON_PRECISEE \
+            or apres.get("designation_reasons") != motif_de_fiche(QUALITE_NON_PRECISEE):
+        return None
+    return True
+
+
+# Les corrections de forme que le delta reconnait, chacune sur SES champs :
+# (champs, reconnaissance, issue du delta quand elle est verifiee).
+CORRECTIONS_DU_LECTEUR = (
+    (CHAMPS_DE_LA_CORRECTION, forme_corrigee_du_lecteur, "FORME"),
+    (CHAMPS_DE_LA_QUALITE, qualite_lue_par_le_lecteur, "FORME_QUALITE"),
+)
+
+
 def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
-    """Parse le dataset PEP OpenSanctions (targets.simple.csv) vers le schema pivot."""
+    """Parse le dataset PEP OpenSanctions (targets.simple.csv) vers le schema
+    pivot. Repli explicite de `parse_pep_targets` : ce format ne porte pas la
+    qualite, chaque fiche dit « qualite non precisee par la source »."""
     return parse_opensanctions_simple_csv(
         file_path,
         id_prefix="PEP",
         origin="OpenSanctions PEP",
-        designation_reasons="Personne Politiquement Exposée (PEP)",
         pep=True,
     )
 

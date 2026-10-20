@@ -263,8 +263,13 @@ def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
       GIL est rendu periodiquement — en processus dedie, c'est sans objet
       mais sans cout.
     """
-    from fiskr import screenpool
+    from fiskr import parametrage, screenpool
     from fiskr.settings import blocking_layout, blocking_config_for
+    # Le cahier tourne dans le demon : capacites et equivalences relues si
+    # l'epoque a bouge, sans quoi il predirait la production d'avant le
+    # dernier reglage (fiskr/parametrage.py). Une surcharge de mesure
+    # d'impact, propre au thread, n'en est pas touchee.
+    parametrage.a_jour(db)
     screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
 
     index: Dict[str, List[Dict[str, Any]]] = {}

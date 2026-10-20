@@ -271,8 +271,14 @@ def test_seco_opensanctions_csv_uses_its_own_namespace(tmp_path):
 
 
 def test_pep_parser_is_unchanged_by_the_shared_reader(tmp_path):
-    """Non-regression : la generalisation du lecteur ne deplace pas le PEP."""
+    """Non-regression : la generalisation du lecteur ne deplace pas le PEP.
+
+    Reecrit, et dit : il exigeait aussi le motif « Personne Politiquement
+    Exposée (PEP) » sur chaque fiche — le defaut corrige par le dossier PPE (le
+    format plat ne dit pas la qualite). Le motif est desormais celui de la
+    qualite « non precisee par la source »."""
     from fiskr.ingest import parse_pep_targets_csv
+    from fiskr.ppe import QUALITE_NON_PRECISEE, motif_de_fiche
     path = tmp_path / "pep.csv"
     path.write_text(
         "id,schema,name,aliases,birth_date,countries,addresses,identifiers,sanctions,dataset\n"
@@ -282,7 +288,7 @@ def test_pep_parser_is_unchanged_by_the_shared_reader(tmp_path):
     entity = list(parse_pep_targets_csv(str(path)))[0]
     assert entity["entity_id"] == "PEP-os-1"
     assert entity["origin"] == "OpenSanctions PEP"
-    assert entity["designation_reasons"] == "Personne Politiquement Exposée (PEP)"
+    assert entity["designation_reasons"] == motif_de_fiche(QUALITE_NON_PRECISEE)
 
 
 # ------------------ CONFIGURATION ------------------

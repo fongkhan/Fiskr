@@ -63,7 +63,12 @@ const LIST_TYPE_LABELS = {
  WATCHLIST_WB_DEBARRED: "Banque mondiale — fournisseurs exclus (voie ouverte)",
  WATCHLIST_IL_CRYPTO: "Israël — portefeuilles crypto désignés",
  CLIENT_BASE: "Base clients",
+ CLIENT_PARTIES: "Parties liées des clients",
 };
+
+// Imports qui ne sont pas des listes : ni filtre de liste, ni périmètre de
+// criblage, ni lookback ne les proposent.
+const TYPES_HORS_LISTES = new Set(["CLIENT_BASE", "CLIENT_PARTIES"]);
 
 // ------------------ CATALOGUE DES SOURCES OFFICIELLES ------------------
 // La seule source de vérité du front : l'écran Sources, les libellés des
@@ -320,7 +325,7 @@ function remplirTypesDeListePourLookback() {
  // vocabulaire partagé des types de liste.
  if (!select || select.options.length > 1) return;
  for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
- if (value === "CLIENT_BASE") continue;
+ if (TYPES_HORS_LISTES.has(value)) continue;
  const option = document.createElement("option");
  option.value = value;
  option.textContent = label;
@@ -363,7 +368,7 @@ async function lancerLookback() {
 function listTypeFilterOptions(withUnknown) {
  let html = '<option value="">Toutes les listes</option>';
  for (const [value, label] of Object.entries(LIST_TYPE_LABELS)) {
- if (value === "CLIENT_BASE") continue;
+ if (TYPES_HORS_LISTES.has(value)) continue;
  html += `<option value="${value}">${label}</option>`;
  }
  if (withUnknown) html += '<option value="UNKNOWN">Inconnue (antérieur)</option>';
@@ -1019,9 +1024,13 @@ const ALERT_EVENT_LABELS = {
  GEL_DECLARE: "Gel déclaré à la DG Trésor", GEL_LEVE: "Gel levé",
  GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
  GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
+ DETENTION_REPUTEE: "Client réputé détenu ou contrôlé", DETENTION_NON_ETABLIE: "Détention ou contrôle non établi",
  WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
  DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
  LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
+ PPE_DOSSIER_OUVERT: "Dossier PPE ouvert", PPE_NON_DECLAREE: "PPE non déclarée par le SI amont",
+ PPE_DOSSIER_INSTRUIT: "Dossier PPE instruit", PPE_PIECE_ORIGINE: "Pièce de l'origine des fonds",
+ PPE_DECISION: "Décision sur la relation (PPE)", PPE_DECISION_EN_RETARD: "Décision PPE en retard",
 };
 
 function alertEventLabel(action) {
@@ -1941,6 +1950,15 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-10-21-parties-et-ppe", date: "2026-10-21",
+ titre: "Les bénéficiaires effectifs criblés, et la suite d'une PPE",
+ points: [
+ "Les bénéficiaires effectifs, mandataires et dirigeants d'un client sont criblés avec lui ; l'alerte dit par qui la correspondance arrive.",
+ "Une PPE confirmée ouvre un dossier : origine des fonds, décision d'une personne habilitée autre que l'analyste.",
+ "Une fiche listée corrigée à la main recrible aussitôt les clients concernés.",
+ ],
+ },
+ {
  id: "2026-10-20-gel-et-criblage", date: "2026-10-20",
  titre: "Ce que le criblage a vraiment fait, et la suite d'un gel",
  points: [
@@ -2356,7 +2374,7 @@ function initListTypeControls() {
  const container = document.getElementById(containerId);
  if (!container) continue;
  container.innerHTML = Object.entries(LIST_TYPE_LABELS)
- .filter(([value]) => value !== "CLIENT_BASE")
+ .filter(([value]) => !TYPES_HORS_LISTES.has(value))
  .map(([value, label]) => `
  <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.85rem;">
  <input type="checkbox" class="${containerId}-cb" value="${value}" checked> ${label}
@@ -2882,6 +2900,8 @@ function switchSubTab(sectionId, subTabId) {
  fetchSavedViews("SCREENING");
  } else if (subTabId === "alerts-gels") {
  fetchGels();
+ } else if (subTabId === "alerts-ppe") {
+ fetchDossiersPPE();
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
  populateAssigneeFilters();
@@ -3032,7 +3052,7 @@ function toggleManualFormFields() {
 function populateManualListSelects() {
  const options = ['<option value="">Générique (par défaut)</option>']
  .concat(Object.entries(LIST_TYPE_LABELS)
- .filter(([type]) => type !== "CLIENT_BASE")
+ .filter(([type]) => !TYPES_HORS_LISTES.has(type))
  .map(([type, label]) => `<option value="${type}">${escapeHtml(label)}</option>`))
  .join("");
  document.querySelectorAll(".manual-list-select").forEach(sel => {
@@ -3378,6 +3398,10 @@ function toggleSsieOptions() {
  // choix à faire là où le format est publié par l'émetteur.
  const btn = document.getElementById("apercu-ingest-btn");
  if (btn) btn.classList.toggle("hidden", !TYPES_AVEC_APERCU.includes(fileType));
+ // Le format du fichier des parties liées n'est publié par personne : il se
+ // dit ici, au moment où on le choisit.
+ const aideParties = document.getElementById("aide-parties-liees");
+ if (aideParties) aideParties.classList.toggle("hidden", fileType !== "CLIENT_PARTIES");
  const zone = document.getElementById("apercu-import");
  if (zone) { zone.classList.add("hidden"); zone.innerHTML = ""; }
  // Une correspondance appartient à un fichier et à un type : la garder au
@@ -3393,7 +3417,7 @@ function toggleSsieOptions() {
 // qui ne correspond à rien, et un criblage qui répond « aucune correspondance »
 // sans jamais se plaindre.
 
-const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU"];
+const TYPES_AVEC_APERCU = ["CLIENT_BASE", "WATCHLIST_EU", "CLIENT_PARTIES"];
 
 // Correspondance en cours d'édition : {champ_du_moteur: colonne_du_fichier}.
 // L'aperçu la rejoue à chaque application, l'import la porte, et le serveur
@@ -3549,6 +3573,7 @@ const OPERATION_KIND_ICONS = {
  batch: uiIcon("package"), batch_campaign: uiIcon("package"),
  quality: uiIcon("activity"), quality_check: uiIcon("activity"),
  lookback: uiIcon("clock"), client_screening: uiIcon("shield"), mining: uiIcon("search"),
+ entity_rescreen: uiIcon("shield"),
  engine_simulation: uiIcon("sliders"), resource_simulation: uiIcon("sliders"),
  fprules_bench: uiIcon("target"), testpanel_generate: uiIcon("users"),
 };
@@ -3638,6 +3663,24 @@ async function signalerCriblageDesClients(criblage) {
   switchTab("screening");
   switchSubTab("screening", "screening-batch");
  }
+}
+
+// Le fichier des parties liées recrible les clients dont une partie a changé
+// d'identité (fiskr/api.py, `_cribler_apres_import_des_parties`) : par le
+// même travail qu'un import de référentiel, référentiel par référentiel. Rien
+// à recribler, ou des clients absents du référentiel : chacun se dit à part —
+// « aucune liste n'est en production » serait faux.
+function signalerCriblageDesParties(criblage) {
+ if (criblage.reason === "NO_IDENTITY_CHANGE") {
+  showToast("Aucune identité de partie n'a changé : rien à recribler.", "info", 7000);
+  return;
+ }
+ if (criblage.reason === "NO_CLIENT_IN_PRODUCTION") {
+  showToast("Ces parties ne sont PAS criblées : leurs clients ne sont pas au référentiel en production.", "error", 10000);
+  return;
+ }
+ const premier = (criblage.resultats || [])[0];
+ if (premier) signalerCriblageDesClients(premier);
 }
 
 // Handle Snapshot Ingestion (Upload file)
@@ -3741,7 +3784,10 @@ async function handleIngestion(event) {
  // Un référentiel clients part au criblage dès son entrée en production.
  // L'import annonçait « Successfully imported 406 items » sans cribler
  // personne : il dit maintenant ce qui se passe, et où en lire le résultat.
- if (data.criblage) signalerCriblageDesClients(data.criblage);
+ if (data.criblage) {
+  if (fileType === "CLIENT_PARTIES") signalerCriblageDesParties(data.criblage);
+  else signalerCriblageDesClients(data.criblage);
+ }
  fileInput.value = "";
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
@@ -4879,9 +4925,13 @@ async function handleScreening(event) {
 
  // Continuité criblage -> alerte : lien direct vers l'alerte ouverte
  const alertLink = document.getElementById("screening-alert-link");
+ // Les parties liées du client (bénéficiaires effectifs, mandataires…) sont
+ // criblées avec lui : leurs alertes sont les siennes, et se proposent ici.
+ const alertesDesParties = (data.parties || []).filter(p => p.alert_id).map(p =>
+ `<button class="btn btn-sm btn-secondary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${p.alert_id});"><span>Instruire l'alerte de la partie liée</span> #${p.alert_id}</button>`).join(" ");
  if (alertLink) {
- if (data.alert_id) {
- alertLink.innerHTML = `<button class="btn btn-sm btn-primary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button>`;
+ if (data.alert_id || alertesDesParties) {
+ alertLink.innerHTML = (data.alert_id ? `<button class="btn btn-sm btn-primary" onclick="switchTab('screening'); switchSubTab('screening', 'alerts-screening'); openAlertModal(${data.alert_id});"> Instruire l'alerte #${data.alert_id}</button> ` : "") + alertesDesParties;
  alertLink.classList.remove("hidden");
  } else {
  alertLink.classList.add("hidden");
@@ -4900,7 +4950,7 @@ async function handleScreening(event) {
  }
  }
  // Une decision ALERT ouvre une alerte de travail : rafraichir le badge
- if (data.alert_id) { fetchAlerts("SCREENING"); refreshSidebarCounters(); }
+ if (data.alert_id || alertesDesParties) { fetchAlerts("SCREENING"); refreshSidebarCounters(); }
  } catch (e) {
  console.error("Error screening:", e);
  showToast("Erreur réseau lors de l'appel au moteur.", "error");
@@ -5696,6 +5746,11 @@ function extendedFieldsRows(item) {
  }
  const crypto = cryptoWalletsText(item.crypto_wallets);
  if (crypto) rows.push(`<div class="details-item" style="grid-column: span 2;"><strong>Adresses crypto</strong><span>${escapeHtml(crypto)}</span></div>`);
+ // Ce que la source PEP dit de la personne, lu et non saisi (la qualité est
+ // dans les motifs de la désignation) : la fin de fonction et le lien vers la PPE
+ if (item.pep_fin_de_fonction) rows.push(`<div class="details-item"><strong>Fin de fonction PEP</strong><span>${formatDate(item.pep_fin_de_fonction)}</span></div>`);
+ const liensPPE = _liensPPE(item.pep_liens);
+ if (liensPPE) rows.push(`<div class="details-item" style="grid-column: span 2;"><strong>Lien avec une PPE</strong><span>${liensPPE}</span></div>`);
  return rows.length
  ? `<h3 style="margin: 1rem 0 0.5rem;">Champs étendus</h3><div class="details-grid">${rows.join("")}</div>`
  : "";
@@ -6276,6 +6331,8 @@ async function fetchIngestionSettings() {
  }
  const gelDelayEl = document.getElementById("setting-gel-delay");
  if (gelDelayEl) gelDelayEl.value = ingestionSettings.gel_declaration_delay_hours ?? "";
+ const ppeDelayEl = document.getElementById("setting-ppe-delay");
+ if (ppeDelayEl) ppeDelayEl.value = ingestionSettings.ppe_decision_delay_days ?? "";
  // Notifications : l'écran est généré depuis le catalogue du serveur
  fetchNotificationsCatalog();
  // Digest KPI périodique
@@ -6403,6 +6460,9 @@ async function saveIngestionSettings() {
  // bornes est refusée par le serveur avec la raison.
  ...(document.getElementById("setting-gel-delay")?.value
    ? { gel_declaration_delay_hours: parseInt(document.getElementById("setting-gel-delay").value, 10) }
+   : {}),
+ ...(document.getElementById("setting-ppe-delay")?.value
+   ? { ppe_decision_delay_days: parseInt(document.getElementById("setting-ppe-delay").value, 10) }
    : {}),
  // Activation étape par étape : cases générées depuis le catalogue serveur
  notification_events: collectNotificationEvents(),
@@ -7095,12 +7155,20 @@ function renderReviewDeltaDetails(deltaDetails) {
  // Correction du lecteur OpenSanctions (fiskr/ingest.py) : une fiche dont
  // seule la FORME change n'est pas une modification de la source, mais le
  // lot reste à homologuer une fois — c'est ce que la production gardera.
- const forme = details.reader_form_count
-  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${Number(details.reader_form_count)} fiche(s) ne changent que de forme : les programmes de sanction passent de pep_role à sanction_programs (lecteur corrigé), sans modification de la source.</span>`
+ // Deux corrections, dites chacune : les programmes de sanction rangés à
+ // leur place, et la qualité PEP que le lecteur n'affirme plus (le compte
+ // total les comprend toutes deux).
+ const formeQualite = Number(details.reader_quality_form_count || 0);
+ const formeProgrammes = Number(details.reader_form_count || 0) - formeQualite;
+ const forme = (formeProgrammes > 0
+  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${formeProgrammes} fiche(s) ne changent que de forme : les programmes de sanction passent de pep_role à sanction_programs (lecteur corrigé), sans modification de la source.</span>`
     + (details.reader_form_unverified_count
      ? ` <span>Dont ${Number(details.reader_form_unverified_count)} comparée(s) en partie seulement : l'ancienne version tronquait ce texte à 500 caractères.</span>` : "")
     + `</p>`
-  : "";
+  : "")
+  + (formeQualite > 0
+   ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${formeQualite} fiche(s) ne changent que de forme : « Personne Politiquement Exposée (PEP) », affirmé sans avoir été lu, devient « qualité non précisée par la source » (lecteur corrigé), sans modification de la source.</span></p>`
+   : "");
  if (!added.length && !removed.length && !modified.length) {
  container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>' + forme + empreinteSeule;
  return;
@@ -8338,7 +8406,7 @@ function renderAlertsTable(channel, items) {
  tbody.innerHTML = items.map(a => {
  const subject = channel === "FILTERING"
  ? describeFilteringSubject(a)
- : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>`;
+ : `<strong>${escapeHtml(a.client_name)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(a.client_id || "")}</small>${a.partie ? "<br>" + partieLieeHtml(a.partie) : ""}`;
  const etoile = a.following_me
  ? `<span class="etoile-suivi" title="Vous suivez ce dossier" aria-hidden="true">★</span> ` : "";
  const selectable = !a.status.startsWith("CLOSED");
@@ -8470,6 +8538,7 @@ async function openAlertModal(alertId) {
  </span>
  </p>
  ${bandeauCaduciteHtml(a)}
+ ${blocPartieLiee(a, roles.includes("auditor"))}
  ${blocComparaison(a)}
  <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
@@ -8489,6 +8558,7 @@ async function openAlertModal(alertId) {
  </div>
  ${actionsHtml}
  ${blocMesuresDeGel(a, isReviewer)}
+ ${blocDossiersPPE(a, isReviewer)}
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
  <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()"> Générer un narratif</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchAlertAdverseMedia('client')"> Presse : client</button>
@@ -8503,6 +8573,59 @@ async function openAlertModal(alertId) {
  } catch (e) {
  console.error("Error opening alert:", e);
  }
+}
+
+// ------------------ PARTIES LIÉES (fiskr/parties.py) ------------------
+// Une correspondance sur le bénéficiaire effectif, le mandataire, le dirigeant
+// ou l'associé d'un client est l'alerte du CLIENT : l'écran nomme la partie
+// sous lui. Rôles, nom et mentions en nœuds texte séparés — chacun se traduit,
+// le nom ne se traduit pas.
+
+function _pourcentageLisible(valeur) {
+ return valeur == null ? "—" : `${Number(valeur).toLocaleString(uiLocale())} %`;
+}
+
+function partieLieeHtml(p) {
+ if (!p) return "";
+ const roles = (p.roles || []).map(r => `<span>${escapeHtml(r.libelle)}</span>`).join(" · ");
+ const pct = p.pourcentage_detention != null ? ` · ${escapeHtml(_pourcentageLisible(p.pourcentage_detention))}` : "";
+ const engage = p.peut_engager_les_fonds ? ` · <span>peut engager les fonds</span>` : "";
+ return `<small class="partie-liee"><span>Via la partie liée</span> ${roles} : <strong>${escapeHtml(p.nom)}</strong>${pct}${engage}</small>`;
+}
+
+function blocDetentionHtml(d) {
+ if (!d) return "";
+ if (d.reputee) {
+  return `<div class="anomaly-item" style="color: var(--color-alert); font-weight: 600;"><span>Client réputé détenu ou contrôlé par une personne désignée</span> — <span>${escapeHtml(d.fondement_label || "")}</span></div>`;
+ }
+ // Sous le seuil : seulement s'il y a déjà un vrai positif à additionner —
+ // un cumul nul ne dit rien à personne.
+ if (!(d.parties || []).length) return "";
+ return `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.3rem 0;"><span>Détention cumulée des parties confirmées</span> : ${escapeHtml(_pourcentageLisible(d.cumul_pct))} · <span>seuil</span> ${escapeHtml(_pourcentageLisible(d.seuil_pct))}</p>`;
+}
+
+function blocPartieLiee(a, auditeur) {
+ const pl = a.partie_liee;
+ if (!pl) return "";
+ const p = pl.actuelle || pl.criblee || {};
+ const roles = (pl.roles || []).map(r => `<span>${escapeHtml(r.libelle)}</span>`).join(" · ");
+ const doute = a.gel_doute_possible && !auditeur
+  ? `<button class="btn btn-sm btn-secondary" style="margin-top: 0.4rem;" onclick="ouvrirMesureDeGel(${a.id}, 'SUSPENSION_MISE_A_DISPOSITION')">En cas de doute : suspendre et interroger la DG Trésor</button>`
+  : "";
+ return `<div style="margin: 0.75rem 0 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px;">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.4rem;">Partie liée du client</h3>
+  <p style="font-size: 0.82rem; color: var(--text-muted); margin: 0 0 0.4rem;"><span>L'alerte est celle du client : la correspondance porte sur une personne de sa relation.</span></p>
+  ${pl.retiree ? `<div class="anomaly-item warning" style="font-size: 0.82rem;">Partie retirée depuis par la source.</div>` : ""}
+  <div class="details-grid">
+   <div class="details-item"><strong>Rôle</strong><span>${roles || "—"}</span></div>
+   <div class="details-item"><strong>Nom</strong><span>${escapeHtml(p.nom || "—")}</span></div>
+   <div class="details-item"><strong>Naissance</strong><span>${escapeHtml(p.dob || "—")}</span></div>
+   <div class="details-item"><strong>Détention</strong><span>${escapeHtml(_pourcentageLisible(p.pourcentage_detention))}</span></div>
+   <div class="details-item"><strong>Peut engager les fonds</strong><span>${p.peut_engager_les_fonds ? "Oui" : "Non"}</span></div>
+  </div>
+  ${blocDetentionHtml(a.detention)}
+  ${doute}
+ </div>`;
 }
 
 // ------------------ CLIENT ET PERSONNE LISTÉE CÔTE À CÔTE ------------------
@@ -8814,6 +8937,7 @@ function _blocMesure(m, vocab, isReviewer, auditeur) {
    <strong><span>Mesure de gel</span> #${m.id}</strong> ${badgeStatutGel(m)}
    <small style="color: var(--text-muted);"><span>ouverte à la confirmation</span> · ${formatDateTime(m.ouverte_le)} · @${escapeHtml(m.ouverte_par || "")}</small>
   </div>
+  ${m.fondement ? `<p style="font-size: 0.85rem; color: var(--color-alert); font-weight: 600; margin: 0 0 0.4rem;">${escapeHtml(m.fondement_label || "")}</p>` : ""}
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${m.radiation_a_examiner ? `
@@ -8965,7 +9089,7 @@ async function fetchGels() {
    <tr>
     <td>#${m.id}</td>
     <td>${formatDateTime(m.ouverte_le)}</td>
-    <td>${escapeHtml(m.client_name)}</td>
+    <td>${escapeHtml(m.client_name)}${m.fondement ? `<br><span class="badge badge-danger" style="font-size: 0.7rem; white-space: normal;">${escapeHtml(m.fondement_label || "")}</span>` : ""}</td>
     <td>${escapeHtml(m.watchlist_name)}</td>
     <td>${m.list_type ? listTypeBadge(m.list_type) : "—"}</td>
     <td>${escapeHtml(m.type_action_label)}</td>
@@ -8977,6 +9101,265 @@ async function fetchGels() {
    </tr>`).join("");
  } catch (e) {
   tableError("#gels-table", 11);
+ }
+}
+
+// ------------------ DOSSIERS PPE (étapes dans l'alerte et registre) ------------------
+// Une PPE confirmée ouvre un dossier (fiskr/ppe.py) : qualité retenue,
+// fonction et fin de fonction, origine des fonds et du patrimoine, décision
+// d'entrer ou de rester en relation par une personne habilitée qui n'a pas
+// instruit l'alerte (R.561-20-2). Le vocabulaire (qualités, décisions) vient
+// du serveur : une seule définition.
+
+function badgeStatutPPE(d) {
+ // Ce qui demande une action est dit À CÔTÉ du statut, qui ne change pas
+ const signaux = [
+  d.ppe_non_declaree ? `<span class="status-badge alert" style="white-space: nowrap;">PPE non déclarée</span>` : "",
+  d.exposition_echue ? `<span class="status-badge warning" style="white-space: nowrap;">Fonction terminée depuis plus d'un an</span>` : "",
+  d.revue_echue ? `<span class="status-badge warning" style="white-space: nowrap;">Revue échue</span>` : "",
+ ].filter(Boolean).join(" ");
+ const suite = signaux ? " " + signaux : "";
+ if (d.en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">Décision en retard</span>${suite}`;
+ const classe = { A_DECIDER: "warning", DECIDE: "no_match" }[d.statut] || "";
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(d.statut_label)}</span>${suite}`;
+}
+
+function _liensPPE(liens) {
+ return (liens || []).map(l => `${escapeHtml(l.personne || l.personne_id || "—")}${l.relation ? ` (${escapeHtml(l.relation)})` : ""}${l.personne_ppe ? " — PPE" : ""}`).join(" ; ");
+}
+
+// Date ISO (AAAA-MM-JJ) dans un an : la revue proposée par défaut
+function _dansUnAn() {
+ const d = new Date();
+ d.setFullYear(d.getFullYear() + 1);
+ return d.toISOString().slice(0, 10);
+}
+
+function _etapeInstructionPPE(d, vocab, auditeur) {
+ const pieces = (d.pieces_origine || []).map(p => p.file_present === false || !p.file_name
+  ? `<li><span style="text-decoration: line-through; color: var(--text-muted);">${escapeHtml(p.file_name || "#" + p.id)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span></li>`
+  : `<li><a href="/api/alerts/attachments/${p.id}" target="_blank" style="color: var(--color-accent);">${escapeHtml(p.file_name)}</a></li>`).join("");
+ const listePieces = `<ul style="list-style: none; margin: 0.3rem 0; font-size: 0.85rem;">${pieces || `<li style="color: var(--text-muted);">Aucune pièce de l'origine des fonds ou du patrimoine.</li>`}</ul>`;
+ if (auditeur || d.statut !== "A_DECIDER") {
+  return `<p style="font-size: 0.85rem;"><span>Qualité retenue</span> : <strong>${escapeHtml(d.qualite_retenue_label || "—")}</strong>
+   ${d.fonction ? `<br><span>Fonction</span> : ${escapeHtml(d.fonction)}` : ""}
+   ${d.fin_de_fonction ? `<br><span>Fin de fonction</span> : ${formatDate(d.fin_de_fonction)}` : ""}
+   <br><span>Origine des fonds</span> : ${escapeHtml(d.origine_fonds || "—")}
+   <br><span>Origine du patrimoine</span> : ${escapeHtml(d.origine_patrimoine || "—")}</p>${listePieces}`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="ppe-qualite-${d.id}">Qualité retenue</label>
+    <select id="ppe-qualite-${d.id}"><option value="">—</option>${_options(vocab.qualites, d.qualite_retenue)}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-fin-${d.id}">Fin de fonction</label>
+    <input type="date" id="ppe-fin-${d.id}" value="${escapeHtml(d.fin_de_fonction || "")}"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-fonction-${d.id}">Fonction</label>
+   <textarea id="ppe-fonction-${d.id}" rows="2" placeholder="Fonction exercée (ou celle de la PPE à laquelle la personne est liée)">${escapeHtml(d.fonction || "")}</textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-fonds-${d.id}">Origine des fonds</label>
+   <textarea id="ppe-fonds-${d.id}" rows="2" placeholder="D'où viennent les fonds versés sur le compte ou le contrat (salaires, cession, donation…)">${escapeHtml(d.origine_fonds || "")}</textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-patrimoine-${d.id}">Origine du patrimoine</label>
+   <textarea id="ppe-patrimoine-${d.id}" rows="2" placeholder="Composition et origine du patrimoine immobilier et mobilier">${escapeHtml(d.origine_patrimoine || "")}</textarea></div>
+  <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="enregistrerInstructionPPE(${d.id}, ${d.alert_id})">Enregistrer l'instruction</button>
+  <h4 style="font-size: 0.82rem; margin: 0.6rem 0 0.2rem;">Pièces de l'origine des fonds et du patrimoine</h4>${listePieces}
+  <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+   <input type="file" id="ppe-piece-${d.id}" aria-label="Pièce de l'origine des fonds ou du patrimoine" style="flex: 1 1 220px; padding: 0.35rem; font-size: 0.8rem;">
+   <button class="btn btn-sm btn-secondary" onclick="joindrePiecePPE(${d.id}, ${d.alert_id})">Joindre la pièce</button>
+  </div>`;
+}
+
+function _etapeDecisionPPE(d, vocab, isReviewer, auditeur) {
+ if (d.statut === "DECIDE") {
+  return `<p style="font-size: 0.85rem;"><strong>${escapeHtml(d.decision_label || d.decision || "")}</strong> · ${formatDate(d.decidee_le)} · @${escapeHtml(d.decidee_par || "")}
+   ${d.decision_reference ? ` · <span>réf.</span> ${escapeHtml(d.decision_reference)}` : ""}
+   · <span>délai depuis la confirmation</span> : <strong>${formatDuree(d.delai_decision_secondes)}</strong><br>
+   ${escapeHtml(d.decision_motif || "")}
+   ${d.prochaine_revue_le ? `<br><span>Prochaine revue</span> : <strong style="${d.revue_echue ? "color: var(--color-warning);" : ""}">${formatDate(d.prochaine_revue_le)}</strong>` : ""}</p>`;
+ }
+ const delai = d.en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;">Délai de décision dépassé : <span>${formatDuree(d.delai_decision_secondes)}</span> (<span>seuil</span> ${d.seuil_jours} j).</p>`
+  : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>Décision attendue — délai écoulé</span> : ${formatDuree(d.delai_decision_secondes)} (<span>seuil</span> ${d.seuil_jours} j).</p>`;
+ const moi = currentUser ? currentUser.username : "";
+ if (!isReviewer || auditeur) {
+  return `${delai}<p style="font-size: 0.82rem; color: var(--text-muted);">La décision revient à une personne habilitée (rôle réviseur) qui n'a pas instruit l'alerte.</p>`;
+ }
+ if ((d.instruit_par || []).includes(moi)) {
+  return `${delai}<p style="font-size: 0.82rem; color: var(--text-muted);">Vous avez proposé ou validé la confirmation : la décision revient à une autre personne habilitée.</p>`;
+ }
+ return `${delai}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="ppe-decision-${d.id}">Décision</label>
+    <select id="ppe-decision-${d.id}">${_options(vocab.decisions, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-decidee-${d.id}">Décidée le</label>
+    <input type="datetime-local" id="ppe-decidee-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-${d.id}">Prochaine revue</label>
+    <input type="date" id="ppe-revue-${d.id}" value="${_dansUnAn()}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-reference-${d.id}">Référence</label>
+    <input type="text" id="ppe-reference-${d.id}" maxlength="255" placeholder="Comité, procès-verbal…"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-motif-${d.id}">Motif de la décision</label>
+   <textarea id="ppe-motif-${d.id}" rows="2" maxlength="4000"></textarea></div>
+  <small style="color: var(--text-muted); display: block;">Une entrée ou un maintien en relation exige la qualité retenue, l'origine des fonds et du patrimoine, au moins une pièce et une prochaine revue datée (R.561-20-2).</small>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerDecisionPPE(${d.id}, ${d.alert_id})">Enregistrer la décision</button>`;
+}
+
+function _blocDossierPPE(d, vocab, isReviewer, auditeur) {
+ const liens = _liensPPE(d.liens_source);
+ const nonDeclaree = d.ppe_non_declaree
+  ? `<p style="color: var(--color-alert); font-size: 0.85rem; font-weight: 600;"><span>PPE non déclarée par le SI amont : la classification du client est à corriger dans le SI amont. Fiskr ne la corrige pas.</span>${d.client_pep_declare_actuel === true ? ` <span style="font-weight: normal;">Le SI amont le déclare désormais PPE.</span>` : ""}</p>`
+  : "";
+ const echue = d.exposition_echue
+  ? `<p style="color: var(--color-warning); font-size: 0.85rem;"><span>Fonction terminée le</span> ${formatDate(d.fin_de_fonction)} : <span>plus d'un an (R.561-18 I). Rien n'est fermé automatiquement — la personne habilitée décide si la vigilance complémentaire est maintenue.</span></p>`
+  : "";
+ return `<div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem;">
+  <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+   <strong><span>Dossier PPE</span> #${d.id}</strong> ${badgeStatutPPE(d)}
+   <small style="color: var(--text-muted);"><span>ouvert à la confirmation</span> · ${formatDateTime(d.ouvert_le)} · @${escapeHtml(d.ouvert_par || "")}</small>
+  </div>
+  ${nonDeclaree}
+  <p style="font-size: 0.85rem;"><span>Qualité lue à la source</span> : <strong>${escapeHtml(d.qualite_source_label)}</strong>
+   ${d.fonction_source ? `<br><span>Fonction lue</span> : ${escapeHtml(d.fonction_source)}` : ""}
+   ${d.fin_de_fonction_source ? `<br><span>Fin de fonction lue</span> : ${formatDate(d.fin_de_fonction_source)}` : ""}
+   ${liens ? `<br><span>Lien avec une PPE</span> : ${liens}` : ""}</p>
+  ${echue}
+  <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Instruction</h4>${_etapeInstructionPPE(d, vocab, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Décision d'entrer ou de rester en relation</h4>${_etapeDecisionPPE(d, vocab, isReviewer, auditeur)}
+ </div>`;
+}
+
+function blocDossiersPPE(a, isReviewer) {
+ const dossiers = a.ppe_dossiers || [];
+ if (!dossiers.length && !a.ppe_du && !a.ppe_sans_dossier) return "";
+ const vocab = a.ppe_vocabulaire || {};
+ const auditeur = userRoles(currentUser).includes("auditor");
+ // PPE confirmée AVANT le dossier : rien ne l'y fera entrer toute seule —
+ // le bouton le dit, et le délai courra depuis la confirmation.
+ const manquant = !dossiers.length && a.ppe_du && !auditeur
+  ? `<p style="color: var(--color-alert); font-size: 0.85rem; font-weight: 600;">PPE confirmée sans dossier : aucune décision d'entrer ou de rester en relation n'est tracée.</p>
+   <button class="btn btn-sm btn-primary" onclick="ouvrirDossierPPE(${a.id})">Ouvrir le dossier PPE</button>`
+  : "";
+ const sansDossier = a.ppe_sans_dossier ? `<p class="section-desc">${escapeHtml(a.ppe_sans_dossier)}</p>` : "";
+ return `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Dossier PPE (R.561-20-2)</h3>
+  ${dossiers.map(d => _blocDossierPPE(d, vocab, isReviewer, auditeur)).join("")}
+  ${manquant}${sansDossier}
+ </div>`;
+}
+
+async function _ppeRequete(url, options, alertId) {
+ try {
+  const response = await apiFetch(url, options);
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  showToast(data.message, "success");
+  if (alertId) openAlertModal(alertId);
+  rafraichirSiAffichee("screening", "alerts-ppe", fetchDossiersPPE);
+  return data;
+ } catch (e) {
+  showToast("Erreur réseau de communication.", "error");
+  return null;
+ }
+}
+
+async function ouvrirDossierPPE(alertId) {
+ await _ppeRequete(`/api/alerts/${alertId}/ppe`, { method: "POST" }, alertId);
+}
+
+async function enregistrerInstructionPPE(dossierId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${dossierId}`)?.value ?? "";
+ await _ppeRequete(`/api/ppe/${dossierId}`, {
+  method: "PUT", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+   qualite_retenue: valeur("ppe-qualite"), fin_de_fonction: valeur("ppe-fin"),
+   fonction: valeur("ppe-fonction"), origine_fonds: valeur("ppe-fonds"),
+   origine_patrimoine: valeur("ppe-patrimoine"),
+  }),
+ }, alertId);
+}
+
+async function joindrePiecePPE(dossierId, alertId) {
+ const fichier = document.getElementById(`ppe-piece-${dossierId}`)?.files?.[0];
+ if (!fichier) {
+  showToast("Choisissez la pièce : relevé, avis d'imposition, acte de propriété…", "error");
+  return;
+ }
+ const form = new FormData();
+ form.append("file", fichier);
+ await _ppeRequete(`/api/ppe/${dossierId}/pieces`, { method: "POST", body: form }, alertId);
+}
+
+async function enregistrerDecisionPPE(dossierId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${dossierId}`)?.value || "";
+ const payload = { decision: valeur("ppe-decision"), motif: valeur("ppe-motif"),
+  reference: valeur("ppe-reference") };
+ if (valeur("ppe-decidee")) payload.decidee_le = new Date(valeur("ppe-decidee")).toISOString();
+ // La revue ne vaut que pour une relation qui s'ouvre ou continue : le
+ // serveur l'ignore pour un refus ou une fin de relation
+ if (valeur("ppe-revue")) payload.prochaine_revue_le = new Date(valeur("ppe-revue") + "T12:00:00").toISOString();
+ if (!await confirmDialog("Enregistrer cette décision ? Le dossier ne se réécrit plus ensuite.")) return;
+ await _ppeRequete(`/api/ppe/${dossierId}/decision`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
+function _parametresDesDossiersPPE() {
+ const params = new URLSearchParams();
+ const statut = document.getElementById("ppe-statut-filter")?.value;
+ const recherche = (document.getElementById("ppe-recherche")?.value || "").trim();
+ if (statut) params.set("statut", statut);
+ if (recherche) params.set("q", recherche);
+ return params;
+}
+
+function exportDossiersPPECsv() {
+ // Tous les dossiers filtrés, côté serveur : la pièce qu'un contrôle demande entière
+ window.open(`/api/export/ppe.csv?${_parametresDesDossiersPPE().toString()}`, "_blank");
+}
+
+function _afficherSyntheseDesDossiersPPE(s) {
+ const el = document.getElementById("ppe-synthese");
+ if (!el || !s) return;
+ el.innerHTML = `
+  <span><strong>${s.to_decide}</strong> <span>à décider</span></span>
+  <span style="${s.overdue ? "color: var(--color-alert); font-weight: 600;" : ""}"><strong>${s.overdue}</strong> <span>en retard</span> (<span>seuil</span> ${s.threshold_days} j)</span>
+  <span><strong>${s.decided}</strong> <span>décidé(s)</span></span>
+  <span><span>Délai moyen confirmation → décision</span> : <strong>${formatDuree(s.avg_decision_delay_seconds)}</strong></span>
+  ${s.undeclared_by_upstream ? `<span style="color: var(--color-alert);"><strong>${s.undeclared_by_upstream}</strong> <span>PPE non déclarée(s) par le SI amont</span></span>` : ""}
+  ${s.decided_late ? `<span style="color: var(--color-warning);"><strong>${s.decided_late}</strong> <span>décidé(s) hors délai</span></span>` : ""}`;
+}
+
+async function fetchDossiersPPE() {
+ const tbody = document.querySelector("#ppe-table tbody");
+ if (!tbody) return;
+ tableLoading("#ppe-table", 9);
+ const params = _parametresDesDossiersPPE();
+ const filtre = params.toString() !== "";
+ params.set("page_size", "200");
+ try {
+  const response = await apiFetch(`/api/ppe?${params.toString()}`);
+  if (!response.ok) { tableError("#ppe-table", 9); return; }
+  const data = await response.json();
+  _afficherSyntheseDesDossiersPPE(data.synthese);
+  const total = document.getElementById("ppe-total");
+  if (total) total.textContent = data.total > data.items.length ? `${data.items.length} / ${data.total}` : "";
+  if (!data.items.length) {
+   tableEmpty("#ppe-table", 9, filtre ? "Aucun dossier pour ces filtres." : "Aucun dossier PPE.", "",
+    filtre ? "" : "Un dossier s'ouvre à la confirmation d'une alerte sur une liste de personnes politiquement exposées.");
+   return;
+  }
+  tbody.innerHTML = data.items.map(d => `
+   <tr>
+    <td>#${d.id}</td>
+    <td>${formatDateTime(d.ouvert_le)}</td>
+    <td>${escapeHtml(d.client_name)}</td>
+    <td>${escapeHtml(d.watchlist_name)}</td>
+    <td>${escapeHtml(d.qualite_retenue_label || d.qualite_source_label)}</td>
+    <td>${badgeStatutPPE(d)}</td>
+    <td>${d.decision_label ? escapeHtml(d.decision_label) : "—"}</td>
+    <td>${formatDuree(d.delai_decision_secondes)}</td>
+    <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${d.alert_id})" title="Ouvrir l'alerte et les étapes du dossier">Ouvrir</button></td>
+   </tr>`).join("");
+ } catch (e) {
+  tableError("#ppe-table", 9);
  }
 }
 
@@ -13203,7 +13586,20 @@ async function recriblerClient(clientId) {
  // L'alerte à instruire : celle de la meilleure correspondance que la liste
  // blanche n'a pas absorbée (`best_alert`), à défaut celle de la meilleure.
  const alerteId = (data.best_alert && data.best_alert.alert_id) || data.alert_id;
- if (alerteId) {
+ // Une partie liée en alerte est une alerte du client : « aucune
+ // correspondance » ne se dit pas tant qu'elle existe.
+ const partieEnAlerte = (data.parties || []).find(p => p.alert_id);
+ if (!alerteId && partieEnAlerte) {
+ showToast("Criblage terminé : une partie liée du client est en alerte.", "warning", 9000, {
+ label: "Ouvrir l'alerte", suffixe: `#${partieEnAlerte.alert_id}`,
+ run: () => {
+ document.getElementById("client360-modal")?.classList.add("hidden");
+ switchTab("screening"); switchSubTab("screening", "alerts-screening");
+ openAlertModal(partieEnAlerte.alert_id);
+ },
+ });
+ refreshAlertQueues?.();
+ } else if (alerteId) {
  showToast("Criblage terminé : correspondance au-dessus du seuil.", "warning", 9000, {
  label: "Ouvrir l'alerte", suffixe: `#${alerteId}`,
  run: () => {
@@ -13258,25 +13654,39 @@ async function openClient360(clientId) {
  <div class="details-item"><strong>Notation de risque</strong><span>${escapeHtml(k.risk_rating || "—")}${k.pep_flag ? ' · <strong style="color: var(--color-warning);">PEP</strong>' : ""}</span></div>
  <div class="details-item"><strong>Segment / Secteur</strong><span>${escapeHtml(k.segment || "—")} ${k.activity_sector ? "· " + escapeHtml(k.activity_sector) : ""}</span></div>
  <div class="details-item"><strong>Entrée en relation</strong><span>${escapeHtml(k.relationship_start || "—")}${k.status ? " · " + escapeHtml(k.status) : ""}</span></div>
+ <div class="details-item"><strong>Fin de relation</strong><span>${escapeHtml(k.relationship_end || "—")}</span></div>
  </div>`
  : `<p class="section-desc">Aucune fiche KYC en production pour <strong>${escapeHtml(clientId)}</strong> (client ad hoc ou hors référentiel).</p>`;
 
  const screeningsHtml = (d.screenings || []).slice(0, 15).map(s => `
  <tr>
  <td>${formatDateTime(s.timestamp)}</td>
- <td>${escapeHtml(s.watchlist_name || "—")}</td>
+ <td>${escapeHtml(s.watchlist_name || "—")}${s.partie_nom ? `<br><small style="color: var(--text-muted);"><span>Via la partie liée</span> : ${escapeHtml(s.partie_nom)}</small>` : ""}</td>
  <td>${s.list_type ? listTypeBadge(s.list_type) : "—"}</td>
  <td>${s.final_score !== null && s.final_score !== undefined ? s.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${escapeHtml(statusLabel(s.status))}</td>
  </tr>`).join("");
 
+ const partiesParId = Object.fromEntries((d.parties || []).map(p => [p.id, p]));
  const alertsHtml = (d.alerts || []).slice(0, 15).map(a => `
  <tr>
  <td>#${a.id}</td><td>${formatDateTime(a.created_at)}</td>
- <td>${escapeHtml(a.watchlist_name)}</td>
+ <td>${escapeHtml(a.watchlist_name)}${a.partie_liee_id && partiesParId[a.partie_liee_id] ? "<br>" + partieLieeHtml(partiesParId[a.partie_liee_id]) : ""}</td>
  <td>${alertPriorityBadge(a)}</td>
  <td>${escapeHtml(statusLabel(a.status))}</td>
  <td><button class="btn btn-sm btn-secondary" onclick="document.getElementById('client360-modal').classList.add('hidden'); switchTab('${(a.channel || "SCREENING") === "FILTERING" ? "filtering" : "screening"}'); openAlertModal(${a.id})"></button></td>
+ </tr>`).join("");
+
+ // Bénéficiaires effectifs, mandataires, dirigeants, associés : criblés avec
+ // le client, leurs alertes sont les siennes (fiskr/parties.py).
+ const partiesHtml = (d.parties || []).map(p => `
+ <tr>
+ <td>${(p.roles || []).map(r => `<span>${escapeHtml(r.libelle)}</span>`).join(" · ")}</td>
+ <td>${escapeHtml(p.nom)}</td>
+ <td>${escapeHtml(p.dob || "—")}</td>
+ <td>${escapeHtml(_pourcentageLisible(p.pourcentage_detention))}</td>
+ <td>${p.peut_engager_les_fonds ? "Oui" : "Non"}</td>
+ <td>${p.alertes_ouvertes ? `<strong style="color: var(--color-alert);">${p.alertes_ouvertes}</strong>` : "0"}${p.alertes_confirmees ? ` · <span>confirmée(s)</span> ${p.alertes_confirmees}` : ""}</td>
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `
@@ -13284,6 +13694,14 @@ async function openClient360(clientId) {
 
  body.innerHTML = `
  ${kycHtml}
+ <div class="modal-section">
+ <h4><span>Parties liées</span> (${(d.parties || []).length})</h4>
+ ${blocDetentionHtml(d.detention)}
+ ${partiesHtml ? `<div class="table-container" style="max-height: 190px;"><table>
+ <thead><tr><th>Rôle</th><th>Nom</th><th>Naissance</th><th>Détention</th><th>Peut engager les fonds</th><th>Alertes ouvertes</th></tr></thead>
+ <tbody>${partiesHtml}</tbody></table></div>`
+ : '<p style="font-size: 0.85rem; color: var(--text-muted);">Aucune partie liée déclarée (bénéficiaire effectif, mandataire, dirigeant, associé) : seul le client est criblé.</p>'}
+ </div>
  <div class="modal-section">
  <h4>Criblages (${d.counts.screenings})</h4>
  ${screeningsHtml ? `<div class="table-container" style="max-height: 190px;"><table>
@@ -13887,6 +14305,7 @@ async function fetchRetentionSettings() {
  const archiveEl = document.getElementById("retention-archive");
  if (archiveEl) archiveEl.checked = policy.archive !== false;
  renderRetentionPreview(data.preview || {});
+ renderRetentionConservees(data.conservees, data.motifs_de_conservation);
  renderRetentionLegal(data.sous_la_duree_legale, data.duree_legale_jours);
  } catch (e) { console.error("Retention fetch error:", e); }
 }
@@ -13895,8 +14314,10 @@ async function fetchRetentionSettings() {
 // Code monétaire et financier) ne se ressemblent pas : le premier empêche de
 // vider la base par mégarde, le second dit combien de temps la preuve doit
 // exister. Régler le journal de criblage sur 31 jours était accepté sans un
-// mot — et un mois plus tard la preuve n'existait plus. On ne l'interdit pas :
-// on refuse seulement que le choix se fasse sans le savoir.
+// mot — et un mois plus tard la preuve n'existait plus. La purge applique
+// désormais elle-même le plancher : c'est le RÉGLAGE qui est sous la durée
+// légale, plus la conservation — l'écran ne dit donc plus « conservation sous
+// la durée légale », qui serait devenu faux.
 function renderRetentionLegal(ecarts, planchers) {
  const el = document.getElementById("retention-legal");
  if (!el) return;
@@ -13907,9 +14328,35 @@ function renderRetentionLegal(ecarts, planchers) {
  return;
  }
  el.classList.remove("hidden");
- el.textContent = "Conservation sous la durée légale — "
-  + liste.map(e => e.message || `${e.famille} : ${e.jours} j`).join(" ")
-  + ` Le réglage reste possible, mais il est tracé au journal d'administration.`;
+ el.innerHTML = `<strong>Réglage sous la durée légale</strong> — `
+  + liste.map(e => `<span>${escapeHtml(e.message || `${e.famille} : ${e.jours} j`)}</span>`).join(" ")
+  + ` <span>Le réglage reste possible, mais il est tracé au journal d'administration.</span>`;
+}
+
+// Les familles probantes, nommées comme les champs de la carte
+const LIBELLES_FAMILLES_PROBANTES = { audit_trail: "Décisions de criblage", closed_alerts: "Alertes clôturées" };
+
+// Ce que la politique aurait purgé et que la loi garde, et pourquoi (motifs
+// rendus par le serveur, fiskr/conservation.py). Un client en portefeuille
+// garde son dossier : c'est le fonctionnement normal, pas une alarme — le
+// paragraphe reste neutre, et absent quand il n'y a rien à dire.
+function renderRetentionConservees(conservees, motifs) {
+ const el = document.getElementById("retention-conservees");
+ if (!el) return;
+ const lignes = [];
+ Object.entries(conservees || {}).forEach(([famille, parMotif]) => {
+  Object.entries(parMotif || {}).forEach(([motif, n]) => {
+   if (n > 0) lignes.push(`<li><strong>${Number(n)}</strong> · <span>${escapeHtml(LIBELLES_FAMILLES_PROBANTES[famille] || famille)}</span> — <span>${escapeHtml((motifs || {})[motif] || motif)}</span></li>`);
+  });
+ });
+ if (!lignes.length) {
+  el.classList.add("hidden");
+  el.innerHTML = "";
+  return;
+ }
+ el.classList.remove("hidden");
+ el.innerHTML = `<span>Conservées au-delà de la durée réglée, le délai légal courant depuis la fin de la relation (art. L561-12 CMF) :</span>
+  <ul style="margin: 0.25rem 0 0 1.25rem;">${lignes.join("")}</ul>`;
 }
 
 function renderRetentionPreview(preview) {

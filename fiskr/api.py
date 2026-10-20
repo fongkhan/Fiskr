@@ -11,7 +11,7 @@ import secrets
 import logging
 import shutil
 import threading
-from datetime import date as date_type, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Union
@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
+from fiskr import parametrage
 from fiskr import rarete
 from fiskr import univers
 from fiskr.quality import evaluate_and_clean
@@ -35,7 +36,7 @@ from fiskr.delta import calculate_delta_db
 from fiskr.tasks import _refresh_production_cache
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
-    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
+    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets, parse_ofsi_conlist_csv,
     parse_seco_xml, parse_seco_opensanctions_csv, parse_ofac_consolidated_xml, parse_csl_json,
     parse_canada_sema_csv, parse_dfat_consolidated,
     parse_hk_sfc_alert_list, parse_amf_blacklist, parse_worldbank_debarred_json,
@@ -53,7 +54,7 @@ from fiskr.database import (
     AlertAttachment, AdminAuditLog, ALERT_PRIORITIES, ALERT_PRIORITY_LABELS,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
     BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
-    NotificationDelivery, LearnedEquivalence
+    NotificationDelivery, LearnedEquivalence, PartieLiee
 )
 from fiskr.alerts import (open_or_redetect_alerts,
                           is_whitelisted, whitelisted_pairs, compute_due_at,
@@ -149,10 +150,14 @@ from fiskr.settings import (
 from fiskr import resources as resource_tables
 from fiskr import country_risk
 from fiskr import gels as registre_des_gels
-from fiskr.database import MesureDeGel
+from fiskr import ppe as dossiers_ppe
+from fiskr.database import DossierPPE, MesureDeGel
 from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
-                            gel_declaration_delai_heures, perimeter_overrides)
-from fiskr.retention import preview_retention, run_retention
+                            gel_declaration_delai_heures, perimeter_overrides,
+                            SETTING_PPE_DELAI, PPE_DELAI_BORNES_JOURS, ppe_decision_delai_jours)
+from fiskr.retention import (preview_retention, run_retention,
+                             conservees_au_titre_de_la_relation)
+from fiskr import conservation
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
 from fiskr import jobs as job_queue
@@ -209,11 +214,9 @@ def _entity_search_blob(ent: Dict[str, Any]) -> str:
     return strip_accents(" | ".join(p for p in parts if p)).upper()
 
 
-def _valeur_de_cache(valeur):
-    """Une colonne telle que le cache de criblage doit la porter : serialisable."""
-    if isinstance(valeur, (datetime, date_type)):
-        return valeur.isoformat()
-    return valeur
+# Une colonne telle que le cache de criblage doit la porter : serialisable. Une
+# seule definition, que le re-criblage lit aussi (fiskr.database).
+from fiskr.database import valeur_de_criblage as _valeur_de_cache
 
 
 def load_watchlist_cache(db: Session):
@@ -228,8 +231,10 @@ def load_watchlist_cache(db: Session):
     # un demon recharge apres la coupure de `adjust.dob` la voyait toujours
     # active, et rebatissait son index avec. Les cles de l'index dependent de
     # ces deux reglages : ils sont relus ICI, avant de batir quoi que ce soit.
-    caps.invalidate_context()
-    resource_tables.invalidate_context()
+    # Les equivalences, contenu compris : seule l'activation etait relue, et
+    # une equivalence approuvee dans un autre processus n'atteignait jamais
+    # celui-ci (fiskr/parametrage.py).
+    parametrage.relire(db)
     univers.invalider()
 
     # Les lots READY des types WATCHLIST_* : la definition de l'univers vit
@@ -493,8 +498,11 @@ def run_resource_mining(db, started_by: str = "système",
             if resources_active(db):
                 # Meme lecon que le reglage d'activation : l'index des fiches
                 # listees fige ses cles de blocking, il doit etre reconstruit
-                # pour que les nouvelles equivalences aient un effet
-                load_watchlist_cache(db)
+                # pour que les nouvelles equivalences aient un effet. Et dans
+                # TOUS les processus : la fouille tourne dans le demon, qui
+                # rechargeait le seul cache qu'il ne sert pas ; l'epoque est le
+                # canal qui previent les processus web (fiskr/parametrage.py).
+                _refresh_production_cache(db)
         progress_registry.update(token, phase="DONE", kind="mining", label=label,
                                  started_by=started_by,
                                  processed=report["candidates"],
@@ -687,6 +695,14 @@ def _notification_batch_tick(tick=None) -> None:
         except Exception as e:
             db.rollback()
             logger.error(f"Détection des déclarations de gel en retard impossible : {e}")
+        # Dossiers PPE sans decision au-dela du delai : meme cadence, meme
+        # raison — un recapitulatif coupe ne doit pas taire une relation qui
+        # court sans la decision de R.561-20-2 1°.
+        try:
+            dossiers_ppe.detecter_retards(db)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Détection des dossiers PPE sans décision impossible : {e}")
         batch_cfg = notification_batch_settings(db)
         if not batch_cfg["enabled"]:
             return
@@ -845,6 +861,10 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
                 snap.phase = "DONE"
                 snap.status = "PENDING_REVIEW" if (
                     staging and snap.file_type != "CLIENT_BASE") else "READY"
+                if snap.file_type == "CLIENT_BASE":
+                    # Un referentiel repare entre en production comme un
+                    # import abouti : il ne degele personne non plus.
+                    registre_des_gels.reappliquer_aux_clients(db, snap.snapshot_id)
                 summary["repaired"] += 1
             else:
                 snap.status = "ERROR"
@@ -2103,7 +2123,11 @@ async def get_retention(
             # Le minimum technique et le plancher legal ne se ressemblent pas :
             # l'ecran doit pouvoir montrer les deux, et dire lequel est franchi.
             "duree_legale_jours": DUREE_LEGALE_JOURS,
-            "sous_la_duree_legale": retention_sous_la_duree_legale(politique)}
+            "sous_la_duree_legale": retention_sous_la_duree_legale(politique),
+            # Ce que la politique aurait purge et que la loi garde, et pourquoi
+            # (libelles derives de fiskr/conservation.py, jamais recopies)
+            "conservees": conservees_au_titre_de_la_relation(db, politique),
+            "motifs_de_conservation": conservation.MOTIFS}
 
 @app.put("/api/settings/retention")
 async def update_retention_settings(
@@ -2146,11 +2170,11 @@ async def update_retention_settings(
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     set_setting(db, SETTING_RETENTION, merged, updated_by=admin_user["username"])
     # Ce que la loi impose n'est pas ce que le garde-fou technique verifie. Un
-    # reglage sous le plancher de L561-12 reste ACCEPTE — une installation hors
-    # de France peut relever d'une autre regle, et c'est la decision de
-    # l'exploitant — mais il ne peut plus se prendre sans le savoir : il est
-    # annonce dans la reponse et trace au journal d'administration, ou un
-    # controle le retrouvera avec sa date et son auteur.
+    # reglage sous le plancher de L561-12 reste ACCEPTE, mais la purge ne
+    # descend pas en dessous (fiskr/conservation.py : cinq annees civiles
+    # depuis la fin de la relation) : il est annonce dans la reponse — la
+    # duree affichee n'est pas celle appliquee — et trace au journal
+    # d'administration, ou un controle le retrouvera avec sa date et son auteur.
     ecarts = retention_sous_la_duree_legale(merged)
     delta = {k: v for k, v in merged.items() if before.get(k) != v}
     if delta:
@@ -2465,7 +2489,7 @@ _PORTABLE_SETTINGS = {
     SETTING_AUTO_BACKTEST_ENABLED,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
-    SETTING_GEL_DELAI,
+    SETTING_GEL_DELAI, SETTING_PPE_DELAI,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
     # Synchronisation automatique : les cles de source sont universelles,
@@ -2916,12 +2940,17 @@ SCREEN_MAX_MATCHES = 50
 
 
 def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: str,
-                          requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
+                          requested_lists: Optional[List[str]] = None,
+                          partie: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Cœur du criblage unitaire, PARTAGE entre l'endpoint temps réel /api/screen
     et les campagnes batch : quality gate -> blocking -> scoring -> liste
     blanche -> règles anti-faux positifs -> journal d'audit -> alerte.
     Lève HTTPException 400 si le quality gate rejette le profil.
+
+    `partie` : le profil est celui d'une PARTIE LIEE du client
+    (fiskr/parties.py, `contexte`) — même cœur, et le journal comme l'alerte
+    sont ceux du client, la partie nommée (cf. `cribler_un_profil`).
     """
     client_dict = dict(client_dict)
     # Normalize client_type to PP/PM for internal validation and scoring engine
@@ -3110,7 +3139,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         lignes = log_compliance_decisions(
             db, client_dict,
             [(m.get("watchlist_entity") or {}, m) for m, _ in a_journaliser],
-            watchlist_version, watchlist_hash, commit=False)
+            watchlist_version, watchlist_hash, commit=False, partie=partie)
         for (hit, _regle), ligne in zip(a_journaliser, lignes):
             if hit is best_match:
                 audit_id = ligne.id
@@ -3133,7 +3162,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                 detail_suffix=(
                     f" [Criblage restreint aux listes : {', '.join(requested_lists)}]"
                     if requested_lists else ""
-                ))
+                ), partie=partie)
             hits_summary["opened"] = resultat_alertes["opened"]
             hits_summary["closed_by_rule"] = resultat_alertes["closed_by_rule"]
             hits_summary["redetected"] = resultat_alertes["redetected"]
@@ -3183,7 +3212,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
             dummy_wl,
             no_match_result,
             watchlist_version,
-            watchlist_hash
+            watchlist_hash,
+            partie=partie
         )
         audit_id = audit_record.id
         
@@ -3286,9 +3316,66 @@ def cribler_un_profil(db: Session, client_dict: Dict[str, Any], username: str,
     criblait contre la version de ce moment-la — mesure : une DGT mise en
     production designant le client, NO_MATCH journalise par le webhook, ALERT
     rendu par /api/screen pour le meme profil.
+
+    Les PARTIES LIEES du client (beneficiaires effectifs, mandataires,
+    dirigeants, associes — fiskr/parties.py) sont criblees dans la foulee, par
+    le meme cœur : LD DGT/ACPR §117 et §141, et la Commission des sanctions de
+    l'ACPR (9 fevrier 2022, n° 2020-11, §27) qui sanctionne un dispositif
+    « aucun filtrage des mandataires et des beneficiaires effectifs n'etant
+    realise ». La reponse les detaille (`parties`) ; `best_match` et
+    `alert_id` restent ceux du client lui-meme (contrat historique).
     """
     _ensure_watchlist_cache(db)
-    return screen_client_profile(db, client_dict, username, requested_lists)
+    resultat = screen_client_profile(db, client_dict, username, requested_lists)
+    # Meme cache, meme univers que le client : les parties sont criblees ici,
+    # sous la garantie de fraicheur que cette fonction vient de prendre. Une
+    # partie que le contrôle qualite refuse est dite NON criblee — jamais
+    # « aucune correspondance » — et n'empeche pas les autres de l'etre.
+    resultat["parties"] = []
+    for ctx, profil in _parties_a_cribler(db, client_dict):
+        try:
+            r = screen_client_profile(db, profil, username, requested_lists, partie=ctx)
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_400_BAD_REQUEST:
+                raise
+            resultat["parties"].append({
+                "partie": ctx, "performed": False, "reason": "QUALITY_GATE_REJECTED",
+                "summary": "NON criblée : identité refusée par le contrôle qualité.",
+                "detail": exc.detail})
+            continue
+        resultat["parties"].append(_resume_du_criblage_de_partie(ctx, r))
+    return resultat
+
+
+def _parties_a_cribler(db: Session, client_dict: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """(contexte, profil) de chaque partie active du client (fiskr/parties.py)."""
+    from fiskr import parties as parties_liees
+    client_id = client_dict.get("client_id")
+    if not client_id:
+        return []
+    actives = parties_liees.parties_actives(db, [client_id]).get(client_id, [])
+    nom_client = parties_liees.nom_d_affichage(client_dict) or client_id
+    sortie = []
+    for partie in actives:
+        sortie.append((parties_liees.contexte(partie, nom_client),
+                       parties_liees.profil_de_criblage(partie)))
+    return sortie
+
+
+def _resume_du_criblage_de_partie(ctx: Dict[str, Any], r: Dict[str, Any]) -> Dict[str, Any]:
+    best = r.get("best_match") or {}
+    retenue = r.get("best_alert") or {}
+    return {
+        "partie": ctx, "performed": True,
+        "status": best.get("status") or "NO_MATCH",
+        "final_score": best.get("final_score"),
+        "audit_trail_id": r.get("audit_trail_id"),
+        # L'alerte a instruire : celle de la meilleure correspondance que la
+        # liste blanche n'a pas absorbee (meme regle que pour le client)
+        "alert_id": retenue.get("alert_id") or r.get("alert_id"),
+        "watchlist_name": retenue.get("primary_name"),
+        "hits": r.get("hits"),
+    }
 
 
 def cribler_la_requete(db: Session, payload: ScreenClientRequest, username: str) -> Dict[str, Any]:
@@ -3598,7 +3685,7 @@ def _valider_correspondance(file_type: str, brut: Optional[str],
     return propre
 
 _APERCU_LIGNES = 10
-_APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU")
+_APERCU_TYPES = ("CLIENT_BASE", "WATCHLIST_EU", "CLIENT_PARTIES")
 
 @app.post("/api/ingest/preview")
 async def preview_ingest(
@@ -3625,7 +3712,7 @@ async def preview_ingest(
 
     # Même plafond que l'import réel : la porte de l'aperçu ne peut pas être
     # plus large que celle qu'elle précède.
-    nature = "clients" if file_type == "CLIENT_BASE" else "liste"
+    nature = "clients" if file_type in ("CLIENT_BASE", "CLIENT_PARTIES") else "liste"
     # Même dossier temporaire que l'import réel, et un nom qui dit ce que
     # c'est : un aperçu abandonné doit se reconnaître d'un coup d'œil.
     temp_dir = PROJECT_ROOT / "temp_ingestion"
@@ -3651,7 +3738,13 @@ async def preview_ingest(
         for brut in parse_csv_file(str(chemin), delimiter=delimiter,
                                    mapping_dict=correspondance or None):
             item = ensure_parsed_name(_normaliser_ligne_csv(file_type, dict(brut)))
-            report = evaluate_and_clean(item)
+            if file_type == "CLIENT_PARTIES":
+                # Même lecture que l'import (rôle, détention, identité) : une
+                # ligne que l'import refusera ne s'affiche pas « acceptée ».
+                lue, motifs = _partie_de_la_ligne(item)
+                report = {"is_valid": lue is not None, "errors": motifs}
+            else:
+                report = evaluate_and_clean(item)
             if report["is_valid"]:
                 acceptees += 1
             else:
@@ -3719,6 +3812,8 @@ _CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "client_id": (), "client_type": (), "client_first_name": (),
         "client_last_name": (), "client_company_name": (), "client_dob": (),
         "nationality": (), "residence": (),
+        # Point de depart des cinq ans de conservation (fiskr/conservation.py)
+        "client_relationship_end": ("relationship_end",),
     },
     "WATCHLIST_EU": {
         "entity_id": ("id",),
@@ -3730,8 +3825,28 @@ _CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
     },
 }
 
+# Fichier des parties liées (fiskr/parties.py) : une ligne par partie — le
+# client auquel elle appartient, son ou ses rôles, sa détention, son pouvoir
+# d'engager les fonds — et son identité dans les MÊMES colonnes que le
+# référentiel clients, dérivées de sa table : un bénéficiaire effectif se lit
+# comme un client (`_colonnes_client_de_la_ligne`).
+_CHAMPS_CSV["CLIENT_PARTIES"] = {
+    "client_id": (),
+    "partie_id": ("party_id",),
+    "role": ("roles",),
+    **{champ: autres for champ, autres in _CHAMPS_CSV["CLIENT_BASE"].items() if champ != "client_id"},
+    "pourcentage_detention": ("ownership_pct",),
+    "peut_engager_les_fonds": ("can_commit_funds",),
+}
+
 # Champs attendus par type, dans l'ordre d'affichage : DÉRIVÉS de la table.
 _APERCU_CHAMPS = {t: tuple(champs) for t, champs in _CHAMPS_CSV.items()}
+
+# Champs dont la FORME compte. La date de fin de relation se compare en SQL
+# comme une chaîne ISO : écrite telle quelle, « 20/10/2019 » se classerait
+# avant « 2021-10-20 ». L'aperçu montre la valeur LUE — vide si illisible, le
+# signe visible d'une colonne mal formée — et l'import écrit la même.
+_LECTURES_CSV = {"client_relationship_end": conservation.date_de_fin_de_relation}
 
 
 def _normaliser_ligne_csv(file_type: str, ligne: Dict[str, Any]) -> Dict[str, Any]:
@@ -3755,6 +3870,8 @@ def _apercu_champs_compris(file_type: str, item: Dict[str, Any]) -> Dict[str, st
     sortie: Dict[str, str] = {}
     for champ in _APERCU_CHAMPS.get(file_type, ()):
         valeur = item.get(champ)
+        if champ in _LECTURES_CSV:
+            valeur = _LECTURES_CSV[champ](valeur)
         sortie[champ] = "" if valeur in (None, "") else str(valeur)
     return sortie
 
@@ -3901,6 +4018,185 @@ def ingest_snapshot(
             os.remove(temp_file_path)
 
 
+
+def _colonnes_client_de_la_ligne(item: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Les colonnes d'une fiche client lues d'une ligne d'import CSV (apres le
+    Quality Gate, dont le genre resolu). UNE lecture, partagee par le
+    referentiel clients (CLIENT_BASE) et par le fichier des parties liees
+    (CLIENT_PARTIES, fiskr/parties.py) : un beneficiaire effectif s'identifie
+    exactement comme un client — memes colonnes, memes formats (pays separes
+    par des virgules, documents en JSON).
+    """
+    # Split countries
+    countries_obj = {
+        "nationality": [c.strip() for c in (item.get("nationality") or "").split(",") if c],
+        "residence": [c.strip() for c in (item.get("residence") or "").split(",") if c],
+        "birth_country": [c.strip() for c in (item.get("birth_country") or "").split(",") if c],
+        "registration_country": [c.strip() for c in (item.get("registration_country") or "").split(",") if c]
+    }
+    alt_addrs_client = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
+    return dict(
+        client_id=item.get("client_id"),
+        client_type=item.get("client_type"),
+        client_first_name=item.get("client_first_name"),
+        client_last_name=item.get("client_last_name"),
+        client_maiden_name=item.get("client_maiden_name"),
+        client_aliases=_client_alias_list(item),
+        client_company_name=item.get("client_company_name"),
+        client_dob=item.get("client_dob"),
+        client_gender=report["resolved_gender"],
+        client_is_deceased=str(item.get("client_is_deceased", "False")).lower() == "true",
+        client_countries=countries_obj,
+        # New fields
+        client_place_of_birth=item.get("client_place_of_birth") or item.get("place_of_birth"),
+        client_address=item.get("client_address") or item.get("address") or item.get("adress"),
+        client_city=item.get("client_city") or item.get("city"),
+        client_state=item.get("client_state") or item.get("state"),
+        client_country=item.get("client_country") or item.get("country"),
+        client_origin=item.get("client_origin") or item.get("origin"),
+        client_designation=item.get("client_designation") or item.get("designation"),
+        client_additional_informations=item.get("client_additional_informations") or item.get("additional_informations") or item.get("additional_info"),
+        client_alternative_addresses=alt_addrs_client,
+        client_date_of_death=item.get("client_date_of_death") or item.get("date_of_death"),
+        client_lei_number=item.get("client_lei_number"),
+        client_national_registry_ids=json.loads(item.get("client_national_registry_ids", "[]")) if item.get("client_national_registry_ids") else [],
+        client_other_registration_ids=json.loads(item.get("client_other_registration_ids", "[]")) if item.get("client_other_registration_ids") else [],
+        client_passport_documents=json.loads(item.get("client_passport_documents", "[]")) if item.get("client_passport_documents") else [],
+        client_national_id_documents=json.loads(item.get("client_national_id_documents", "[]")) if item.get("client_national_id_documents") else [],
+        client_other_id_documents=json.loads(item.get("client_other_id_documents", "[]")) if item.get("client_other_id_documents") else [],
+        # Champs etendus KYC
+        client_iban=item.get("client_iban") or item.get("iban") or None,
+        client_bic=item.get("client_bic") or item.get("bic") or None,
+        client_tax_id=item.get("client_tax_id") or item.get("tax_id") or None,
+        client_phone=item.get("client_phone") or item.get("phone") or None,
+        client_email=item.get("client_email") or item.get("email") or None,
+        client_website=item.get("client_website") or item.get("website") or None,
+        client_crypto_wallets=parse_multi_value(item, "client_crypto_wallets", "crypto_wallets"),
+        client_risk_rating=(item.get("client_risk_rating") or "").strip().upper() or None,
+        client_pep_flag=str(item.get("client_pep_flag", "")).strip().lower() in ("true", "1", "oui", "yes"),
+        client_segment=item.get("client_segment") or None,
+        client_activity_sector=item.get("client_activity_sector") or None,
+        client_activity_countries=[c.strip().upper() for c in (item.get("client_activity_countries") or "").split(",") if c.strip()],
+        client_relationship_start=item.get("client_relationship_start") or None,
+        client_status=(item.get("client_status") or "").strip().upper() or None,
+    )
+
+
+def _partie_de_la_ligne(item: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """
+    (partie lue, motifs de refus) d'une ligne du fichier des parties liées.
+    Appelée à l'identique par l'aperçu et par l'import : ce que l'aperçu dit
+    accepté est ce que l'import écrit.
+
+    L'identité est celle d'un client — même Quality Gate, mêmes colonnes
+    (`_colonnes_client_de_la_ligne`) — restreinte aux éléments
+    d'identification que le moteur lit (fiskr/parties.py, `champs_d_identite`).
+    """
+    from fiskr import parties as parties_liees
+    if not str(item.get("client_id") or "").strip():
+        return None, ["client_id manquant : la ligne ne dit pas de quel client elle est la partie."]
+    report = evaluate_and_clean(item)
+    if not report["is_valid"]:
+        return None, [str(e) for e in (report.get("errors") or [])]
+    champs = set(parties_liees.champs_d_identite())
+    identite = {k: v for k, v in _colonnes_client_de_la_ligne(item, report).items() if k in champs}
+    try:
+        lue = parties_liees.lire_une_partie(
+            identite, roles=item.get("role"), pourcentage=item.get("pourcentage_detention"),
+            peut_engager=item.get("peut_engager_les_fonds"), partie_id=item.get("partie_id"))
+    except parties_liees.RefusDePartie as refus:
+        return None, [str(refus)]
+    return lue, []
+
+
+def _importer_les_parties(db: Session, chemin, delimiter: str,
+                          column_mapping: Optional[Dict[str, str]], snap_id: str,
+                          username: str, rejets: "_CompteurDeRejets") -> Tuple[int, Dict[str, Any]]:
+    """
+    Import du fichier des parties liées (fiskr/parties.py). Rend (parties
+    enregistrées, bilan).
+
+    CONTRAT DU FICHIER : pour chaque client qu'il NOMME, le fichier porte le
+    jeu complet de ses parties — il remplace celui en base (parties nouvelles
+    créées, connues mises à jour en place, absentes retirées). Un client que
+    le fichier ne nomme pas garde ses parties : un fichier partiel n'efface
+    personne. Un client dont UNE ligne est refusée n'est pas mis à jour du
+    tout : remplacer son jeu sans la ligne refusée retirerait une partie que
+    le SI déclare encore.
+    """
+    from fiskr import parties as parties_liees
+    par_client: Dict[str, List[Dict[str, Any]]] = {}
+    refuses: Dict[str, int] = {}
+    for item in parse_csv_file(str(chemin), delimiter=delimiter,
+                               mapping_dict=column_mapping or None):
+        item = _normaliser_ligne_csv("CLIENT_PARTIES", item)
+        client_ref = str(item.get("client_id") or "").strip()
+        lue, motifs = _partie_de_la_ligne(item)
+        if lue is None:
+            rejets.ajouter({"errors": [f"{client_ref or '?'} : {m}" for m in motifs]})
+            if client_ref:
+                refuses[client_ref] = refuses.get(client_ref, 0) + 1
+            continue
+        par_client.setdefault(client_ref, []).append(lue)
+
+    bilan: Dict[str, Any] = {"clients": 0, "creees": 0, "modifiees": 0, "reactivees": 0,
+                             "retirees": 0, "inchangees": 0, "clients_modifies": [],
+                             "clients_non_mis_a_jour": []}
+    enregistrees = 0
+    for client_ref in sorted(par_client):
+        if client_ref in refuses:
+            continue
+        try:
+            resultat = parties_liees.remplacer_les_parties(
+                db, client_ref, par_client[client_ref], source=parties_liees.SOURCE_IMPORT,
+                source_ref=snap_id, username=username)
+        except parties_liees.RefusDePartie as refus:
+            rejets.ajouter({"errors": [f"{client_ref} : {refus}"]})
+            refuses[client_ref] = refuses.get(client_ref, 0) + 1
+            continue
+        bilan["clients"] += 1
+        for cle in ("creees", "modifiees", "reactivees", "retirees", "inchangees"):
+            bilan[cle] += resultat[cle]
+        if resultat["identite_changee"]:
+            bilan["clients_modifies"].append(client_ref)
+        enregistrees += len(par_client[client_ref])
+    bilan["clients_non_mis_a_jour"] = sorted(refuses)
+    db.flush()
+    return enregistrees, bilan
+
+
+def _cribler_apres_import_des_parties(db: Session, bilan: Dict[str, Any],
+                                      username: str) -> Dict[str, Any]:
+    """
+    Les clients dont une identité de partie vient de changer sont « modifiés »
+    au sens du criblage (fiskr/rescreen.py : l'empreinte de la relation couvre
+    ses parties). Le criblage des clients nouveaux ou modifiés de chaque
+    référentiel en production qui les porte les reprend — eux et leurs
+    parties, et eux seuls : les autres ont la même empreinte qu'hier.
+    """
+    modifies = bilan.get("clients_modifies") or []
+    if not modifies:
+        return {"launched": False, "reason": "NO_IDENTITY_CHANGE",
+                "message": "Aucune identité de partie n'a changé : rien à recribler."}
+    lots = set()
+    for debut in range(0, len(modifies), 800):   # plafond de parametres SQLite
+        lots.update(lot for (lot,) in db.query(ClientEntity.snapshot_id).join(
+            Snapshot, Snapshot.snapshot_id == ClientEntity.snapshot_id).filter(
+            Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY",
+            ClientEntity.client_id.in_(modifies[debut:debut + 800])).distinct().all())
+    lots = sorted(lots)
+    if not lots:
+        return {"launched": False, "reason": "NO_CLIENT_IN_PRODUCTION",
+                "message": (f"Les parties de {len(modifies)} client(s) ne sont PAS criblées : "
+                            f"aucun de ces clients n'est au référentiel en production. Elles le "
+                            f"seront avec leur client, quand il y entrera.")}
+    resultats = [_cribler_le_referentiel_importe(db, lot, username) for lot in lots]
+    return {"launched": any(r.get("launched") for r in resultats), "lots": lots,
+            "resultats": resultats,
+            "message": " ".join(dict.fromkeys(r["message"] for r in resultats))}
+
+
 class _CompteurDeRejets:
     """
     Compte ce que le Quality Gate ecarte pendant un import, et retient les
@@ -4032,6 +4328,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         # nommee produisait donc un « import reussi » avec une liste vide ou
         # amputee — le defaut le plus couteux du produit, et le plus discret.
         rejets = _CompteurDeRejets()
+        fins_illisibles = 0  # dates de fin de relation non comprises (CLIENT_BASE)
         ofac_relations = None  # liens entre profils (OFAC uniquement)
 
         # 3. Parse contents based on File Type
@@ -4054,8 +4351,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     origin=_os_src.origin,
                     designation_reasons=_os_src.designation_reasons)
             elif file_type == "WATCHLIST_PEP":
-                # Dataset PEP OpenSanctions (targets.simple.csv)
-                parser_stream = parse_pep_targets_csv(str(temp_file_path))
+                # Dataset PEP OpenSanctions : targets.nested.json (qualite lue)
+                # ou targets.simple.csv (qualite non precisee) — le fichier decide
+                parser_stream = parse_pep_targets(str(temp_file_path))
             elif file_type == "WATCHLIST_OFSI":
                 # Liste consolidee UK OFSI (ConList.csv format 2022)
                 parser_stream = parse_ofsi_conlist_csv(str(temp_file_path))
@@ -4298,69 +4596,30 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 if not report["is_valid"]:
                     rejets.ajouter(report)
                     continue
-                    
+
+                # Une date de fin illisible n'ecarte pas la fiche (elle doit
+                # rester criblee) : elle n'est pas ecrite, le client reste
+                # repute en relation — et l'import le dit.
+                fin_brute = item.get("client_relationship_end")
+                fin_de_relation = _LECTURES_CSV["client_relationship_end"](fin_brute)
+                if conservation.illisible(fin_brute, fin_de_relation):
+                    fins_illisibles += 1
+
                 ent_checksum = compute_checksum(item)
-                
-                # Split countries
-                countries_obj = {
-                    "nationality": [c.strip() for c in (item.get("nationality") or "").split(",") if c],
-                    "residence": [c.strip() for c in (item.get("residence") or "").split(",") if c],
-                    "birth_country": [c.strip() for c in (item.get("birth_country") or "").split(",") if c],
-                    "registration_country": [c.strip() for c in (item.get("registration_country") or "").split(",") if c]
-                }
-                
-                alt_addrs_client = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                 db_ent = ClientEntity(
                     snapshot_id=snap_id,
-                    client_id=item.get("client_id"),
-                    client_type=item.get("client_type"),
-                    client_first_name=item.get("client_first_name"),
-                    client_last_name=item.get("client_last_name"),
-                    client_maiden_name=item.get("client_maiden_name"),
-                    client_aliases=_client_alias_list(item),
-                    client_company_name=item.get("client_company_name"),
-                    client_dob=item.get("client_dob"),
-                    client_gender=report["resolved_gender"],
-                    client_is_deceased=str(item.get("client_is_deceased", "False")).lower() == "true",
-                    client_countries=countries_obj,
-                    # New fields
-                    client_place_of_birth=item.get("client_place_of_birth") or item.get("place_of_birth"),
-                    client_address=item.get("client_address") or item.get("address") or item.get("adress"),
-                    client_city=item.get("client_city") or item.get("city"),
-                    client_state=item.get("client_state") or item.get("state"),
-                    client_country=item.get("client_country") or item.get("country"),
-                    client_origin=item.get("client_origin") or item.get("origin"),
-                    client_designation=item.get("client_designation") or item.get("designation"),
-                    client_additional_informations=item.get("client_additional_informations") or item.get("additional_informations") or item.get("additional_info"),
-                    client_alternative_addresses=alt_addrs_client,
-                    client_date_of_death=item.get("client_date_of_death") or item.get("date_of_death"),
-                    client_lei_number=item.get("client_lei_number"),
-                    client_national_registry_ids=json.loads(item.get("client_national_registry_ids", "[]")) if item.get("client_national_registry_ids") else [],
-                    client_other_registration_ids=json.loads(item.get("client_other_registration_ids", "[]")) if item.get("client_other_registration_ids") else [],
-                    client_passport_documents=json.loads(item.get("client_passport_documents", "[]")) if item.get("client_passport_documents") else [],
-                    client_national_id_documents=json.loads(item.get("client_national_id_documents", "[]")) if item.get("client_national_id_documents") else [],
-                    client_other_id_documents=json.loads(item.get("client_other_id_documents", "[]")) if item.get("client_other_id_documents") else [],
-                    # Champs etendus KYC
-                    client_iban=item.get("client_iban") or item.get("iban") or None,
-                    client_bic=item.get("client_bic") or item.get("bic") or None,
-                    client_tax_id=item.get("client_tax_id") or item.get("tax_id") or None,
-                    client_phone=item.get("client_phone") or item.get("phone") or None,
-                    client_email=item.get("client_email") or item.get("email") or None,
-                    client_website=item.get("client_website") or item.get("website") or None,
-                    client_crypto_wallets=parse_multi_value(item, "client_crypto_wallets", "crypto_wallets"),
-                    client_risk_rating=(item.get("client_risk_rating") or "").strip().upper() or None,
-                    client_pep_flag=str(item.get("client_pep_flag", "")).strip().lower() in ("true", "1", "oui", "yes"),
-                    client_segment=item.get("client_segment") or None,
-                    client_activity_sector=item.get("client_activity_sector") or None,
-                    client_activity_countries=[c.strip().upper() for c in (item.get("client_activity_countries") or "").split(",") if c.strip()],
-                    client_relationship_start=item.get("client_relationship_start") or None,
-                    client_status=(item.get("client_status") or "").strip().upper() or None,
-                    entity_checksum=ent_checksum
+                    client_relationship_end=fin_de_relation,
+                    entity_checksum=ent_checksum,
+                    **_colonnes_client_de_la_ligne(item, report),
                 )
                 db.add(db_ent)
                 record_count += 1
                 if record_count % _INGEST_COMMIT_EVERY == 0:
                     snap = _ingest_progress_tick(db, snap, record_count, progress_id)
+
+        elif file_type == "CLIENT_PARTIES":
+            record_count, bilan_parties = _importer_les_parties(
+                db, temp_file_path, delimiter, column_mapping, snap_id, username, rejets)
 
         # Update Snapshot status. En mode homologation, les watchlists attendent
         # un pointage humain (PENDING_REVIEW) et restent hors du cache de criblage.
@@ -4405,6 +4664,18 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
                 "Importé par": username, "Snapshot": snap_id,
             })
+        elif file_type == "CLIENT_PARTIES":
+            # Ce que le fichier a changé, dit en clair — et les clients qu'il
+            # n'a PAS mis à jour, nommés : leurs parties restent celles d'avant.
+            message = (f"{record_count} partie(s) liée(s) enregistrée(s) pour "
+                       f"{bilan_parties['clients']} client(s) : {bilan_parties['creees']} "
+                       f"nouvelle(s), {bilan_parties['modifiees'] + bilan_parties['reactivees']} "
+                       f"modifiée(s), {bilan_parties['retirees']} retirée(s).")
+            non = bilan_parties["clients_non_mis_a_jour"]
+            if non:
+                message += (f" {len(non)} client(s) NON mis à jour (ligne refusée) : leurs "
+                            f"parties restent celles d'avant — {', '.join(non[:10])}"
+                            + (" …" if len(non) > 10 else "") + ".")
         else:
             message = f"{record_count} fiches importées et mises en production."
             emit(db, "list_import_done", {
@@ -4412,6 +4683,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Importé par": username, "Snapshot": snap_id,
             })
         criblage = None
+        if file_type == "CLIENT_PARTIES":
+            criblage = _cribler_apres_import_des_parties(db, bilan_parties, username)
+            message = f"{message} {criblage['message']}"
         if file_type == "CLIENT_BASE" and snap.status == "READY":
             # Contrôle de complétude en tâche de fond : hors de la requête
             # (un référentiel volumineux doublerait le temps d'import perçu)
@@ -4425,6 +4699,10 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 pass
             criblage = _cribler_le_referentiel_importe(db, snap_id, username)
             message = f"{message} {criblage['message']}"
+        if fins_illisibles:
+            message = (f"{message} {fins_illisibles} date(s) de fin de relation illisible(s) "
+                       f"(AAAA-MM-JJ ou JJ/MM/AAAA attendu) : non enregistrée(s), ces clients "
+                       f"restent réputés en relation et leurs pièces conservées.")
         # Une correspondance qui retombe sur une alerte deja ouverte ne cree
         # rien : la porte reste la meme (le re-criblage a bien produit
         # quelque chose), mais les trois nombres sont maintenant distincts.
@@ -4455,6 +4733,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             "status": snap.status,
             "rescreen": rescreen_result,
             "criblage": criblage,
+            "relationship_end_unreadable": fins_illisibles,
             **rejets.rapport(),
         }
     except Exception as e:
@@ -4814,6 +5093,46 @@ def _insert_manual_entity(db: Session, snap: Snapshot, payload: "WatchlistEntity
     snap.record_count += 1
     return {"entity_id": ent_dict["entity_id"], "primary_name": report["cleansed_name"]}
 
+def _recribler_contre_les_fiches(db: Session, entity_pks: List[int], *, geste: str,
+                                 reference_avant: Optional[str], username: str,
+                                 label: str) -> Dict[str, Any]:
+    """
+    Apres une correction ou un ajout manuel de fiches listees : soumet le
+    re-criblage du referentiel contre CES fiches (travail `entity_rescreen`,
+    fiskr.rescreen.recribler_apres_un_geste_manuel). Rend ce que l'endpoint
+    en dit : le jeton du travail, ou pourquoi aucun n'est parti.
+
+    Le re-criblage ne partait que d'une mise en production de lot : une fiche
+    corrigee pour porter la date de naissance d'un client, un homonyme ajoute
+    a la main, ne rencontraient personne avant un lookback.
+    """
+    if not entity_pks:
+        return {"submitted": False, "reason": "aucune fiche à confronter"}
+    if not auto_rescreen_enabled(db):
+        return {"submitted": False,
+                "reason": "re-criblage automatique désactivé (ingestion.auto_rescreen) : "
+                          "la fiche ne rencontrera les clients qu'au prochain lookback"}
+    if db.query(Snapshot.snapshot_id).filter(Snapshot.file_type == "CLIENT_BASE",
+                                             Snapshot.status == "READY").first() is None:
+        return {"submitted": False, "reason": "aucun référentiel clients en production"}
+    token = f"entity_rescreen-{uuid.uuid4().hex[:8]}"
+    job = _submit_job("entity_rescreen", token=token, label=label,
+                      params={"entity_pks": [int(pk) for pk in entity_pks], "geste": geste,
+                              "reference_avant": reference_avant, "username": username},
+                      started_by=username)
+    rendu = {"submitted": True, "job_token": token, "status": job.status}
+    if job.status == "ERROR":
+        rendu["error"] = job.error
+    return rendu
+
+
+def _reference_avant_le_geste(db: Session) -> str:
+    """L'empreinte de l'univers AVANT un geste manuel, lue avant toute
+    ecriture : c'est d'elle que le re-criblage prolonge la couverture."""
+    from fiskr.rescreen import reference_de_l_univers
+    return reference_de_l_univers(db)[1]
+
+
 @app.post("/api/watchlist/entity")
 async def create_watchlist_entity(
     payload: WatchlistEntityCreate,
@@ -4824,8 +5143,10 @@ async def create_watchlist_entity(
     Ajout manuel d'UNE entite. Sans list_type : snapshot generique historique
     (manual-watchlist). Avec list_type : snapshot d'ajouts manuels dedie a
     cette liste — l'entite compte alors dans cette liste (filtres, seuils de
-    cut-off, libelles d'alertes). Indexee immediatement dans le moteur.
+    cut-off, libelles d'alertes). Indexee immediatement dans le moteur, puis
+    le referentiel clients est recrible contre elle (`rescreen`).
     """
+    reference_avant = _reference_avant_le_geste(db)
     snap = _manual_snapshot_for(db, payload.list_type)
     result = _insert_manual_entity(db, snap, payload)
     db.commit()
@@ -4836,13 +5157,26 @@ async def create_watchlist_entity(
     # restait invisible du demon : un liste saisi manuellement n'etait pas
     # crible par les campagnes.
     _refresh_production_cache(db)
+    rescreen = _recribler_contre_les_fiches(
+        db, _pks_des_ajouts(db, snap.snapshot_id, [result["entity_id"]]),
+        geste="ajout", reference_avant=reference_avant,
+        username=current_user["username"],
+        label=f"Re-criblage — fiche {result['entity_id']} ajoutée")
     return {
         "message": "Entité ajoutée avec succès.",
         "entity_id": result["entity_id"],
         "primary_name": result["primary_name"],
         "list_type": snap.file_type,
         "snapshot_id": snap.snapshot_id,
+        "rescreen": rescreen,
     }
+
+
+def _pks_des_ajouts(db: Session, snapshot_id: str, entity_ids: List[str]) -> List[int]:
+    """Cles des fiches que l'ajout manuel vient d'inserer dans son lot."""
+    return [pk for (pk,) in db.query(WatchlistEntity.id).filter(
+        WatchlistEntity.snapshot_id == snapshot_id,
+        WatchlistEntity.entity_id.in_(entity_ids)).all()] if entity_ids else []
 
 class WatchlistEntityBatchCreate(BaseModel):
     list_type: Optional[str] = None
@@ -4859,14 +5193,15 @@ async def create_watchlist_entities_batch(
     """
     Ajout manuel PAR LOT vers la meme liste cible. Chaque ligne passe le
     quality gate individuellement : les refus n'empechent pas les autres
-    d'entrer (ils sont restitues ligne par ligne). Un seul commit et un seul
-    rechargement du cache pour tout le lot.
+    d'entrer (ils sont restitues ligne par ligne). Un seul commit, un seul
+    rechargement du cache et un seul re-criblage pour tout le lot.
     """
     if not payload.entities:
         raise HTTPException(status_code=400, detail="Aucune entité fournie.")
     if len(payload.entities) > MANUAL_BATCH_MAX:
         raise HTTPException(status_code=400,
                             detail=f"Au plus {MANUAL_BATCH_MAX} entités par lot.")
+    reference_avant = _reference_avant_le_geste(db)
     snap = _manual_snapshot_for(db, payload.list_type)
     added, rejected = [], []
     for index, entity in enumerate(payload.entities):
@@ -4886,14 +5221,21 @@ async def create_watchlist_entities_batch(
         # restait invisible du demon : un liste saisi manuellement n'etait pas
         # crible par les campagnes.
         _refresh_production_cache(db)
+        rescreen = _recribler_contre_les_fiches(
+            db, _pks_des_ajouts(db, snap.snapshot_id, [a["entity_id"] for a in added]),
+            geste="ajout", reference_avant=reference_avant,
+            username=current_user["username"],
+            label=f"Re-criblage — {len(added)} fiche(s) ajoutée(s) à {snap.file_type}")
     else:
         db.rollback()
+        rescreen = {"submitted": False, "reason": "aucune fiche ajoutée"}
     return {
         "message": f"{len(added)} entité(s) ajoutée(s), {len(rejected)} refusée(s).",
         "added": added,
         "rejected": rejected,
         "list_type": snap.file_type,
         "snapshot_id": snap.snapshot_id,
+        "rescreen": rescreen,
     }
 
 # ------------------ PATCH DE VALEURS D'UNE FICHE LISTEE ------------------
@@ -5024,6 +5366,13 @@ class WatchlistEntityPatch(BaseModel):
     countries: Optional[Dict[str, Any]] = None
     aliases: Optional[Dict[str, Any]] = None
     alternative_addresses: Optional[List[str]] = None
+    # Documents d'identite : ce que le moteur compare en premier (correspondance
+    # certaine sur le passeport, puis la CNI). Corriger une fiche pour y porter
+    # le numero qu'une source publie apres coup n'etait pas exprimable : le
+    # champ, absent du modele, etait ignore sans un mot (« Aucune modification »).
+    # [{"number": ..., "issuing_country": ...}], comme a l'ingestion.
+    passport_documents: Optional[List[Dict[str, Any]]] = None
+    national_id_documents: Optional[List[Dict[str, Any]]] = None
     # Champs etendus scalaires
     bic_swift: Optional[str] = None
     tax_id: Optional[str] = None
@@ -5068,8 +5417,10 @@ async def patch_watchlist_entity(
     Modifie les valeurs d'une fiche listee en production (snapshot READY, non
     exclue). Chaque champ modifie est journalise dans watchlist_entity_changes
     (qui, quand, ancienne -> nouvelle valeur), le checksum de version est
-    recalcule et le cache de criblage est recharge immediatement.
+    recalcule, le cache de criblage est recharge immediatement, et le
+    referentiel clients est recrible contre la fiche corrigee (`rescreen`).
     """
+    reference_avant = _reference_avant_le_geste(db)
     row = db.query(WatchlistEntity).filter(WatchlistEntity.id == entity_pk).first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fiche introuvable.")
@@ -5087,6 +5438,11 @@ async def patch_watchlist_entity(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le nom principal ne peut pas être vide.")
     if "entity_type" in fields and fields["entity_type"] not in ("I", "E", "V", "O"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="entity_type doit être I, E, V ou O.")
+    for champ in ("passport_documents", "national_id_documents"):
+        if fields.get(champ) and any(not str((d or {}).get("number") or "").strip()
+                                     for d in fields[champ]):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Chaque document d'identité porte un numéro (number).")
 
     def _journal_value(value):
         if value is None or isinstance(value, str):
@@ -5149,6 +5505,13 @@ async def patch_watchlist_entity(
     # restait invisible du demon : un liste saisi manuellement n'etait pas
     # crible par les campagnes.
     _refresh_production_cache(db)
+    # Tout changement, comme le re-criblage post-delta re-crible toute fiche
+    # dont l'empreinte a change : c'est aussi ce qui rend la couverture exacte
+    # (l'univers a change d'empreinte, les clients ne sont couverts contre lui
+    # qu'une fois confrontes a la fiche nouvelle).
+    rescreen = _recribler_contre_les_fiches(
+        db, [row.id], geste="correction", reference_avant=reference_avant,
+        username=reviewer["username"], label=f"Re-criblage — fiche {row.entity_id} corrigée")
     db.refresh(row)
 
     return {
@@ -5156,6 +5519,7 @@ async def patch_watchlist_entity(
         "changed_fields": changed_fields,
         "official_reference_date_touched": date_touched,
         "entity": _serialize_watchlist_entity(row, snap),
+        "rescreen": rescreen,
     }
 
 
@@ -5322,7 +5686,10 @@ def _relation_view(rel: EntityRelationship, names: Dict[str, str]) -> Dict[str, 
         "created_at": rel.created_at.isoformat() if rel.created_at else None,
     }
 
-OWNERSHIP_THRESHOLD_PCT = 50.0
+# LD DGT/ACPR §131 : la definition vit dans fiskr/parties.py, que la detention
+# reputee d'un client par ses parties liees lit aussi.
+from fiskr.parties import SEUIL_DE_DETENTION_PCT as OWNERSHIP_THRESHOLD_PCT
+from fiskr.parties import FONDEMENTS as FONDEMENTS_DE_DETENTION
 
 
 def _listed_entity_ids(db: Session, entity_ids) -> set:
@@ -6947,7 +7314,8 @@ async def get_client_overview(
             "phone": entity.client_phone, "email": entity.client_email,
             "risk_rating": entity.client_risk_rating, "pep_flag": bool(entity.client_pep_flag),
             "segment": entity.client_segment, "activity_sector": entity.client_activity_sector,
-            "relationship_start": entity.client_relationship_start, "status": entity.client_status,
+            "relationship_start": entity.client_relationship_start,
+            "relationship_end": entity.client_relationship_end, "status": entity.client_status,
             "snapshot_uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
             # Quand cette fiche a ete criblee, et contre quelle version des listes
             "dernier_criblage": _trace_de_criblage(db, entity),
@@ -6960,6 +7328,22 @@ async def get_client_overview(
     pairs = db.query(WhitelistPair).filter(WhitelistPair.client_id == client_id) \
               .order_by(WhitelistPair.created_at.desc()).all()
 
+    # Parties liees (fiskr/parties.py) : qui, a quel titre, quelle detention —
+    # et leurs alertes, toutes rattachees a ce client. La detention reputee se
+    # lit sur les parties CONFIRMEES (vrais positifs du perimetre SANCTION).
+    from fiskr import parties as parties_liees
+    actives = parties_liees.parties_actives(db, [client_id]).get(client_id, [])
+    noms_de_parties = {p.id: p.nom for p in actives}
+    manquantes = {r.partie_liee_id for r in audits if r.partie_liee_id} - set(noms_de_parties)
+    if manquantes:
+        noms_de_parties.update({p.id: p.nom for p in db.query(PartieLiee).filter(
+            PartieLiee.id.in_(sorted(manquantes))).all()})
+    alertes_par_partie: Dict[int, List[Alert]] = {}
+    for a in db.query(Alert).filter(Alert.client_id == client_id,
+                                    Alert.partie_liee_id.isnot(None)).all():
+        alertes_par_partie.setdefault(a.partie_liee_id, []).append(a)
+    detention = parties_liees.evaluer_la_detention(db, client_id, perimeter_overrides(db))
+
     return {
         "client_id": client_id,
         "kyc": kyc,
@@ -6968,11 +7352,23 @@ async def get_client_overview(
                 "id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None,
                 "watchlist_id": r.watchlist_id, "watchlist_name": r.watchlist_name,
                 "final_score": r.final_score, "status": r.status, "list_type": r.list_type,
+                # Decision sur une partie liee : laquelle (NULL : le client)
+                "partie_liee_id": r.partie_liee_id,
+                "partie_nom": noms_de_parties.get(r.partie_liee_id) if r.partie_liee_id else None,
             }
             for r in audits
         ],
         "alerts": [_alert_summary(a) for a in alerts],
         "whitelist_pairs": [_whitelist_summary(p) for p in pairs],
+        "parties": [{
+            **parties_liees.vue(p),
+            "alertes_ouvertes": sum(1 for a in alertes_par_partie.get(p.id, [])
+                                    if a.status in ALERT_OPEN_STATUSES),
+            "alertes_confirmees": sum(1 for a in alertes_par_partie.get(p.id, [])
+                                      if a.status == "CLOSED_CONFIRMED"),
+        } for p in actives],
+        "detention": {**detention,
+                      "fondement_label": parties_liees.FONDEMENTS.get(detention["fondement"] or "")},
         "counts": {
             "screenings": db.query(AuditTrail).filter(AuditTrail.client_id == client_id).count(),
             "alerts": db.query(Alert).filter(Alert.client_id == client_id).count(),
@@ -7767,6 +8163,8 @@ _OPERATION_LINKS = {
     "lookback": "#screening/alerts-screening",
     # Le resultat d'un import de referentiel se lit sur la carte de couverture
     "client_screening": "#screening/screening-batch",
+    # Le re-criblage contre une fiche corrigee ou ajoutee : ses alertes
+    "entity_rescreen": "#screening/alerts-screening",
     "mining": "#alerts/alerts-resources",
     "engine_simulation": "#alerts/alerts-blocking",
     "resource_simulation": "#alerts/alerts-resources",
@@ -8483,6 +8881,8 @@ class IngestionSettingsUpdate(BaseModel):
     alert_sla_hours: Optional[Dict[str, int]] = None
     # Delai de declaration d'une mesure de gel a la DG Tresor (heures)
     gel_declaration_delay_hours: Optional[int] = None
+    # Delai de decision d'un dossier PPE par une personne habilitee (jours)
+    ppe_decision_delay_days: Optional[int] = None
     # Motifs de cloture proposes aux analystes ([] = aucune suggestion) :
     # {"motif", "decisions"} — une simple chaine (ancien client) est classee
     # comme a la migration (fiskr/settings.py, `motifs_de_cloture`)
@@ -8543,6 +8943,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
         "gel_declaration_delay_hours": gel_declaration_delai_heures(db),
+        "ppe_decision_delay_days": ppe_decision_delai_jours(db),
         "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
@@ -8601,7 +9002,7 @@ async def update_ingestion_settings(
     changed = {k: v for k, v in updates.items() if v is not None}
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
-              payload.gel_declaration_delay_hours,
+              payload.gel_declaration_delay_hours, payload.ppe_decision_delay_days,
               payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
@@ -8660,6 +9061,15 @@ async def update_ingestion_settings(
             raise HTTPException(status_code=400,
                                 detail=f"Délai de déclaration d'un gel : entre {bas} et {haut} heures.")
         set_setting(db, SETTING_GEL_DELAI, int(payload.gel_declaration_delay_hours),
+                    updated_by=admin_user["username"])
+    if payload.ppe_decision_delay_days is not None:
+        bas, haut = PPE_DELAI_BORNES_JOURS
+        if not (bas <= payload.ppe_decision_delay_days <= haut):
+            # Meme refus franc que le delai de gel : hors bornes, la lecture
+            # retomberait en silence sur le defaut
+            raise HTTPException(status_code=400,
+                                detail=f"Délai de décision d'un dossier PPE : entre {bas} et {haut} jours.")
+        set_setting(db, SETTING_PPE_DELAI, int(payload.ppe_decision_delay_days),
                     updated_by=admin_user["username"])
     if payload.alert_close_reasons is not None:
         bruts = [m for m in payload.alert_close_reasons
@@ -11350,6 +11760,10 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
         "lapsed_since": alert.lapsed_since.isoformat() if alert.lapsed_since else None,
         "lapsed_reason": alert.lapsed_reason,
         "delisted_at": alert.delisted_at.isoformat() if alert.delisted_at else None,
+        # Correspondance sur une partie liee du client (fiskr/parties.py) : la
+        # chaine qui la rattache au client, figee a la creation
+        "partie_liee_id": alert.partie_liee_id,
+        "via_partie": alert.via_partie,
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -12624,6 +13038,19 @@ def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[st
         "personne_concernee": _personne_concernee(db, alert) if alert is not None
                               else {"nom_complet": mesure.client_name},
         "operation_concernee": operation,
+        # Client repute detenu ou controle par ses parties liees
+        # (fiskr/parties.py) : le fondement et le calcul fige a l'ouverture
+        "detention_ou_controle": ({
+            "fondement": FONDEMENTS_DE_DETENTION.get(mesure.fondement),
+            "cumul_pct": (mesure.detention or {}).get("cumul_pct"),
+            "seuil_pct": (mesure.detention or {}).get("seuil_pct"),
+            "parties": [
+                f"{p.get('nom')}"
+                + (f" — {p['pourcentage_detention']:g} %" if p.get("pourcentage_detention") else "")
+                + (" — peut engager les fonds" if p.get("peut_engager_les_fonds") else "")
+                + f" — {', '.join(p.get('personnes_designees') or [])}"
+                for p in (mesure.detention or {}).get("parties") or []],
+        } if mesure.fondement else None),
         "traitement_alerte": {
             "score_final": alert.final_score if alert else None,
             "correspondance_exacte": bool(tree.get("hard_match_triggered", False)),
@@ -12684,6 +13111,13 @@ def _render_gel_draft_html(mesure: MesureDeGel, draft: Dict[str, Any], generated
                            "type_message": "Type de message", "partie_en_cause": "Partie en cause",
                            "role_partie": "Rôle de la partie"})
         + "</tbody></table>") if operation else ""
+    detention = draft.get("detention_ou_controle")
+    detention_html = (
+        "<h2>Détention ou contrôle par une personne désignée (LD DGT/ACPR §131, §133, §144)</h2>"
+        "<table><tbody>"
+        + rows(detention, {"fondement": "Fondement", "cumul_pct": "Détention cumulée (%)",
+                           "seuil_pct": "Seuil (%)", "parties": "Parties liées confirmées"})
+        + "</tbody></table>") if detention else ""
     listee = draft["personne_listee"]
     absente = ("" if listee["presente_dans_les_listes_en_production"] else
                "<p class=\"sub\">⚠ La fiche n'est plus présente dans les listes en production : "
@@ -12736,6 +13170,7 @@ th {{ background: #f0f0f0; width: 240px; }}
     "adresse": "Adresse", "ville": "Ville", "pays": "Pays", "nationalites": "Nationalité(s)",
     "iban": "IBAN", "bic": "BIC", "entree_en_relation": "Entrée en relation",
     "reference_interne": "Référence interne"})}</tbody></table>
+{detention_html}
 {operation_html}
 <h2>5. Traitement de l'alerte</h2>
 <table><tbody>{rows(draft['traitement_alerte'], {"score_final": "Score final (%)",
@@ -12889,6 +13324,274 @@ async def export_gels_csv(
             iso(m.radiation_constatee_le),
         ])
     return _csv_response(f"fiskr_registre_gels_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+                         header, data)
+
+
+# ------------------ DOSSIERS PPE (R.561-20-2) ------------------
+# Ce qui suit une PPE confirmee : qualite retenue, fonction et fin de fonction,
+# origine des fonds et du patrimoine, decision d'entrer ou de rester en
+# relation par une personne habilitee (fiskr/ppe.py). Memes motifs que le
+# registre des gels : lecture auditeur comprise, pieces jointes de l'alerte,
+# refus francs.
+
+def _dossier_ppe_ou_404(db: Session, dossier_id: int) -> DossierPPE:
+    dossier = db.query(DossierPPE).filter(DossierPPE.id == dossier_id).first()
+    if dossier is None:
+        raise HTTPException(status_code=404, detail="Dossier PPE introuvable.")
+    return dossier
+
+
+def _refus_ppe(refus: "dossiers_ppe.RefusPPE") -> HTTPException:
+    return HTTPException(status_code=refus.status_code, detail=str(refus))
+
+
+class PPEInstructionRequest(BaseModel):
+    qualite_retenue: Optional[str] = None
+    fonction: Optional[str] = Field(None, max_length=4000)
+    fin_de_fonction: Optional[str] = None
+    origine_fonds: Optional[str] = Field(None, max_length=4000)
+    origine_patrimoine: Optional[str] = Field(None, max_length=4000)
+
+
+class PPEDecisionRequest(BaseModel):
+    decision: str
+    motif: str = Field(..., max_length=4000)
+    reference: Optional[str] = Field(None, max_length=255)
+    decidee_le: Optional[str] = None
+    prochaine_revue_le: Optional[str] = None
+
+
+def _registre_ppe_filtre(db: Session, statut: Optional[str], list_type: Optional[str],
+                         q: Optional[str]):
+    """Filtres des dossiers PPE, partages par l'ecran et l'export CSV."""
+    query = db.query(DossierPPE)
+    if statut:
+        code = statut.strip().upper()
+        if code == dossiers_ppe.FILTRE_EN_RETARD:
+            # La definition du retard est celle de fiskr/kpi.py, lue telle quelle
+            ids = [d.id for d in dossiers_ppe.dossiers_en_retard(db)]
+            query = query.filter(DossierPPE.id.in_(ids or [-1]))
+        elif code == dossiers_ppe.FILTRE_NON_DECLAREE:
+            query = query.filter(DossierPPE.ppe_non_declaree.is_(True))
+        elif code == dossiers_ppe.FILTRE_REVUE_ECHUE:
+            # Meme definition que `ppe.revue_echue`
+            query = query.filter(DossierPPE.statut == dossiers_ppe.STATUT_DECIDE,
+                                 DossierPPE.prochaine_revue_le <= datetime.utcnow())
+        elif code in dossiers_ppe.STATUTS:
+            query = query.filter(DossierPPE.statut == code)
+        else:
+            raise HTTPException(status_code=400, detail="Statut de dossier PPE inconnu.")
+    query = _apply_list_type_filter(query, DossierPPE.list_type, list_type)
+    if q and q.strip():
+        motif = f"%{q.strip()[:100]}%"
+        query = query.filter(DossierPPE.client_name.ilike(motif)
+                             | DossierPPE.watchlist_name.ilike(motif)
+                             | DossierPPE.client_id.ilike(motif))
+    return query
+
+
+@app.get("/api/ppe")
+async def list_ppe_dossiers(
+    statut: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    alert_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Dossiers PPE (lecture, auditeur compris) : filtrables par statut
+    (A_DECIDER, DECIDE, ou EN_RETARD, NON_DECLAREE, REVUE_ECHUE), liste et
+    client. Portent la synthese du pilotage (delai confirmation -> decision,
+    fiskr/kpi.py) et le vocabulaire de l'ecran.
+    """
+    from fiskr.kpi import synthese_des_dossiers_ppe
+    query = _registre_ppe_filtre(db, statut, list_type, q)
+    if alert_id is not None:
+        query = query.filter(DossierPPE.alert_id == alert_id)
+    total = query.count()
+    lignes = query.order_by(DossierPPE.ouvert_le.desc(), DossierPPE.id.desc()) \
+                  .offset((page - 1) * page_size).limit(page_size).all()
+    seuil = ppe_decision_delai_jours(db)
+    ids_pieces = [i for d in lignes for i in (d.pieces_origine or [])]
+    pieces = {p.id: p for p in db.query(AlertAttachment).filter(
+        AlertAttachment.id.in_(ids_pieces)).all()} if ids_pieces else {}
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [dossiers_ppe.serialiser(db, d, seuil, pieces=pieces) for d in lignes],
+        "synthese": synthese_des_dossiers_ppe(db),
+        "vocabulaire": dossiers_ppe.vocabulaire(),
+    }
+
+
+@app.get("/api/ppe/{dossier_id}")
+async def get_ppe_dossier(
+    dossier_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Un dossier PPE, avec les etapes tracees au journal de son alerte et la
+    classification du client telle que le SI amont la dit AUJOURD'HUI."""
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    evenements = db.query(AlertEvent).filter(
+        AlertEvent.alert_id == dossier.alert_id, AlertEvent.action.like("PPE_%")) \
+        .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    return {
+        **dossiers_ppe.serialiser(db, dossier, avec_client_actuel=True),
+        "evenements": [
+            {"timestamp": e.timestamp.isoformat() if e.timestamp else None,
+             "username": e.username, "action": e.action, "detail": e.detail}
+            for e in evenements if re.search(rf"#{dossier.id}\b", e.detail or "")
+        ],
+    }
+
+
+@app.post("/api/alerts/{alert_id}/ppe")
+async def open_ppe_dossier(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Dossier d'une PPE confirmee AVANT le dossier PPE : son delai court
+    depuis la confirmation."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    try:
+        dossier = dossiers_ppe.ouvrir(db, alert, current_user["username"])
+    except dossiers_ppe.RefusPPE as refus:
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Dossier PPE #{dossier.id} ouvert : décision à prendre par une "
+                       f"personne habilitée.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.put("/api/ppe/{dossier_id}")
+async def update_ppe_dossier(
+    dossier_id: int,
+    payload: PPEInstructionRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Instruction : qualite retenue, fonction et fin de fonction, origine des
+    fonds et du patrimoine (R.561-20-2 2°)."""
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.enregistrer_instruction(
+            db, dossier, username=current_user["username"],
+            qualite_retenue=payload.qualite_retenue, fonction=payload.fonction,
+            fin_de_fonction=payload.fin_de_fonction, origine_fonds=payload.origine_fonds,
+            origine_patrimoine=payload.origine_patrimoine)
+    except dossiers_ppe.RefusPPE as refus:
+        db.rollback()
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Dossier PPE #{dossier.id} enregistré.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.post("/api/ppe/{dossier_id}/pieces")
+async def add_ppe_piece(
+    dossier_id: int,
+    file: Optional[UploadFile] = File(None),
+    comment: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Piece de l'origine des fonds ou du patrimoine : piece jointe de
+    l'alerte (inventaire des pieces probantes), referencee par le dossier."""
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.verifier_avant_piece(dossier)
+        if file is None or not (file.filename or "").strip():
+            raise dossiers_ppe.RefusPPE("Joignez la pièce (relevé, avis d'imposition, acte…).")
+    except dossiers_ppe.RefusPPE as refus:
+        raise _refus_ppe(refus)
+    safe_name, target_path = _chemin_de_piece_d_alerte(dossier.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, dossier.alert_id, safe_name, target_path,
+        (comment or "").strip() or f"Origine des fonds ou du patrimoine — dossier PPE #{dossier.id}.",
+        current_user["username"])
+    dossiers_ppe.ajouter_piece(db, dossier, piece, current_user["username"])
+    db.commit()
+    return {"message": f"Pièce jointe au dossier PPE #{dossier.id}.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.post("/api/ppe/{dossier_id}/decision")
+async def record_ppe_decision(
+    dossier_id: int,
+    payload: PPEDecisionRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Decision d'entrer ou de rester en relation (R.561-20-2 1°) : reviewer ou
+    admin — la traduction dans Fiskr de la personne habilitee par l'organe
+    executif —, et jamais celui qui a propose ou valide la confirmation.
+    """
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.enregistrer_decision(
+            db, dossier, username=reviewer["username"], decision=payload.decision,
+            motif=payload.motif, reference=payload.reference, decidee_le=payload.decidee_le,
+            prochaine_revue_le=payload.prochaine_revue_le)
+    except dossiers_ppe.RefusPPE as refus:
+        db.rollback()
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Décision enregistrée au dossier PPE #{dossier.id}.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.get("/api/export/ppe.csv")
+async def export_ppe_csv(
+    statut: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV des dossiers PPE (memes filtres que l'ecran) : la piece que
+    le controle demande entiere, pas la page affichee."""
+    from fiskr.kpi import delai_de_decision_ppe_secondes
+    rows = _registre_ppe_filtre(db, statut, list_type, q) \
+        .order_by(DossierPPE.ouvert_le.desc(), DossierPPE.id.desc()).limit(_EXPORT_MAX_ROWS).all()
+    retard = {d.id for d in dossiers_ppe.dossiers_en_retard(db)}
+    maintenant = datetime.utcnow()
+
+    def iso(d):
+        return d.isoformat() if d else ""
+
+    header = ["dossier", "alerte", "statut", "en_retard", "client_id", "client",
+              "fiche_listee_id", "fiche_listee", "liste", "qualite_source", "qualite_retenue",
+              "fonction", "fin_de_fonction", "fonction_terminee_depuis_plus_d_un_an",
+              "ppe_non_declaree", "origine_fonds", "origine_patrimoine", "pieces_origine",
+              "confirmee_le", "proposee_par", "confirmee_par", "decision", "decision_motif",
+              "decision_reference", "decidee_le", "decidee_par", "delai_decision_jours",
+              "prochaine_revue_le"]
+    data = []
+    for d in rows:
+        delai = delai_de_decision_ppe_secondes(d.ouvert_le, d.decidee_le)
+        data.append([
+            d.id, d.alert_id, d.statut, "oui" if d.id in retard else "non",
+            d.client_id or "", d.client_name, d.watchlist_entity_id, d.watchlist_name,
+            d.list_type or "", d.qualite_source or "", d.qualite_retenue or "",
+            d.fonction or "", d.fin_de_fonction or "",
+            "oui" if dossiers_ppe.exposition_echue(d.fin_de_fonction, maintenant) else "non",
+            "oui" if d.ppe_non_declaree else "non", d.origine_fonds or "",
+            d.origine_patrimoine or "", " | ".join(str(i) for i in (d.pieces_origine or [])),
+            iso(d.ouvert_le), d.proposee_par or "", d.confirmee_par or "",
+            d.decision or "", d.decision_motif or "", d.decision_reference or "",
+            iso(d.decidee_le), d.decidee_par or "",
+            f"{delai / 86400:.1f}" if (delai is not None and d.decidee_le) else "",
+            iso(d.prochaine_revue_le),
+        ])
+    return _csv_response(f"fiskr_dossiers_ppe_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
                          header, data)
 
 
@@ -13313,7 +14016,34 @@ class HookClientUpsert(BaseModel):
     client_segment: Optional[str] = None
     client_activity_sector: Optional[str] = None
     client_relationship_start: Optional[str] = None
+    # AAAA-MM-JJ (ou JJ/MM/AAAA) : point de depart des cinq ans de
+    # conservation. ABSENT de la charge utile, il est laisse tel quel — le
+    # remplacement etant complet, un appelant qui ne le connait pas
+    # effacerait sinon la date posee par l'import. `null` explicite l'efface.
+    client_relationship_end: Optional[str] = None
     client_status: Optional[str] = None
+    # Parties liees (fiskr/parties.py). CONTRAT : la charge utile remplace
+    # toute la fiche, mais PAS les parties quand elle n'en dit rien — champ
+    # absent ou null : parties inchangees (un SI qui ignore ce champ, et ils
+    # l'ignorent tous aujourd'hui, ne doit pas effacer les beneficiaires
+    # effectifs connus). Une liste, meme vide, est le jeu COMPLET : elle
+    # remplace celui en base, et une partie qui n'y figure plus est retiree.
+    parties: Optional[List["HookPartieLiee"]] = None
+
+
+class HookPartieLiee(BaseModel):
+    # Reference amont de la personne ; absente : calculee de son identite
+    partie_id: Optional[str] = Field(None, max_length=100)
+    roles: List[str] = Field(..., min_length=1)
+    # Elements d'identification d'un client, et eux seuls : la liste est
+    # celle que le moteur lit (fiskr/identification.py), verifiee par
+    # fiskr/parties.py — un champ inconnu est refuse, pas ignore.
+    identite: Dict[str, Any]
+    pourcentage_detention: Optional[float] = None
+    peut_engager_les_fonds: Optional[bool] = None
+
+
+HookClientUpsert.model_rebuild()
 
 
 def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
@@ -13331,8 +14061,10 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
 
     - creation : toujours criblee ;
     - mise a jour : criblee si un element d'identification a change — la
-      liste est RELEVEE sur le moteur (fiskr/identification.py), pas recopiee ;
-      sinon, rien n'est recrible et la reponse le dit ;
+      liste est RELEVEE sur le moteur (fiskr/identification.py), pas recopiee —
+      ou si l'identite d'une partie liee a change (`identification` porte
+      alors « parties_liees ») ; sinon, rien n'est recrible et la reponse le
+      dit ;
     - aucune liste en production (409 de `exiger_un_univers`) ou profil
       refuse par le quality gate (400) : la fiche reste enregistree, et la
       reponse dit qu'elle n'a PAS ete criblee — jamais « aucune
@@ -13379,9 +14111,23 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
     summary = f"criblée contre les listes en production : {statut}"
     if result.get("alert_id"):
         summary += f", alerte #{result['alert_id']}"
+    # Un NO_MATCH du client avec un beneficiaire effectif en alerte ne doit pas
+    # se lire « rien » : les parties sont dites, et ce qui ne va pas, nomme.
+    parties_criblees = result.get("parties") or []
+    if parties_criblees:
+        en_alerte = [p for p in parties_criblees if p.get("alert_id")]
+        refusees = [p for p in parties_criblees if not p.get("performed")]
+        summary += f" ; parties liées : {len(parties_criblees) - len(refusees)} criblée(s)"
+        if en_alerte:
+            summary += ", en alerte : " + ", ".join(
+                f"#{p['alert_id']} ({p['partie']['chaine']})" for p in en_alerte)
+        if refusees:
+            summary += f", {len(refusees)} NON criblée(s) (contrôle qualité)"
     return {
         "performed": True,
-        "reason": "CREATED" if operation == "created" else "IDENTIFICATION_CHANGED",
+        "reason": ("CREATED" if operation == "created"
+                   else "PARTIES_CHANGED" if identification == ["parties_liees"]
+                   else "IDENTIFICATION_CHANGED"),
         "identification_fields_changed": identification,
         "summary": summary + ".",
         "status": statut,
@@ -13389,6 +14135,7 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
         "audit_trail_id": result.get("audit_trail_id"),
         "alert_id": result.get("alert_id"),
         "hits": result.get("hits"),
+        "parties": parties_criblees,
         # Meme contrat que POST /api/hooks/screening
         "result": result,
     }
@@ -13430,7 +14177,50 @@ async def hook_client_upsert(
                 detail="Aucune base clients en production : importez d'abord un référentiel CLIENT_BASE."
             )
 
-        values = payload.model_dump()
+        values = payload.model_dump(exclude={"parties"})
+        # Parties liees lues et verifiees AVANT toute ecriture : une partie
+        # refusee ne laisse pas une fiche modifiee derriere elle.
+        from fiskr import parties as parties_liees
+        parties_lues = None
+        if payload.parties is not None:
+            try:
+                parties_lues = [parties_liees.lire_une_partie(
+                    p.identite, roles=p.roles, pourcentage=p.pourcentage_detention,
+                    peut_engager=p.peut_engager_les_fonds, partie_id=p.partie_id)
+                    for p in payload.parties]
+            except parties_liees.RefusDePartie as refus:
+                raise HTTPException(status_code=422, detail=f"Partie liée refusée : {refus}")
+        avertissements: List[str] = []
+        if "client_relationship_end" not in payload.model_fields_set:
+            values.pop("client_relationship_end")
+        else:
+            fin_brute = values["client_relationship_end"]
+            values["client_relationship_end"] = conservation.date_de_fin_de_relation(fin_brute)
+            if conservation.illisible(fin_brute, values["client_relationship_end"]):
+                avertissements.append(
+                    f"date de fin de relation illisible (« {str(fin_brute)[:40]} », AAAA-MM-JJ "
+                    f"attendu) : non enregistrée, le client reste réputé en relation.")
+        # Le registre des gels l'emporte sur le SI amont, qui l'ignore : une
+        # mesure en vigueur garde le client GELE, quoi que dise la charge utile
+        # (un statut absent l'effacerait tout autant). Le reste de la fiche
+        # s'applique ; seule la levee de la mesure rend le statut.
+        gel_maintenu = None
+        tiennent = registre_des_gels.mesures_qui_tiennent(db, payload.client_id)
+        if tiennent:
+            demande = values.get("client_status")
+            values["client_status"] = registre_des_gels.STATUT_CLIENT_GELE
+            if str(demande or "").strip().upper() != registre_des_gels.STATUT_CLIENT_GELE:
+                numeros = ", ".join(f"#{m.id}" for m in tiennent)
+                gel_maintenu = {
+                    "requested_status": demande,
+                    "applied_status": registre_des_gels.STATUT_CLIENT_GELE,
+                    "freeze_measures": [m.id for m in tiennent],
+                    "summary": (f"statut « {demande or 'vide'} » non appliqué : mesure(s) de gel "
+                                f"{numeros} en vigueur au registre, le client reste GELE. Seule "
+                                f"la levée de la mesure rend le statut ; le reste de la fiche "
+                                f"est appliqué."),
+                }
+                avertissements.append(gel_maintenu["summary"])
         existing = db.query(ClientEntity).filter(
             ClientEntity.snapshot_id == snap.snapshot_id,
             ClientEntity.client_id == payload.client_id,
@@ -13454,22 +14244,46 @@ async def hook_client_upsert(
             changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
 
         identification = elements_d_identification(changed_fields)
+        if parties_lues is None:
+            bilan_parties = {"applied": False,
+                             "summary": "inchangées : la charge utile ne porte pas de parties."}
+        else:
+            try:
+                bilan_parties = parties_liees.remplacer_les_parties(
+                    db, payload.client_id, parties_lues, source=parties_liees.SOURCE_WEBHOOK,
+                    source_ref=current_user["username"], username=current_user["username"])
+            except parties_liees.RefusDePartie as refus:
+                raise HTTPException(status_code=422, detail=f"Partie liée refusée : {refus}")
+            bilan_parties = {"applied": True, "received": len(parties_lues), **bilan_parties}
+            # Une identite de partie creee, modifiee ou retiree est une mise a
+            # jour des elements d'identification de la relation (LD §141).
+            if bilan_parties["identite_changee"] and "parties_liees" not in identification:
+                identification = identification + ["parties_liees"]
+        trace = {"operation": action_detail, "fields": changed_fields,
+                 "identification_fields": identification,
+                 "snapshot_id": snap.snapshot_id,
+                 "parties": {k: v for k, v in bilan_parties.items() if k != "summary"}}
+        if gel_maintenu:
+            # Un SI qui tente de degeler un client se retrouve au journal
+            trace["status_kept_frozen"] = {k: gel_maintenu[k] for k in
+                                           ("requested_status", "freeze_measures")}
         log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
-                         target=payload.client_id,
-                         after={"operation": action_detail, "fields": changed_fields,
-                                "identification_fields": identification,
-                                "snapshot_id": snap.snapshot_id})
+                         target=payload.client_id, after=trace)
         screening = _cribler_apres_upsert(db, row, action_detail, changed_fields,
                                           identification, current_user["username"])
         db.commit()
         result = {
             "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} "
-                       f"dans le référentiel en production — {screening['summary']}",
+                       f"dans le référentiel en production — {screening['summary']}"
+                       + "".join(f" — {a}" for a in avertissements),
             "operation": action_detail,
             "client_id": payload.client_id,
             "snapshot_id": snap.snapshot_id,
             "changed_fields": changed_fields,
+            "parties": bilan_parties,
             "screening": screening,
+            "frozen": gel_maintenu,
+            "warnings": avertissements,
         }
         _hook_store_delivery(db, cle, "client-upsert", current_user["username"], 200, result)
         return result
@@ -13689,12 +14503,19 @@ async def list_alerts(
         suivis = {r.alert_id for r in db.query(AlertFollower).filter(
             AlertFollower.username == current_user["username"],
             AlertFollower.alert_id.in_([a.id for a in rows])).all()}
+    # Parties liees des alertes de la page, en une requete : la file nomme
+    # la partie sous le client (fiskr/parties.py)
+    from fiskr import parties as parties_liees
+    ids_parties = sorted({a.partie_liee_id for a in rows if a.partie_liee_id is not None})
+    vues_parties = {p.id: parties_liees.vue(p) for p in db.query(PartieLiee).filter(
+        PartieLiee.id.in_(ids_parties)).all()} if ids_parties else {}
     return {
         "total": total,
         "open_count": open_count,
         "page": page,
         "page_size": page_size,
-        "items": [{**_alert_summary(a), "following_me": a.id in suivis} for a in rows],
+        "items": [{**_alert_summary(a), "following_me": a.id in suivis,
+                   "partie": vues_parties.get(a.partie_liee_id)} for a in rows],
     }
 
 @app.get("/api/alerts/{alert_id}")
@@ -13767,8 +14588,53 @@ async def get_alert_detail(
         "gel_mesures": _mesures_de_l_alerte(db, alert.id, attachments),
         "gel_du": registre_des_gels.est_due(alert, perimeter_overrides(db)),
         "gel_vocabulaire": registre_des_gels.vocabulaire(),
+        # La suite d'une PPE confirmee : son dossier (fiskr/ppe.py). `ppe_du`
+        # dit si l'alerte en impose un — l'ecran propose de l'ouvrir quand il
+        # manque ; `ppe_sans_dossier` dit pourquoi une PPE confirmee n'en a
+        # pas, quand c'est voulu (partie de paiement).
+        "ppe_dossiers": _dossiers_ppe_de_l_alerte(db, alert.id, attachments),
+        "ppe_du": dossiers_ppe.est_du(alert),
+        "ppe_sans_dossier": dossiers_ppe.motif_sans_dossier(alert),
+        "ppe_vocabulaire": dossiers_ppe.vocabulaire(),
         # Client et personne listee cote a cote (fiskr/comparaison.py)
         "comparison": _comparaison_de_l_alerte(db, alert, audit),
+        # Partie liee du client sur laquelle porte la correspondance, et ce que
+        # ses parties confirmees etablissent de la detention du client
+        **_partie_de_l_alerte(db, alert, audit),
+    }
+
+
+def _partie_de_l_alerte(db: Session, alert: Alert, audit: Optional[AuditTrail]) -> Dict[str, Any]:
+    """
+    Sur une alerte de partie liee (fiskr/parties.py) : la partie telle que le
+    criblage l'a vue (arbre journalise) et telle qu'elle est aujourd'hui, la
+    detention reputee du client, et si le geste du doute (suspendre et
+    interroger la DG Tresor, LD §144) est ouvert a l'analyste.
+    """
+    if alert.partie_liee_id is None:
+        return {"partie_liee": None}
+    from fiskr import parties as parties_liees
+    surcharges = perimeter_overrides(db)
+    ligne = db.get(PartieLiee, alert.partie_liee_id)
+    vue = parties_liees.vue(ligne) if ligne is not None else None
+    vue_criblee = ((audit.decision_tree or {}).get("partie_liee") if audit else None) or {}
+    detention = parties_liees.evaluer_la_detention(db, alert.client_id, surcharges)
+    from fiskr.perimeters import est_sanction
+    doute = (alert.status == "CLOSED_CONFIRMED" and est_sanction(alert.list_type, surcharges)
+             and not detention["reputee"]
+             and not db.query(MesureDeGel.id).filter(MesureDeGel.alert_id == alert.id).first())
+    return {
+        "partie_liee": {
+            "actuelle": vue,
+            "criblee": vue_criblee,
+            "chaine": alert.via_partie or vue_criblee.get("chaine"),
+            "retiree": ligne is not None and ligne.retiree_le is not None,
+            "roles": [{"code": r, "libelle": parties_liees.ROLES.get(r, r)}
+                      for r in (vue_criblee.get("roles") or (ligne.roles if ligne else []) or [])],
+        },
+        "detention": {**detention,
+                      "fondement_label": parties_liees.FONDEMENTS.get(detention["fondement"] or "")},
+        "gel_doute_possible": bool(doute),
     }
 
 
@@ -13780,12 +14646,15 @@ _SOURCES_DE_COMPARAISON = {
     "AUDIT_NOM": "Client hors référentiel, criblé avant que le journal ne porte son identification : seul son nom est restituable",
     "FICHE_RENCONTREE": "Version de la fiche rencontrée par ce criblage",
     "FICHE_EN_PRODUCTION": "Version en production (la ligne d'audit de ce criblage n'est plus disponible)",
+    "PARTIE_LIEE": "Partie liée du client (bénéficiaire effectif, mandataire, dirigeant ou associé)",
+    "PARTIE_JOURNALISEE": "Identité de la partie liée journalisée par ce criblage (partie retirée depuis par la source)",
 }
 _NOTES_DE_COMPARAISON = {
     "CLIENT_MODIFIE": "L'identification du client a changé depuis ce criblage : le tableau compare le référentiel actuel, l'explication du score porte sur l'identification criblée.",
     "FICHE_PURGEE": "La version rencontrée n'est plus conservée en base : elle est restituée depuis le journal d'audit.",
     "FICHE_CORRIGEE": "La fiche a été corrigée depuis ce criblage : le tableau compare la version rencontrée, la fiche complète montre la version corrigée.",
     "FICHE_PLUS_RECENTE": "Une version plus récente de cette fiche est en production.",
+    "PARTIE_MODIFIEE": "L'identité de la partie liée a changé depuis ce criblage : le tableau compare son identité actuelle, l'explication du score porte sur l'identité criblée.",
 }
 
 
@@ -13872,9 +14741,22 @@ def _comparaison_de_l_alerte(db: Session, alert: Alert,
         return {"available": False,
                 "reason": "Ni la ligne d'audit ni la production ne décrivent plus cette fiche : rien à comparer."}
 
-    referentiel = None if str(alert.client_id or "").startswith("TXN:") \
+    # Alerte de partie liee (fiskr/parties.py) : la colonne « client » est la
+    # PARTIE — c'est son identite que le moteur a comparee, pas celle d'ACME.
+    partie = db.get(PartieLiee, alert.partie_liee_id) if alert.partie_liee_id is not None else None
+    referentiel = None if (str(alert.client_id or "").startswith("TXN:")
+                           or alert.partie_liee_id is not None) \
         else _fiche_du_referentiel(db, alert.client_id)
-    if referentiel is not None:
+    if partie is not None and partie.retiree_le is None:
+        from fiskr.parties import profil_de_criblage
+        source_client, profil = "PARTIE_LIEE", profil_de_criblage(partie)
+        if arbre.get("client_fingerprint") and \
+                empreinte_client(profil) != arbre.get("client_fingerprint"):
+            notes.append("PARTIE_MODIFIEE")
+    elif alert.partie_liee_id is not None and arbre.get("client_identification"):
+        source_client = "PARTIE_JOURNALISEE"
+        profil = {"client_type": audit.client_type, **arbre["client_identification"]}
+    elif referentiel is not None:
         source_client, profil = "REFERENTIEL", _profil_du_referentiel(referentiel)
         if arbre.get("client_fingerprint") and \
                 empreinte_client(profil) != arbre.get("client_fingerprint"):
@@ -13911,6 +14793,17 @@ def _mesures_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[s
     seuil = gel_declaration_delai_heures(db)
     pieces = {att.id: att for att in attachments}
     return [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in mesures]
+
+
+def _dossiers_ppe_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[str, Any]]:
+    dossiers = db.query(DossierPPE).filter(DossierPPE.alert_id == alert_id) \
+                 .order_by(DossierPPE.id.asc()).all()
+    if not dossiers:
+        return []
+    seuil = ppe_decision_delai_jours(db)
+    pieces = {att.id: att for att in attachments}
+    return [dossiers_ppe.serialiser(db, d, seuil, pieces=pieces, avec_client_actuel=True)
+            for d in dossiers]
 
 @app.post("/api/alerts/{alert_id}/assign")
 async def assign_alert(
@@ -13998,11 +14891,19 @@ def _close_alert(db: Session, alert: Alert, decision: str, username: str,
     declaration. Toute confirmation passe ici (proposition sans 4-yeux comme
     validation) : la mesure « a declarer » ne peut donc pas etre oubliee par
     un chemin, elle est ouverte dans la meme transaction que la cloture.
+
+    Meme regle pour une PPE confirmee (liste PEP, fiskr/perimeters.py) : rien
+    ne suivait. Le dossier PPE (fiskr/ppe.py) s'ouvre ici, dans la meme
+    transaction — decision d'entrer ou de rester en relation par une personne
+    habilitee, origine des fonds et du patrimoine (R.561-20-2). Les deux
+    obligations sont independantes : une liste PEP rangee SANCTION par
+    l'exploitant ouvre l'une et l'autre.
     """
     alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
     alert.decided_by = username
     alert.decided_at = datetime.utcnow()
     alert.decision_comment = comment
+    dossiers_ppe.ouvrir_si_du(db, alert, username)
     return registre_des_gels.ouvrir_si_due(db, alert, username)
 
 
@@ -14102,7 +15003,8 @@ def _enregistrer_la_proposition(db: Session, alert: Alert, decision: str, commen
     mesure = _close_alert(db, alert, decision, username, comment)
     _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}{precision}")
     _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
-    return label, "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure), mesure
+    return (label, "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure)
+            + _message_de_dossier_ppe(db, alert), mesure)
 
 
 def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
@@ -14110,6 +15012,20 @@ def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
         return ""
     return (f" Mesure de gel #{mesure.id} ouverte : déclaration à la DG Trésor "
             f"due immédiatement (Criblage → Registre des gels).")
+
+
+def _message_de_dossier_ppe(db: Session, alert: Alert) -> str:
+    """Ce que la confirmation vient d'ouvrir, dit dans la reponse : le dossier
+    PPE s'ouvre dans la transaction de la cloture (`_close_alert`)."""
+    if alert.status != "CLOSED_CONFIRMED":
+        return ""
+    dossier = db.query(DossierPPE).filter(DossierPPE.alert_id == alert.id).first()
+    if dossier is None:
+        return ""
+    return (f" Dossier PPE #{dossier.id} ouvert : décision d'entrer ou de rester en relation "
+            f"à prendre par une personne habilitée (Criblage → Dossiers PPE)."
+            + (" PPE non déclarée par le SI amont : la classification du client y est à "
+               "corriger." if dossier.ppe_non_declaree else ""))
 
 @app.post("/api/alerts/{alert_id}/propose")
 async def propose_alert_decision(
@@ -14207,7 +15123,8 @@ async def validate_alert_decision(
         # Le statut se dit par son libellé : le toast affichait
         # « (CLOSED_FALSE_POSITIVE) » au milieu d'une phrase en français.
         libelle = ALERT_STATUS_LABELS.get(alert.status, alert.status)
-        message = f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
+        message = (f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
+                   + _message_de_dossier_ppe(db, alert))
         message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
         event_key, extra = "alert_decision_validated", {
             "Validée par": username, "Statut": libelle,

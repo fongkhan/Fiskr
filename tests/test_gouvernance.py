@@ -109,14 +109,19 @@ def test_retention_purge_end_to_end(client):
 
     db = next(get_db())
     try:
-        # Alerte cloturee il y a 100 jours + rapport de sync vieux de 100 jours
-        old = datetime.utcnow() - timedelta(days=100)
+        # Alerte cloturee il y a plus de cinq ans (le client crible n'a pas de
+        # fiche : operation occasionnelle, que la purge garde cinq annees
+        # civiles quelle que soit la politique — fiskr/conservation.py ; a
+        # 100 jours elle ne partait plus) + rapport de sync vieux de 100 jours,
+        # famille d'exploitation sans plancher legal
+        old = datetime.utcnow() - timedelta(days=6 * 366)
         alert = db.query(Alert).filter(Alert.id == alert_id).first()
         audit_id = alert.audit_id
         alert.status = "CLOSED_FALSE_POSITIVE"
         alert.decided_at = old
         db.query(AuditTrail).filter(AuditTrail.id == audit_id).first().timestamp = old
-        db.add(SyncReport(source="OFAC", executed_at=old, status="SUCCESS", message="test_gouv"))
+        db.add(SyncReport(source="OFAC", executed_at=datetime.utcnow() - timedelta(days=100),
+                          status="SUCCESS", message="test_gouv"))
         db.commit()
     finally:
         db.close()

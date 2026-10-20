@@ -87,6 +87,7 @@ NATURE_INFORMATION = "INFORMATION"
 INCHANGEE = "INCHANGEE"
 FORME = "FORME"                          # forme du lecteur seule, equivalence verifiee
 FORME_NON_VERIFIABLE = "FORME_NON_VERIFIABLE"  # idem, ancien texte tronque
+FORME_QUALITE = "FORME_QUALITE"          # qualite PEP plus affirmee (« non precisee »)
 MODIFIEE = "MODIFIEE"
 
 
@@ -108,16 +109,29 @@ def _comparer(identifiant, nom: str, avant_ent: dict, apres_ent: dict,
     changements, avant, apres = find_differences(avant_ent, apres_ent)
     if not changements:
         return INCHANGEE, None
-    from fiskr.ingest import CHAMPS_DE_LA_CORRECTION, forme_corrigee_du_lecteur
-    de_forme = [c for c in changements if c.split(".")[0] in CHAMPS_DE_LA_CORRECTION]
-    forme = forme_corrigee_du_lecteur(avant_ent, apres_ent, de_forme) if de_forme else None
-    if forme is not None:
+    # Chaque correction du lecteur est reconnue sur SES champs : celle des
+    # programmes de sanction, et la qualite PEP que le lecteur n'affirme plus
+    # (« non precisee » au lieu de « Personne Politiquement Exposée (PEP) »
+    # sur les 709 511 fiches du lot PEP).
+    from fiskr.ingest import CORRECTIONS_DU_LECTEUR
+    issues_de_forme = []
+    for champs, reconnaitre, issue_verifiee in CORRECTIONS_DU_LECTEUR:
+        de_forme = [c for c in changements if c.split(".")[0] in champs]
+        forme = reconnaitre(avant_ent, apres_ent, de_forme) if de_forme else None
+        if forme is None:
+            continue
+        issues_de_forme.append(issue_verifiee if forme else FORME_NON_VERIFIABLE)
         changements = [c for c in changements if c not in de_forme]
-        if not changements:
-            return (FORME if forme else FORME_NON_VERIFIABLE), None
         for chemin in de_forme:
             avant.pop(chemin.split(".")[0], None)
             apres.pop(chemin.split(".")[0], None)
+    if issues_de_forme and not changements:
+        # Une fiche que les deux corrections touchent a la fois (aucune en
+        # production : le lot PEP n'a pas de programmes) se range sous la
+        # premiere, et sa verification partielle l'emporte.
+        if FORME_NON_VERIFIABLE in issues_de_forme:
+            return FORME_NON_VERIFIABLE, None
+        return issues_de_forme[0], None
     ligne = {
         "id": identifiant,
         "primary_name": nom,
@@ -456,7 +470,7 @@ def _realigner_empreintes(db, modele, a_realigner: List[Dict[str, Any]]) -> None
 # sans raison visible ne se croit pas. Cles du detail (jamais du resume, que
 # les rapports archives et les tests lisent tel quel), absentes quand nulles.
 CLES_ECARTEES_DU_COMPTE = ("checksum_only_count", "reader_form_count",
-                           "reader_form_unverified_count")
+                           "reader_form_unverified_count", "reader_quality_form_count")
 
 
 def _rapport(ajouts, nb_ajouts, retraits, nb_retraits,
@@ -473,9 +487,13 @@ def _rapport(ajouts, nb_ajouts, retraits, nb_retraits,
     issues = issues or {}
     ecartees = {
         "checksum_only_count": issues.get(INCHANGEE, 0),
-        # Les deux especes de forme, la seconde etant comprise dans la premiere
-        "reader_form_count": issues.get(FORME, 0) + issues.get(FORME_NON_VERIFIABLE, 0),
+        # Toutes les especes de forme ; les deux suivantes y sont comprises
+        "reader_form_count": (issues.get(FORME, 0) + issues.get(FORME_NON_VERIFIABLE, 0)
+                              + issues.get(FORME_QUALITE, 0)),
         "reader_form_unverified_count": issues.get(FORME_NON_VERIFIABLE, 0),
+        # dont : la qualite PEP que le lecteur n'affirme plus (l'ecran le dit
+        # a part : ce n'est pas un deplacement de programmes de sanction)
+        "reader_quality_form_count": issues.get(FORME_QUALITE, 0),
     }
     details.update({cle: n for cle, n in ecartees.items() if n})
     summary = {"added_count": nb_ajouts, "removed_count": nb_retraits,

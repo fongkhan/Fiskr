@@ -163,6 +163,41 @@ def gel_declaration_delai_heures(db) -> int:
     bas, haut = GEL_DELAI_BORNES_HEURES
     return heures if bas <= heures <= haut else DEFAULT_GEL_DELAI_HEURES
 
+
+# Delai (jours) au-dela duquel un dossier PPE sans decision d'entrer ou de
+# rester en relation leve une notification immediate et un controle de mise
+# en service BLOQUANT (fiskr/ppe.py).
+#
+# R.561-20-2 ne donne pas de chiffre : la decision « ne peut etre prise que
+# par un membre de l'organe executif ou toute personne habilitee a cet effet
+# par l'organe executif ». Pour un client qui DEVIENT PPE en cours de relation
+# (L.561-10 1°), la relation court pendant ce temps sans la decision que le
+# texte exige. Trente jours, parce que la decision suppose ce que Fiskr ne
+# peut pas faire seul : demander au client et recevoir les justificatifs de
+# l'origine des fonds et du patrimoine que l'ACPR enumere (bulletins de
+# salaire, avis d'imposition, actes de propriete, actes de cession —
+# publication ACPR « Les personnes politiquement exposees », juillet 2024),
+# puis les presenter a la personne habilitee. Au-dela d'un mois, le dossier
+# n'attend plus une instruction : il attend que quelqu'un s'en saisisse.
+SETTING_PPE_DELAI = "ppe.decision_delai_jours"
+DEFAULT_PPE_DELAI_JOURS = 30
+# Bornes : en dessous d'un jour, chaque confirmation sonnerait avant que le
+# client ait pu etre interroge ; au-dela d'un trimestre, le reglage ne
+# decrirait plus une decision prise, mais une decision remise.
+PPE_DELAI_BORNES_JOURS = (1, 90)
+
+
+def ppe_decision_delai_jours(db) -> int:
+    """Delai de decision d'un dossier PPE (jours), borne. Une valeur illisible
+    retombe sur le defaut : jamais sur « aucun delai »."""
+    valeur = get_setting_with_source(db, SETTING_PPE_DELAI, DEFAULT_PPE_DELAI_JOURS)["value"]
+    try:
+        jours = int(valeur)
+    except (TypeError, ValueError):
+        return DEFAULT_PPE_DELAI_JOURS
+    bas, haut = PPE_DELAI_BORNES_JOURS
+    return jours if bas <= jours <= haut else DEFAULT_PPE_DELAI_JOURS
+
 # Motifs de cloture proposes a la saisie d'une decision d'alerte. Une
 # bibliotheque, pas un carcan : le motif choisi s'insere dans le commentaire
 # et reste editable — la motivation reglementaire finale appartient a
@@ -290,12 +325,21 @@ RETENTION_MIN_DAYS = 30  # garde-fou TECHNIQUE : jamais moins de 30 jours quand 
 #
 # Un administrateur pouvait donc regler le journal de criblage sur 31 jours :
 # accepte sans un mot, et un mois plus tard la preuve n'existe plus. Ce
-# plancher-la est desormais NOMME. Il n'interdit pas — une installation hors
-# de France peut relever d'une autre regle, et c'est la decision de
-# l'exploitant — mais il ne laisse plus le choix se faire sans le savoir :
-# l'API l'annonce, le journal d'administration le trace, l'ecran de mise en
-# service le rappelle et chaque purge concernee le redit.
-DUREE_LEGALE_JOURS = 5 * 365  # 1825 — L561-12 CMF
+# plancher-la est desormais NOMME : l'API l'annonce, le journal
+# d'administration le trace, l'ecran de mise en service le rappelle.
+#
+# Et la purge l'APPLIQUE (fiskr/conservation.py) : les cinq ans courent depuis
+# la fin de la relation, et aucune politique ne les raccourcit. La directive
+# (UE) 2015/849 (art. 40) les impose dans toute l'Union, et la recommandation
+# 11 du GAFI fixe « au moins cinq ans » au-dela : une regle LBA-FT qui
+# prevoirait moins, l'installation hors de France n'en trouvera pas. Une
+# politique reglee en dessous reste acceptee et annoncee — elle n'a
+# simplement pas d'effet sous le plancher.
+#
+# Le plancher en jours etait 5 * 365 = 1825 : moins que cinq ans dans TOUTE
+# fenetre (chacune contient un 29 fevrier). Il est desormais derive du
+# calendrier — la plus longue fenetre de cinq annees civiles, 1 827 jours.
+from fiskr.conservation import DUREE_LEGALE_JOURS
 
 # Familles qui portent la preuve opposable. Les deux autres (rapports de
 # synchronisation, campagnes batch) sont de l'exploitation : utiles, non
@@ -329,9 +373,11 @@ def retention_sous_la_duree_legale(policy: Dict[str, Any]) -> List[Dict[str, Any
                 "jours": jours,
                 "plancher_legal": DUREE_LEGALE_JOURS,
                 "message": (
-                    f"{_LIBELLE_FAMILLE.get(famille, famille)} : purge à {jours} jours, "
+                    f"{_LIBELLE_FAMILLE.get(famille, famille)} : purge réglée à {jours} jours, "
                     f"alors que l'article L561-12 du Code monétaire et financier "
-                    f"impose {DUREE_LEGALE_JOURS} jours (cinq ans) de conservation."),
+                    f"impose cinq ans de conservation à compter de la fin de la "
+                    f"relation (jusqu'à {DUREE_LEGALE_JOURS} jours) : la purge "
+                    f"applique ces cinq ans, le réglage n'a pas d'effet en dessous."),
             })
     return ecarts
 DEFAULT_RETENTION = {"audit_trail": 0, "closed_alerts": 0, "sync_reports": 0,

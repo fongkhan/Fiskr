@@ -44,7 +44,7 @@ PHASES = ("QUEUED", "UPLOAD", "DOWNLOAD", "HASH", "PARSE", "PERSIST", "DELTA",
 # s'affichaient donc sans icone dans le panneau des travaux.
 KINDS = ("import", "ingest", "sync", "backtest", "approve", "batch",
          "batch_campaign", "quality", "quality_check", "lookback",
-         "client_screening", "mining",
+         "client_screening", "entity_rescreen", "mining",
          "engine_simulation", "resource_simulation", "fprules_bench",
          "testpanel_generate")
 

@@ -39,7 +39,7 @@ from fiskr.quality import evaluate_and_clean
 from fiskr.delta import CLES_ECARTEES_DU_COMPTE, calculate_delta_db
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
-    parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv, parse_canada_opensanctions_csv,
+    parse_pep_targets, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv, parse_canada_opensanctions_csv,
     parse_opensanctions_simple_csv,
     parse_ofac_consolidated_xml, parse_csl_json, CSL_DEFAULT_EXCLUDED_SOURCES,
     parse_canada_sema_csv, parse_dfat_consolidated,
@@ -965,7 +965,8 @@ EXTENDED_ENTITY_FIELDS = (
     "vessel_tonnage", "vessel_owner",
     "aircraft_model", "aircraft_operator", "aircraft_construction_number",
     "sanction_programs", "listed_on", "delisted_on", "name_original_script",
-    "title", "pep_role", "secondary_sanctions_risk", "designating_state",
+    "title", "pep_role", "pep_qualite", "pep_fin_de_fonction", "pep_liens",
+    "secondary_sanctions_risk", "designating_state",
     "organization_established_date", "organization_type",
     "phone_numbers", "email_addresses", "websites",
 )
@@ -1821,15 +1822,22 @@ def run_pep_sync(
     reload_cache: Optional[Callable[[], None]] = None,
 ) -> SyncReport:
     """
-    Telecharge le dataset PEP OpenSanctions (targets.simple.csv) et remplace
-    la liste PEP active. Usage non commercial libre ; licence OpenSanctions
-    requise pour un usage commercial.
+    Telecharge le dataset PEP OpenSanctions et remplace la liste PEP active.
+    Usage non commercial libre ; licence OpenSanctions requise pour un usage
+    commercial.
+
+    Le format suit l'URL configuree (`sync.pep.url`) et le lecteur suit le
+    fichier (`ingest.parse_pep_targets`) : `targets.simple.csv` par defaut,
+    qui ne dit pas la qualite (PPE, famille, associe) et le dit sur chaque
+    fiche ; `targets.nested.json` la porte, mais pese 1,35 Go (19 octobre
+    2026), au-dessus du plafond de telechargement (fiskr/limites.py).
     """
     cfg = get_sync_config()["pep"]
+    suffixe = ".json" if str(cfg["url"]).split("?")[0].lower().endswith(".json") else ".csv"
     return _run_list_replacement_sync(
         db, source="PEP", file_type="WATCHLIST_PEP", url=cfg["url"],
-        parser=parse_pep_targets_csv, file_label="OpenSanctions_PEP",
-        temp_suffix=".csv", trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
+        parser=parse_pep_targets, file_label="OpenSanctions_PEP",
+        temp_suffix=suffixe, trigger=trigger, fetcher=fetcher, reload_cache=reload_cache
     )
 
 

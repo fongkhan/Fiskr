@@ -98,10 +98,11 @@ def _tokens(texte: str, channel: str = caps.CHANNEL_SCREENING) -> List[str]:
 class TableRarete:
     """Frequence documentaire des mots de nom sur un corpus liste donne."""
 
-    __slots__ = ("total", "_df", "_seuil_repandu", "empreinte", "plancher")
+    __slots__ = ("total", "_df", "_seuil_repandu", "empreinte", "plancher", "contexte")
 
     def __init__(self, total: int, df: Dict[str, int], empreinte: str = "",
-                 plancher: int = DF_MIN_CONSERVE):
+                 plancher: int = DF_MIN_CONSERVE,
+                 contexte: Optional[frozenset] = None):
         self.total = max(0, int(total))
         self._df = df
         self._seuil_repandu = max(SEUIL_REPANDU_MIN, int(self.total * PART_REPANDU))
@@ -113,6 +114,9 @@ class TableRarete:
         # Ce qui identifie le corpus mesure : la table voyage avec l'audit,
         # une rarete se relit avec le corpus qui l'a produite.
         self.empreinte = empreinte
+        # Les capacites sous lesquelles les mots ont ete COMPTES (voir
+        # `table_pour`) : None = inconnues, la table ne vaut pour aucun reglage.
+        self.contexte = contexte
 
     def __len__(self) -> int:
         return len(self._df)
@@ -253,7 +257,8 @@ def construire(entites: Iterable[Dict[str, Any]],
         f"Table de rareté construite : {total} fiches, {len(brut)} mots distincts, "
         f"{len(conserve)} conservés (plancher {plancher})."
     )
-    return TableRarete(total, conserve, empreinte, plancher)
+    return TableRarete(total, conserve, empreinte, plancher,
+                       contexte=caps.current_context(channel))
 
 
 def construire_depuis_base(db, channel: str = caps.CHANNEL_SCREENING) -> TableRarete:
@@ -277,7 +282,7 @@ def construire_depuis_base(db, channel: str = caps.CHANNEL_SCREENING) -> TableRa
     empreinte = univers.calculer(db, lots).empreinte
     snapshot_ids = [s.snapshot_id for s in lots]
     if not snapshot_ids:
-        return TableRarete(0, {}, empreinte)
+        return TableRarete(0, {}, empreinte, contexte=caps.current_context(channel))
     lignes = db.query(WatchlistEntity.primary_name, WatchlistEntity.aliases).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True),
@@ -301,10 +306,24 @@ def table_pour(db, channel: str = caps.CHANNEL_SCREENING) -> TableRarete:
     l'homologation d'un autre lot — comptant les mots d'un corpus qui n'etait
     plus celui du criblage. A appeler AVANT un fork de pool — les enfants en
     heritent.
+
+    Et par le CONTEXTE DES CAPACITES du canal : les mots se comptent sous la
+    forme que compare le moteur (`_tokens`), que la translitteration, les
+    ecritures et l'aplatissement des diacritiques changent. Mesure : 15 fiches
+    ecrivent VLADIMIR en latin, 15 autres en cyrillique ; translitteration
+    active, VLADIMIR est porte par 30 fiches et dit REPANDU (seuil 25) ; coupee,
+    par 15, et ne l'est plus. Le demon, qui construit sa table ici, gardait
+    apres la coupure celle d'avant — l'univers n'avait pas change — et une
+    regle fondee sur `nom_repandu` y aurait clos une alerte que le processus
+    web, qui rebatit sa table au rechargement par epoque, gardait ouverte. Le
+    reglage compare est celui EN VIGUEUR (`production_context`) : une mesure
+    d'impact qui tourne sous une surcharge ne reconstruit pas la table du
+    processus.
     """
     empreinte = _empreinte_en_production(db)
     courante = _TABLE
-    if courante is not None and courante.empreinte == empreinte:
+    if (courante is not None and courante.empreinte == empreinte
+            and courante.contexte == caps.production_context(channel)):
         return courante
     table = construire_depuis_base(db, channel)
     installer(table)

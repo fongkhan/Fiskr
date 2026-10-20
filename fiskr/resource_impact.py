@@ -120,6 +120,13 @@ def simulate_resource_impact(
     if not clients:
         raise ValueError("Panel introuvable ou vide.")
 
+    # La mesure tourne dans le demon : l'index en vigueur est relu si l'epoque
+    # a bouge AVANT que les surcharges ci-dessous ne le capturent — sans quoi
+    # la premiere mesure apres une equivalence approuvee ailleurs se ferait
+    # contre l'index d'avant (fiskr/parametrage.py).
+    from fiskr import parametrage
+    parametrage.a_jour(db)
+
     # Univers = la production telle qu'elle est aujourd'hui. On ne fait varier
     # QUE le parametrage des equivalences : deux variables a la fois rendraient
     # l'ecart ininterpretable.

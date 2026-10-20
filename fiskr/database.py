@@ -28,6 +28,14 @@ class Snapshot(Base):
     reviewed_by = Column(String(100), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     review_comment = Column(Text, nullable=True)
+    # Quand l'approbation a ete notifiee (`snapshot_approved`) : UNE approbation,
+    # UNE notification, meme si le travail qui la suit se rejoue (remis en file
+    # apres un arret du demon, relance a la main). Posee dans la transaction
+    # meme qui ecrit la ligne du journal des notifications (fiskr/tasks.py).
+    # Sur le lot et non sur le dossier d'homologation, qui n'est jamais
+    # reecrit ; un lot n'est approuve qu'une fois (PENDING_REVIEW -> READY).
+    # NULL : approbation anterieure a ce suivi, ou pas encore notifiee.
+    approval_notified_at = Column(DateTime, nullable=True)
     # Dernier cahier de tests (backtest) execute sur ce snapshot candidat :
     # rapport archive avec le snapshot, auditable apres promotion
     backtest_report = Column(JSON, nullable=True)
@@ -113,6 +121,16 @@ class WatchlistEntity(Base):
     name_original_script = Column(String(1000), nullable=True)  # nom en ecriture d'origine
     title = Column(String(255), nullable=True)          # titre honorifique (distinct de designation)
     pep_role = Column(String(500), nullable=True)       # fonction PEP (OpenSanctions)
+    # Qualite LUE a la source (fiskr/ppe.py, QUALITES) : PPE, membre de la
+    # famille, personne etroitement associee — ou « non precisee » quand le
+    # format consomme ne le dit pas. Jamais « PPE » par defaut : le lecteur
+    # affirmait PPE de chaque fiche, proche compris.
+    pep_qualite = Column(String(20), nullable=True)
+    # Fin de la DERNIERE fonction quand toutes sont terminees (ISO, borne haute
+    # d'une date partielle) ; vide si une fonction est en cours ou non datee
+    pep_fin_de_fonction = Column(String(20), nullable=True)
+    # Liens lus a la source (proche -> PPE) : [{"nature", "relation", "personne", "personne_id", "personne_ppe"}]
+    pep_liens = Column(JSON, nullable=True)
     secondary_sanctions_risk = Column(Text, nullable=True)  # OFAC CAATSA
     designating_state = Column(String(200), nullable=True)  # Etat a l'origine de l'inscription (ONU)
     # Personnes morales
@@ -222,6 +240,11 @@ class ClientEntity(Base):
     client_activity_sector = Column(String(100), nullable=True) # code NAF / secteur
     client_activity_countries = Column(JSON, nullable=True)     # pays d'exposition operationnelle
     client_relationship_start = Column(String(20), nullable=True)
+    # Fin de la relation d'affaires (AAAA-MM-JJ, lue par
+    # fiskr.conservation.date_de_fin_de_relation) : c'est d'elle, et non de la
+    # date d'une ligne, que courent les cinq ans de conservation (CMF L.561-12).
+    # NULL : le client est en relation, ses pieces ne sont jamais purgees.
+    client_relationship_end = Column(String(20), nullable=True)
     # actif / cloture / gele — normalise en majuscules a l'import ; « GELE »
     # est ecrit par le registre des mesures de gel (fiskr/gels.py)
     client_status = Column(String(20), nullable=True)
@@ -254,6 +277,55 @@ class ClientEntity(Base):
 # arbre de decision que la colonne JSON du journal refuse (cf. modified_at).
 CLIENT_SCREENING_TRACE_COLUMNS = ("screened_at", "screening_pass_id",
                                   "screened_identity_sha256", "covered_universe_hash")
+
+
+class PartieLiee(Base):
+    """
+    Une partie liee d'un client : beneficiaire effectif, mandataire, dirigeant,
+    associe (fiskr/parties.py). Le README annoncait le criblage des
+    « mandataires, beneficiaires effectifs » ; aucune table ne pouvait porter
+    ce lien — `ClientEntity` n'en avait aucun, l'import non plus, et la regle
+    des 50 % ne parcourait que des liens entre fiches LISTEES.
+
+    Rattachee au client par `client_id`, pas a un lot du referentiel : un
+    import nocturne du CLIENT_BASE qui ne porte pas les parties ne doit pas les
+    effacer. Cle stable (client_id, partie_id) : une partie mise a jour garde
+    son identifiant, donc ses alertes et leur deduplication. Une partie que le
+    SI ne declare plus est RETIREE (date), jamais supprimee : les alertes et le
+    journal qui la nomment restent lisibles.
+
+    `identite` ne porte que des elements d'identification du client
+    (fiskr/identification.py, `champs_du_profil_lus_par_le_moteur`) : ce que
+    le moteur sait comparer, et rien d'autre.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre.
+    """
+    __tablename__ = "parties_liees"
+    __table_args__ = (UniqueConstraint("client_id", "partie_id", name="uq_parties_liees_client_partie"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String(100), nullable=False, index=True)
+    # Reference amont de la personne, ou identifiant calcule de son identite
+    # (fiskr/identification.py, `identifiant_calcule`) quand le SI n'en donne pas
+    partie_id = Column(String(100), nullable=False)
+    # Codes de fiskr/parties.py (ROLES) : une personne, plusieurs roles — le
+    # gerant majoritaire est beneficiaire effectif ET dirigeant, une seule
+    # partie, une seule alerte
+    roles = Column(JSON, nullable=False)
+    identite = Column(JSON, nullable=False)
+    nom = Column(String(1000), nullable=False)
+    pourcentage_detention = Column(Float, nullable=True)
+    peut_engager_les_fonds = Column(Boolean, nullable=False, default=False)
+    # IMPORT (fichier de parties liees) | WEBHOOK (client-upsert)
+    source = Column(String(20), nullable=False)
+    source_ref = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(100), nullable=True)
+    retiree_le = Column(DateTime, nullable=True, index=True)
+    retiree_par = Column(String(100), nullable=True)
 
 
 class ScreeningPass(Base):
@@ -326,6 +398,11 @@ class AuditTrail(Base):
     # NULL sur les enregistrements anterieurs a l'ajout (journal immuable,
     # jamais reecrit) et sur les decisions sans candidat
     list_type = Column(String(30), nullable=True)
+    # Decision portant sur une PARTIE LIEE du client (PartieLiee.id) : la
+    # ligne reste celle du client (client_id, client_name), l'identite comparee
+    # est celle de la partie (decision_tree.partie_liee, client_identification).
+    # NULL : le client lui-meme.
+    partie_liee_id = Column(Integer, nullable=True)
 
 class ReviewRecord(Base):
     """
@@ -560,6 +637,13 @@ class Alert(Base):
     # si la fiche est de nouveau rencontree au-dessus du seuil (reinscription)
     # — l'evenement DELISTED, lui, reste a l'historique.
     delisted_at = Column(DateTime, nullable=True)
+    # Correspondance trouvee sur une PARTIE LIEE du client (fiskr/parties.py) :
+    # l'alerte est celle du CLIENT — c'est sa relation qui est en cause —, la
+    # partie est nommee, et la chaine le dit (« via le beneficiaire effectif X
+    # (35 %) du client ACME »). La deduplication porte sur (client, fiche,
+    # partie) : deux parties homonymes ne se confondent pas. NULL : le client.
+    partie_liee_id = Column(Integer, nullable=True)
+    via_partie = Column(Text, nullable=True)
 
 ALERT_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 # Libellés des messages serveur (« Priorité passée à haute. ») — le code brut
@@ -640,6 +724,73 @@ class MesureDeGel(Base):
     # levee faite par le produit. Signalee une fois.
     radiation_constatee_le = Column(DateTime, nullable=True)
     radiation_detail = Column(Text, nullable=True)
+    # Mesure ouverte parce que le CLIENT est repute detenu ou controle par une
+    # personne designee au travers de ses parties liees (fiskr/parties.py) :
+    # DETENTION_REPUTEE (>= 50 % cumules, LD DGT/ACPR §131) ou CONTROLE (une
+    # partie designee peut engager ses fonds, §133 et §144). `detention` fige
+    # le calcul (cumul, parties, alertes) : le reviseur doit pouvoir le refaire.
+    # NULL : vrai positif sur le client lui-meme.
+    fondement = Column(String(30), nullable=True)
+    detention = Column(JSON, nullable=True)
+
+
+class DossierPPE(Base):
+    """
+    Dossier PPE : ce qui SUIT une correspondance confirmee sur une liste de
+    personnes politiquement exposees (fiskr/ppe.py). Avant lui, `_close_alert`
+    closait une alerte PEP confirmee comme les autres : aucune decision de
+    la direction, aucune origine des fonds, rien ne suivait — alors que
+    R.561-20-2 en fait trois obligations.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "ppe_dossiers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    statut = Column(String(20), nullable=False, default="A_DECIDER", index=True)
+    # Identite figee a l'ouverture : le registre se lit sans rejouer l'alerte
+    client_id = Column(String(100), nullable=True, index=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    list_type = Column(String(30), nullable=True)
+    # Ce que la SOURCE dit, fige a l'ouverture (la fiche peut changer ensuite)
+    qualite_source = Column(String(20), nullable=True)
+    fonction_source = Column(Text, nullable=True)
+    fin_de_fonction_source = Column(String(20), nullable=True)
+    liens_source = Column(JSON, nullable=True)
+    # Ce que l'instruction RETIENT (qualite au sens de R.561-18 I, II ou III)
+    qualite_retenue = Column(String(20), nullable=True)
+    fonction = Column(Text, nullable=True)
+    fin_de_fonction = Column(String(20), nullable=True)
+    # Origine du patrimoine et des fonds (R.561-20-2 2°) et pieces jointes de
+    # l'alerte qui l'etablissent (identifiants AlertAttachment)
+    origine_fonds = Column(Text, nullable=True)
+    origine_patrimoine = Column(Text, nullable=True)
+    pieces_origine = Column(JSON, nullable=True)
+    # Classification du client par le SI amont au moment du constat :
+    # True declare PPE, False non, None absente (champ vide ou fiche introuvable)
+    client_pep_declare = Column(Boolean, nullable=True)
+    ppe_non_declaree = Column(Boolean, nullable=True)
+    # Point de depart du delai : la confirmation ; ceux qui l'ont instruite ne
+    # decident pas de la relation
+    ouvert_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    ouvert_par = Column(String(100), nullable=False)
+    proposee_par = Column(String(100), nullable=True)
+    confirmee_par = Column(String(100), nullable=True)
+    # Decision d'entrer ou de rester en relation (R.561-20-2 1°)
+    decision = Column(String(30), nullable=True)
+    decision_motif = Column(Text, nullable=True)
+    decision_reference = Column(String(255), nullable=True)
+    decidee_le = Column(DateTime, nullable=True)
+    decidee_par = Column(String(100), nullable=True)
+    # Vigilance renforcee (R.561-20-2 3°) : prochaine revue du dossier
+    prochaine_revue_le = Column(DateTime, nullable=True)
+    # Retard de decision signale une fois (notification immediate)
+    retard_signale_le = Column(DateTime, nullable=True)
+
 
 class AdminAuditLog(Base):
     """Journal append-only des actions d'administration (utilisateurs,
@@ -1662,6 +1813,7 @@ def init_db():
                 ("client_activity_sector", "VARCHAR(100)"),
                 ("client_activity_countries", "JSON"),
                 ("client_relationship_start", "VARCHAR(20)"),
+                ("client_relationship_end", "VARCHAR(20)"),
                 ("client_status", "VARCHAR(20)"),
             ],
             "alerts": [
@@ -1677,10 +1829,16 @@ def init_db():
                 ("lapsed_since", "TIMESTAMP"),
                 ("lapsed_reason", "TEXT"),
                 ("delisted_at", "TIMESTAMP"),
+                # Correspondance sur une partie liee du client (fiskr/parties.py)
+                ("partie_liee_id", "INTEGER"),
+                ("via_partie", "TEXT"),
             ],
             "gel_mesures": [
                 ("radiation_constatee_le", "TIMESTAMP"),
                 ("radiation_detail", "TEXT"),
+                # Client repute detenu ou controle (fiskr/parties.py)
+                ("fondement", "VARCHAR(30)"),
+                ("detention", "JSON"),
             ],
             "review_records": [
                 ("backtest_validity", "JSON"),
@@ -1688,6 +1846,7 @@ def init_db():
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),
                 ("watchlist_composition", "JSON"),
+                ("partie_liee_id", "INTEGER"),
             ],
             "whitelist_pairs": [
                 ("list_type", "VARCHAR(30)"),
@@ -1839,15 +1998,39 @@ def _composition_de(wl_hash: str):
     return reference.composition_journal() if reference is not None else None
 
 
-def _arbre_journalise(scoring_result: dict, identite: dict) -> dict:
+def _arbre_journalise(scoring_result: dict, identite: dict,
+                      partie: Optional[dict] = None) -> dict:
     """Arbre de decision tel qu'il est journalise : le resultat du moteur et
     l'identification du client que ce criblage a comparee
     (`empreintes.identification_client`). Copie : le resultat lui-meme
     retourne a l'appelant, et la reponse de criblage ne doit pas grossir d'une
-    identification par correspondance."""
-    if not identite:
+    identification par correspondance.
+
+    `partie` : la decision porte sur une partie liee du client
+    (fiskr/parties.py) — son role, son nom, sa detention et la chaine qui la
+    rattache au client sont figes avec la decision. L'identification
+    journalisee est alors celle de la PARTIE : c'est elle qui a ete comparee."""
+    if not identite and not partie:
         return scoring_result
-    return {**scoring_result, "client_identification": identite}
+    arbre = dict(scoring_result)
+    if identite:
+        arbre["client_identification"] = identite
+    if partie:
+        arbre["partie_liee"] = partie
+    return arbre
+
+
+def _nom_journalise(client: dict, partie: Optional[dict]) -> str:
+    """Le nom du client porte par la ligne d'audit. Sur une partie liee, c'est
+    celui du CLIENT de la relation : l'alerte qui en nait lui est rattachee."""
+    if partie and partie.get("client_name"):
+        return partie["client_name"]
+    cname = client.get("primary_name", "")
+    if not cname:
+        fname = client.get("client_first_name", "")
+        lname = client.get("client_last_name", "")
+        cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
+    return cname or "Inconnu"
 
 
 def log_compliance_decision(
@@ -1856,37 +2039,33 @@ def log_compliance_decision(
     watchlist_entry: dict,
     scoring_result: dict,
     wl_version: str,
-    wl_hash: str
+    wl_hash: str,
+    partie: Optional[dict] = None
 ) -> AuditTrail:
-    """Inserts a compliance screening decision into the audit trail database."""
+    """Inserts a compliance screening decision into the audit trail database.
+    `partie` : decision sur une partie liee du client (cf. `_arbre_journalise`)."""
     from fiskr.config import config as active_config
     config_audit = {k: v for k, v in active_config.items() if k != "database"}
-    
-    # Handle the difference in client keys (for client_last_name / primary_name)
-    cname = client.get("primary_name", "")
-    if not cname:
-        fname = client.get("client_first_name", "")
-        lname = client.get("client_last_name", "")
-        cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
-        
+
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
     from fiskr.empreintes import identification_client
 
     db_entry = AuditTrail(
         client_id=client.get("entity_id") or client.get("client_id"),
-        client_name=cname or "Inconnu",
+        client_name=_nom_journalise(client, partie),
         client_type=ctype,
         watchlist_id=watchlist_entry.get("entity_id", "NONE"),
         watchlist_name=watchlist_entry.get("primary_name", "Aucun match"),
         base_score=scoring_result.get("base_score", 0.0),
         final_score=scoring_result.get("final_score", 0.0),
         status=scoring_result.get("status", "NO_MATCH"),
-        decision_tree=_arbre_journalise(scoring_result, identification_client(client)),
+        decision_tree=_arbre_journalise(scoring_result, identification_client(client), partie),
         config_state=config_audit,
         watchlist_version=wl_version,
         watchlist_hash=wl_hash,
         watchlist_composition=_composition_de(wl_hash),
-        list_type=watchlist_entry.get("_list_type")
+        list_type=watchlist_entry.get("_list_type"),
+        partie_liee_id=(partie or {}).get("id"),
     )
     db.add(db_entry)
     db.commit()
@@ -1895,7 +2074,8 @@ def log_compliance_decision(
 
 
 def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
-                             wl_hash: str, commit: bool = True):
+                             wl_hash: str, commit: bool = True,
+                             partie: Optional[dict] = None):
     """
     Journalise PLUSIEURS decisions d'un meme criblage, en un seul commit.
 
@@ -1906,15 +2086,12 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
     decision doit rester relisible sans dependre des autres.
 
     `decisions` : sequence de (fiche_listee, resultat_de_score).
+    `partie` : decisions sur une partie liee du client (cf. `_arbre_journalise`).
     """
     from fiskr.config import config as active_config
     config_audit = {k: v for k, v in active_config.items() if k != "database"}
 
-    cname = client.get("primary_name", "")
-    if not cname:
-        fname = client.get("client_first_name", "")
-        lname = client.get("client_last_name", "")
-        cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
+    cname = _nom_journalise(client, partie)
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
     client_ref = client.get("entity_id") or client.get("client_id")
     composition = _composition_de(wl_hash)
@@ -1927,19 +2104,20 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
     for watchlist_entry, scoring_result in decisions:
         lignes.append(AuditTrail(
             client_id=client_ref,
-            client_name=cname or "Inconnu",
+            client_name=cname,
             client_type=ctype,
             watchlist_id=watchlist_entry.get("entity_id", "NONE"),
             watchlist_name=watchlist_entry.get("primary_name", "Aucun match"),
             base_score=scoring_result.get("base_score", 0.0),
             final_score=scoring_result.get("final_score", 0.0),
             status=scoring_result.get("status", "NO_MATCH"),
-            decision_tree=_arbre_journalise(scoring_result, identite),
+            decision_tree=_arbre_journalise(scoring_result, identite, partie),
             config_state=config_audit,
             watchlist_version=wl_version,
             watchlist_hash=wl_hash,
             watchlist_composition=composition,
             list_type=watchlist_entry.get("_list_type"),
+            partie_liee_id=(partie or {}).get("id"),
         ))
     db.add_all(lignes)
     if commit:
@@ -1984,6 +2162,23 @@ CLES_HORS_EMPREINTE = frozenset({
     "modified_by", "modified_at", "excluded", "exclusion_justification",
     "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
 })
+
+
+def valeur_de_criblage(valeur):
+    """
+    Une colonne de fiche telle qu'un criblage doit la porter : serialisable.
+
+    La fiche rencontree finit dans l'arbre de decision, que la colonne JSON du
+    journal d'audit refuse brute : une date y voyage en ISO 8601, comme l'API
+    la rendrait. Le cache de criblage (fiskr.api) le faisait seul ; le
+    re-criblage (fiskr.rescreen) copiait les colonnes telles quelles, et un
+    lookback qui rencontrait une fiche corrigee a la main (`modified_at`)
+    finissait en ECHEC, sans ligne d'audit.
+    """
+    from datetime import date
+    if isinstance(valeur, (datetime, date)):
+        return valeur.isoformat()
+    return valeur
 
 # Toutes les formes de guillemet et d'apostrophe rencontrees dans les sources
 # (typographiques, accents graves employes en translitteration, pleine

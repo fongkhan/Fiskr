@@ -467,6 +467,17 @@ def current_context(channel: str = CHANNEL_SCREENING) -> FrozenSet[str]:
     override = getattr(_local, "override", None)
     if override is not None and channel in override:
         return override[channel]
+    return production_context(channel)
+
+
+def production_context(channel: str = CHANNEL_SCREENING) -> FrozenSet[str]:
+    """
+    Capacites du reglage EN VIGUEUR sur ce canal, sans la surcharge du thread
+    courant. C'est contre lui que se cle ce qui est partage par tout le
+    processus (la table de rarete, fiskr/rarete.py) : une mesure d'impact qui
+    tourne sous `use_context` ne doit ni le reconstruire ni le remplacer pour
+    les criblages servis en parallele.
+    """
     if channel not in _context_cache:
         _context_cache[channel] = _load_active(channel)
     return _context_cache[channel]

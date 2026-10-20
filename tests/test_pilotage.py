@@ -83,7 +83,10 @@ def test_purge_archives_before_delete(client):
     alert_id = _screen_putin(client, cid)["alert_id"]
     db = next(get_db())
     try:
-        old = datetime.utcnow() - timedelta(days=100)
+        # Plus de cinq ans : le client crible n'a pas de fiche (operation
+        # occasionnelle), la purge le garde cinq annees civiles quelle que
+        # soit la politique (fiskr/conservation.py)
+        old = datetime.utcnow() - timedelta(days=6 * 366)
         alert = db.query(Alert).filter(Alert.id == alert_id).first()
         alert.status = "CLOSED_FALSE_POSITIVE"
         alert.decided_at = old
@@ -123,7 +126,8 @@ def test_purge_without_archive_when_disabled(client):
     try:
         alert = db.query(Alert).filter(Alert.id == alert_id).first()
         alert.status = "CLOSED_FALSE_POSITIVE"
-        alert.decided_at = datetime.utcnow() - timedelta(days=100)
+        # Au-dela des cinq ans du plancher legal (cf. le test precedent)
+        alert.decided_at = datetime.utcnow() - timedelta(days=6 * 366)
         db.commit()
     finally:
         db.close()

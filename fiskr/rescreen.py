@@ -22,6 +22,18 @@ Un passage ecrit donc UNE ligne (`ScreeningPass` : reference de l'univers,
 perimetre, effectifs, horodatages) et date chaque fiche criblee par des mises
 a jour en masse (`ClientEntity.screened_at`, `screening_pass_id`). Les
 correspondances, elles, gardent leur ligne d'audit complete, comme avant.
+
+LES PARTIES LIEES DATENT LEUR CLIENT
+------------------------------------
+Les beneficiaires effectifs, mandataires, dirigeants et associes d'un client
+(fiskr/parties.py) n'ont pas de trace a eux : ce qui est crible, c'est la
+RELATION. Tout passage crible le client ET ses parties, et la trace du client
+dit que les deux l'ont ete ; son empreinte d'identification
+(`screened_identity_sha256`) couvre l'identite de ses parties. Une partie
+ajoutee, renommee ou retiree change donc cette empreinte : le criblage des
+clients nouveaux ou modifies reprend ce client et ses parties (LD DGT/ACPR
+§141 : « a chaque mise a jour des elements d'identification »). Un client
+sans partie garde l'empreinte d'avant.
 """
 import logging
 import time
@@ -31,11 +43,13 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from fiskr.config import config
 from fiskr.database import (
     Snapshot, WatchlistEntity, ClientEntity, ScreeningPass,
-    CLIENT_SCREENING_TRACE_COLUMNS, log_compliance_decision
+    CLIENT_SCREENING_TRACE_COLUMNS, log_compliance_decision, valeur_de_criblage
 )
 from fiskr.blocking import generate_blocking_keys, lookup_blocking_keys
 from fiskr.scoring import match_entities
 from fiskr.alerts import is_whitelisted
+from fiskr.identification import CLE_DES_PARTIES
+from fiskr.parties import CLE_DU_CONTEXTE
 from fiskr import screenpool
 
 logger = logging.getLogger("fiskr.rescreen")
@@ -81,6 +95,10 @@ def _entity_dicts(db, snapshot_ids: List[str],
     `entity_ids` : restreint aux entity_id demandes (passes DELTA du cahier de
     tests : seules les fiches ajoutees/modifiees/retirees sont chargees). Le
     IN est decoupe en tranches — SQLite plafonne les parametres d'une requete.
+
+    Les valeurs sont celles que porte le cache de criblage
+    (`valeur_de_criblage`) : une fiche corrigee a la main porte `modified_at`,
+    une date que l'arbre de decision ne peut pas journaliser brute.
     """
     snapshot_types = {
         s.snapshot_id: s.file_type
@@ -107,7 +125,7 @@ def _entity_dicts(db, snapshot_ids: List[str],
             if chunk is not None:
                 query = query.filter(WatchlistEntity.entity_id.in_(chunk))
             for row in query.yield_per(5000):
-                d = dict(zip(fields, row))
+                d = dict(zip(fields, (valeur_de_criblage(v) for v in row)))
                 d["_list_type"] = snapshot_types.get(d.get("snapshot_id"))
                 out.append(d)
         return out
@@ -119,7 +137,7 @@ def _entity_dicts(db, snapshot_ids: List[str],
         if chunk is not None:
             query = query.filter(WatchlistEntity.entity_id.in_(chunk))
         for r in query.all():
-            d = {c.name: getattr(r, c.name) for c in r.__table__.columns}
+            d = {c.name: valeur_de_criblage(getattr(r, c.name)) for c in r.__table__.columns}
             # Type de liste d'origine : seuils de cut-off par liste
             d["_list_type"] = snapshot_types.get(r.snapshot_id)
             out.append(d)
@@ -129,7 +147,12 @@ def _entity_dicts(db, snapshot_ids: List[str],
 def _client_dicts(db, snapshot_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Referentiel clients : entites des snapshots CLIENT_BASE en production
     (ou des seuls `snapshot_ids`). Sans les colonnes de trace : elles disent
-    quand la fiche a ete criblee, elles ne font pas partie de ce qu'on crible."""
+    quand la fiche a ete criblee, elles ne font pas partie de ce qu'on crible.
+
+    Chaque fiche porte les profils de ses parties liees
+    (`identification.CLE_DES_PARTIES`, fiskr/parties.py) : un passage les
+    crible avec elle, et l'empreinte d'identification de la relation les
+    couvre — un beneficiaire effectif ajoute rend le client « modifie »."""
     snap_ids = snapshot_ids if snapshot_ids is not None else [
         s.snapshot_id for s in db.query(Snapshot).filter(
             Snapshot.file_type == "CLIENT_BASE",
@@ -140,8 +163,11 @@ def _client_dicts(db, snapshot_ids: Optional[List[str]] = None) -> List[Dict[str
         return []
     rows = db.query(ClientEntity).filter(
         ClientEntity.snapshot_id.in_(snap_ids)).order_by(ClientEntity.id).all()
-    return [{c.name: getattr(r, c.name) for c in r.__table__.columns
-             if c.name not in CLIENT_SCREENING_TRACE_COLUMNS} for r in rows]
+    fiches = [{c.name: getattr(r, c.name) for c in r.__table__.columns
+               if c.name not in CLIENT_SCREENING_TRACE_COLUMNS} for r in rows]
+    from fiskr.parties import joindre_les_parties
+    joindre_les_parties(db, fiches)
+    return fiches
 
 
 def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
@@ -170,11 +196,17 @@ def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
 
     `lapsed_alerts` : alertes ouvertes dont la fiche vient d'etre re-criblee et
     dont le couple ne franchit plus le seuil, rendues caduques
-    (fiskr.caducite). Zero hors d'une mise en production de liste.
+    (fiskr.caducite) : apres une mise en production de liste, une correction
+    ou un ajout manuel de fiche, et un lookback. Zero pour le criblage des
+    clients nouveaux ou modifies, qui ne re-crible aucune fiche.
+
+    `parties_screened` : parties liees criblees avec leurs clients
+    (fiskr/parties.py) — `clients_screened` ne compte que les clients.
     """
     return {
         "changed_entities": int(changed_entities),
         "clients_screened": 0,
+        "parties_screened": 0,
         "new_alerts": 0,
         "redetected_alerts": 0,
         "closed_by_rule": 0,
@@ -215,6 +247,13 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     if not changed_entities:
         return result
 
+    # Capacites et equivalences relues si l'epoque a bouge : ce re-criblage
+    # tourne dans le demon, qui ne recharge pas le cache des listes et gardait
+    # sinon le parametrage lu a son premier passage (fiskr/parametrage.py). Les
+    # cles de blocking ci-dessous et le score en dependent.
+    from fiskr import parametrage
+    parametrage.a_jour(db)
+
     # Layout de blocking du canal criblage (parametrable a chaud)
     from fiskr.settings import blocking_layout, blocking_config_for
     screening_cfg = blocking_config_for(blocking_layout(db, "SCREENING"))
@@ -241,6 +280,15 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         clients = _client_dicts(db)
     total_clients = len(clients)
     result["clients_screened"] = total_clients
+    # Les parties liees de chaque client (fiskr/parties.py) sont criblees avec
+    # lui : memes fiches, meme index, meme ecriture — une mise a jour de liste
+    # qui ajoute le beneficiaire effectif d'ACME ouvre l'alerte d'ACME. Elles
+    # suivent les clients dans la liste : l'ordre d'ecriture reste stable.
+    profils = list(clients)
+    for client in clients:
+        profils.extend(client.get(CLE_DES_PARTIES) or ())
+    result["parties_screened"] = len(profils) - total_clients
+    total_profils = len(profils)
 
     def _persist_hits(client: Dict[str, Any], hits: List[Dict[str, Any]]) -> None:
         """Ecrit en base la suite de TOUTES les correspondances en ALERT d'un
@@ -259,10 +307,15 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         from fiskr.empreintes import empreinte_client, examiner_la_paire, notifier_les_bascules
 
         client_ref = client.get("client_id")
+        # Profil d'une partie liee : journal et alertes du client, partie nommee
+        partie = client.get(CLE_DU_CONTEXTE)
         hits = sorted(hits, key=lambda h: -h["final_score"])
         if paires_franchies is not None:
+            # Une partie franchit pour elle-meme : (client, fiche, partie) — la
+            # caducite d'une alerte de partie ne se juge pas sur le client.
             paires_franchies.update(
-                (client_ref, (h.get("watchlist_entity") or {}).get("entity_id")) for h in hits)
+                (client_ref, (h.get("watchlist_entity") or {}).get("entity_id"))
+                + ((partie["id"],) if partie else ()) for h in hits)
         paires = whitelisted_pairs(
             db, client_ref,
             [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits])
@@ -309,7 +362,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         lignes = log_compliance_decisions(
             db, client,
             [(h.get("watchlist_entity") or {}, h) for h, _r in a_journaliser],
-            watchlist_version, watchlist_hash, commit=False)
+            watchlist_version, watchlist_hash, commit=False, partie=partie)
         a_alerter = [{"audit": ligne, "match": h, "rule": r,
                       "whitelist_stale": reexamens.get(id(h))}
                      for (h, r), ligne in zip(a_journaliser, lignes)
@@ -326,7 +379,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             # sans en creer une seule.
             compte = open_or_redetect_alerts(
                 db, a_alerter, client_id=client_ref, username=RESCREEN_USERNAME,
-                channel="SCREENING", detail_suffix=f" {trigger_detail}")
+                channel="SCREENING", detail_suffix=f" {trigger_detail}", partie=partie)
             result["new_alerts"] += int(compte.get("opened", 0))
             result["redetected_alerts"] += int(compte.get("redetected", 0))
             result["closed_by_rule"] += int(compte.get("closed_by_rule", 0))
@@ -338,7 +391,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     # sequentiel. Le calcul part maintenant sur un pool de processus forkes ;
     # seules les rares correspondances en ALERT reviennent au parent, qui garde
     # l'ecriture pour lui. Resultat identique, dans le meme ordre.
-    resolved = screenpool.resolve_processes(len(clients) + len(changed_entities))
+    resolved = screenpool.resolve_processes(total_profils + len(changed_entities))
     hits = None
     if resolved > 1 and total_clients:
         try:
@@ -346,7 +399,7 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
         except Exception:
             pass
         try:
-            hits = screenpool.parallel_match(clients, index, screening_cfg,
+            hits = screenpool.parallel_match(profils, index, screening_cfg,
                                              processes=resolved, progress=progress)
         except screenpool.PoolStalled as e:
             # Auto-guerison : pool mort (OOM) ou fige — on recalcule en
@@ -357,21 +410,21 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     if hits is not None:
         # ---- Phase 2 : ecriture, sequentielle, dans l'ordre des clients ----
         for i, trouvees in hits:
-            _persist_hits(clients[i], trouvees)
+            _persist_hits(profils[i], trouvees)
         if progress:
             try:
-                progress(total_clients, total_clients)
+                progress(total_profils, total_profils)
             except Exception:
                 pass
     else:
         # Chemin sequentiel historique (un seul coeur, pool indisponible ou
         # replie) : calcul et ecriture entrelaces, meme resultat.
         done = 0
-        for client in clients:
+        for client in profils:
             done += 1
-            if progress and (done % _PROGRESS_EVERY == 0 or done == total_clients):
+            if progress and (done % _PROGRESS_EVERY == 0 or done == total_profils):
                 try:
-                    progress(done, total_clients)
+                    progress(done, total_profils)
                 except Exception:
                     pass  # une progression cassee n'interrompt jamais un re-criblage
             # Cession explicite du GIL : sans elle, ce calcul en Python pur affame
@@ -466,6 +519,89 @@ def rescreen_after_snapshot_change(db, file_type: str, new_snapshot_id: str,
     return result
 
 
+GESTE_CORRECTION = "correction"
+GESTE_AJOUT = "ajout"
+
+
+def recribler_apres_un_geste_manuel(db, entity_pks: List[int], *, geste: str,
+                                    reference_avant: Optional[str],
+                                    progress: Optional[Callable[[int, int], None]] = None,
+                                    started_by: Optional[str] = None,
+                                    clients: Optional[List[Dict[str, Any]]] = None
+                                    ) -> Dict[str, Any]:
+    """
+    Apres une correction (PATCH) ou un ajout manuel de fiches listees : le
+    referentiel est confronte a CES fiches seulement, telles qu'elles sont en
+    production a l'execution — le meme chemin que le re-criblage post-delta :
+    passage date, couverture prolongee depuis `reference_avant`, alertes
+    caduques.
+
+    Le re-criblage ne partait que d'une mise en production de lot. Reproduit :
+    une fiche corrigee pour porter la date de naissance et la nationalite d'un
+    client, un ajout manuel homonyme d'un autre — aucune alerte sans lookback,
+    et la couverture « duree inconnue » jusqu'a ce que quelqu'un en lance un.
+    L'empreinte d'univers (fiskr/univers.py) voyait pourtant les deux gestes.
+
+    `reference_avant` : l'empreinte de l'univers lue par l'endpoint AVANT le
+    geste. Les clients couverts contre elle le sont contre l'univers d'apres,
+    puisqu'ils viennent d'etre confrontes a tout ce que le geste a change.
+
+    `clients` : les profils a confronter, par defaut le referentiel en
+    production (`_client_dicts`). Point d'extension : le jour ou les parties
+    liees au client se criblent, c'est ici qu'elles rejoignent la liste — le
+    passage, les alertes et la caducite les traiteront comme les autres.
+
+    Une fiche exclue, retiree de la production ou supprimee entre le geste et
+    ce travail n'est plus criblee : elle n'est plus dans l'univers.
+    """
+    from fiskr import univers
+    from fiskr.database import WATCHLIST_FILE_TYPES
+
+    resultat = compteurs_de_recriblage(0)
+    pks = sorted({int(pk) for pk in entity_pks or []})
+    if not pks:
+        return resultat
+    lots = set(lots_en_production(db))
+    lignes = []
+    for i in range(0, len(pks), _TRANCHE):
+        lignes.extend(db.query(WatchlistEntity.snapshot_id, WatchlistEntity.entity_id).filter(
+            WatchlistEntity.id.in_(pks[i:i + _TRANCHE]),
+            WatchlistEntity.excluded.isnot(True)).all())
+    lignes = [(lot, eid) for lot, eid in lignes if lot in lots]
+    if not lignes:
+        return resultat
+    fiches = _entity_dicts(db, sorted({lot for lot, _ in lignes}),
+                           entity_ids={eid for _, eid in lignes})
+    if clients is None:
+        clients = _client_dicts(db)
+    resultat["changed_entities"] = len(fiches)
+    if not clients:
+        return resultat
+    listes = sorted({f["_list_type"] for f in fiches if f.get("_list_type")
+                     and f["_list_type"] in WATCHLIST_FILE_TYPES})
+    # Premiere fiche d'une installation neuve (ajout manuel sur un univers
+    # vide) : le passage a vu tout ce qui est en production, il est complet —
+    # meme regle que la premiere liste homologuee.
+    complet = (reference_avant == univers.EMPREINTE_VIDE and db.query(WatchlistEntity.id).filter(
+        WatchlistEntity.snapshot_id.in_(sorted(lots)), WatchlistEntity.excluded.isnot(True)).count()
+        == len(fiches))
+    identifiants = ", ".join(sorted(f["entity_id"] for f in fiches)[:5]) \
+        + (f" (+{len(fiches) - 5})" if len(fiches) > 5 else "")
+    libelle = "correction" if geste == GESTE_CORRECTION else "ajout manuel"
+    franchies: Set = set()
+    resultat = _executer_le_passage(
+        db, NATURE_MISE_A_JOUR, fiches, clients,
+        trigger_detail=f"[Re-criblage après {libelle} de fiche : {identifiants}]",
+        progress=progress, complet=complet, reference_avant=reference_avant,
+        scope={"listes": listes, "complet": complet, "geste": geste,
+               "fiches": sorted(f["entity_id"] for f in fiches)[:50]},
+        started_by=started_by, paires_franchies=franchies,
+    )
+    resultat["lapsed_alerts"] = _examiner_les_caduques_par_liste(
+        db, fiches, franchies, version=reference_de_l_univers(db)[0])
+    return resultat
+
+
 class UniversAbsent(RuntimeError):
     """Aucune liste en production dans le perimetre demande : un passage rendu
     maintenant ecrirait que des clients ont ete cribles contre rien."""
@@ -505,7 +641,8 @@ def rescreen_lookback(db, file_type: Optional[str] = None,
         return compteurs_de_recriblage(0)
     entities = _entity_dicts(db, snap_ids)
     label = file_type or "toutes listes"
-    return _executer_le_passage(
+    franchies: Set = set()
+    result = _executer_le_passage(
         db, NATURE_LOOKBACK, entities, clients,
         trigger_detail=f"[Lookback manuel {label}]", progress=progress,
         # Restreint a un type de liste, il crible pour de bon — les fiches sont
@@ -513,8 +650,29 @@ def rescreen_lookback(db, file_type: Optional[str] = None,
         complet=file_type is None,
         scope={"listes": [file_type] if file_type else "TOUTES",
                "complet": file_type is None},
-        started_by=started_by,
+        started_by=started_by, paires_franchies=franchies,
     )
+    # Il vient de confronter le referentiel a TOUTES les fiches de son
+    # perimetre : une alerte ouverte dont le couple ne franchit plus le seuil
+    # (fiche corrigee, seuil releve) est caduque, comme apres un re-criblage
+    # post-delta. Il ne le disait pas : elle restait en file.
+    result["lapsed_alerts"] = _examiner_les_caduques_par_liste(
+        db, entities, franchies, version=reference_de_l_univers(db)[0])
+    return result
+
+
+def _examiner_les_caduques_par_liste(db, fiches: List[Dict[str, Any]],
+                                     franchies: Set, *, version: str) -> int:
+    """`caducite.examiner_les_caduques`, liste par liste : une alerte n'est
+    rapprochee que des fiches de SA liste (deux listes peuvent employer le meme
+    identifiant pour deux fiches differentes)."""
+    from fiskr.caducite import examiner_les_caduques
+    par_liste: Dict[str, List[Dict[str, Any]]] = {}
+    for fiche in fiches:
+        if fiche.get("_list_type"):
+            par_liste.setdefault(fiche["_list_type"], []).append(fiche)
+    return sum(examiner_les_caduques(db, liste, groupe, franchies, version=version)
+               for liste, groupe in sorted(par_liste.items()))
 
 
 def cribler_les_clients_nouveaux_ou_modifies(
@@ -785,6 +943,13 @@ def dater_un_criblage_unitaire(db, fiche: ClientEntity, audit_id: Optional[int])
         return
     profil = {c.name: getattr(fiche, c.name) for c in fiche.__table__.columns
               if c.name not in CLIENT_SCREENING_TRACE_COLUMNS}
+    # Le criblage unitaire crible aussi les parties liees (fiskr/api.py,
+    # `cribler_un_profil`) : l'empreinte de la relation les couvre, comme celle
+    # d'un passage (`_client_dicts`).
+    from fiskr.parties import profils_des_parties
+    parties = profils_des_parties(db, fiche.client_id)
+    if parties:
+        profil[CLE_DES_PARTIES] = parties
     fiche.screened_at = ligne.timestamp or datetime.utcnow()
     fiche.screening_pass_id = None
     fiche.screened_identity_sha256 = empreinte_d_identification(profil)

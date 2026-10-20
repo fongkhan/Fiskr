@@ -131,6 +131,14 @@ Q999,Person,Jane Politician,,1980,us;fr,,,,,,wd_peps,2020-01-01,2026-07-01,2026-
 
 
 def test_parse_pep_targets_csv(tmp_path):
+    """
+    Réécrit, et dit : ce test épinglait le défaut. Il exigeait que chaque fiche
+    du format plat porte « Personne Politiquement Exposée (PEP) », alors que ce
+    format ne dit pas la qualité — il range les proches (`role.rca`) parmi les
+    PPE, indiscernables. La fiche dit désormais « qualité non précisée par la
+    source » (fiskr/ppe.py) ; le reste de la fiche est inchangé.
+    """
+    from fiskr.ppe import QUALITE_NON_PRECISEE, motif_de_fiche
     csv_file = tmp_path / "targets.simple.csv"
     csv_file.write_text(PEP_CSV, encoding="utf-8")
     entities = {e["entity_id"]: e for e in parse_pep_targets_csv(str(csv_file))}
@@ -142,7 +150,9 @@ def test_parse_pep_targets_csv(tmp_path):
     assert "Wladimir Putin" in putin["aliases"]["high_priority"]
     assert putin["dates_of_birth"] == ["1952-10-07"]
     assert putin["countries"]["citizenship"] == ["RU"]
-    assert putin["designation_reasons"] == "Personne Politiquement Exposée (PEP)"
+    assert putin["pep_qualite"] == QUALITE_NON_PRECISEE
+    assert putin["designation_reasons"] == motif_de_fiche(QUALITE_NON_PRECISEE)
+    assert "Personne Politiquement Exposée (PEP)" != putin["designation_reasons"]
     assert putin["origin"] == "OpenSanctions PEP"
     # Champs etendus : fonction PEP, premiere apparition, contacts
     assert putin["pep_role"] == "President of Russia"

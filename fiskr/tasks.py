@@ -18,6 +18,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import update as sa_update
+
 from fiskr import jobs
 from fiskr.database import Snapshot
 from fiskr.settings import bump_watchlist_epoch
@@ -199,7 +201,24 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
             ReviewRecord.snapshot_id == snapshot_id, ReviewRecord.decision == "APPROVED"
         ).order_by(ReviewRecord.id.desc()).first()
         perime = bool(dossier and (dossier.backtest_validity or {}).get("stale"))
-        emit(session, "snapshot_approved", {
+        # UNE approbation, UNE notification. Ce travail se rejoue : remis en
+        # file apres un arret du demon (jobs.requeue_stale), relance a la main
+        # apres une erreur ; il emettait a chaque passage. Reproduit : remis en
+        # file apres un arret, deux notifications pour un dossier. Releve en
+        # production : 560 notifications `snapshot_approved` pour 251 dossiers
+        # (la cause n'y est pas etablie ; la marque vaut pour toute reprise).
+        # La marque du lot est posee par une mise a jour CONDITIONNELLE, laissee
+        # ouverte : `emit` ecrit sa ligne au journal et valide la transaction,
+        # la marque part avec elle ou pas du tout. Un passage qui echoue avant
+        # d'emettre ne pose rien, le suivant emet ; deux passages simultanes
+        # s'arbitrent sur le verrou de la ligne, un seul trouve la marque vide.
+        marque = session.execute(
+            sa_update(Snapshot)
+            .where(Snapshot.snapshot_id == snapshot_id,
+                   Snapshot.approval_notified_at.is_(None))
+            .values(approval_notified_at=datetime.utcnow())
+            .execution_options(synchronize_session=False))
+        notifiee = marque.rowcount == 1 and emit(session, "snapshot_approved", {
             "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
             "Fiches": snap.record_count, "Exclusions": excluded_count,
             "Approuvé par": username,
@@ -212,7 +231,11 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
             "Fiches radiées": radiations["delisted"],
             "Alertes ouvertes sur une fiche radiée": radiations["open_alerts_delisted"],
             "Mesures de gel : radiation à examiner": radiations["gel_measures_flagged"],
-        })
+        }) is not None
+        if not notifiee:
+            # Rien d'ecrit (evenement coupe, journal indisponible) ou deja
+            # notifiee : la marque n'affirme pas une notification absente.
+            session.rollback()
         ctx.set_result({"snapshot_id": snapshot_id, "rescreen": rescreen_result,
                         "radiations": radiations})
     finally:
@@ -492,6 +515,35 @@ def lookback_task(ctx: jobs.JobContext, *, file_type: Optional[str] = None,
         session.close()
 
 
+@jobs.task("entity_rescreen")
+def entity_rescreen_task(ctx: jobs.JobContext, *, entity_pks: List[int], geste: str,
+                         reference_avant: Optional[str] = None,
+                         username: str = "?") -> None:
+    """
+    Re-criblage du referentiel contre des fiches listees corrigees ou ajoutees
+    a la main (cf. rescreen.recribler_apres_un_geste_manuel) : la fiche
+    nouvelle rencontre les clients sans attendre un lookback, et la couverture
+    redevient exacte a la fin du passage.
+    """
+    from fiskr.rescreen import GESTE_AJOUT, recribler_apres_un_geste_manuel
+
+    session = ctx.session()
+    try:
+        ctx.update(phase="RESCREEN")
+        result = recribler_apres_un_geste_manuel(
+            session, entity_pks, geste=geste, reference_avant=reference_avant,
+            progress=lambda done, total: ctx.update(
+                phase="RESCREEN", processed=done, total=total),
+            started_by=username)
+        nature = "ajoutée(s)" if geste == GESTE_AJOUT else "corrigée(s)"
+        ctx.set_result({"message": f"{result.get('clients_screened', 0)} client(s) "
+                                   f"confronté(s) à {result.get('changed_entities', 0)} "
+                                   f"fiche(s) {nature}.",
+                        **result})
+    finally:
+        session.close()
+
+
 @jobs.task("client_screening")
 def client_screening_task(ctx: jobs.JobContext, *, snapshot_id: str,
                           username: str = "?") -> None:
@@ -514,9 +566,13 @@ def client_screening_task(ctx: jobs.JobContext, *, snapshot_id: str,
                 phase="RESCREEN", processed=done, total=total, snapshot_id=snapshot_id),
             started_by=username)
         cribles = int(result.get("clients_screened") or 0)
+        # Les parties liees (fiskr/parties.py) sont criblees avec leur client :
+        # le compte les dit, sans les confondre avec les clients.
+        parties = int(result.get("parties_screened") or 0)
         message = (f"{cribles} client(s) nouveau(x) ou modifié(s) criblé(s) contre les listes "
-                   f"en production ; {result.get('unchanged_clients', 0)} inchangé(s), non "
-                   f"recriblé(s).")
+                   f"en production"
+                   + (f", avec {parties} partie(s) liée(s)" if parties else "")
+                   + f" ; {result.get('unchanged_clients', 0)} inchangé(s), non recriblé(s).")
         mouvements = sum(int(result.get(cle) or 0)
                          for cle in ("new_alerts", "redetected_alerts", "closed_by_rule"))
         if mouvements:

@@ -181,12 +181,16 @@ def test_la_memoire_ne_s_ecrit_qu_apres_un_import_abouti():
 
 def test_la_correspondance_traverse_l_endpoint_le_job_et_le_lecteur():
     """Une correspondance validée dans l'aperçu mais perdue en route ferait
-    écrire à l'import autre chose que ce que l'aperçu a montré."""
+    écrire à l'import autre chose que ce que l'aperçu a montré.
+
+    Ajusté avec le fichier des parties liées (CLIENT_PARTIES) : une troisième
+    lecture CSV de l'import (liste UE, référentiel clients, parties liées),
+    qui porte la correspondance comme les deux autres."""
     src = open(os.path.join(os.path.dirname(STATIC), "api.py"), encoding="utf-8").read()
     assert "column_mapping: Optional[str] = Form(None)" in src
     assert '"column_mapping": correspondance or None,' in src, "transmise au job"
-    assert src.count("mapping_dict=column_mapping or None") == 2, \
-        "les deux lectures CSV de l'import doivent la porter"
+    assert src.count("mapping_dict=column_mapping or None") == 3, \
+        "les trois lectures CSV de l'import doivent la porter"
     taches = open(os.path.join(os.path.dirname(STATIC), "tasks.py"), encoding="utf-8").read()
     assert "column_mapping=None" in taches and "column_mapping=column_mapping" in taches
 
