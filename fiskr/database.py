@@ -1791,6 +1791,17 @@ def _composition_de(wl_hash: str):
     return reference.composition_journal() if reference is not None else None
 
 
+def _arbre_journalise(scoring_result: dict, identite: dict) -> dict:
+    """Arbre de decision tel qu'il est journalise : le resultat du moteur et
+    l'identification du client que ce criblage a comparee
+    (`empreintes.identification_client`). Copie : le resultat lui-meme
+    retourne a l'appelant, et la reponse de criblage ne doit pas grossir d'une
+    identification par correspondance."""
+    if not identite:
+        return scoring_result
+    return {**scoring_result, "client_identification": identite}
+
+
 def log_compliance_decision(
     db,
     client: dict,
@@ -1811,7 +1822,8 @@ def log_compliance_decision(
         cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
         
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
-    
+    from fiskr.empreintes import identification_client
+
     db_entry = AuditTrail(
         client_id=client.get("entity_id") or client.get("client_id"),
         client_name=cname or "Inconnu",
@@ -1821,7 +1833,7 @@ def log_compliance_decision(
         base_score=scoring_result.get("base_score", 0.0),
         final_score=scoring_result.get("final_score", 0.0),
         status=scoring_result.get("status", "NO_MATCH"),
-        decision_tree=scoring_result,
+        decision_tree=_arbre_journalise(scoring_result, identification_client(client)),
         config_state=config_audit,
         watchlist_version=wl_version,
         watchlist_hash=wl_hash,
@@ -1858,6 +1870,10 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
     client_ref = client.get("entity_id") or client.get("client_id")
     composition = _composition_de(wl_hash)
+    # Une seule lecture du client pour tout le lot : elle est la meme sur
+    # chaque correspondance d'un criblage.
+    from fiskr.empreintes import identification_client
+    identite = identification_client(client)
 
     lignes = []
     for watchlist_entry, scoring_result in decisions:
@@ -1870,7 +1886,7 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
             base_score=scoring_result.get("base_score", 0.0),
             final_score=scoring_result.get("final_score", 0.0),
             status=scoring_result.get("status", "NO_MATCH"),
-            decision_tree=scoring_result,
+            decision_tree=_arbre_journalise(scoring_result, identite),
             config_state=config_audit,
             watchlist_version=wl_version,
             watchlist_hash=wl_hash,

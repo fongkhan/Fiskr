@@ -137,6 +137,28 @@ def _canonique(valeur: Any) -> Any:
     return _canonique(str(valeur))
 
 
+def identification_client(client: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ce que l'empreinte resume, en clair : les elements d'identification du
+    client que le moteur lit, tels que CE criblage les recoit. Journalise avec
+    chaque decision (fiskr/database.py) : pour un client connu seulement par
+    l'appel temps reel — hors referentiel, comme les criblages manuels —, la
+    ligne d'audit etait la seule trace, et elle ne portait que son nom. La
+    comparaison client / fiche de l'alerte n'avait rien d'autre a montrer.
+
+    Memes champs et memes absences que l'empreinte (vide, NULL et drapeau a
+    faux ne disent rien) ; valeurs telles que saisies, pour etre relues.
+    """
+    identite = {}
+    for champ in champs_client_cribles():
+        valeur = client.get(champ)
+        if _canonique(valeur) is None:
+            continue
+        identite[champ] = valeur if isinstance(valeur, (str, int, float, bool, list, dict)) \
+            else str(valeur)
+    return identite
+
+
 def empreinte_client(client: Dict[str, Any]) -> str:
     """Empreinte des elements d'identification du client que le moteur lit."""
     identite = {}

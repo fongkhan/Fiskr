@@ -1060,6 +1060,12 @@
  <p class="section-desc">Renseignez les données du tiers pour évaluer son niveau de risque et de correspondance.</p>
  
  <form id="screening-form" onsubmit="handleScreening(event)">
+ <div class="form-group">
+ <label for="client-id">Identifiant client</label>
+ <input type="text" id="client-id" list="client-id-suggestions" maxlength="100" autocomplete="off" placeholder="Rechercher dans le référentiel (nom ou identifiant)…" oninput="chercherClientDuReferentiel()">
+ <datalist id="client-id-suggestions"></datalist>
+ <small id="client-id-hint" style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Vide : identifiant calculé à partir du nom normalisé, de la date de naissance et du type.</small>
+ </div>
  <div class="form-row">
  <div class="form-group">
  <label for="client-type">Type d'Entité *</label>
@@ -1258,6 +1264,7 @@
  </div>
 
  <!-- Continuité criblage -> alerte : lien direct vers l'alerte ouverte -->
+ <div id="screening-client-id-note" class="hidden" style="margin: 0.5rem 0 0;"></div>
  <div id="screening-alert-link" class="hidden" style="margin: 0.75rem 0;"></div>
  <div id="screening-restriction-note" class="hidden" style="margin: 0.25rem 0 0.75rem;"></div>
 
@@ -2597,9 +2604,18 @@
  <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La déclaration est due « immédiatement » après la confirmation (CMF L.562-4). Au-delà de ce délai, une mesure non déclarée déclenche une notification immédiate et bloque la mise en service. De 1 à 72 heures.</small>
  </div>
  <div class="form-group" style="margin-top: 0.75rem;">
- <label for="setting-close-reasons">Motifs de clôture proposés aux analystes</label>
- <textarea id="setting-close-reasons" rows="5" placeholder="Un motif par ligne…"></textarea>
- <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Un motif par ligne. Proposés au moment de la décision : le clic remplit le commentaire, qui reste éditable. Vider la liste retire les suggestions.</small>
+ <label for="setting-close-reasons-fp">Motifs de clôture : faux positif</label>
+ <textarea id="setting-close-reasons-fp" rows="4" placeholder="Un motif par ligne…"></textarea>
+ </div>
+ <div class="form-group" style="margin-top: 0.5rem;">
+ <label for="setting-close-reasons-confirmed">Motifs de clôture : vrai positif</label>
+ <textarea id="setting-close-reasons-confirmed" rows="3" placeholder="Un motif par ligne…"></textarea>
+ </div>
+ <div class="form-group" style="margin-top: 0.5rem;">
+ <label for="setting-close-reasons-both">Motifs de clôture : les deux décisions</label>
+ <textarea id="setting-close-reasons-both" rows="2" placeholder="Un motif par ligne…"></textarea>
+ <small id="setting-close-reasons-unclassified" class="hidden" style="color: var(--color-warning); display: block; margin-top: 0.3rem;"></small>
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Un motif par ligne. Chaque dialogue de décision ne propose que les motifs de sa décision : le clic remplit le commentaire, qui reste éditable. Un commentaire qui cite un motif réservé à l'autre décision est refusé. Vider les listes retire les suggestions.</small>
  </div>
  <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);"><svg class="ui-icon" aria-hidden="true"><use href="#i-bell"></use></svg> Notifications métier (email / webhooks)</h3>
  <p class="section-desc" style="margin-bottom: 0.75rem;">Un mail à chaque étape de la production des listes, du criblage et du filtrage. Les étapes structurantes partent immédiatement ; les étapes à fort volume sont regroupées dans un récapitulatif périodique. Les destinataires sont déduits des rôles (adresse email du compte), avec repli sur les variables SMTP globales.</p>

@@ -372,7 +372,11 @@ function listTypeFilterOptions(withUnknown) {
 
 // ------------------ NOTIFICATIONS INTÉGRÉES (toasts & dialogs) ------------------
 
-function showToast(message, type = "info", durationMs = 4500) {
+// `action` (facultatif) : { label, suffixe, run } — un bouton dans le toast.
+// « Criblage terminé — alerte #28 » n'était pas cliquable : il fallait aller
+// chercher l'alerte dans la file. Le libellé reste un nœud texte à part, pour
+// être traduit ; le suffixe (« #28 ») ne se traduit pas.
+function showToast(message, type = "info", durationMs = 4500, action = null) {
  const container = document.getElementById("toast-container");
  if (!container) { console.log(`[${type}] ${message}`); return; }
  const toast = document.createElement("div");
@@ -380,6 +384,15 @@ function showToast(message, type = "info", durationMs = 4500) {
  const icons = { success: uiIcon("check-circle"), error: uiIcon("warning"), info: uiIcon("info") };
  toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span class="toast-msg">${escapeHtml(message)}</span>`;
  toast.onclick = () => toast.remove();
+ if (action && typeof action.run === "function") {
+  const bouton = document.createElement("button");
+  bouton.type = "button";
+  bouton.className = "btn btn-sm btn-secondary";
+  bouton.style.cssText = "margin-left: 0.6rem; white-space: nowrap; flex-shrink: 0;";
+  bouton.innerHTML = `<span>${escapeHtml(action.label)}</span>${action.suffixe ? " " + escapeHtml(action.suffixe) : ""}`;
+  bouton.addEventListener("click", (e) => { e.stopPropagation(); toast.remove(); action.run(); });
+  toast.appendChild(bouton);
+ }
  container.appendChild(toast);
  setTimeout(() => {
  toast.classList.add("toast-out");
@@ -388,7 +401,7 @@ function showToast(message, type = "info", durationMs = 4500) {
 }
 
 // Modale générique : résout une Promise (bouton, Escape = annulation)
-function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password, suggestions }) {
+function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password, suggestions, checkbox }) {
  return new Promise((resolve) => {
  const overlay = document.getElementById("app-dialog");
  const titleEl = document.getElementById("app-dialog-title");
@@ -419,12 +432,16 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
  if (suggestions && suggestions.length) {
  const rangee = document.createElement("div");
  rangee.className = "dialog-suggestions";
- for (const motif of suggestions) {
+ for (const suggestion of suggestions) {
+ // Une suggestion est un texte, ou { texte, titre, marque } quand elle a
+ // quelque chose à dire d'elle-même (motif hérité, non classé).
+ const motif = typeof suggestion === "string" ? suggestion : suggestion.texte;
  const puce = document.createElement("button");
  puce.type = "button";
  puce.className = "suggestion-chip";
  puce.textContent = motif.length > 60 ? motif.slice(0, 60) + "…" : motif;
- puce.title = motif;
+ puce.title = (typeof suggestion !== "string" && suggestion.titre) || motif;
+ if (typeof suggestion !== "string" && suggestion.marque) puce.style.borderStyle = "dashed";
  puce.addEventListener("click", () => {
  inputEl.value = inputEl.value.trim() ? inputEl.value.trim() + " " + motif : motif;
  inputEl.focus();
@@ -435,12 +452,30 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
  }
  fieldWrap.appendChild(inputEl);
  }
+ // Case à cocher facultative ({ label, aide, coche }) : la promesse rend
+ // alors { value, checked } au lieu de la seule valeur.
+ let caseEl = null;
+ if (checkbox) {
+ const bloc = document.createElement("label");
+ bloc.style.cssText = "display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.75rem; font-size: 0.88rem; cursor: pointer;";
+ caseEl = document.createElement("input");
+ caseEl.type = "checkbox";
+ caseEl.id = "app-dialog-checkbox";
+ caseEl.checked = !!checkbox.coche;
+ // Les champs de la modale prennent toute la largeur : pas une case à cocher
+ caseEl.style.cssText = "margin-top: 0.2rem; width: auto; flex: 0 0 auto;";
+ const textes = document.createElement("span");
+ textes.innerHTML = `<strong>${escapeHtml(checkbox.label)}</strong>${checkbox.aide ? `<br><small style="color: var(--text-muted);">${escapeHtml(checkbox.aide)}</small>` : ""}`;
+ bloc.appendChild(caseEl);
+ bloc.appendChild(textes);
+ fieldWrap.appendChild(bloc);
+ }
 
  const cleanup = (value) => {
  overlay.classList.add("hidden");
  document.removeEventListener("keydown", onKey);
  okBtn.onclick = cancelBtn.onclick = null;
- resolve(value);
+ resolve(caseEl && value !== null && value !== false ? { value, checked: caseEl.checked } : value);
  };
  const onKey = (e) => { if (e.key === "Escape") cleanup(null); };
 
@@ -475,7 +510,7 @@ function promptDialog(title, options = {}) {
  return _openAppDialog({ title, message: options.message || "", input: !options.textarea,
  textarea: options.textarea, placeholder: options.placeholder,
  required: options.required !== false, password: options.password,
- suggestions: options.suggestions,
+ suggestions: options.suggestions, checkbox: options.checkbox,
  confirmLabel: options.confirmLabel || "Valider" });
 }
 
@@ -984,7 +1019,7 @@ const ALERT_EVENT_LABELS = {
  GEL_DECLARE: "Gel déclaré à la DG Trésor", GEL_LEVE: "Gel levé",
  GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
  GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
- WHITELIST_STALE: "Liste blanche à réexaminer",
+ WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
 };
 
 function alertEventLabel(action) {
@@ -4624,15 +4659,85 @@ async function handleAdhocScreen(event) {
  <td><strong>${(m.final_score ?? 0).toFixed ? m.final_score.toFixed(1) : m.final_score}%</strong></td>
  <td>${escapeHtml(m.watchlist_name || "—")}${m.hard_match ? ` <span class="badge-secondary">${_tr("Hard match")}</span>` : ""}</td>
  <td>${listTypeBadge(m.list_type)}</td>
- <td><span class="status-badge ${m.status === "ALERT" ? "alert" : "no_match"}">${escapeHtml(m.status || "")}</span></td>
+ <td><span class="status-badge ${m.status === "ALERT" ? "alert" : "no_match"}">${escapeHtml(_STATUTS_D_APERCU[m.status] || statusLabel(m.status))}</span></td>
  </tr>`).join("") + `</tbody></table></div>`;
  }
- results.innerHTML = entete + table;
+ // Passer au criblage réglementaire sans tout ressaisir
+ const versTrace = `<div style="margin-top: 0.6rem;"><button type="button" class="btn btn-sm btn-secondary" onclick="criblerEnTrace()">Cribler en tracé</button>
+ <small style="color: var(--text-muted); margin-left: 0.4rem;">Pré-remplit le formulaire complet ci-dessous : journal d'audit et alerte.</small></div>`;
+ results.innerHTML = entete + table + versTrace;
  } catch (e) {
  results.innerHTML = `<p class="anomaly-item warning">${_tr("Vérification impossible (réseau).")}</p>`;
  } finally {
  if (btn) { btn.disabled = false; btn.textContent = _tr("Vérifier"); }
  }
+}
+
+// L'aperçu n'ouvre aucune alerte : « Alerte » serait faux, et « ALERT » brut
+// ne se traduisait pas. Il dit où la fiche tombe par rapport au seuil.
+const _STATUTS_D_APERCU = { ALERT: "Au-dessus du seuil", NO_MATCH: "Sous le seuil" };
+
+// Vérification rapide → formulaire complet : il fallait tout ressaisir pour
+// passer au criblage tracé. Rien ne part tout seul : l'analyste relit, puis
+// lance le criblage (journalisé, alerte au-dessus du seuil).
+function criblerEnTrace() {
+ const nom = (document.getElementById("adhoc-name")?.value || "").trim();
+ const type = document.getElementById("adhoc-type")?.value || "I";
+ const fixer = (id, valeur) => { const el = document.getElementById(id); if (el) el.value = valeur; };
+ fixer("client-type", type === "E" ? "E" : "I");
+ if (typeof toggleFormFields === "function") toggleFormFields();
+ if (type === "E") {
+ fixer("client-companyname", nom);
+ fixer("client-firstname", ""); fixer("client-lastname", "");
+ } else {
+ // Même découpage que le quality gate : premier mot = prénom, le reste = nom
+ const mots = nom.split(/\s+/).filter(Boolean);
+ fixer("client-firstname", mots.length > 1 ? mots[0] : "");
+ fixer("client-lastname", mots.length > 1 ? mots.slice(1).join(" ") : (mots[0] || ""));
+ fixer("client-companyname", "");
+ }
+ fixer("client-dob", document.getElementById("adhoc-dob")?.value || "");
+ fixer("client-countries", (document.getElementById("adhoc-country")?.value || "").trim().toUpperCase());
+ fixer("client-id", "");
+ majIdentifiantClient();
+ const formulaire = document.getElementById("screening-form");
+ if (formulaire) formulaire.scrollIntoView({ behavior: "smooth", block: "start" });
+ document.getElementById(type === "E" ? "client-companyname" : "client-lastname")?.focus({ preventScroll: true });
+}
+
+// ------------------ IDENTIFIANT CLIENT DU CRIBLAGE MANUEL ------------------
+// Le formulaire tirait `SCREEN-<Math.random()*10000>` : en production, 24
+// décisions sur 28 sous un identifiant aléatoire, et deux alertes sur la même
+// fiche, au même score, jamais rapprochées. Un identifiant du référentiel se
+// choisit ici ; à défaut le serveur le CALCULE (nom normalisé, naissance,
+// type) et l'écran le dit.
+
+let _rechercheClientMinuteur = null;
+
+function majIdentifiantClient() {
+ const champ = document.getElementById("client-id");
+ const aide = document.getElementById("client-id-hint");
+ if (!champ || !aide) return;
+ aide.textContent = champ.value.trim()
+ ? _tr("Identifiant fourni : les criblages de ce client se rapprochent sous lui.")
+ : _tr("Vide : identifiant calculé à partir du nom normalisé, de la date de naissance et du type.");
+}
+
+function chercherClientDuReferentiel() {
+ majIdentifiantClient();
+ clearTimeout(_rechercheClientMinuteur);
+ const terme = (document.getElementById("client-id")?.value || "").trim();
+ const liste = document.getElementById("client-id-suggestions");
+ if (!liste || terme.length < 2) return;
+ _rechercheClientMinuteur = setTimeout(async () => {
+ try {
+ const response = await apiFetch(`/api/search/quick?q=${encodeURIComponent(terme)}&limit=8`, { silent: true });
+ if (!response.ok) return;
+ const data = await response.json();
+ liste.innerHTML = ((data.clients || {}).items || []).map(c =>
+ `<option value="${escapeHtml(c.client_id)}">${escapeHtml(c.name || "")}</option>`).join("");
+ } catch (e) { /* sans suggestions, la saisie libre reste possible */ }
+ }, 250);
 }
 
 async function handleScreening(event) {
@@ -4678,8 +4783,11 @@ async function handleScreening(event) {
  
  const altAddressesList = altAddressesStr ? altAddressesStr.split(";").map(a => a.trim()) : [];
  
+ // Identifiant choisi dans le référentiel ou saisi ; vide = calculé par le
+ // serveur (jamais tiré au hasard : la déduplication des alertes en dépend)
+ const clientIdSaisi = (document.getElementById("client-id")?.value || "").trim();
  const payload = {
- client_id: `SCREEN-${Math.floor(Math.random() * 10000)}`,
+ client_id: clientIdSaisi || null,
  client_type: clientType,
  client_first_name: clientType === "PP" ? firstName : "",
  client_last_name: clientType === "PP" ? lastName : "",
@@ -4745,6 +4853,15 @@ async function handleScreening(event) {
  resultsCard.classList.remove("hidden");
 
  renderScreeningResult(data);
+
+ // Sous quel identifiant ce criblage est journalisé — et s'il est calculé
+ const idNote = document.getElementById("screening-client-id-note");
+ if (idNote) {
+ idNote.innerHTML = data.client_id
+ ? `<small><span>${data.client_id_calcule ? "Identifiant calculé" : "Identifiant client"}</span> : <strong>${escapeHtml(data.client_id)}</strong>${data.client_id_calcule ? ` <span style="color: var(--text-muted);">(nom normalisé, date de naissance, type)</span>` : ""}</small>`
+ : "";
+ idNote.classList.toggle("hidden", !data.client_id);
+ }
 
  // Continuité criblage -> alerte : lien direct vers l'alerte ouverte
  const alertLink = document.getElementById("screening-alert-link");
@@ -6033,6 +6150,53 @@ function userRoles(user) {
  return (user.role || "").split(",").map(r => r.trim().toLowerCase()).filter(Boolean);
 }
 
+// Motifs de clôture, une case par décision. Un motif hérité que la migration
+// n'a pas pu classer (texte écrit avant que les motifs ne portent leur
+// décision) arrive dans « les deux » : l'écran le dit, l'enregistrement vaut
+// classement.
+const _CASES_DE_MOTIFS = [
+ ["setting-close-reasons-fp", ["FALSE_POSITIVE"]],
+ ["setting-close-reasons-confirmed", ["CONFIRMED"]],
+ ["setting-close-reasons-both", ["FALSE_POSITIVE", "CONFIRMED"]],
+];
+
+function _caseDuMotif(decisions) {
+ const fp = (decisions || []).includes("FALSE_POSITIVE"), vp = (decisions || []).includes("CONFIRMED");
+ return fp && vp ? "setting-close-reasons-both" : vp ? "setting-close-reasons-confirmed" : "setting-close-reasons-fp";
+}
+
+function afficherMotifsDeCloture(motifs) {
+ const parCase = {};
+ let aClasser = 0;
+ for (const m of motifs) {
+ const entree = typeof m === "string" ? { motif: m, decisions: ["FALSE_POSITIVE", "CONFIRMED"], a_classer: true } : m;
+ if (entree.a_classer) aClasser += 1;
+ const cle = _caseDuMotif(entree.decisions);
+ (parCase[cle] = parCase[cle] || []).push(entree.motif);
+ }
+ for (const [id] of _CASES_DE_MOTIFS) {
+ const el = document.getElementById(id);
+ if (el) el.value = (parCase[id] || []).join("\n");
+ }
+ const note = document.getElementById("setting-close-reasons-unclassified");
+ if (note) {
+ note.classList.toggle("hidden", !aClasser);
+ note.innerHTML = aClasser
+ ? `<strong>${aClasser}</strong> <span>motif(s) hérité(s) non classé(s) : ils sont proposés pour les deux décisions. Déplacez chacun dans la case de sa décision, puis enregistrez.</span>`
+ : "";
+ }
+}
+
+function motifsDeClotureSaisis() {
+ const motifs = [];
+ for (const [id, decisions] of _CASES_DE_MOTIFS) {
+ for (const ligne of (document.getElementById(id)?.value || "").split("\n")) {
+ if (ligne.trim()) motifs.push({ motif: ligne.trim(), decisions });
+ }
+ }
+ return motifs;
+}
+
 async function fetchIngestionSettings() {
  try {
  const response = await apiFetch("/api/settings/ingestion");
@@ -6087,8 +6251,7 @@ async function fetchIngestionSettings() {
  const qualityMinEl = document.getElementById("setting-quality-min");
  if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
  // SLA par priorité + notifications métier
- const motifsEl = document.getElementById("setting-close-reasons");
- if (motifsEl) motifsEl.value = (ingestionSettings.alert_close_reasons || []).join("\n");
+ afficherMotifsDeCloture(ingestionSettings.alert_close_reasons || []);
  const sla = ingestionSettings.alert_sla_hours || {};
  for (const [prio, id] of [["CRITICAL", "setting-sla-critical"], ["HIGH", "setting-sla-high"],
  ["MEDIUM", "setting-sla-medium"], ["LOW", "setting-sla-low"]]) {
@@ -6213,8 +6376,7 @@ async function saveIngestionSettings() {
  auto_backtest_panel: document.getElementById("setting-auto-backtest-panel")?.value ?? "",
  // 0 = pas de seuil : `|| 0` conserve bien la desactivation
  quality_min_score_pct: parseFloat(document.getElementById("setting-quality-min")?.value) || 0,
- alert_close_reasons: (document.getElementById("setting-close-reasons")?.value || "")
- .split("\n").map(m => m.trim()).filter(Boolean),
+ alert_close_reasons: motifsDeClotureSaisis(),
  alert_sla_hours: {
  CRITICAL: parseInt(document.getElementById("setting-sla-critical")?.value, 10) || 0,
  HIGH: parseInt(document.getElementById("setting-sla-high")?.value, 10) || 0,
@@ -7792,6 +7954,9 @@ async function rejectPendingSnapshot() {
 const DEFAULT_ALERT_FILTER = "OPEN,IN_PROGRESS,ESCALATED,PENDING_VALIDATION";
 let alertsFilterByChannel = { SCREENING: DEFAULT_ALERT_FILTER, FILTERING: DEFAULT_ALERT_FILTER };
 let currentAlertId = null;
+// Détail de l'alerte ouverte : la décision proposée et le client décident de
+// ce que les dialogues de décision offrent (case « liste blanche »).
+let currentAlertData = null;
 
 const ALERT_CHANNEL_CONF = {
  SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter",
@@ -8027,6 +8192,7 @@ async function openAlertModal(alertId) {
  showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
  return;
  }
+ currentAlertData = a;
  _memoriserRecent("alerte", a.id, `${a.client_name} × ${a.watchlist_name}`);
  const sousOnglet = (a.channel === "FILTERING") ? "filtering/alerts-filtering" : "screening/alerts-screening";
  const lienDossier = `${location.origin}${location.pathname}#${sousOnglet}/alerte-${a.id}`;
@@ -8081,7 +8247,8 @@ async function openAlertModal(alertId) {
  } else {
  actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
  // Faux positif avere : proposer la mise en liste blanche (reviseurs)
- if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer) {
+ // (sauf si la paire a été posée à la validation : un second clic serait refusé)
+ if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer && !(a.events || []).some(e => e.action === "WHITELISTED")) {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="openWhitelistModal('${escapeHtml(a.client_id || "")}', '${escapeHtml(a.watchlist_entity_id)}', '${escapeHtml(a.client_name)}', '${escapeHtml(a.watchlist_name)}')"> Mettre en liste blanche</button>`;
  }
  }
@@ -8116,6 +8283,7 @@ async function openAlertModal(alertId) {
  <a class="btn btn-sm btn-secondary" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)"> Rapport</a>
  </span>
  </p>
+ ${blocComparaison(a)}
  <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
  <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
@@ -8146,6 +8314,85 @@ async function openAlertModal(alertId) {
  } catch (e) {
  console.error("Error opening alert:", e);
  }
+}
+
+// ------------------ CLIENT ET PERSONNE LISTÉE CÔTE À CÔTE ------------------
+// L'alerte ne montrait que deux noms : la date de naissance du client se lisait
+// dans « Client 360° » (troisième modale empilée), celle de la personne listée
+// par la palette — environ neuf gestes par alerte pour cocher « identité
+// vérifiée ». Les lignes et leurs verdicts viennent du serveur
+// (fiskr/comparaison.py) : ce sont les comparaisons du moteur, pas une liste
+// tenue ici.
+
+const _COULEURS_DE_VERDICT = {
+ CONCORDANCE: ["var(--success-soft-text)", "rgba(34,197,94,0.08)"],
+ ECART: ["var(--color-alert)", "rgba(239,68,68,0.10)"],
+ NEUTRE: ["var(--text-muted)", ""],
+ ABSENT: ["var(--text-muted)", ""],
+ VIDE: ["var(--text-muted)", ""],
+};
+
+function _celluleDeComparaison(entrees) {
+ if (!entrees || !entrees.length) return '<span style="color: var(--text-muted);">—</span>';
+ return entrees.map(e => `<div><small style="color: var(--text-muted);">${escapeHtml(e.libelle)}</small> <span style="overflow-wrap: anywhere;">${escapeHtml((e.valeurs || []).join(", "))}</span></div>`).join("");
+}
+
+function blocComparaison(a) {
+ const c = a.comparison;
+ if (!c) return "";
+ if (!c.available) {
+  return `<h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Client et personne listée</h3>
+  <p class="section-desc">${escapeHtml(c.reason || "")}</p>`;
+ }
+ const lignes = (c.lignes || []).map(l => {
+  const [couleur, fond] = _COULEURS_DE_VERDICT[l.verdict] || ["var(--text-muted)", ""];
+  let verdict = "";
+  if (l.famille === "names") {
+   verdict = `<span>Score de nom</span> <strong>${l.score_de_nom != null ? Number(l.score_de_nom).toFixed(1) : "—"} %</strong>`;
+  } else if (l.verdict) {
+   verdict = `<strong style="color: ${couleur};">${escapeHtml(l.verdict_libelle || l.verdict)}</strong>`
+    + (l.detail ? `<br><small style="color: var(--text-muted);">${escapeHtml(l.detail)}</small>` : "");
+  }
+  return `<tr data-famille="${escapeHtml(l.famille)}" data-verdict="${escapeHtml(l.verdict || "")}" style="${fond ? `background: ${fond};` : ""}">
+   <th scope="row" style="text-align: left; white-space: nowrap; font-weight: 600;">${escapeHtml(l.libelle)}</th>
+   <td>${_celluleDeComparaison(l.client)}</td>
+   <td>${_celluleDeComparaison(l.fiche)}</td>
+   <td>${verdict}</td>
+  </tr>`;
+ }).join("");
+ const contexte = (c.contexte || []).map(e =>
+  `<div class="details-item"><strong>${escapeHtml(e.libelle)}</strong><span style="overflow-wrap: anywhere;">${escapeHtml((e.valeurs || []).join(", "))}</span></div>`).join("");
+ const liens = [
+  c.watchlist_db_id ? `<button class="btn btn-sm btn-secondary" onclick="ouvrirFicheDepuisLAlerte(${Number(c.watchlist_db_id)})">Fiche listée complète</button>` : "",
+  c.watchlist_current_db_id ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="ouvrirFicheDepuisLAlerte(${Number(c.watchlist_current_db_id)})">Version en production</button>` : "",
+ ].join(" ");
+ const notes = (c.notes || []).map(n => `<div class="anomaly-item warning" style="font-size: 0.82rem;">${escapeHtml(n)}</div>`).join("");
+ return `
+ <div id="alert-comparison" style="margin: 0.75rem 0 0.5rem;">
+  <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+   <h3 style="font-size: 0.95rem; margin: 0;">Client et personne listée</h3>
+   <span style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap;">${liens}</span>
+  </div>
+  <p style="font-size: 0.78rem; color: var(--text-muted); margin: 0.3rem 0 0.4rem;">
+   <span>Client</span> : <span>${escapeHtml(c.client_source_label || "")}</span> · <span>Fiche</span> : <span>${escapeHtml(c.watchlist_source_label || "")}</span>
+  </p>
+  ${notes}
+  <div class="table-container">
+   <table class="comparison-table">
+    <thead><tr><th></th><th>Client</th><th>Personne listée</th><th>Verdict du moteur</th></tr></thead>
+    <tbody>${lignes}</tbody>
+   </table>
+  </div>
+  ${contexte ? `<div class="details-grid" style="margin-top: 0.5rem;">${contexte}</div>` : ""}
+ </div>`;
+}
+
+// La fiche s'ouvre PAR-DESSUS l'alerte : la modale de détail précède celle de
+// l'alerte dans la page et, à hauteur égale, passait dessous.
+function ouvrirFicheDepuisLAlerte(dbId) {
+ const modale = document.getElementById("details-modal");
+ if (modale) modale.style.zIndex = "1001";
+ showWatchlistDetails({ id: dbId });
 }
 
 function closeAlertModal() {
@@ -8675,27 +8922,94 @@ async function chargerMotifsDeCloture() {
  return [];
 }
 
+// Les motifs de CETTE décision seulement : la liste plate offrait « Correspondance
+// confirmée » au faux positif et l'homonymie au vrai positif — un clic distrait
+// produisait un faux positif motivé par une confirmation. Un motif hérité que
+// la migration n'a pas pu classer vaut pour les deux, et le dit.
+function motifsDeLaDecision(motifs, decision) {
+ return (motifs || [])
+ .map(m => typeof m === "string" ? { motif: m, decisions: ["FALSE_POSITIVE", "CONFIRMED"], a_classer: true } : m)
+ .filter(m => (m.decisions || []).includes(decision))
+ .map(m => m.a_classer
+ ? { texte: m.motif, marque: true, titre: "Motif non classé : proposé pour les deux décisions (Paramètres → motifs de clôture)." }
+ : m.motif);
+}
+
+// « Mémoriser en liste blanche » : au moment où le faux positif est VALIDÉ.
+// Sans elle, l'alerte n° 20, close en faux positif après 4-yeux, s'est
+// rouverte dix minutes plus tard en n° 28 sur la même paire (« Recribler ce
+// client ») ; la liste blanche ne se proposait qu'après coup, par un bouton
+// séparé. La pose suit le flux existant côté serveur (justification,
+// empreintes de ce que la décision couvre).
+function caseListeBlanche() {
+ const pieceExigee = !!(ingestionSettings && ingestionSettings.whitelist_file_required);
+ return {
+ label: "Mémoriser en liste blanche",
+ aide: pieceExigee
+ ? "Pièce justificative exigée : le formulaire de liste blanche s'ouvrira après la validation."
+ : "La paire reprend cette motivation. Sans elle, le prochain criblage de ce client rouvrira une alerte sur cette fiche.",
+ };
+}
+
+function _estReviseur() {
+ const roles = userRoles(currentUser);
+ return roles.includes("admin") || roles.includes("reviewer");
+}
+
+// Pièce exigée par le réglage : le JSON de la décision ne la transporte pas,
+// la paire se pose donc par le formulaire existant, juste après la clôture,
+// pré-rempli de la motivation.
+function _poserApresCloture(a, motivation) {
+ openWhitelistModal(a.client_id || "", a.watchlist_entity_id, a.client_name, a.watchlist_name);
+ const champ = document.getElementById("whitelist-justification");
+ if (champ) champ.value = motivation || "";
+}
+
 async function proposeAlertDecision(decision) {
  const label = decision === "CONFIRMED" ? "vrai positif" : "faux positif";
- const comment = await promptDialog(`Proposer « ${label} »`, {
+ const a = currentAlertData || {};
+ // 4-yeux coupé : la proposition CLÔT le faux positif, c'est le moment de valider
+ const clotureDirecte = ingestionSettings && ingestionSettings.alert_four_eyes_required === false;
+ const offrirListeBlanche = decision === "FALSE_POSITIVE" && clotureDirecte && _estReviseur() && !!a.client_id;
+ const reponse = await promptDialog(`Proposer « ${label} »`, {
  message: "Commentaire obligatoire motivant la décision proposée (validation 4-yeux ensuite).",
  textarea: true, placeholder: "Motivation réglementaire de la décision...",
- suggestions: await chargerMotifsDeCloture()
+ suggestions: motifsDeLaDecision(await chargerMotifsDeCloture(), decision),
+ checkbox: offrirListeBlanche ? caseListeBlanche() : null,
  });
- if (comment === null) return;
- const data = await _postAlertAction("propose", { decision, comment });
- if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
+ if (reponse === null) return;
+ const comment = offrirListeBlanche ? reponse.value : reponse;
+ const memoriser = offrirListeBlanche && reponse.checked;
+ const pieceExigee = !!(ingestionSettings && ingestionSettings.whitelist_file_required);
+ const corps = { decision, comment };
+ if (memoriser && !pieceExigee) corps.whitelist = {};
+ const data = await _postAlertAction("propose", corps);
+ if (data) {
+ showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues();
+ if (memoriser && pieceExigee) _poserApresCloture(a, comment);
+ }
 }
 
 async function validateAlertDecision(approve) {
- const comment = await promptDialog(approve ? "Valider la décision (4-yeux)" : "Refuser et renvoyer en analyse", {
+ const a = currentAlertData || {};
+ const offrirListeBlanche = approve && a.proposed_decision === "FALSE_POSITIVE" && !!a.client_id;
+ const reponse = await promptDialog(approve ? "Valider la décision (4-yeux)" : "Refuser et renvoyer en analyse", {
  message: approve ? "Commentaire (optionnel)." : "Motif du refus (obligatoire) — l'alerte repartira en analyse.",
  textarea: true, required: !approve,
- placeholder: approve ? "Commentaire éventuel..." : "Motif du refus..."
+ placeholder: approve ? "Commentaire éventuel..." : "Motif du refus...",
+ checkbox: offrirListeBlanche ? caseListeBlanche() : null,
  });
- if (comment === null) return;
- const data = await _postAlertAction("validate", { approve, comment });
- if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
+ if (reponse === null) return;
+ const comment = offrirListeBlanche ? reponse.value : reponse;
+ const memoriser = offrirListeBlanche && reponse.checked;
+ const pieceExigee = !!(ingestionSettings && ingestionSettings.whitelist_file_required);
+ const corps = { approve, comment };
+ if (memoriser && !pieceExigee) corps.whitelist = {};
+ const data = await _postAlertAction("validate", corps);
+ if (data) {
+ showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues();
+ if (memoriser && pieceExigee) _poserApresCloture(a, comment || a.proposal_comment);
+ }
 }
 
 // ------------------ LISTE BLANCHE CLIENT x LISTÉ (GOOD GUYS) ------------------
@@ -12625,14 +12939,28 @@ async function recriblerClient(clientId) {
  showToast("Erreur : " + (data.detail || "criblage impossible."), "error");
  return;
  }
- const statut = data.status || (data.best_match || {}).status || "—";
- if (statut === "ALERT") {
- showToast(`Criblage terminé : correspondance au-dessus du seuil${data.alert_id ? ` — alerte #${data.alert_id}` : ""}.`, "warning", 7000);
+ // L'alerte à instruire : celle de la meilleure correspondance que la liste
+ // blanche n'a pas absorbée (`best_alert`), à défaut celle de la meilleure.
+ const alerteId = (data.best_alert && data.best_alert.alert_id) || data.alert_id;
+ if (alerteId) {
+ showToast("Criblage terminé : correspondance au-dessus du seuil.", "warning", 9000, {
+ label: "Ouvrir l'alerte", suffixe: `#${alerteId}`,
+ run: () => {
+ document.getElementById("client360-modal")?.classList.add("hidden");
+ switchTab("screening"); switchSubTab("screening", "alerts-screening");
+ openAlertModal(alerteId);
+ },
+ });
  refreshAlertQueues?.();
+ } else if (data.whitelisted) {
+ showToast("Criblage terminé : correspondance couverte par la liste blanche (journalisée, sans alerte).", "success", 6000);
  } else {
  showToast("Criblage terminé : aucune correspondance au-dessus du seuil.", "success", 5000);
  }
  refreshSidebarCounters?.();
+ // La vue 360 ouverte montre le criblage qui vient d'être journalisé
+ const vue360 = document.getElementById("client360-modal");
+ if (vue360 && !vue360.classList.contains("hidden")) openClient360(clientId);
  } catch (e) {
  console.error("Rescreen client error:", e);
  showToast("Erreur réseau pendant le criblage.", "error");

@@ -69,17 +69,32 @@ def client():
 # ------------------------------------------------------- motifs de clôture
 
 def test_la_bibliotheque_par_defaut_existe_et_reste_editable():
+    # Les motifs portent desormais leur decision (tests/test_decider_sur_pieces.py) :
+    # la longueur bornee est celle du TEXTE du motif.
     assert len(DEFAULT_ALERT_CLOSE_REASONS) >= 3
-    assert all(len(m) <= 300 for m in DEFAULT_ALERT_CLOSE_REASONS)
+    assert all(len(m["motif"]) <= 300 for m in DEFAULT_ALERT_CLOSE_REASONS)
 
 
 def test_les_motifs_se_reglent_et_se_lisent(client):
+    """Réécrit quand les motifs ont porté leur décision : ce test relisait une
+    liste plate de chaînes, celle-là même qui proposait « Correspondance
+    confirmée » au faux positif. Son intention demeure — ce qui s'écrit se
+    relit, nettoyé —, et une simple chaîne écrite par un ancien client est
+    classée comme à la migration : inconnue de la bibliothèque, elle vaut pour
+    les deux décisions et le dit."""
     _connecte("admin")
     reponse = client.put("/api/settings/ingestion", json={
-        "alert_close_reasons": ["  Motif A  ", "", "Motif B"]})
+        "alert_close_reasons": ["  Motif A  ", "",
+                                {"motif": " Motif B ", "decisions": ["CONFIRMED"]}]})
     assert reponse.status_code == 200, reponse.text
     lu = client.get("/api/settings/ingestion").json()
-    assert lu["alert_close_reasons"] == ["Motif A", "Motif B"]
+    assert lu["alert_close_reasons"] == [
+        {"motif": "Motif A", "decisions": ["FALSE_POSITIVE", "CONFIRMED"], "a_classer": True},
+        {"motif": "Motif B", "decisions": ["CONFIRMED"]},
+    ]
+    inconnue = client.put("/api/settings/ingestion", json={
+        "alert_close_reasons": [{"motif": "Motif C", "decisions": ["PEUT_ETRE"]}]})
+    assert inconnue.status_code == 400
 
 
 def test_un_analyste_lit_les_motifs_sans_etre_admin(client):

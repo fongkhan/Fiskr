@@ -5,6 +5,7 @@ La ligne AppSetting en base gagne toujours sur la valeur de config.yaml, qui ne
 sert que de valeur par defaut tant qu'aucun admin n'a modifie le reglage.
 """
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from fiskr.config import config
@@ -167,27 +168,114 @@ def gel_declaration_delai_heures(db) -> int:
 # et reste editable — la motivation reglementaire finale appartient a
 # l'analyste. L'interet est double : moins de re-frappe, et des statistiques
 # de cloture qui parlent le meme vocabulaire d'un analyste a l'autre.
+#
+# CHAQUE MOTIF PORTE LA DECISION QU'IL MOTIVE. La bibliotheque etait une liste
+# plate, proposee telle quelle aux deux decisions : le dialogue « Proposer faux
+# positif » offrait « Correspondance confirmee : identite alignee… », et
+# « vrai positif » offrait les motifs d'homonymie. Un clic distrait produisait
+# un faux positif justifie par une confirmation — et le serveur l'acceptait.
+# Le dialogue ne propose plus que les motifs de la decision, et le serveur
+# refuse un commentaire qui cite un motif reserve a l'autre.
 SETTING_ALERT_CLOSE_REASONS = "alerts.close_reasons"
+DECISION_FAUX_POSITIF = "FALSE_POSITIVE"
+DECISION_VRAI_POSITIF = "CONFIRMED"
+DECISIONS_DE_CLOTURE = (DECISION_FAUX_POSITIF, DECISION_VRAI_POSITIF)
 DEFAULT_ALERT_CLOSE_REASONS = [
-    "Homonymie : date de naissance incompatible avec la fiche listée.",
-    "Homonymie : nationalité et pays de résidence incompatibles.",
-    "Personne morale distincte : n° d'immatriculation différent.",
-    "Client déjà instruit : correspondance couverte par la liste blanche.",
-    "Correspondance confirmée : identité alignée sur la fiche listée (pièces au dossier).",
+    {"motif": "Homonymie : date de naissance incompatible avec la fiche listée.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    {"motif": "Homonymie : nationalité et pays de résidence incompatibles.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    {"motif": "Personne morale distincte : n° d'immatriculation différent.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    # Une paire de liste blanche memorise un faux positif deja instruit.
+    {"motif": "Client déjà instruit : correspondance couverte par la liste blanche.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    {"motif": "Correspondance confirmée : identité alignée sur la fiche listée (pièces au dossier).",
+     "decisions": [DECISION_VRAI_POSITIF]},
 ]
 _MAX_MOTIFS = 50
 _MAX_MOTIF_LONGUEUR = 300
+
+
+def _forme_du_motif(texte: str) -> str:
+    """Forme de comparaison d'un motif : casse, blancs (insecables compris) et
+    ponctuation finale ne le distinguent pas."""
+    return " ".join(str(texte).split()).casefold().rstrip(" .;")
+
+
+def motifs_de_cloture(valeur) -> list:
+    """
+    Motifs sous leur forme canonique : [{"motif", "decisions"[, "a_classer"]}].
+
+    Migration des motifs anterieurs, simples chaines sans decision : un motif
+    de la bibliotheque livree reprend son classement ; un motif ecrit par
+    l'administrateur ne peut pas etre classe sans deviner — il s'applique aux
+    DEUX decisions et le dit (`a_classer`), jusqu'a ce qu'on le classe. Deux
+    entrees du meme motif se fondent (decisions reunies).
+    """
+    livres = {_forme_du_motif(m["motif"]): m["decisions"] for m in DEFAULT_ALERT_CLOSE_REASONS}
+    sortie, rangs = [], {}
+    for brut in (valeur or [])[:_MAX_MOTIFS]:
+        a_classer = False
+        if isinstance(brut, dict):
+            texte = str(brut.get("motif") or "").strip()
+            decisions = [d for d in DECISIONS_DE_CLOTURE if d in (brut.get("decisions") or [])]
+            a_classer = bool(brut.get("a_classer")) or not decisions
+        else:
+            texte = str(brut or "").strip()
+            decisions = list(livres.get(_forme_du_motif(texte), ()))
+            a_classer = not decisions
+        if not texte:
+            continue
+        if a_classer and not decisions:
+            decisions = list(DECISIONS_DE_CLOTURE)
+        texte = texte[:_MAX_MOTIF_LONGUEUR]
+        cle = _forme_du_motif(texte)
+        if cle in rangs:
+            deja = sortie[rangs[cle]]
+            deja["decisions"] = [d for d in DECISIONS_DE_CLOTURE
+                                 if d in deja["decisions"] or d in decisions]
+            continue
+        entree = {"motif": texte, "decisions": decisions}
+        if a_classer:
+            entree["a_classer"] = True
+        rangs[cle] = len(sortie)
+        sortie.append(entree)
+    return sortie
 
 
 def alert_close_reasons(db) -> list:
     """Motifs actifs, nettoyes et bornes. Le defaut sert tant que l'admin n'a
     rien ecrit ; une liste VIDE enregistree signifie « pas de suggestions »."""
     value = get_setting_with_source(db, SETTING_ALERT_CLOSE_REASONS, None)["value"]
-    if value is None:
-        return list(DEFAULT_ALERT_CLOSE_REASONS)
-    if not isinstance(value, list):
-        return list(DEFAULT_ALERT_CLOSE_REASONS)
-    return [str(m).strip()[:_MAX_MOTIF_LONGUEUR] for m in value[:_MAX_MOTIFS] if str(m).strip()]
+    if value is None or not isinstance(value, list):
+        return [dict(m) for m in DEFAULT_ALERT_CLOSE_REASONS]
+    return motifs_de_cloture(value)
+
+
+def motifs_d_une_autre_decision(db, decision: str, *textes: Optional[str]) -> list:
+    """
+    Les motifs de la bibliotheque, reserves a une AUTRE decision que
+    `decision`, que ces textes citent. Le motif choisi s'insere tel quel dans
+    le commentaire (le dialogue remplit le champ) : c'est donc le commentaire
+    qui porte la motivation, quel que soit le chemin — dialogue, API, ancien
+    onglet reste ouvert. Un motif cite entre deux bornes de mot, pour qu'un
+    motif court ne se trouve pas au milieu d'un autre mot.
+    """
+    corpus = [_forme_du_motif(t) for t in textes if t and str(t).strip()]
+    if not corpus:
+        return []
+    trouves = []
+    for entree in alert_close_reasons(db):
+        if decision in entree["decisions"]:
+            continue
+        forme = _forme_du_motif(entree["motif"])
+        if not forme:
+            continue
+        motif = re.compile(r"(?<!\w)" + re.escape(forme) + r"(?!\w)")
+        if any(motif.search(texte) for texte in corpus):
+            trouves.append(entree["motif"])
+    return trouves
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
 RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_campaigns")
 RETENTION_MIN_DAYS = 30  # garde-fou TECHNIQUE : jamais moins de 30 jours quand une purge est activee

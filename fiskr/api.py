@@ -14,7 +14,7 @@ import threading
 from datetime import date as date_type, datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
@@ -115,7 +115,8 @@ from fiskr.settings import (
     BLOCKING_COMPONENTS, BLOCKING_FIELD_COMPONENTS, MAX_BLOCKING_FIELDS,
     blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events, alert_close_reasons,
-    SETTING_ALERT_CLOSE_REASONS,
+    SETTING_ALERT_CLOSE_REASONS, DECISIONS_DE_CLOTURE, motifs_de_cloture,
+    motifs_d_une_autre_decision,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     sync_auto_enabled, sync_sources_enabled, sync_automation_sources,
@@ -3290,11 +3291,21 @@ def cribler_un_profil(db: Session, client_dict: Dict[str, Any], username: str,
 def cribler_la_requete(db: Session, payload: ScreenClientRequest, username: str) -> Dict[str, Any]:
     """Criblage temps reel d'une charge utile /api/screen — la meme fonction
     pour la route humaine et pour le webhook du SI amont."""
+    from fiskr.identification import identifiant_calcule
     client_dict = payload.model_dump()
     # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
     client_dict.pop("screening_lists", None)
     requested_lists = _validate_screening_lists(payload.screening_lists)
-    return cribler_un_profil(db, client_dict, username, requested_lists)
+    # Sans identifiant, le client n'en changeait pas moins a chaque saisie : le
+    # formulaire en tirait un au hasard, et l'API n'en posait aucun — aucune
+    # deduplication d'alerte, aucune paire de liste blanche possible. Il est
+    # derive de ce qui le decrit, et la reponse dit qu'il est calcule.
+    calcule = False
+    if not (client_dict.get("client_id") or "").strip():
+        client_dict["client_id"] = identifiant_calcule(client_dict)
+        calcule = client_dict["client_id"] is not None
+    resultat = cribler_un_profil(db, client_dict, username, requested_lists)
+    return {**resultat, "client_id": client_dict.get("client_id"), "client_id_calcule": calcule}
 
 
 @app.post("/api/screen")
@@ -6857,13 +6868,7 @@ async def screen_existing_client(
     `screen_client_profile`, alimente par la fiche du referentiel plutot que
     par un formulaire.
     """
-    snap_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
-        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
-    row = None
-    if snap_ids:
-        row = db.query(ClientEntity).filter(
-            ClientEntity.client_id == client_id,
-            ClientEntity.snapshot_id.in_(snap_ids)).first()
+    row = _fiche_du_referentiel(db, client_id)
     if row is None:
         raise HTTPException(status_code=404,
                             detail="Client introuvable dans le référentiel en production.")
@@ -8467,8 +8472,10 @@ class IngestionSettingsUpdate(BaseModel):
     alert_sla_hours: Optional[Dict[str, int]] = None
     # Delai de declaration d'une mesure de gel a la DG Tresor (heures)
     gel_declaration_delay_hours: Optional[int] = None
-    # Motifs de cloture proposes aux analystes ([] = aucune suggestion)
-    alert_close_reasons: Optional[List[str]] = None
+    # Motifs de cloture proposes aux analystes ([] = aucune suggestion) :
+    # {"motif", "decisions"} — une simple chaine (ancien client) est classee
+    # comme a la migration (fiskr/settings.py, `motifs_de_cloture`)
+    alert_close_reasons: Optional[List[Union[str, Dict[str, Any]]]] = None
     notification_events: Optional[Dict[str, bool]] = None
     # Digest KPI periodique : {"enabled": bool, "cron": "0 8 * * 1-5"}
     digest: Optional[Dict[str, Any]] = None
@@ -8644,14 +8651,25 @@ async def update_ingestion_settings(
         set_setting(db, SETTING_GEL_DELAI, int(payload.gel_declaration_delay_hours),
                     updated_by=admin_user["username"])
     if payload.alert_close_reasons is not None:
-        motifs = [str(m).strip() for m in payload.alert_close_reasons if str(m).strip()]
-        if len(motifs) > 50:
+        bruts = [m for m in payload.alert_close_reasons
+                 if str((m.get("motif") if isinstance(m, dict) else m) or "").strip()]
+        if len(bruts) > 50:
             raise HTTPException(status_code=400, detail="Au plus 50 motifs de clôture.")
-        if any(len(m) > 300 for m in motifs):
+        if any(len(str((m.get("motif") if isinstance(m, dict) else m)).strip()) > 300 for m in bruts):
             raise HTTPException(status_code=400, detail="Un motif de clôture tient en 300 caractères.")
+        inconnues = sorted({str(d) for m in bruts if isinstance(m, dict)
+                            for d in (m.get("decisions") or []) if d not in DECISIONS_DE_CLOTURE})
+        if inconnues:
+            raise HTTPException(status_code=400, detail=(
+                f"Décision de motif inconnue : {', '.join(inconnues)} "
+                f"({' ou '.join(DECISIONS_DE_CLOTURE)})."))
         # [] est un choix valable : « pas de suggestions » — distinct de None
-        # (non fourni), qui laisse la bibliothèque par défaut.
-        set_setting(db, SETTING_ALERT_CLOSE_REASONS, motifs, updated_by=admin_user["username"])
+        # (non fourni), qui laisse la bibliothèque par défaut. Un motif sans
+        # décision (simple chaîne, ancien client) est classé comme à la
+        # migration : livré, il garde son classement ; sinon il vaut pour les
+        # deux décisions et le dit.
+        set_setting(db, SETTING_ALERT_CLOSE_REASONS, motifs_de_cloture(bruts),
+                    updated_by=admin_user["username"])
     if payload.notification_events is not None:
         unknown = [e for e in payload.notification_events if e not in DEFAULT_NOTIFICATION_EVENTS]
         if unknown:
@@ -11159,13 +11177,22 @@ class AlertAssignRequest(BaseModel):
 class AlertCommentRequest(BaseModel):
     comment: str
 
+class AlertWhitelistOnClose(BaseModel):
+    """« Memoriser en liste blanche » au moment ou un faux positif est valide.
+    Sans justification propre, la paire reprend la motivation de la decision."""
+    justification: Optional[str] = None
+    expires_at: Optional[str] = None
+
 class AlertProposeRequest(BaseModel):
     decision: str  # CONFIRMED | FALSE_POSITIVE
     comment: str
+    # Cloture directe (4-yeux coupe) d'un faux positif uniquement
+    whitelist: Optional[AlertWhitelistOnClose] = None
 
 class AlertValidateRequest(BaseModel):
     approve: bool
     comment: Optional[str] = None
+    whitelist: Optional[AlertWhitelistOnClose] = None
 
 def _alert_summary(alert: Alert) -> Dict[str, Any]:
     return {
@@ -13600,6 +13627,139 @@ async def get_alert_detail(
         "gel_mesures": _mesures_de_l_alerte(db, alert.id, attachments),
         "gel_du": registre_des_gels.est_due(alert, perimeter_overrides(db)),
         "gel_vocabulaire": registre_des_gels.vocabulaire(),
+        # Client et personne listee cote a cote (fiskr/comparaison.py)
+        "comparison": _comparaison_de_l_alerte(db, alert, audit),
+    }
+
+
+# Provenances des deux colonnes du tableau de comparaison. Libelles rendus
+# tels quels et traduits par fiskr/static/i18n.js (une ligne par libelle).
+_SOURCES_DE_COMPARAISON = {
+    "REFERENTIEL": "Référentiel clients en production",
+    "AUDIT": "Identification journalisée par ce criblage (client hors référentiel)",
+    "AUDIT_NOM": "Client hors référentiel, criblé avant que le journal ne porte son identification : seul son nom est restituable",
+    "FICHE_RENCONTREE": "Version de la fiche rencontrée par ce criblage",
+    "FICHE_EN_PRODUCTION": "Version en production (la ligne d'audit de ce criblage n'est plus disponible)",
+}
+_NOTES_DE_COMPARAISON = {
+    "CLIENT_MODIFIE": "L'identification du client a changé depuis ce criblage : le tableau compare le référentiel actuel, l'explication du score porte sur l'identification criblée.",
+    "FICHE_PURGEE": "La version rencontrée n'est plus conservée en base : elle est restituée depuis le journal d'audit.",
+    "FICHE_CORRIGEE": "La fiche a été corrigée depuis ce criblage : le tableau compare la version rencontrée, la fiche complète montre la version corrigée.",
+    "FICHE_PLUS_RECENTE": "Une version plus récente de cette fiche est en production.",
+}
+
+
+def _fiche_du_referentiel(db: Session, client_id: Optional[str]) -> Optional[ClientEntity]:
+    """La fiche du client dans le referentiel EN PRODUCTION (lots CLIENT_BASE
+    prets ; les panels du cahier de tests n'en sont pas)."""
+    if not client_id:
+        return None
+    snap_ids = [s.snapshot_id for s in db.query(Snapshot.snapshot_id).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
+    if not snap_ids:
+        return None
+    return db.query(ClientEntity).filter(
+        ClientEntity.client_id == client_id,
+        ClientEntity.snapshot_id.in_(snap_ids)).first()
+
+
+def _fiche_listee_en_production(db: Session, entity_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Version en production d'une fiche listee, sous la forme du cache moteur."""
+    if not entity_id:
+        return None
+    ligne = db.query(WatchlistEntity, Snapshot.file_type).join(
+        Snapshot, Snapshot.snapshot_id == WatchlistEntity.snapshot_id
+    ).filter(
+        WatchlistEntity.entity_id == entity_id,
+        WatchlistEntity.excluded.isnot(True),
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+        Snapshot.status == "READY",
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    if ligne is None:
+        return None
+    ent, type_de_liste = ligne
+    fiche = {c.name: _valeur_de_cache(getattr(ent, c.name)) for c in ent.__table__.columns}
+    fiche["_list_type"] = type_de_liste
+    return fiche
+
+
+def _comparaison_de_l_alerte(db: Session, alert: Alert,
+                             audit: Optional[AuditTrail]) -> Dict[str, Any]:
+    """
+    Les deux colonnes du tableau de comparaison, et d'ou elles viennent.
+
+    La fiche : la version RENCONTREE, celle que la ligne d'audit a journalisee
+    (le cache moteur la porte entiere, identifiant de ligne compris) — c'est
+    elle que l'alerte instruit. Purgee de la base depuis, elle reste lisible
+    dans le journal, et l'ecran le dit ; sans ligne d'audit (retention), la
+    version en production, en le disant aussi.
+
+    Le client : le referentiel en production d'abord. Un client connu
+    seulement par l'appel temps reel (criblage manuel, API) n'y est pas : son
+    identification est celle que la ligne d'audit a journalisee
+    (`client_identification`). Une ligne anterieure a ce journal ne porte que
+    son nom — l'ecran dit qu'il n'y a rien d'autre, plutot qu'une colonne vide
+    qui passerait pour un client sans date de naissance.
+    """
+    from fiskr.comparaison import comparer
+    from fiskr.empreintes import empreinte_client
+
+    arbre = (audit.decision_tree if audit else None) or {}
+    canal = alert.channel or "SCREENING"
+    notes: List[str] = []
+
+    fiche = arbre.get("watchlist_entity") or None
+    fiche_db_id = fiche_courante_db_id = None
+    en_production = _fiche_listee_en_production(db, alert.watchlist_entity_id)
+    if fiche:
+        source_fiche = "FICHE_RENCONTREE"
+        rangee = db.query(WatchlistEntity.id, WatchlistEntity.entity_checksum).filter(
+            WatchlistEntity.id == fiche.get("id")).first() if fiche.get("id") else None
+        if rangee is None:
+            notes.append("FICHE_PURGEE")
+        else:
+            fiche_db_id = rangee[0]
+            if rangee[1] != fiche.get("entity_checksum"):
+                notes.append("FICHE_CORRIGEE")
+        if en_production and en_production.get("entity_checksum") != fiche.get("entity_checksum") \
+                and en_production.get("id") != fiche_db_id:
+            notes.append("FICHE_PLUS_RECENTE")
+            fiche_courante_db_id = en_production.get("id")
+    elif en_production:
+        source_fiche, fiche = "FICHE_EN_PRODUCTION", en_production
+        fiche_db_id = en_production.get("id")
+    else:
+        return {"available": False,
+                "reason": "Ni la ligne d'audit ni la production ne décrivent plus cette fiche : rien à comparer."}
+
+    referentiel = None if str(alert.client_id or "").startswith("TXN:") \
+        else _fiche_du_referentiel(db, alert.client_id)
+    if referentiel is not None:
+        source_client, profil = "REFERENTIEL", _profil_du_referentiel(referentiel)
+        if arbre.get("client_fingerprint") and \
+                empreinte_client(profil) != arbre.get("client_fingerprint"):
+            notes.append("CLIENT_MODIFIE")
+    elif arbre.get("client_identification"):
+        source_client = "AUDIT"
+        profil = {"client_type": audit.client_type, **arbre["client_identification"]}
+    else:
+        source_client = "AUDIT_NOM"
+        profil = {"client_type": audit.client_type if audit else "PP",
+                  "primary_name": (audit.client_name if audit else None) or alert.client_name}
+
+    tableau = comparer(profil, fiche, scoring_config_with_thresholds(db, canal), canal)
+    return {
+        "available": True,
+        "client_source": source_client,
+        "client_source_label": _SOURCES_DE_COMPARAISON[source_client],
+        "watchlist_source": source_fiche,
+        "watchlist_source_label": _SOURCES_DE_COMPARAISON[source_fiche],
+        "notes": [_NOTES_DE_COMPARAISON[n] for n in notes],
+        # Lien vers la fiche complete : la version rencontree quand la base la
+        # garde, sinon la version en production — jamais une autre en silence.
+        "watchlist_db_id": fiche_db_id or fiche_courante_db_id,
+        "watchlist_current_db_id": fiche_courante_db_id if fiche_db_id else None,
+        **tableau,
     }
 
 
@@ -13706,6 +13866,64 @@ def _close_alert(db: Session, alert: Alert, decision: str, username: str,
     return registre_des_gels.ouvrir_si_due(db, alert, username)
 
 
+_LIBELLES_DE_DECISION = {"CONFIRMED": "vrai positif", "FALSE_POSITIVE": "faux positif"}
+
+
+def _refuser_un_motif_de_l_autre_decision(db: Session, decision: str, *textes,
+                                          statut: int = 400, suite: str = "") -> None:
+    """Un faux positif motive par « Correspondance confirmee… » (ou l'inverse)
+    est une piece de conformite qui se contredit : refus franc, en nommant le
+    motif, plutot qu'une cloture que personne ne relira."""
+    contraires = motifs_d_une_autre_decision(db, decision, *textes)
+    if contraires:
+        autre = _LIBELLES_DE_DECISION["CONFIRMED" if decision == "FALSE_POSITIVE" else "FALSE_POSITIVE"]
+        raise HTTPException(status_code=statut, detail=(
+            f"Motif réservé à un {autre} : « {contraires[0]} ». Il ne peut pas motiver un "
+            f"{_LIBELLES_DE_DECISION.get(decision, decision)}.{suite}"))
+
+
+def _preparer_la_paire_de_l_alerte(db: Session, alert: Alert, utilisateur: Dict[str, Any],
+                                   decision: str, demande: AlertWhitelistOnClose,
+                                   motivation: str) -> WhitelistPair:
+    """« Memoriser en liste blanche » a la cloture d'un faux positif : le flux
+    de pose de l'ecran Liste blanche (`_preparer_une_paire`), appele AVANT la
+    cloture — une pose refusee ne laisse pas une alerte close que le prochain
+    re-criblage rouvrirait. Mesure : alerte n° 20 close en faux positif apres
+    4-yeux, n° 28 rouverte dix minutes plus tard sur la meme paire par
+    « Recribler ce client » ; la liste blanche ne se proposait qu'apres coup,
+    par un bouton separe."""
+    if decision != "FALSE_POSITIVE":
+        raise HTTPException(status_code=400, detail=(
+            "La liste blanche mémorise un faux positif : elle ne s'applique pas à un vrai positif."))
+    roles = set(parse_roles(utilisateur.get("role")))
+    if not roles & {"admin", "reviewer"}:
+        raise HTTPException(status_code=403, detail=(
+            "La mise en liste blanche est réservée aux réviseurs : validez la décision, "
+            "un réviseur posera la paire."))
+    if not alert.client_id:
+        raise HTTPException(status_code=400, detail=(
+            "Cette alerte ne porte pas d'identifiant client : aucune paire ne peut la mémoriser."))
+    return _preparer_une_paire(
+        db, utilisateur["username"], alert.client_id, alert.watchlist_entity_id,
+        justification=(demande.justification or "").strip() or motivation,
+        expires_at=demande.expires_at, client_name=alert.client_name,
+        watchlist_name=alert.watchlist_name)
+
+
+def _poser_la_paire_de_l_alerte(db: Session, alert: Alert, paire: Optional[WhitelistPair],
+                                username: str) -> str:
+    """Inscrit la paire preparee au journal de l'alerte, dans la transaction de
+    la cloture. Rend la phrase a ajouter au message."""
+    if paire is None:
+        return ""
+    db.flush()   # identifiant de la paire, pour le journal de l'alerte
+    _log_alert_event(db, alert.id, username, "WHITELISTED",
+                     f"Paire de liste blanche #{paire.id} posée à la validation : ce couple "
+                     f"client × fiche ne rouvrira pas d'alerte tant que la fiche et "
+                     f"l'identification du client restent celles de cette décision.")
+    return f" Paire de liste blanche #{paire.id} posée."
+
+
 def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
     if mesure is None:
         return ""
@@ -13733,8 +13951,17 @@ async def propose_alert_decision(
     comment = (payload.comment or "").strip()
     if not comment:
         raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
+    _refuser_un_motif_de_l_autre_decision(db, decision, comment)
 
     username = current_user["username"]
+    four_eyes = alert_four_eyes_required(db)
+    paire = None
+    if payload.whitelist is not None:
+        if four_eyes:
+            raise HTTPException(status_code=400, detail=(
+                "La mise en liste blanche se décide à la validation 4-yeux, pas à la proposition."))
+        paire = _preparer_la_paire_de_l_alerte(db, alert, current_user, decision,
+                                               payload.whitelist, comment)
     # Proposer une decision, c'est instruire : une mise en attente encore
     # active n'a plus de sens et fausserait le classement de la file.
     if alert.snoozed_until:
@@ -13745,7 +13972,6 @@ async def propose_alert_decision(
     alert.proposal_comment = comment
     label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
 
-    four_eyes = alert_four_eyes_required(db)
     if four_eyes:
         alert.status = "PENDING_VALIDATION"
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
@@ -13755,7 +13981,10 @@ async def propose_alert_decision(
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
         _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
         message = "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure)
+        message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
     db.commit()
+    if paire is not None:
+        _annoncer_la_paire(db, paire, username)
     common = {
         "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
         "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
@@ -13799,7 +14028,20 @@ async def validate_alert_decision(
         "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
         "Proposée par": proposer,
     }
+    paire = None
+    if payload.whitelist is not None and not payload.approve:
+        raise HTTPException(status_code=400, detail=(
+            "Une décision renvoyée en analyse ne se mémorise pas en liste blanche."))
     if payload.approve:
+        # La proposition a pu etre ecrite avant que les motifs ne portent leur
+        # decision : le valideur ne peut pas la modifier, il la renvoie.
+        _refuser_un_motif_de_l_autre_decision(
+            db, alert.proposed_decision, alert.proposal_comment, comment, statut=409,
+            suite=" Renvoyez la décision en analyse pour qu'elle soit motivée à nouveau.")
+        if payload.whitelist is not None:
+            paire = _preparer_la_paire_de_l_alerte(db, alert, reviewer, alert.proposed_decision,
+                                                   payload.whitelist,
+                                                   comment or alert.proposal_comment)
         mesure = _close_alert(db, alert, alert.proposed_decision, username,
                               comment or alert.proposal_comment)
         _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
@@ -13807,6 +14049,7 @@ async def validate_alert_decision(
         # « (CLOSED_FALSE_POSITIVE) » au milieu d'une phrase en français.
         libelle = ALERT_STATUS_LABELS.get(alert.status, alert.status)
         message = f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
+        message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
         event_key, extra = "alert_decision_validated", {
             "Validée par": username, "Statut": libelle,
             "Commentaire": comment or "—",
@@ -13825,6 +14068,8 @@ async def validate_alert_decision(
             "Renvoyée par": username, "Motif": comment,
         }
     db.commit()
+    if paire is not None:
+        _annoncer_la_paire(db, paire, username)
     emit(db, event_key, {**common, **extra})
     _notifier_les_suiveurs(db, alert,
                            "Décision validée, dossier clos" if payload.approve
@@ -14526,9 +14771,43 @@ async def create_whitelist_pair(
     WHITELISTED dans le journal d'audit). Justification et piece jointe
     exigees selon les reglages modulaires.
     """
+    piece_fournie = file is not None and bool(file.filename)
+    pair = _preparer_une_paire(db, reviewer["username"], client_id, watchlist_entity_id,
+                               justification=justification, expires_at=expires_at,
+                               client_name=client_name, watchlist_name=watchlist_name,
+                               piece_fournie=piece_fournie)
+    # La piece s'ecrit APRES tous les refus (aucun fichier orphelin sur le
+    # disque pour une pose refusee), et toujours bornee.
+    if piece_fournie:
+        safe_name = os.path.basename(file.filename).replace("..", "_")
+        WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        copier_televersement_vers(target_path, file, "piece")
+        pair.evidence_file_name = safe_name
+        pair.evidence_file_path = str(target_path)
+    db.commit()
+    db.refresh(pair)
+    _annoncer_la_paire(db, pair, reviewer["username"])
+    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+
+
+def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_entity_id: str, *,
+                        justification: Optional[str] = None, expires_at: Optional[str] = None,
+                        client_name: Optional[str] = None, watchlist_name: Optional[str] = None,
+                        piece_fournie: bool = False) -> WhitelistPair:
+    """
+    LE flux de pose d'une paire — justification, piece, echeance, empreintes
+    de ce que la decision couvre (fiskr.empreintes) —, partage par l'ecran
+    Liste blanche et par la validation d'un faux positif (« Memoriser en liste
+    blanche »). Tout refus est leve AVANT d'ecrire quoi que ce soit : la
+    validation qui l'appelle ne clot donc pas l'alerte sur une pose ratee. La
+    paire est ajoutee a la session, pas validee : l'appelant commit, et
+    joint la piece s'il en a une (`piece_fournie` ne decide que du refus quand
+    le reglage l'exige).
+    """
     from fiskr.empreintes import empreintes_de_reference, motif_en_attente, poser_les_empreintes
-    client_id = client_id.strip()
-    watchlist_entity_id = watchlist_entity_id.strip()
+    client_id = (client_id or "").strip()
+    watchlist_entity_id = (watchlist_entity_id or "").strip()
     if not client_id or not watchlist_entity_id:
         raise HTTPException(status_code=400, detail="client_id et watchlist_entity_id sont requis.")
 
@@ -14544,7 +14823,7 @@ async def create_whitelist_pair(
     justification = (justification or "").strip()
     if requirements["justification_required"] and not justification:
         raise HTTPException(status_code=400, detail="Une justification est obligatoire pour une mise en liste blanche (réglage actif).")
-    if requirements["file_required"] and (file is None or not file.filename):
+    if requirements["file_required"] and not piece_fournie:
         raise HTTPException(status_code=400, detail="Une pièce jointe justificative est obligatoire pour une mise en liste blanche (réglage actif).")
 
     expires_dt = None
@@ -14562,16 +14841,6 @@ async def create_whitelist_pair(
         raise HTTPException(status_code=409, detail=(
             "Impossible d'établir ce que cette décision couvre : "
             + " ; ".join(reference["manque"]) + "."))
-
-    evidence_name = None
-    evidence_path = None
-    if file is not None and file.filename:
-        safe_name = os.path.basename(file.filename).replace("..", "_")
-        WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-        target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-        copier_televersement_vers(target_path, file, "piece")
-        evidence_name = safe_name
-        evidence_path = str(target_path)
 
     # Type de liste derive cote serveur (jamais fourni par le client) :
     # cache de production d'abord, sinon la derniere alerte de la paire
@@ -14591,23 +14860,23 @@ async def create_whitelist_pair(
         watchlist_name=(watchlist_name or "").strip() or None,
         list_type=list_type,
         justification=justification or None,
-        evidence_file_name=evidence_name,
-        evidence_file_path=evidence_path,
-        created_by=reviewer["username"],
+        created_by=username,
         expires_at=expires_dt,
     )
     poser_les_empreintes(pair, reference)
     db.add(pair)
-    db.commit()
-    db.refresh(pair)
+    return pair
+
+
+def _annoncer_la_paire(db: Session, pair: WhitelistPair, username: str) -> None:
+    """Notification d'une paire posee, apres le commit."""
     emit(db, "whitelist_changed", {
         "Action": "paire créée", "Client": pair.client_name or pair.client_id,
         "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
-        "Liste": pair.list_type or "—", "Par": reviewer["username"],
+        "Liste": pair.list_type or "—", "Par": username,
         "Justification": pair.justification or "—",
         "Échéance de revue": pair.expires_at.strftime("%d/%m/%Y") if pair.expires_at else "—",
     })
-    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
 
 class WhitelistBulkPair(BaseModel):
     client_id: str

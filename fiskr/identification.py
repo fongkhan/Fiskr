@@ -36,8 +36,11 @@ rien, elles tranchent une correspondance deja trouvee.
 """
 import hashlib
 import json
+import re
+import sys
+import unicodedata
 from functools import lru_cache
-from typing import FrozenSet
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 
 class _Releve(dict):
@@ -136,3 +139,190 @@ def empreinte_d_identification(profil) -> str:
     identite = {cle: profil[cle] for cle in sorted(lus) if cle in profil}
     return hashlib.sha256(json.dumps(identite, sort_keys=True, default=str,
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+# ------------------ CE QUE LE MOTEUR COMPARE, ET A QUOI ------------------
+#
+# Le releve ci-dessus dit QUELS champs du client le moteur lit. L'alerte a
+# besoin d'une chose de plus : avec QUEL champ de la fiche listee chacun est
+# compare. L'analyste qui coche « identite verifiee (nom, date de naissance,
+# pays) » ouvrait trois modales empilees et la palette pour mettre les deux
+# cotes en regard (mesure : environ neuf gestes par alerte). Le tableau de
+# comparaison de l'alerte lit ce releve-ci, pas une liste de correspondances
+# tenue a la main : le jour ou le moteur compare un champ de plus, la colonne
+# le montre.
+#
+# Methode : le meme couple de sondes traverse `match_entities`, chaque lecture
+# notee dans UN journal commun (cote client ou cote fiche, dans l'ordre). Le
+# moteur conclut chaque comparaison par une etape nommee ; les lectures qui la
+# precedent sont celles qu'elle compare. Les etapes sont reperees a leur sortie
+# par un profileur pose sur CE thread seulement (`sys.setprofile`) : rien n'est
+# remplace dans le module de scoring, un criblage servi en parallele ne voit
+# rien.
+
+# Etapes qui CONCLUENT une comparaison, et la famille qu'elles produisent dans
+# l'arbre de decision : `adjustments` porte dob, gender et geography, le hard
+# match les identifiants, le score de base les noms.
+ETAPES_DE_COMPARAISON = {
+    "check_hard_matches": "identifiers",
+    "compute_base_score": "names",
+    "calculate_dob_adjustment": "dob",
+    "calculate_gender_adjustment": "gender",
+    "calculate_geography_adjustment": "geography",
+}
+
+
+class _Journal(dict):
+    """Comme `_Releve`, mais chaque lecture part dans un journal partage avec
+    l'autre cote, dans l'ordre ou le moteur la fait."""
+
+    def __init__(self, contenu, cote, journal):
+        super().__init__(contenu)
+        self.cote = cote
+        self.journal = journal
+
+    def get(self, cle, defaut=None):
+        self.journal.append((self.cote, cle))
+        return super().get(cle, defaut)
+
+    def __getitem__(self, cle):
+        self.journal.append((self.cote, cle))
+        return super().__getitem__(cle)
+
+    def __contains__(self, cle):
+        self.journal.append((self.cote, cle))
+        return super().__contains__(cle)
+
+
+class Comparaison(NamedTuple):
+    """Une famille de comparaison du moteur : les champs du client et ceux de
+    la fiche qu'elle met en regard. `paires` decoupe la famille en
+    comparaisons elementaires — le moteur lit un champ client puis son
+    homologue cote fiche (un identifiant contre le meme identifiant)."""
+    famille: str
+    client: Tuple[str, ...]
+    fiche: Tuple[str, ...]
+    paires: Tuple[Tuple[Tuple[str, ...], Tuple[str, ...]], ...]
+
+
+def _paires(lectures) -> List[Tuple[Tuple[str, ...], Tuple[str, ...]]]:
+    """Alternance client puis fiche : une lecture client apres une lecture
+    fiche ouvre une nouvelle comparaison elementaire."""
+    paires: List[Tuple[List[str], List[str]]] = []
+    for cote, cle in lectures:
+        if not paires or (cote == "client" and paires[-1][1]):
+            paires.append(([], []))
+        cible = paires[-1][0] if cote == "client" else paires[-1][1]
+        if cle not in cible:
+            cible.append(cle)
+    return [(tuple(c), tuple(f)) for c, f in paires]
+
+
+@lru_cache(maxsize=1)
+def comparaisons_du_moteur() -> Tuple[Comparaison, ...]:
+    """Familles de comparaison de `match_entities`, une par etape de
+    `ETAPES_DE_COMPARAISON`.
+
+    Echec franc si une etape attendue n'est jamais vue, ou ne compare rien
+    d'un cote : un tableau de comparaison bati sur un releve casse montrerait
+    des colonnes vides comme si les donnees manquaient."""
+    from fiskr import capabilities as caps
+    from fiskr.config import config
+    from fiskr.scoring import match_entities
+
+    canal = caps.CHANNEL_SCREENING
+    familles: Dict[str, Dict[Tuple[str, ...], List[str]]] = {}
+    for modele in _SONDES:
+        journal: List[Tuple[str, str]] = []
+
+        def crochet(cadre, evenement, _arg, journal=journal):
+            if evenement == "return" and cadre.f_globals.get("__name__") == "fiskr.scoring":
+                famille = ETAPES_DE_COMPARAISON.get(cadre.f_code.co_name)
+                if famille:
+                    journal.append(("etape", famille))
+
+        precedent = sys.getprofile()
+        with caps.use_context(canal, caps.CAPABILITY_CATALOG):
+            sys.setprofile(crochet)
+            try:
+                match_entities(_Journal(modele, "client", journal),
+                               _Journal(_FICHE, "fiche", journal), config)
+            finally:
+                sys.setprofile(precedent)
+
+        lectures: List[Tuple[str, str]] = []
+        for cote, cle in journal:
+            if cote != "etape":
+                lectures.append((cote, cle))
+                continue
+            # Les lectures depuis l'etape precedente sont celles que CETTE
+            # etape compare. Une etape rappelee sans lecture neuve (le score de
+            # base, une fois par couple de noms) n'ajoute rien.
+            if lectures:
+                par_fiche = familles.setdefault(cle, {})
+                for client, fiche in _paires(lectures):
+                    deja = par_fiche.setdefault(fiche, [])
+                    deja.extend(c for c in client if c not in deja)
+            lectures = []
+        # Ce qui suit la derniere etape (seuil de coupure de la liste) ne
+        # compare rien au client : ignore.
+
+    manquantes = [f for f in ETAPES_DE_COMPARAISON.values() if f not in familles]
+    if manquantes:
+        raise RuntimeError("Relevé des comparaisons du moteur incomplet : étape(s) "
+                           f"{', '.join(manquantes)} jamais vue(s).")
+    resultat = []
+    for famille in dict.fromkeys(ETAPES_DE_COMPARAISON.values()):
+        paires = tuple((tuple(client), fiche) for fiche, client in familles[famille].items())
+        client = tuple(dict.fromkeys(c for cl, _f in paires for c in cl))
+        fiche = tuple(dict.fromkeys(f for _c, fi in paires for f in fi))
+        if not client or not fiche:
+            raise RuntimeError(f"Relevé des comparaisons du moteur : la famille {famille} "
+                               "ne compare rien d'un côté.")
+        resultat.append(Comparaison(famille, client, fiche, paires))
+    return tuple(resultat)
+
+
+# ------------------ IDENTIFIANT CALCULE (criblage sans identifiant) ------------------
+#
+# Releve en production : 24 decisions sur 28 portaient un identifiant
+# `SCREEN-<alea>` tire par le formulaire (Math.random() * 10 000, collisions
+# possibles), et les deux alertes de production visaient la meme fiche, au meme
+# score, sous deux identifiants differents — jamais rapprochees. Or la
+# deduplication des alertes (fiskr/alerts.py), la liste blanche et la vue 360
+# reposent sur cet identifiant : un client qui en change a chaque saisie est
+# un client nouveau a chaque saisie. Sans identifiant fourni, il est donc
+# DERIVE de ce qui le decrit — nom normalise, date de naissance, type — et le
+# meme client saisi deux fois retombe sur la meme alerte.
+#
+# Deux homonymes saisis sans date de naissance partagent cet identifiant : rien
+# ne les distingue dans ce qui est saisi, et leur criblage est le meme. Ce qui
+# les distinguerait (pays, documents) entre dans l'empreinte du client
+# (fiskr/empreintes.py) : une paire de liste blanche posee pour l'un ne couvre
+# pas l'autre, elle passe « a reexaminer ».
+
+PREFIXE_IDENTIFIANT_CALCULE = "CALC-"
+
+
+def _forme_stable(texte: Any) -> str:
+    """Casse, accents, ponctuation et blancs ne distinguent personne : deux
+    saisies d'un meme nom doivent donner le meme identifiant."""
+    t = unicodedata.normalize("NFKD", str(texte or ""))
+    t = "".join(c for c in t if not unicodedata.combining(c)).casefold()
+    return " ".join(re.sub(r"[\W_]+", " ", t).split())
+
+
+def identifiant_calcule(client: Dict[str, Any]) -> Optional[str]:
+    """Identifiant deterministe d'un client saisi sans identifiant, ou None
+    s'il n'a pas de nom (le quality gate le refusera de toute facon)."""
+    personne_physique = client.get("client_type") in ("PP", "I")
+    if personne_physique:
+        nom = f"{client.get('client_first_name') or ''} {client.get('client_last_name') or ''}"
+    else:
+        nom = client.get("client_company_name") or ""
+    nom = _forme_stable(nom)
+    if not nom:
+        return None
+    cle = "|".join(("PP" if personne_physique else "PM", nom,
+                    str(client.get("client_dob") or "").strip()))
+    return PREFIXE_IDENTIFIANT_CALCULE + hashlib.sha256(cle.encode("utf-8")).hexdigest()[:12].upper()
