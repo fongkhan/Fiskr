@@ -16,6 +16,11 @@ from fiskr.database import (
 from fiskr.fprules import run_rule, compile_rule, evaluate_fp_rules
 from fiskr.settings import SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 
 def _override_user(username: str, role: str):
     app.dependency_overrides[get_current_user] = lambda: {

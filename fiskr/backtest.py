@@ -196,9 +196,10 @@ class _RuleSnapshot(NamedTuple):
     code: str
 
 
-def _active_whitelist_keys(db) -> Set[Tuple[str, str]]:
+def _active_whitelist_keys(db) -> Dict[Tuple[str, str], Any]:
     """
-    Couples (client, entite) de liste blanche ACTIFS, charges EN UNE REQUETE.
+    Paires de liste blanche ACTIVES, indexees par couple (client, entite),
+    chargees EN UNE REQUETE.
 
     Le criblage a blanc interrogeait la base pour chaque client en alerte
     (`is_whitelisted`). Outre le cout — une requete par alerte —, ces lectures
@@ -206,14 +207,28 @@ def _active_whitelist_keys(db) -> Set[Tuple[str, str]]:
     pendant toute la duree du cahier de tests. La table est une liste curee a la
     main : la charger entierement coute une requete et tient en memoire.
 
-    Meme filtre que `is_whitelisted` (non revoquee, non expiree).
+    Chaque couple porte les EMPREINTES de sa decision (fiskr.empreintes) : en
+    production, une paire dont la fiche ou le client a change n'absorbe plus.
+    Le cahier doit predire la production — une liste candidate qui modifie une
+    fiche blanchie y rouvre donc l'alerte, comme elle le fera apres
+    homologation.
+
+    Meme filtre que `is_whitelisted` (non revoquee, non expiree) ; premiere
+    paire par couple, comme `whitelisted_pairs`.
     """
+    from fiskr.empreintes import EmpreintesDePaire
     now = datetime.utcnow()
-    rows = db.query(WhitelistPair.client_id, WhitelistPair.watchlist_entity_id).filter(
+    rows = db.query(WhitelistPair.client_id, WhitelistPair.watchlist_entity_id,
+                    WhitelistPair.id, WhitelistPair.entity_checksum,
+                    WhitelistPair.client_fingerprint, WhitelistPair.stale_since,
+                    WhitelistPair.stale_reason).filter(
         WhitelistPair.revoked_at.is_(None),
         (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
-    ).all()
-    return {(r[0], r[1]) for r in rows}
+    ).order_by(WhitelistPair.id).all()
+    paires: Dict[Tuple[str, str], Any] = {}
+    for r in rows:
+        paires.setdefault((r[0], r[1]), EmpreintesDePaire(*r[2:]))
+    return paires
 
 
 def _dry_run_screen(db, clients: Optional[List[Dict[str, Any]]],
@@ -358,7 +373,9 @@ def _engine_fingerprint(db, current_rules) -> str:
         for r in db.query(AppSetting.key, AppSetting.value).all()
     )
     regles = sorted((r.id, getattr(r, "code", "") or "") for r in (current_rules or []))
-    liste_blanche = sorted(_active_whitelist_keys(db))
+    # Couples ET empreintes : une reconduction ou un reexamen change le verdict
+    # d'un cahier sans changer la liste des couples.
+    liste_blanche = sorted(_active_whitelist_keys(db).items())
     # Journal des editions manuelles : deux entiers suffisent a detecter toute
     # correction survenue depuis le cahier precedent (table de petite taille).
     editions = db.query(func.count(WatchlistEntityChange.id),
@@ -426,6 +443,286 @@ def validate_candidate_rule(db, candidate_rule_id: Optional[int]):
     return rule
 
 
+# ------------------ CE QUE LE CAHIER A TESTE ------------------
+# L'homologation exige « un rapport au verdict OK » (review.backtest_required),
+# et ce rapport n'etait jamais invalide : sa seule ecriture est la fin du job.
+# Reproduit sur base jetable : cahier OK (5 interceptions sur 5), puis
+# exclusion des 5 fiches DGT. L'homologation rendait 202, le dossier disait
+# « APPROVED, verdict OK », et la DGT en production comptait 0 fiche.
+#
+# Le rapport porte donc l'empreinte de ce qu'il a teste, relevee au depart :
+# les lots en production (l'univers « actuel », fiskr/univers.py), chaque lot
+# candidat avec ses exclusions, le journal des corrections de fiches. Tout
+# ecart le rend PERIME, et un rapport perime ne vaut pas OK.
+#
+# Une exception, et une seule : un candidat du MEME cahier mis en production
+# depuis. Une vague de synchronisations est testee en un cahier consolide ;
+# l'univers candidat contenait deja ce lot, sa mise en production n'est pas un
+# changement par rapport a ce que le cahier a vu. Sans elle, approuver la
+# premiere liste d'une vague rendait perime le cahier de toutes les autres.
+
+MOTIF_ANTERIEUR = ("Rapport antérieur au suivi de ce qu'il a testé : rien n'établit "
+                   "la production, les exclusions ni l'univers qu'il couvre.")
+
+# Un motif ecrit est exige pour approuver malgre un cahier WARN ou perime.
+# Releve en production : 46 des 200 dernieres approbations portaient un
+# verdict WARN (ecart jusqu'a 13,69 %), aucune ne portait de commentaire. Un
+# plancher de longueur ne fait pas un motif ; il refuse le reflexe « ok ».
+MOTIF_D_APPROBATION_MIN = 15
+
+
+def _digest_exclusions(pks) -> str:
+    return hashlib.sha256(",".join(str(p) for p in sorted(pks)).encode("ascii")).hexdigest()
+
+
+def _exclusions_par_lot(db, snapshot_ids) -> Dict[str, List[int]]:
+    """Cles des fiches exclues, par lot, en une requete (index partiel
+    `ix_wl_entities_excluded`)."""
+    from fiskr.database import WatchlistEntity
+    ids = [s for s in dict.fromkeys(snapshot_ids) if s]
+    if not ids:
+        return {}
+    par_lot: Dict[str, List[int]] = {s: [] for s in ids}
+    for sid, pk in db.query(WatchlistEntity.snapshot_id, WatchlistEntity.id).filter(
+            WatchlistEntity.snapshot_id.in_(ids), WatchlistEntity.excluded.is_(True)).all():
+        par_lot[sid].append(pk)
+    return par_lot
+
+
+def _identite_de_lot(lot) -> Tuple[Any, ...]:
+    # Le nombre de fiches, comme dans fiskr/univers.py : un lot d'ajouts
+    # manuels garde son hash quand on lui ajoute une fiche.
+    return (lot.file_type, lot.snapshot_id, lot.file_hash, int(lot.record_count or 0))
+
+
+def _derniere_correction(db) -> int:
+    from sqlalchemy import func
+    from fiskr.database import WatchlistEntityChange
+    return int(db.query(func.max(WatchlistEntityChange.id)).scalar() or 0)
+
+
+def empreinte_testee(db, pendings: List[Snapshot]) -> Dict[str, Any]:
+    """Ce qu'un cahier teste, releve AU DEPART : un geste survenu pendant le
+    criblage rend le rapport perime, jamais l'inverse."""
+    from fiskr import univers
+    lots = univers.lots_en_production(db)
+    exclues = _exclusions_par_lot(db, [s.snapshot_id for s in pendings])
+    return {
+        "version": 1,
+        "production": sorted(list(_identite_de_lot(l)) for l in lots),
+        "production_reference": univers.calculer(db, lots).empreinte,
+        "corrections": _derniere_correction(db),
+        "candidates": [{
+            "snapshot_id": s.snapshot_id, "file_type": s.file_type,
+            "file_hash": s.file_hash, "record_count": int(s.record_count or 0),
+            "excluded_count": len(exclues.get(s.snapshot_id, [])),
+            "exclusions": _digest_exclusions(exclues.get(s.snapshot_id, [])),
+        } for s in pendings],
+    }
+
+
+def _validite(snapshot_id: str, rapport: Dict[str, Any], production: set,
+              corrections: int, lignes: Dict[str, Any],
+              exclues: Dict[str, List[int]]) -> Dict[str, Any]:
+    from fiskr.sync import MANUAL_SNAPSHOT_ID
+    perimetre = rapport.get("tested_scope")
+    if not perimetre:
+        return {"stale": True, "reasons": [MOTIF_ANTERIEUR]}
+    motifs: List[str] = []
+    candidats = perimetre.get("candidates") or []
+    if snapshot_id not in {c.get("snapshot_id") for c in candidats}:
+        # Cahier consolide qui a garde la version la plus recente d'une liste
+        # (normalize_pending) : son rapport etait ecrit aussi sur l'autre.
+        motifs.append("Ce rapport ne couvre pas ce lot : une autre version de la même "
+                      "liste a été testée à sa place.")
+    appliques = []
+    for c in candidats:
+        ligne = lignes.get(c.get("snapshot_id"))
+        if ligne is None or ligne.status not in ("PENDING_REVIEW", "READY"):
+            continue  # rejete ou remplace : il n'entrera pas en production
+        if (ligne.file_hash != c.get("file_hash")
+                or int(ligne.record_count or 0) != c.get("record_count")):
+            motifs.append(f"Le lot {c.get('file_type')} a changé de contenu depuis le cahier.")
+        pks = exclues.get(c.get("snapshot_id"), [])
+        if _digest_exclusions(pks) != c.get("exclusions"):
+            motifs.append(f"Exclusions de {c.get('file_type')} posées ou levées depuis le "
+                          f"cahier ({c.get('excluded_count', 0)} → {len(pks)} fiche(s) exclue(s)).")
+        if ligne.status == "READY":
+            appliques.append(c)
+    attendue = {tuple(l) for l in perimetre.get("production") or []}
+    for c in appliques:
+        # Ce candidat est en production : il a remplace les lots de sa liste,
+        # comme l'univers candidat du cahier le prevoyait.
+        attendue = {l for l in attendue
+                    if l[0] != c["file_type"] or str(l[1]).startswith(MANUAL_SNAPSHOT_ID)}
+        attendue.add((c["file_type"], c["snapshot_id"], c["file_hash"], c["record_count"]))
+    if attendue != production:
+        types = sorted({str(l[0]) for l in attendue ^ production})
+        motifs.append("Production modifiée depuis le cahier : " + ", ".join(types) + ".")
+    if corrections != perimetre.get("corrections"):
+        motifs.append("Fiche(s) listée(s) corrigée(s) depuis le cahier.")
+    return {"stale": bool(motifs), "reasons": motifs}
+
+
+def validites_des_cahiers(db, snaps) -> Dict[str, Dict[str, Any]]:
+    """
+    Ce que vaut AUJOURD'HUI le rapport de chaque snapshot : {"stale", "reasons"}.
+    Un snapshot sans rapport n'a pas d'entree. Trois lectures pour tous : la
+    file d'attente l'affiche sur chaque ligne.
+    """
+    from sqlalchemy.orm import load_only
+    from fiskr import univers
+    rapports = {s.snapshot_id: s.backtest_report for s in snaps if s.backtest_report}
+    if not rapports:
+        return {}
+    production = {_identite_de_lot(l) for l in univers.lots_en_production(db)}
+    corrections = _derniere_correction(db)
+    ids = {c.get("snapshot_id") for r in rapports.values()
+           for c in ((r.get("tested_scope") or {}).get("candidates") or [])}
+    ids.discard(None)
+    lignes = {s.snapshot_id: s for s in db.query(Snapshot).options(load_only(
+        Snapshot.snapshot_id, Snapshot.file_type, Snapshot.file_hash,
+        Snapshot.record_count, Snapshot.status,
+    )).filter(Snapshot.snapshot_id.in_(ids)).all()} if ids else {}
+    exclues = _exclusions_par_lot(db, ids)
+    return {sid: _validite(sid, rapport, production, corrections, lignes, exclues)
+            for sid, rapport in rapports.items()}
+
+
+def validite_du_cahier(db, snap: Snapshot) -> Optional[Dict[str, Any]]:
+    """Validite du rapport d'UN snapshot, None s'il n'en a pas."""
+    return validites_des_cahiers(db, [snap]).get(snap.snapshot_id)
+
+
+def motif_d_approbation_exige(report: Optional[Dict[str, Any]],
+                              validite: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Pourquoi approuver ce lot exige un motif ecrit — ou None. Un lot sans
+    cahier n'en exige pas : rien n'y est affirme, le dossier dit « non execute »."""
+    if not report:
+        return None
+    if report.get("verdict") != "OK":
+        return f"cahier de tests au verdict {report.get('verdict') or '—'}"
+    if validite and validite.get("stale"):
+        return "cahier de tests périmé"
+    return None
+
+
+# ------------------ SENS DE L'ECART ------------------
+
+# Sens de l'ecart d'un cahier (`gap_direction`) : ce qui fait le verdict.
+GAP_INTERCEPTION_LOSS = "INTERCEPTION_LOSS"          # des interceptions sont perdues
+GAP_INCREASE = "INCREASE"                            # plus d'alertes a traiter
+GAP_FEWER_FALSE_POSITIVES = "FEWER_FALSE_POSITIVES"  # moins d'alertes, rien de perdu
+GAP_NONE = "NONE"
+
+# Issue d'une alerte de production que la liste candidate ne produit plus.
+ISSUE_TOUJOURS_INTERCEPTE = "STILL_INTERCEPTED"      # le client sort sur une autre fiche
+ISSUE_FAUX_POSITIF_ECARTE = "FALSE_POSITIVE_REMOVED"
+ISSUE_INTERCEPTION_PERDUE = "INTERCEPTION_LOST"
+
+# Ce que le generateur de panel (plus bas) sait de chaque pseudo-client qu'il
+# fabrique, d'apres le motif de son identifiant `TEST-<VARIANTE>-<n>` : une
+# copie ou une variante d'un liste DOIT etre interceptee ; une quasi-collision
+# (meme nom, date de naissance decalee) ou un client neutre ne le doit pas.
+_INTERCEPTION_ATTENDUE = {"HIT": True, "TYPO": True, "SWAP": True,
+                          "NEAR": False, "NEUTRE": False}
+
+
+def interception_attendue(client_id: Any) -> Optional[bool]:
+    """True / False pour un pseudo-client genere, None pour un vrai client
+    (dont personne ne sait a l'avance s'il doit etre intercepte)."""
+    parties = str(client_id or "").split("-")
+    if len(parties) >= 3 and parties[0] == "TEST":
+        return _INTERCEPTION_ATTENDUE.get(parties[1])
+    return None
+
+
+def _issues_des_resolues(db, resolved_keys, current: Dict[str, Any],
+                         candidate: Dict[str, Any], candidate_ids: List[str],
+                         panel_snapshot_id: str,
+                         projection) -> Dict[Any, Tuple[str, str]]:
+    """
+    Pourquoi chaque alerte de production disparait avec la liste candidate.
+
+    - le client reste intercepte, sur une autre fiche : rien n'est perdu ;
+    - FAUX POSITIF ECARTE : un pseudo-client construit pour NE PAS etre
+      intercepte, ou un client dont le nom correspond toujours (score de nom
+      au-dessus du seuil) mais qu'une donnee nouvelle de la fiche — date de
+      naissance, genre, pays — fait passer sous le seuil. C'est le cas de
+      production : les dates de naissance ajoutees ont ecarte huit homonymes ;
+    - INTERCEPTION PERDUE : tout le reste — fiche retiree de la liste, nom qui
+      ne correspond plus, regle qui clot l'alerte, ou pseudo-client construit
+      pour ETRE intercepte, quelle que soit la raison. Une date de naissance
+      corrompue dans la liste candidate ferait passer de vrais listes pour
+      des homonymes : la copie exacte d'un liste qui n'est plus interceptee
+      reste une perte.
+
+    Le client et la fiche candidate sont relus et rescores un a un : il y a
+    au plus autant de rescorages que d'alertes disparues, negligeable devant
+    un criblage.
+    """
+    interceptes = {cle[0] for cle in candidate["pairs"]}
+    issues: Dict[Any, Tuple[str, str]] = {}
+    a_rescorer = []
+    for cle in resolved_keys:
+        client_id = cle[0]
+        if client_id in interceptes:
+            issues[cle] = (ISSUE_TOUJOURS_INTERCEPTE, "toujours intercepté, sur une autre fiche")
+        elif interception_attendue(client_id) is False:
+            issues[cle] = (ISSUE_FAUX_POSITIF_ECARTE,
+                           "pseudo-client construit pour ne pas être intercepté")
+        else:
+            a_rescorer.append(cle)
+    if not a_rescorer:
+        return issues
+
+    clients = {}
+    ids_clients = sorted({cle[0] for cle in a_rescorer})
+    for debut in range(0, len(ids_clients), 800):
+        for ligne in db.query(ClientEntity).filter(
+                ClientEntity.snapshot_id == panel_snapshot_id,
+                ClientEntity.client_id.in_(ids_clients[debut:debut + 800])).all():
+            clients[ligne.client_id] = {c.name: getattr(ligne, c.name)
+                                        for c in ligne.__table__.columns}
+    fiches = {(e.get("_list_type"), e.get("entity_id")): e
+              for e in _entity_dicts(db, candidate_ids, projection=projection,
+                                     entity_ids={cle[1] for cle in a_rescorer})}
+
+    sorts_candidats = candidate.get("par_client") or {}
+    for cle in a_rescorer:
+        client_id, entity_id = cle
+        attendu = interception_attendue(client_id)
+        fiche = fiches.get((current["pairs"][cle].get("list_type"), entity_id))
+        client = clients.get(client_id)
+        sort = (sorts_candidats.get(client_id) or (None,))[0]
+        if sort == "rule":
+            issues[cle] = (ISSUE_INTERCEPTION_PERDUE, "close par une règle anti-faux positifs")
+            continue
+        if sort == "whitelisted":
+            issues[cle] = (ISSUE_INTERCEPTION_PERDUE, "masquée par une paire en liste blanche")
+            continue
+        if fiche is None:
+            issues[cle] = (ISSUE_INTERCEPTION_PERDUE, "fiche absente de la liste candidate")
+            continue
+        if attendu is True:
+            issues[cle] = (ISSUE_INTERCEPTION_PERDUE,
+                           "pseudo-client construit pour être intercepté")
+            continue
+        score = match_entities(client, fiche, config) if client else {}
+        ajustements = sum(float((a or {}).get("score") or 0)
+                          for a in (score.get("adjustments") or {}).values())
+        discrimine = (score.get("status") != "ALERT"
+                      and not score.get("hard_match_triggered")
+                      and float(score.get("base_score") or 0) >= float(score.get("cut_off_applied") or 0)
+                      and ajustements < 0)
+        if discrimine:
+            issues[cle] = (ISSUE_FAUX_POSITIF_ECARTE,
+                           "le nom correspond toujours ; une donnée nouvelle de la fiche l'écarte")
+        else:
+            issues[cle] = (ISSUE_INTERCEPTION_PERDUE, "la fiche candidate ne correspond plus")
+    return issues
+
+
 def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
                  threshold_pct: float, executed_by: str,
                  candidate_rule_id: Optional[int] = None,
@@ -465,6 +762,9 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         raise ValueError("Aucun snapshot candidat à tester.")
     pending_ids = {s.snapshot_id for s in pendings}
     current_ids, candidate_ids = _universe_snapshot_ids(db, pendings)
+    # Ce que ce cahier teste, releve AVANT les passes (cf. « CE QUE LE CAHIER
+    # A TESTE ») : l'homologation compare ensuite cette empreinte a la base.
+    perimetre_teste = empreinte_testee(db, pendings)
     panel_size = _panel_count(db, panel_snapshot_id)
 
     current_rules = active_rules(db, "SCREENING")
@@ -689,11 +989,49 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         "resolved_pairs_count": sum(n for t, n in perdues.items() if t not in types_testes),
     }
 
-    # Ecart relatif du nombre d'alertes (100 % si on part de zero)
-    if current["alerts"] == 0:
-        gap_pct = 0.0 if candidate["alerts"] == 0 else 100.0
+    # ------- SENS DE L'ECART -------
+    # L'ecart se calculait en VALEUR ABSOLUE. Releve en production : huit faux
+    # positifs SUPPRIMES grace a l'ajout des dates de naissance etaient
+    # signales « ECART ELEVE », avec le conseil de poser des Good Guys ou des
+    # exclusions — ce qui aurait creuse l'ecart — et, cahier obligatoire,
+    # l'approbation bloquee. Une alerte de moins n'est pas une interception de
+    # moins : chaque alerte disparue est lue (cf. `_issues_des_resolues`), et
+    # seules les interceptions PERDUES comptent dans le sens de la baisse.
+    issues = _issues_des_resolues(db, resolved_keys, current, candidate,
+                                  candidate_ids, panel_snapshot_id, projection)
+    for cle, (issue, raison) in issues.items():
+        current["pairs"][cle] = {**current["pairs"][cle], "outcome": issue, "outcome_reason": raison}
+    perdues_n = sum(1 for issue, _ in issues.values() if issue == ISSUE_INTERCEPTION_PERDUE)
+    ecartes_n = sum(1 for issue, _ in issues.values() if issue == ISSUE_FAUX_POSITIF_ECARTE)
+
+    def _pct(n: int, base: int) -> float:
+        # 100 % si on part de zero (comportement historique de l'ecart)
+        if base == 0:
+            return 0.0 if n == 0 else 100.0
+        return round(n * 100.0 / base, 2)
+
+    net_gap_pct = (_pct(candidate["alerts"] - current["alerts"], current["alerts"])
+                   if candidate["alerts"] >= current["alerts"]
+                   else -_pct(current["alerts"] - candidate["alerts"], current["alerts"]))
+    increase_pct = max(0.0, net_gap_pct)
+    loss_pct = _pct(perdues_n, current["alerts"]) if current["alerts"] else 0.0
+    # L'ecart A EXAMINER, celui qui fait le verdict : la hausse nette des
+    # alertes, ou la part d'interceptions perdues — la plus forte des deux.
+    gap_pct = max(increase_pct, loss_pct)
+    # Le sens nomme ce qui fait le verdict (la perte d'abord : elle est la
+    # plus grave), sinon ce qui a bouge dans la tolerance.
+    if loss_pct > threshold_pct:
+        gap_direction = GAP_INTERCEPTION_LOSS
+    elif increase_pct > threshold_pct:
+        gap_direction = GAP_INCREASE
+    elif loss_pct:
+        gap_direction = GAP_INTERCEPTION_LOSS
+    elif increase_pct:
+        gap_direction = GAP_INCREASE
+    elif net_gap_pct < 0:
+        gap_direction = GAP_FEWER_FALSE_POSITIVES
     else:
-        gap_pct = round(abs(candidate["alerts"] - current["alerts"]) * 100.0 / current["alerts"], 2)
+        gap_direction = GAP_NONE
 
     # Meme ecart, calcule AVANT application des regles anti-FP : isole la part
     # de l'ecart imputable a la liste elle-meme vs aux regles
@@ -738,6 +1076,8 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             for s in pendings
         ],
         "unattributed_pairs": hors_perimetre,
+        # Empreinte de ce qui a ete teste : lue par `validite_du_cahier`.
+        "tested_scope": perimetre_teste,
         # Tracabilite : ce cahier a-t-il reemploye la passe partagee d'un
         # cahier precedent (meme univers, meme panel, meme parametrage) ?
         "shared_pass_reused": shared_reused,
@@ -776,13 +1116,25 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             "alerts_before_rules": candidate["alerts_before_rules"],
             "rule_suppressed": candidate["rule_suppressed"],
         },
+        # Ecart ORIENTE (cf. « SENS DE L'ECART ») : `gap_pct` est l'ecart a
+        # examiner — hausse nette des alertes ou part d'interceptions perdues —
+        # et `net_gap_pct` le mouvement signe du nombre de clients interceptes.
         "gap_pct": gap_pct,
+        "gap_direction": gap_direction,
+        "net_gap_pct": net_gap_pct,
+        "increase_pct": increase_pct,
+        "loss_pct": loss_pct,
+        "lost_interceptions_count": perdues_n,
+        "false_positives_removed_count": ecartes_n,
         "threshold_pct": threshold_pct,
         "verdict": "WARN" if gap_pct > threshold_pct else "OK",
         "new_pairs_count": len(new_keys),
         "resolved_pairs_count": len(resolved_keys),
         "new_pairs": [candidate["pairs"][k] for k in new_keys[:MAX_PAIR_DETAILS]],
-        "resolved_pairs": [current["pairs"][k] for k in resolved_keys[:MAX_PAIR_DETAILS]],
+        # Les interceptions PERDUES d'abord : c'est ce que le reviseur doit voir
+        "resolved_pairs": [current["pairs"][k] for k in sorted(
+            resolved_keys, key=lambda k: current["pairs"][k].get("outcome")
+            != ISSUE_INTERCEPTION_PERDUE)[:MAX_PAIR_DETAILS]],
         "executed_by": executed_by,
         "executed_at": datetime.utcnow().isoformat() + "Z",
     }

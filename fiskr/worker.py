@@ -10,7 +10,7 @@ son battement de coeur manque ; le VERROU fichier (flock) garantit qu'il n'y
 en a jamais deux, quelle que soit la course entre processus API.
 
 Il heberge aussi les planificateurs periodiques (cron des sources, inbox CFT,
-digest, retention, notifications, fouille) : sous Passenger, N processus API
+digest, retention, notifications, fouille, fraicheur) : sous Passenger, N processus API
 signifiaient N planificateurs — N digests, N synchronisations. Un seul demon,
 un seul tic.
 
@@ -40,6 +40,29 @@ HEARTBEAT_EVERY_S = 15.0
 POLL_EVERY_S = 2.0
 
 _stop = threading.Event()
+
+# Delai laisse a l'arret propre apres un recyclage, avant de forcer la sortie.
+# Un fil d'execution bloque ne rend jamais la main, et les fils du pool ne
+# sont pas des demons : sans sortie forcee, le processus attendrait ce fil
+# pour toujours au lieu de laisser le superviseur (cron ou autostart de l'API)
+# en relancer un neuf.
+RECYCLAGE_GRACE_S = 30.0
+
+
+def _recycler(raison: str) -> None:
+    """Arrete ce demon pour qu'un neuf, avec tous ses emplacements, le remplace."""
+    if not (config.get("jobs") or {}).get("recycle_on_stall", True):
+        logger.warning(f"Recyclage du demon desactive (jobs.recycle_on_stall) : {raison}")
+        return
+    logger.error(f"Recyclage du demon : {raison}")
+    _stop.set()
+
+    def _sortie_forcee():
+        time.sleep(RECYCLAGE_GRACE_S)
+        logger.error("Recyclage : un fil bloque retient le processus — sortie forcee.")
+        logging.shutdown()
+        os._exit(75)
+    threading.Thread(target=_sortie_forcee, name="recyclage", daemon=True).start()
 
 
 def acquire_worker_lock():
@@ -144,6 +167,14 @@ def _heartbeat_loop():
                     logger.warning(f"Réparation périodique : {repaired} job(s) "
                                    f"zombie(s) traités (battement de coeur périmé).")
             if beats % 20 == 0:  # ~ toutes les 5 min
+                # Le battement ci-dessus rafraichit TOUS les jobs du demon, y
+                # compris celui dont le fil est bloque : il ne peut donc pas
+                # le demasquer. Seule la progression le peut (cf. jobs.declarer_figes).
+                figes = jobs.declarer_figes(session, me)
+                if figes:
+                    _signaler_figes(session, figes)
+                    _recycler(f"{len(figes)} travail(aux) fige(s) : "
+                              + ", ".join(j.label or j.token for j in figes))
                 # Un instantane peut se figer PENDANT que ce demon vit : le job
                 # meurt, l'instantane reste. Attendre le redemarrage suivant,
                 # c'est ce qui a laisse trois jours une liste hors production.
@@ -158,6 +189,20 @@ def _heartbeat_loop():
                 pass
         finally:
             session.close()
+
+
+def _signaler_figes(session, figes) -> None:
+    try:
+        from fiskr.notifier import emit
+        for job in figes:
+            emit(session, "job_fige", {
+                "Travail": job.label or job.token,
+                "Démarré le": job.started_at.strftime("%d/%m/%Y %H:%M") if job.started_at else "—",
+                "Constat": job.error,
+                "Suite": "Le démon se relance de lui-même ; la tâche repartira à son prochain horaire.",
+            })
+    except Exception as e:  # une notification en echec n'empeche pas le recyclage
+        logger.error(f"Signalement d'un travail fige impossible : {e}")
 
 
 def _start_schedulers():
@@ -187,6 +232,7 @@ def _start_schedulers():
     _minute_loop("retention", api_module._retention_tick)
     _minute_loop("notifications", api_module._notification_batch_tick)
     _minute_loop("mining", api_module._mining_tick)
+    _minute_loop("fraicheur", api_module._fraicheur_tick)
 
     # Inbox CFT : cadence propre (batch.inbox_poll_seconds), pas la minute
     def _inbox_run():

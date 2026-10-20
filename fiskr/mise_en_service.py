@@ -42,9 +42,17 @@ OK = "OK"
 FAMILLES = ("Socle", "Listes", "Criblage", "Exploitation")
 
 
-def _controle(cle, famille, titre, etat, constat, remede="", lien="") -> Dict[str, Any]:
+def _controle(cle, famille, titre, etat, constat, remede="", lien="",
+              constat_public=None) -> Dict[str, Any]:
+    """
+    `constat_public` : la version du constat que la sonde de conformite peut
+    rendre a un outil de supervision externe, quand le constat de l'ecran
+    nomme des personnes. Une supervision tierce n'a pas a recevoir le nom d'un
+    client sous mesure de gel.
+    """
     return {"cle": cle, "famille": famille, "titre": titre, "etat": etat,
-            "constat": constat, "remede": remede, "lien": lien}
+            "constat": constat, "remede": remede, "lien": lien,
+            "constat_public": constat_public}
 
 
 # ------------------------------------------------------------------ Socle
@@ -152,6 +160,28 @@ def _demon(db) -> Dict[str, Any]:
     vivant = bool(battement and battement.heartbeat_at
                   and battement.heartbeat_at > datetime.utcnow() - timedelta(seconds=180))
     if vivant:
+        # Un demon qui bat peut porter un travail qui n'avance plus : le
+        # battement est rafraichi pour tous ses jobs par un fil independant.
+        # Releve en production : « Le demon bat » affiche ici pendant qu'une
+        # synchronisation PEP etait figee depuis 26 jours.
+        from fiskr.jobs import stall_after
+        seuil = datetime.utcnow() - stall_after()
+        figes = [j for j in db.query(Job).filter(Job.status == "RUNNING").all()
+                 if (j.progress_at or j.started_at) and (j.progress_at or j.started_at) < seuil]
+        if figes:
+            pire = min(figes, key=lambda j: j.progress_at or j.started_at)
+            depuis = datetime.utcnow() - (pire.progress_at or pire.started_at)
+            return _controle(
+                "demon", "Socle", "Démon travailleur", BLOQUANT,
+                f"Le démon bat, mais {len(figes)} travail(aux) n'avancent plus : "
+                f"« {pire.label or pire.token} » sans progression depuis "
+                f"{int(depuis.total_seconds() // 3600)} h (phase {pire.phase or '?'}). "
+                f"Tant qu'il reste « en cours », il bloque toute relance de la même "
+                f"tâche et occupe un emplacement du démon.",
+                "Un démon à jour déclare ce travail figé et se relance de lui-même. "
+                "Si ce constat persiste, le démon tourne sur un code antérieur : "
+                "redémarrez-le (python -m fiskr.worker) après avoir mis le code à jour.",
+                "#settings/settings-integrations")
         return _controle("demon", "Socle", "Démon travailleur", OK,
                          "Le démon bat ; les travaux de fond sont pris en charge.")
 
@@ -279,6 +309,100 @@ def _listes_en_production(db) -> Dict[str, Any]:
         "#watchlist-mgmt/watchlist-sync")
 
 
+def _sources_de_reference(db) -> Dict[str, Any]:
+    """
+    Une liste de sanctions en production dont la source de reference ne
+    tourne pas — celle qui la REMPLACE a chaque passage (fiskr/sync.py,
+    `sources_de_reference`).
+
+    Releve en production le 19 octobre 2026 : la liste UE comptait 320 fiches,
+    toutes extraites du Journal Officiel par EUR-Lex. La liste consolidee
+    (eu_fsf), qui fait autorite et en porte plusieurs milliers, etait coupee
+    faute de jeton. L'ecran disait « 39 liste(s) en production » : il comptait
+    la liste UE sans dire qu'elle n'etait pas celle que son nom annonce.
+
+    Deux etats, qui n'ont pas la meme gravite :
+    - source NON CONFIGUREE (jeton absent, aucune adresse) : elle ne peut pas
+      tourner, pas meme a la main. La liste ne sera jamais celle de son
+      autorite — BLOQUANT ;
+    - source DESACTIVEE des passages planifies : la liste se fige sur sa
+      derniere version, et le controle de fraicheur ne le voit pas, faute de
+      version plus recente en attente — ATTENTION. Sans objet quand toute la
+      recuperation automatique est coupee : « Récupération automatique » le dit.
+
+    Seules les listes du perimetre SANCTION sont nommees : une liste de
+    vigilance (PEP, regulateurs) figee ne porte pas d'obligation de gel, et un
+    signal qui les nommerait toutes crierait au loup.
+    """
+    from fiskr.database import SyncReport
+    from fiskr.fraicheur import mesurer
+    from fiskr.perimeters import est_sanction
+    from fiskr.settings import perimeter_overrides
+    from fiskr.sync import (SOURCES_COMPLEMENTAIRES, get_sync_config,
+                            source_non_configuree, sources_de_reference)
+
+    cfg = get_sync_config(db)
+    reference = sources_de_reference()
+    surcharges = perimeter_overrides(db)
+    impossibles, figees = [], []
+    for liste in mesurer(db)["listes"]:
+        cle = reference.get(liste["type"])
+        if not liste["production_id"] or not cle or not est_sanction(liste["type"], surcharges):
+            continue
+        source = cfg.get(cle) or {}
+        empechement = source_non_configuree(source)
+        if empechement:
+            impossibles.append((liste, cle, empechement))
+        elif cfg.get("auto_enabled") and not source.get("enabled"):
+            figees.append((liste, cle))
+    if not impossibles and not figees:
+        return _controle(
+            "sources_reference", "Listes", "Sources de référence", OK,
+            "Chaque liste de sanctions en production a sa source de référence "
+            "configurée et active.", lien="#watchlist-mgmt/watchlist-sync")
+
+    def _nom(liste):
+        return liste["type"].replace("WATCHLIST_", "")
+
+    # Qui a produit la version en production, quand ce n'est pas la reference :
+    # un fait lu au rapport de synchronisation, pas deduit de la configuration.
+    origines = {}
+    if impossibles:
+        origines = dict(db.query(SyncReport.snapshot_id, SyncReport.source).filter(
+            SyncReport.snapshot_id.in_([l["production_id"] for l, _, _ in impossibles])).all())
+    constats, remedes = [], []
+    for liste, cle, (champ, empechement) in impossibles:
+        origine = origines.get(liste["production_id"])
+        complements = [c for c, t in SOURCES_COMPLEMENTAIRES.items() if t == liste["type"]]
+        provenance = (f"la version en production vient de {origine}" if origine
+                      else "la version en production vient d'un import manuel")
+        constats.append(
+            f"{_nom(liste)} ({liste['production_fiches']} fiches) : sa source de "
+            f"référence, {cle}, ne peut pas tourner ({empechement}) ; {provenance}"
+            + (f" ; {', '.join(complements)} ne fait que la compléter, sans "
+               f"jamais porter la liste entière ni ses radiations" if complements else "")
+            + ".")
+        remedes.append(f"renseignez sync.{cle}.{champ} dans config.yaml, puis activez "
+                       f"la source {cle}")
+    for liste, cle in figees:
+        constats.append(
+            f"{_nom(liste)} : sa source de référence, {cle}, est coupée des "
+            f"passages planifiés — la version en production a "
+            f"{liste['production_age_jours']} jour(s) et ne se renouvellera pas seule.")
+    if figees:
+        remedes.append("réactivez les sources coupées (écran Sources), ou retirez de "
+                       "la production les listes qui ne sont plus suivies")
+    etat = BLOQUANT if impossibles else ATTENTION
+    return _controle(
+        "sources_reference", "Listes", "Sources de référence", etat,
+        f"{len(impossibles) + len(figees)} liste(s) de sanctions en production "
+        f"sans leur source de référence. " + " ".join(constats)
+        + " Le contrôle « Listes en production » les compte pourtant comme les autres.",
+        "Pour chacune : " + " ; ".join(remedes) + ". Le gel des avoirs s'applique "
+        "à la liste de l'autorité, pas à ce qu'il en reste.",
+        "#watchlist-mgmt/watchlist-sync")
+
+
 def _sources_automatiques(db) -> Dict[str, Any]:
     try:
         from fiskr.sync import get_sync_config
@@ -306,6 +430,18 @@ def _sources_automatiques(db) -> Dict[str, Any]:
 # criblage porte sur une liste qui n'existe plus sous cette forme.
 _RETARD_TOLERE_H = 48
 _RETARD_BLOQUANT_H = 7 * 24
+SEUILS_DE_RETARD_H = {ATTENTION: _RETARD_TOLERE_H, BLOQUANT: _RETARD_BLOQUANT_H}
+
+
+def niveau_de_retard(retard_heures: int) -> str:
+    """
+    OK / ATTENTION / BLOQUANT pour un retard donne — la seule regle. Le
+    controle de fraicheur la lit, et l'evenement `fraicheur_depassee` aussi
+    (fiskr/fraicheur.py) : un signal qui partirait sur d'autres seuils que
+    l'ecran dirait une chose que l'ecran contredit.
+    """
+    return (BLOQUANT if retard_heures >= _RETARD_BLOQUANT_H
+            else ATTENTION if retard_heures >= _RETARD_TOLERE_H else OK)
 
 
 def _fraicheur_des_listes(db) -> Dict[str, Any]:
@@ -319,6 +455,17 @@ def _fraicheur_des_listes(db) -> Dict[str, Any]:
     """
     from fiskr.fraicheur import mesurer, phrase_de_retard
     etat = mesurer(db)
+    if not etat["listes_en_production"]:
+        # Rien a dater. « Chaque liste en production est la derniere version »
+        # est vrai de zero liste : c'est le vert qu'affichait une installation
+        # neuve. Le controle « Listes en production » porte deja le bloquant ;
+        # celui-ci ne le repete pas, il cesse seulement d'affirmer.
+        return _controle(
+            "fraicheur", "Listes", "Fraîcheur des listes", A_FAIRE,
+            "Aucune liste en production : rien à dater.",
+            "La fraîcheur se mesure dès qu'une liste est en production (voir "
+            "« Listes en production »).",
+            "#watchlist-mgmt/watchlist-review")
     if not etat["listes_en_retard"]:
         perimes = etat["lots_perimes"]
         return _controle(
@@ -333,8 +480,7 @@ def _fraicheur_des_listes(db) -> Dict[str, Any]:
                    key=lambda l: -l["retard_heures"])[:5]
     detail = ", ".join(f"{l['type'].replace('WATCHLIST_', '')} "
                        f"({phrase_de_retard(l['retard_heures'])})" for l in pires)
-    etat_du_controle = (BLOQUANT if retard >= _RETARD_BLOQUANT_H
-                        else ATTENTION if retard >= _RETARD_TOLERE_H else OK)
+    etat_du_controle = niveau_de_retard(retard)
     if etat_du_controle == OK:
         return _controle(
             "fraicheur", "Listes", "Fraîcheur des listes", OK,
@@ -357,9 +503,10 @@ def _fraicheur_des_listes(db) -> Dict[str, Any]:
 
 
 def _homologation(db) -> Dict[str, Any]:
-    from fiskr.settings import get_setting, SETTING_REQUIRE_APPROVAL
-    exige = get_setting(db, SETTING_REQUIRE_APPROVAL, True)
-    if exige:
+    # Ce que l'import APPLIQUE, pas une relecture du réglage avec un défaut à
+    # soi : un « Vérifié » ne sort que de la condition que le moteur teste.
+    from fiskr.settings import require_approval_enabled
+    if require_approval_enabled(db):
         return _controle("homologation", "Listes", "Homologation des lots", OK,
                          "Un lot ingéré passe par une revue avant production.",
                          lien="#watchlist-mgmt/watchlist-review")
@@ -609,16 +756,36 @@ def _pieces_probantes(db) -> Dict[str, Any]:
 
 def _couverture_du_criblage(db) -> Dict[str, Any]:
     """
-    « Tous vos clients ont-ils été criblés ? » — la première question d'un
-    contrôle, et le produit ne savait pas y répondre.
+    « Tous vos clients ont-ils été criblés, et contre la version des listes en
+    production ? » — la première question d'un contrôle.
 
-    Importer un référentiel clients déclenche un contrôle de complétude, pas un
-    criblage ; le re-criblage automatique se déclenche quand une LISTE change,
-    jamais quand des CLIENTS arrivent. Un référentiel fraîchement importé
-    restait donc entier hors du criblage, sans que rien ne le signale.
+    Deux constats, le pire l'emporte :
+
+    - le re-criblage automatique est coupé : plus aucune mise à jour de liste
+      n'est confrontée au référentiel (lignes directrices DGT/ACPR, §123 :
+      « sans délai » à chaque modification des mesures), et le réglage se
+      coupait sans qu'aucun contrôle le relève ;
+    - des clients ne sont pas couverts contre la version en production. Le
+      délai toléré est celui de la fraîcheur des listes, et pour la même
+      raison : une liste en retard et un client non recriblé exposent au même
+      gel manqué. En deçà, un travail en cours est laissé à son œuvre ; sans
+      travail en cours, l'écart ne se résorbera pas seul et il est signalé.
     """
+    from datetime import datetime
     from fiskr.couverture import couverture_du_criblage, phrase_de_couverture
+    from fiskr.fraicheur import phrase_de_retard
+    from fiskr.settings import auto_rescreen_enabled
+
     mesure = couverture_du_criblage(db)
+    if mesure.get("illisible"):
+        # Une mesure en echec ne dit rien du referentiel : ni « vide », ni
+        # « tout est crible ». Elle le dit, au lieu de prendre l'un des deux.
+        return _controle(
+            "couverture", "Criblage", "Couverture du criblage", ATTENTION,
+            phrase_de_couverture(mesure),
+            "Relancez la vérification ; si l'échec persiste, le journal du "
+            "serveur donne l'erreur complète (fiskr.couverture).",
+            "#screening/screening-batch")
     if mesure["sans_referentiel"]:
         return _controle(
             "couverture", "Criblage", "Couverture du criblage", A_FAIRE,
@@ -627,18 +794,113 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
             "Importez une base clients (CLIENT_BASE) depuis l'écran Imports. "
             "Le criblage n'a rien à comparer tant qu'elle manque.",
             "#watchlist-mgmt/watchlist-import")
-    if not mesure["jamais_cribles"]:
+
+    rang = {OK: 0, ATTENTION: 1, BLOQUANT: 2}
+    etat, constats, remedes, lien = OK, [], [], "#screening/screening-batch"
+    if not auto_rescreen_enabled(db):
+        etat = ATTENTION
+        constats.append(
+            "Le re-criblage automatique est coupé : une liste mise en production "
+            "n'est plus confrontée au référentiel clients, et rien d'autre ne le fait.")
+        remedes.append(
+            "Rallumez « Re-criblage automatique du référentiel clients après chaque "
+            "mise à jour de liste » (Paramètres → Gouvernance).")
+        lien = "#settings/settings-governance"
+
+    phrase = phrase_de_couverture(mesure)
+    if phrase:
+        heures = None
+        if mesure.get("en_attente_depuis"):
+            depuis = datetime.fromisoformat(mesure["en_attente_depuis"])
+            heures = max(0, int((datetime.utcnow() - depuis).total_seconds() // 3600))
+        if heures is not None and heures >= _RETARD_BLOQUANT_H:
+            ecart = BLOQUANT
+        elif heures is not None and heures >= _RETARD_TOLERE_H:
+            ecart = ATTENTION
+        elif mesure.get("travaux_en_cours"):
+            ecart = OK
+        else:
+            ecart = ATTENTION
+        if heures is not None:
+            phrase += f" Le plus ancien attend depuis {phrase_de_retard(heures)}."
+        elif mesure.get("attente_inconnue"):
+            phrase += (" Aucun passage n'a encore confronté le référentiel à cette "
+                       "version : une fiche listée ajoutée ou corrigée sans re-criblage.")
+        if ecart == OK:
+            phrase += " Un criblage est en cours : il les couvrira."
+        else:
+            remedes.append(
+                "Lancez un lookback (Criblage → Batch) : il confronte tout le "
+                "référentiel aux listes en production et date chaque fiche. C'est "
+                "l'opération la plus lourde du produit — elle part en tâche de fond.")
+            lien = "#screening/screening-batch"
+        constats.append(phrase)
+        if rang[ecart] > rang[etat]:
+            etat = ecart
+
+    if not constats:
         return _controle(
             "couverture", "Criblage", "Couverture du criblage", OK,
-            f"Les {mesure['clients']} clients du référentiel ont tous été "
-            f"criblés au moins une fois.", lien="#screening/screening-batch")
+            f"Les {mesure['clients']} clients du référentiel sont criblés contre la "
+            f"version des listes en production.", lien="#screening/screening-batch")
+    return _controle("couverture", "Criblage", "Couverture du criblage", etat,
+                     " ".join(constats), " ".join(remedes), lien)
+
+
+def _declarations_de_gel(db) -> Dict[str, Any]:
+    """
+    Les gels confirmes ont-ils ete declares a la DG Tresor ?
+
+    La declaration est due « immediatement » (CMF L.562-4 ; LD DGT/ACPR du
+    18 mars 2026, §182), et les « delais de declaration » sont un point de
+    controle interne nomme (§99). Releve en production : deux vrais positifs
+    OFAC, aucune declaration preparee, rien ne le disait. Ce controle lit le
+    registre des mesures de gel — la meme definition du retard que la
+    notification et l'indicateur (fiskr/kpi.py).
+    """
+    from fiskr.database import MesureDeGel
+    from fiskr.gels import STATUT_A_DECLARER, alertes_confirmees_sans_mesure, mesures_en_retard
+    from fiskr.settings import gel_declaration_delai_heures
+    seuil = gel_declaration_delai_heures(db)
+    en_retard = mesures_en_retard(db)
+    lien = "#screening/alerts-gels"
+    orphelines = alertes_confirmees_sans_mesure(db)
+    if orphelines:
+        # Le cas de production : des vrais positifs confirmes AVANT que le
+        # registre n'existe. Rien ne les y fera entrer tout seuls.
+        noms = ", ".join(f"alerte #{a.id} {a.client_name} × {a.watchlist_name}"
+                         for a in orphelines[:5])
+        return _controle(
+            "gels", "Criblage", "Déclarations de gel à la DG Trésor", BLOQUANT,
+            f"{len(orphelines)} vrai(s) positif(s) sur une liste de gel sans mesure au "
+            f"registre : {noms}{' …' if len(orphelines) > 5 else ''}. Aucune déclaration "
+            f"à la DG Trésor n'y est tracée.",
+            "Ouvrez chaque alerte et créez sa mesure de gel (bouton « Ouvrir la mesure de "
+            "gel ») : son délai courra depuis la confirmation, puis déclarez-la.", lien,
+            constat_public=f"{len(orphelines)} vrai(s) positif(s) sur une liste de gel "
+                           f"sans mesure au registre ni déclaration tracée.")
+    if en_retard:
+        noms = ", ".join(f"#{m.id} {m.client_name} × {m.watchlist_name}" for m in en_retard[:5])
+        return _controle(
+            "gels", "Criblage", "Déclarations de gel à la DG Trésor", BLOQUANT,
+            f"{len(en_retard)} mesure(s) de gel non déclarée(s) plus de {seuil} h après la "
+            f"confirmation : {noms}{' …' if len(en_retard) > 5 else ''}. La déclaration est "
+            f"due immédiatement (CMF L.562-4, R.562-3).",
+            "Préparez le projet de déclaration depuis le registre des gels, transmettez-le "
+            "à la DG Trésor, puis enregistrez la déclaration avec la pièce de transmission "
+            "(accusé de réception ou copie du courriel).", lien,
+            constat_public=f"{len(en_retard)} mesure(s) de gel non déclarée(s) plus de "
+                           f"{seuil} h après la confirmation.")
+    a_declarer = db.query(MesureDeGel).filter(MesureDeGel.statut == STATUT_A_DECLARER).count()
+    if a_declarer:
+        return _controle(
+            "gels", "Criblage", "Déclarations de gel à la DG Trésor", ATTENTION,
+            f"{a_declarer} mesure(s) de gel à déclarer, encore dans le délai de {seuil} h.",
+            "Déclarez-les à la DG Trésor maintenant : le délai est un plafond d'alarme, "
+            "pas un délai accordé.", lien)
     return _controle(
-        "couverture", "Criblage", "Couverture du criblage", ATTENTION,
-        phrase_de_couverture(mesure),
-        "Lancez un lookback (Criblage → Re-criblage) : il confronte tout le "
-        "référentiel aux listes en production. C'est l'opération la plus lourde "
-        "du produit — elle part en tâche de fond et se suit par jeton.",
-        "#screening/screening-batch")
+        "gels", "Criblage", "Déclarations de gel à la DG Trésor", OK,
+        "Aucune mesure de gel en attente de déclaration au registre.", lien=lien)
 
 
 # Fenetre d'observation des echecs de synchronisation : assez large pour
@@ -691,11 +953,11 @@ def _sources_en_echec_repete(db) -> Dict[str, Any]:
         "#watchlists/watchlists-sources")
 
 
-_CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
+_CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production, _sources_de_reference,
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
-                   _pieces_probantes, _smtp)
+                   _declarations_de_gel, _pieces_probantes, _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
 
 
@@ -741,6 +1003,59 @@ def _premier_demarrage(db) -> bool:
     except Exception as e:
         logger.warning(f"Détection de premier démarrage impossible : {e}")
         return False
+
+
+# Ce que rejoue la sonde de conformite (GET /api/health/conformite) : les
+# controles qui peuvent conclure BLOQUANT et ne coutent que quelques lectures
+# d'index. Elle est interrogee chaque minute par une supervision externe, elle
+# ne doit rien faire de lourd. Restent dehors, a dessein, ceux qui ne
+# concluent jamais BLOQUANT : une sonde ne doit faire sonner que ce qui
+# bloque. Un test verifie qu'aucun controle capable de BLOQUANT n'en manque.
+_CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
+# La couverture du criblage y est aussi : un referentiel que rien n'a confronte
+# a la version en production depuis une semaine est un defaut de conformite,
+# pas un detail d'ecran. Son comptage est borne (PLAFOND_DE_COMPTAGE).
+_CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
+                          _fraicheur_des_listes, _declarations_de_gel,
+                          _couverture_du_criblage)
+
+
+def etat_de_conformite(db) -> Dict[str, Any]:
+    """
+    Les controles BLOQUANT parmi ceux que rejoue la sonde, et sa portee.
+
+    Releve en production le 19 octobre 2026 : 47 jours sans homologation, la
+    notification desactivee, les envois immediats en echec (0 reussite sur
+    335) — et `/api/health` repondait « ok ». La sonde de vie dit que le
+    processus repond ; celle-ci dit si ce qu'il crible est opposable, sans
+    passer par le courriel.
+
+    Contrairement a l'ecran de mise en service, qui doit rester affichable et
+    saute un controle illisible, la sonde ne saute rien : un controle qui ne
+    peut pas conclure ne l'autorise pas a dire « conforme ». Il est rendu
+    comme un echec, nomme.
+    """
+    bloquants: List[Dict[str, Any]] = []
+    portee: List[str] = []
+    fonctions = ([(f, False) for f in _CONTROLES_DE_LA_SONDE_SANS_BASE]
+                 + [(f, True) for f in _CONTROLES_DE_LA_SONDE])
+    for fonction, avec_base in fonctions:
+        try:
+            controle = fonction(db) if avec_base else fonction()
+        except Exception as e:
+            logger.warning(f"Sonde de conformité : contrôle {fonction.__name__} illisible : {e}")
+            nom = fonction.__name__.strip("_")
+            portee.append(nom)
+            bloquants.append({"cle": nom, "titre": nom, "remede": "",
+                              "constat": f"Contrôle illisible ({type(e).__name__} : {e}) — "
+                                         f"la conformité ne peut pas être établie."})
+            continue
+        portee.append(controle["cle"])
+        if controle["etat"] == BLOQUANT:
+            bloquants.append({"cle": controle["cle"], "titre": controle["titre"],
+                              "constat": controle.get("constat_public") or controle["constat"],
+                              "remede": controle["remede"]})
+    return {"conforme": not bloquants, "bloquants": bloquants, "portee": portee}
 
 
 def sonder_smtp(timeout: float = 8.0) -> Dict[str, Any]:

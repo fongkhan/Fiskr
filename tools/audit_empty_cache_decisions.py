@@ -15,9 +15,10 @@ porte une signature nette :
     watchlist_id   = 'NONE'         <- aucun candidat
     status         = 'NO_MATCH'
 
-Un processus dont le cache est chargé écrit toujours le hash réel du snapshot en
-production. Le critère est donc `watchlist_hash = 'N/A'` : il isole exactement
-les décisions à re-cribler.
+Un processus dont le cache est chargé écrit toujours une empreinte réelle : le
+hash d'un snapshot en production pour les décisions antérieures au 19/10/2026,
+l'empreinte de l'univers criblé depuis (fiskr/univers.py). Le critère est donc
+`watchlist_hash = 'N/A'` : il isole exactement les décisions à re-cribler.
 
 Ce que l'outil NE fait PAS
 --------------------------

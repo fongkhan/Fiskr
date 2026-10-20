@@ -45,7 +45,10 @@ def _cleanup_db():
         if aids:
             db.query(AlertEvent).filter(AlertEvent.alert_id.in_(aids)).delete(synchronize_session=False)
             db.query(Alert).filter(Alert.id.in_(aids)).delete(synchronize_session=False)
-        db.query(HookDelivery).filter(HookDelivery.idempotency_key.like("test_cfp_%")).delete(synchronize_session=False)
+        # Par appelant : la cle d'idempotence n'est plus stockee en clair
+        # (empreinte de appelant + point d'entree + cle), un prefixe de test
+        # ne la retrouverait plus.
+        db.query(HookDelivery).filter(HookDelivery.caller.like("apikey:test_cfp_%")).delete(synchronize_session=False)
         keys = db.query(ApiKey).filter(ApiKey.name.like("test_cfp_%")).all()
         for k in keys:
             db.delete(k)
@@ -294,6 +297,9 @@ def test_hook_screening_with_api_key_and_idempotency(client):
         app.dependency_overrides[get_current_user] = saved_override
 
 
+# Crible contre « une liste en production », que le semis implicite de
+# watchlist.json fournissait quand le fichier tournait seul.
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_hook_hmac_signature_enforced(client, monkeypatch):
     tag = uuid.uuid4().hex[:6]
     full_key = _create_api_key(client)

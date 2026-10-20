@@ -354,6 +354,34 @@ def flush_digest(db, now: Optional[datetime] = None) -> Dict[str, Any]:
             "sent": sent, "failed": failed, "webhook": porte_par_webhook}
 
 
+def derniers_envois(db) -> Dict[str, Dict[str, Any]]:
+    """
+    Par evenement : la date du dernier envoi REEL (statut SENT) et le nombre
+    de tentatives restees sans envoi (FAILED, SKIPPED), lus au journal.
+
+    L'ecran des notifications cochait « actif » sur ce qui etait active, et
+    s'arretait la. Releve en production le 19/10/2026 : `kpi_digest` coche,
+    0 envoi au journal ; `sync_error` coche, 0 reussite sur 335. Active et
+    parti sont deux faits differents ; l'ecran ne montrait que le premier.
+
+    Un seul agregat sur un journal borne (purge a DELIVERY_TTL_DAYS) : « jamais
+    envoye » s'entend donc sur cette fenetre, et l'ecran le dit.
+    """
+    from sqlalchemy import func
+    lignes = db.query(
+        NotificationDelivery.event_key, NotificationDelivery.status,
+        func.count(NotificationDelivery.id), func.max(NotificationDelivery.sent_at),
+    ).group_by(NotificationDelivery.event_key, NotificationDelivery.status).all()
+    out: Dict[str, Dict[str, Any]] = {}
+    for cle, statut, nombre, envoye_le in lignes:
+        ligne = out.setdefault(cle, {"dernier_envoi": None, "sans_envoi": 0})
+        if statut == "SENT" and envoye_le is not None:
+            ligne["dernier_envoi"] = envoye_le.isoformat() + "Z"
+        elif statut in ("FAILED", "SKIPPED"):
+            ligne["sans_envoi"] += int(nombre or 0)
+    return out
+
+
 def purge_deliveries(db, ttl_days: int = DELIVERY_TTL_DAYS) -> int:
     """Purge le journal des envois au-dela du TTL. Retourne le nombre supprime."""
     cutoff = datetime.utcnow() - timedelta(days=ttl_days)

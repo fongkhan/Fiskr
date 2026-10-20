@@ -1,6 +1,10 @@
 from typing import List, Dict, Any, Optional, Tuple
 import json
-from fiskr.database import compute_checksum
+import logging
+from fiskr.database import CLES_HORS_EMPREINTE, compute_checksum, normaliser_fiche
+
+logger = logging.getLogger("fiskr.delta")
+
 
 def flatten_dict(d: dict, prefix: str = "") -> dict:
     """Recursively flattens a nested dictionary into dot-notation keys."""
@@ -15,52 +19,124 @@ def flatten_dict(d: dict, prefix: str = "") -> dict:
             items[new_key] = v
     return items
 
+
 def find_differences(old_ent: dict, new_ent: dict) -> Tuple[List[str], dict, dict]:
     """
-    Compares two entity dicts.
-    Returns:
-        changes_detected: list of strings (e.g. ["dates_of_birth", "countries.residence"])
-        before: dict of changed keys
-        after: dict of changed keys
+    Compare deux fiches SOUS LEUR FORME NORMALISEE (`normaliser_fiche`, celle
+    que hache l'empreinte) et rend :
+        changes_detected : chemins touches (ex. ["dates_of_birth", "countries.residence"])
+        before / after   : valeurs STOCKEES des cles touchees — le reviseur
+                           lit la source telle qu'elle est, pas sa forme de
+                           comparaison.
+
+    Deux references inversees (« A - B » / « B - A » rangees par le lecteur),
+    deux alias permutes ou un guillemet echappe autrement ne sont pas des
+    modifications : la forme normalisee est la meme.
     """
     changes_detected = []
     before = {}
     after = {}
-    
-    exclude_keys = {"id", "snapshot_id", "entity_checksum"}
-    
-    # 1. First compare root keys (non-dict)
-    root_keys = (set(old_ent.keys()) | set(new_ent.keys())) - exclude_keys
-    
-    for k in root_keys:
-        val_old = old_ent.get(k)
-        val_new = new_ent.get(k)
-        
+    norme_old, norme_new = normaliser_fiche(old_ent), normaliser_fiche(new_ent)
+
+    for k in (set(norme_old) | set(norme_new)) - CLES_HORS_EMPREINTE:
+        val_old, val_new = norme_old.get(k), norme_new.get(k)
+        if val_old == val_new:
+            continue
+        sub_changes = []
         if isinstance(val_old, dict) or isinstance(val_new, dict):
-            # Nested comparison
             flat_old = flatten_dict(val_old or {})
             flat_new = flatten_dict(val_new or {})
-            all_flat_keys = set(flat_old.keys()) | set(flat_new.keys())
-            
-            sub_changes = []
-            for fk in all_flat_keys:
-                if flat_old.get(fk) != flat_new.get(fk):
-                    sub_changes.append(fk)
-                    
-            if sub_changes:
-                # Add nested paths to changes_detected
-                for sc in sub_changes:
-                    changes_detected.append(f"{k}.{sc}")
-                before[k] = val_old
-                after[k] = val_new
+            sub_changes = [fk for fk in set(flat_old) | set(flat_new)
+                           if flat_old.get(fk) != flat_new.get(fk)]
+        if sub_changes:
+            changes_detected.extend(f"{k}.{sc}" for sc in sub_changes)
         else:
-            # Flat comparison
-            if val_old != val_new:
-                changes_detected.append(k)
-                before[k] = val_old
-                after[k] = val_new
-                
+            changes_detected.append(k)
+        before[k] = old_ent.get(k)
+        after[k] = new_ent.get(k)
+
     return sorted(changes_detected), before, after
+
+
+# ------------------ IDENTITE OU INFORMATION ------------------
+
+def champs_d_identite() -> frozenset:
+    """
+    Champs dont la modification touche l'IDENTITE de la personne listee :
+    ceux que le moteur lit REELLEMENT pour rapprocher un client d'une fiche
+    (`screenpool.ENTITY_PROJECTION`, verifiee champ par champ par la
+    sentinelle de tests/test_projection.py) — noms, alias, dates de naissance,
+    pays, genre, type, identifiants et documents —, plus les programmes de
+    sanction : le moteur ne les score pas, mais ils fondent l'obligation de
+    gel. Tout le reste — motifs, adresses, informations complementaires,
+    references — est de l'INFORMATION : utile a lire, sans effet sur qui est
+    intercepte.
+
+    Derive, jamais recopie : un champ que le moteur se met a lire devient
+    identitaire ici sans que personne y pense.
+    """
+    from fiskr.screenpool import ENTITY_PROJECTION
+    return (frozenset(ENTITY_PROJECTION) | {"sanction_programs"}) - CLES_HORS_EMPREINTE
+
+
+NATURE_IDENTITE = "IDENTITE"
+NATURE_INFORMATION = "INFORMATION"
+
+
+# Issue de la comparaison de deux versions d'une meme fiche
+INCHANGEE = "INCHANGEE"
+FORME = "FORME"                          # forme du lecteur seule, equivalence verifiee
+FORME_NON_VERIFIABLE = "FORME_NON_VERIFIABLE"  # idem, ancien texte tronque
+MODIFIEE = "MODIFIEE"
+
+
+def _comparer(identifiant, nom: str, avant_ent: dict, apres_ent: dict,
+              identite: Optional[frozenset]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """(issue, ligne « modifiee » du rapport ou None).
+
+    Partagee par le calcul en memoire et le calcul en base : les deux
+    publient exactement les memes lignes.
+
+    Une difference qui ne tient qu'a la correction du lecteur OpenSanctions
+    (programmes de sanction passes de `pep_role` a `sanction_programs`, cf.
+    `ingest.forme_corrigee_du_lecteur`) n'est pas une modification de la
+    source : elle est comptee a part, et dite. Melee a une vraie modification,
+    elle en est retiree : une date de naissance corrigee reste une
+    modification d'identite, une note ajoutee une information — pas une
+    modification de programmes de sanction parce que le lecteur les range
+    ailleurs."""
+    changements, avant, apres = find_differences(avant_ent, apres_ent)
+    if not changements:
+        return INCHANGEE, None
+    from fiskr.ingest import CHAMPS_DE_LA_CORRECTION, forme_corrigee_du_lecteur
+    de_forme = [c for c in changements if c.split(".")[0] in CHAMPS_DE_LA_CORRECTION]
+    forme = forme_corrigee_du_lecteur(avant_ent, apres_ent, de_forme) if de_forme else None
+    if forme is not None:
+        changements = [c for c in changements if c not in de_forme]
+        if not changements:
+            return (FORME if forme else FORME_NON_VERIFIABLE), None
+        for chemin in de_forme:
+            avant.pop(chemin.split(".")[0], None)
+            apres.pop(chemin.split(".")[0], None)
+    ligne = {
+        "id": identifiant,
+        "primary_name": nom,
+        "changes_detected": changements,
+        "before": avant,
+        "after": apres,
+    }
+    if identite is not None:
+        touches = [c for c in changements if c.split(".")[0] in identite]
+        ligne["nature"] = NATURE_IDENTITE if touches else NATURE_INFORMATION
+        ligne["identity_changes"] = touches
+    return MODIFIEE, ligne
+
+
+def _ordre_de_publication(lignes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Les modifications d'IDENTITE d'abord, puis par identifiant : quand le
+    detail est borne, c'est ce qui change qui est intercepte qu'on doit voir."""
+    return sorted(lignes, key=lambda l: (l.get("nature") == NATURE_INFORMATION, str(l["id"])))
+
 
 def calculate_delta(
     old_entities: List[Dict[str, Any]],
@@ -73,70 +149,55 @@ def calculate_delta(
     """
     old_map = {ent.get(key_column): ent for ent in old_entities if ent.get(key_column)}
     new_map = {ent.get(key_column): ent for ent in new_entities if ent.get(key_column)}
-    
+
     old_ids = set(old_map.keys())
     new_ids = set(new_map.keys())
-    
+
     added_ids = new_ids - old_ids
     removed_ids = old_ids - new_ids
     common_ids = old_ids.intersection(new_ids)
-    
+
     added = []
     removed = []
     modified = []
-    
+    identite = champs_d_identite() if key_column == "entity_id" else None
+
     # ADDED
     for i in sorted(added_ids):
         ent = new_map[i]
         name = ent.get("primary_name") or ent.get("client_company_name") or ent.get("client_last_name") or ""
         etype = ent.get("entity_type") or ent.get("client_type") or "I"
         added.append({"id": i, "primary_name": name, "type": etype})
-        
+
     # REMOVED
     for i in sorted(removed_ids):
         ent = old_map[i]
         name = ent.get("primary_name") or ent.get("client_company_name") or ent.get("client_last_name") or ""
         etype = ent.get("entity_type") or ent.get("client_type") or "I"
         removed.append({"id": i, "primary_name": name, "type": etype})
-        
-    # MODIFIED (Using checksum comparisons)
+
+    # MODIFIED : l'empreinte ne fait que designer les candidates, le champ a
+    # champ normalise tranche.
+    issues: Dict[str, int] = {}
     for i in sorted(common_ids):
         old_ent = old_map[i]
         new_ent = new_map[i]
-        
-        # Determine checksums
-        old_chk = old_ent.get("entity_checksum")
-        new_chk = new_ent.get("entity_checksum")
-        
-        if not old_chk:
-            old_chk = compute_checksum(old_ent)
-        if not new_chk:
-            new_chk = compute_checksum(new_ent)
-            
+        old_chk = old_ent.get("entity_checksum") or compute_checksum(old_ent)
+        new_chk = new_ent.get("entity_checksum") or compute_checksum(new_ent)
         if old_chk != new_chk:
-            changes, before, after = find_differences(old_ent, new_ent)
-            if changes:
-                name = new_ent.get("primary_name") or new_ent.get("client_company_name") or new_ent.get("client_last_name") or ""
-                modified.append({
-                    "id": i,
-                    "primary_name": name,
-                    "changes_detected": changes,
-                    "before": before,
-                    "after": after
-                })
-                
-    return {
-        "summary": {
-            "added_count": len(added),
-            "removed_count": len(removed),
-            "modified_count": len(modified)
-        },
-        "details": {
-            "added": added,
-            "removed": removed,
-            "modified": modified
-        }
-    }
+            name = new_ent.get("primary_name") or new_ent.get("client_company_name") or new_ent.get("client_last_name") or ""
+            issue, ligne = _comparer(i, name, old_ent, new_ent, identite)
+            issues[issue] = issues.get(issue, 0) + 1
+            if ligne is not None:
+                modified.append(ligne)
+
+    rapport = _rapport(
+        added, len(added), removed, len(removed), _ordre_de_publication(modified),
+        len(modified), len(modified),
+        nb_identite=(sum(1 for m in modified if m["nature"] == NATURE_IDENTITE)
+                     if identite is not None else None),
+        issues=issues)
+    return rapport
 
 
 # ------------------ CALCUL EN BASE, A MEMOIRE BORNEE ------------------
@@ -182,19 +243,22 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
     -------------------------
     - ajouts / retraits : anti-jointure SQL, un COUNT et un LIMIT ;
     - modifications : jointure sur l'identifiant avec comparaison des
-      EMPREINTES, un COUNT et un LIMIT.
+      EMPREINTES, puis VERIFICATION champ a champ de chaque candidate, par
+      tranches (cf. `_verifier_modifications`).
 
-    L'equivalence des empreintes n'est pas une approximation :
-    `compute_checksum` et `find_differences` excluent EXACTEMENT les memes trois
-    cles (`id`, `snapshot_id`, `entity_checksum`), donc « empreintes
-    differentes » et « au moins un champ compare differe » sont la meme chose.
-    Seules les fiches effectivement publiees en detail sont ensuite chargees en
-    entier, pour en tirer le champ-a-champ.
+    L'empreinte DESIGNE, le champ a champ TRANCHE. Ce module affirmait que
+    « empreintes differentes » et « un champ compare differe » etaient la meme
+    chose ; la production l'a dementi : 15 fiches GBFCDO sur 100 « modifiees »
+    sans aucun champ different, parce que l'empreinte etait calculee sur
+    l'enregistrement lu et non sur ce que la base garde (designation tronquee
+    a 500 caracteres). Le compteur disait 24, la liste en montrait 19. Le
+    compte est desormais celui des fiches verifiees : il ne peut plus
+    contredire la liste.
 
     Rend la structure DEJA tronquee (`{summary, details}` avec les compteurs
     `*_truncated`), celle que les rapports stockent.
     """
-    from sqlalchemy import and_, exists, func, select
+    from sqlalchemy import and_, func, select
     from sqlalchemy.orm import aliased
 
     modele, colonne_cle, colonnes_nom, colonne_type = _descripteur(cle)
@@ -206,10 +270,8 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
     ancien = aliased(WatchlistEntity)
 
     def _sans_homologue(cote, cote_snapshot, autre, autre_snapshot):
-        sous_requete = select(1).where(and_(
-            autre.snapshot_id == autre_snapshot,
-            getattr(autre, colonne_cle) == getattr(cote, colonne_cle)))
-        return and_(cote.snapshot_id == cote_snapshot, ~exists(sous_requete))
+        return _condition_sans_homologue(colonne_cle, cote, cote_snapshot,
+                                         autre, autre_snapshot)
 
     def _nom(cote):
         colonnes = [getattr(cote, c) for c in colonnes_nom]
@@ -224,10 +286,7 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
                 .where(condition).order_by(ordre).limit(max(0, limite))).all()
         ]
 
-    def _compte(condition, cote):
-        return int(db.execute(
-            select(func.count()).select_from(cote.__table__ if hasattr(cote, "__table__")
-                                             else cote).where(condition)).scalar() or 0)
+    identite = champs_d_identite() if cle == "entity_id" else None
 
     if not old_snapshot_id:
         # Premier import : tout est un ajout, rien a comparer.
@@ -235,7 +294,8 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
         total = int(db.execute(select(func.count()).select_from(nouveau)
                                .where(condition)).scalar() or 0)
         ajouts = _lignes(condition, nouveau, getattr(nouveau, colonne_cle))
-        return _rapport(ajouts, total, [], 0, [], 0, limite)
+        return _rapport(ajouts, total, [], 0, [], 0, limite,
+                        nb_identite=0 if identite is not None else None)
 
     cond_ajouts = _sans_homologue(nouveau, new_snapshot_id, ancien, old_snapshot_id)
     cond_retraits = _sans_homologue(ancien, old_snapshot_id, nouveau, new_snapshot_id)
@@ -253,55 +313,155 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
     ).where(and_(nouveau.snapshot_id == new_snapshot_id,
                  func.coalesce(nouveau.entity_checksum, "")
                  != func.coalesce(ancien.entity_checksum, "")))
+    candidates = [r[0] for r in db.execute(
+        jointure.order_by(getattr(nouveau, colonne_cle))).all()]
 
-    nb_modifiees = int(db.execute(
-        select(func.count()).select_from(jointure.subquery())).scalar() or 0)
-    ids_modifiees = [r[0] for r in db.execute(
-        jointure.order_by(getattr(nouveau, colonne_cle)).limit(max(0, limite))).all()]
-
-    modifiees = _details_modifiees(db, old_snapshot_id, new_snapshot_id,
-                                   ids_modifiees, cle)
+    verifie = _verifier_modifications(db, old_snapshot_id, new_snapshot_id,
+                                      candidates, cle, limite, identite)
     return _rapport(ajouts, nb_ajouts, retraits, nb_retraits,
-                    modifiees, nb_modifiees, limite)
+                    verifie["lignes"], verifie["nombre"], limite,
+                    nb_identite=verifie["identite"], issues=verifie["issues"])
 
 
-def _details_modifiees(db, old_snapshot_id, new_snapshot_id, ids,
-                       cle: str = "entity_id") -> List[Dict[str, Any]]:
-    """Champ-a-champ des SEULES fiches publiees en detail."""
-    if not ids:
-        return []
+def _condition_sans_homologue(colonne_cle: str, cote, cote_snapshot, autre, autre_snapshot):
+    """Les fiches de `cote_snapshot` dont l'identifiant est absent de
+    `autre_snapshot` : l'anti-jointure qui fait les ajouts et les retraits du
+    delta. Une seule definition, que lisent le delta et les radiations."""
+    from sqlalchemy import and_, exists, select
+    sous_requete = select(1).where(and_(
+        autre.snapshot_id == autre_snapshot,
+        getattr(autre, colonne_cle) == getattr(cote, colonne_cle)))
+    return and_(cote.snapshot_id == cote_snapshot, ~exists(sous_requete))
+
+
+def fiches_sans_homologue(db, snapshot_id: str, autre_snapshot_id: str,
+                          colonnes: Tuple[str, ...]) -> List[Dict[str, Any]]:
+    """
+    TOUTES les fiches de `snapshot_id` dont l'`entity_id` est absent de
+    `autre_snapshot_id`, sans plafond, reduites aux `colonnes` demandees.
+
+    (precedent, nouveau) rend les RETRAITS du delta ; (nouveau, precedent) ses
+    AJOUTS — la meme anti-jointure que `calculate_delta_db`, qui ne publie que
+    cent lignes par categorie. Les radiations (fiskr/caducite.py) ont besoin de
+    toutes, et d'aucune verification champ a champ : un retrait n'a pas
+    d'homologue a comparer.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import aliased
+    from fiskr.database import WatchlistEntity
+
+    cote, autre = aliased(WatchlistEntity), aliased(WatchlistEntity)
+    condition = _condition_sans_homologue("entity_id", cote, snapshot_id,
+                                          autre, autre_snapshot_id)
+    requete = select(*[getattr(cote, c) for c in colonnes]).where(condition) \
+        .order_by(cote.entity_id)
+    return [dict(zip(colonnes, ligne)) for ligne in db.execute(requete).all()]
+
+
+# Fiches comparees par aller-retour en base : borne la memoire (deux tranches
+# de lignes completes) et reste sous le plafond de parametres de SQLite.
+_TRANCHE_DE_VERIFICATION = 500
+
+
+def _lignes_par_id(db, modele, colonne_cle: str, snapshot_id: str,
+                   ids: List[Any]) -> Dict[Any, Dict[str, Any]]:
+    from sqlalchemy import select
+    table = modele.__table__
+    requete = select(table).where(table.c.snapshot_id == snapshot_id,
+                                  table.c[colonne_cle].in_(ids))
+    return {ligne[colonne_cle]: dict(ligne) for ligne in db.execute(requete).mappings()}
+
+
+def _verifier_modifications(db, old_snapshot_id, new_snapshot_id, ids,
+                            cle: str, limite: int,
+                            identite: Optional[frozenset]) -> Dict[str, Any]:
+    """
+    Champ a champ normalise de CHAQUE fiche dont l'empreinte differe — pas
+    seulement des cent publiees : le compte, la nature (identite /
+    information) et la liste sortent du meme passage et ne peuvent pas se
+    contredire.
+
+    Une candidate sans aucun champ different n'est pas une modification : son
+    empreinte etait perimee (calculee avant la normalisation, ou sur
+    l'enregistrement lu plutot que sur ce que la base garde). Les deux
+    fiches recoivent alors l'empreinte de leur contenu, une fois pour toutes :
+    le premier passage apres le deploiement de la normalisation ne publie pas
+    une vague de « modifiees », et les suivants ne paient plus cette
+    verification. Cout de ce premier passage : relire les fiches communes
+    (quelques minutes sur la liste PEP), une seule fois par lot.
+    """
     modele, colonne_cle, colonnes_nom, _ = _descripteur(cle)
+    lignes_identite: List[Dict[str, Any]] = []
+    lignes_information: List[Dict[str, Any]] = []
+    nombre = nb_identite = 0
+    issues: Dict[str, int] = {}
+    a_realigner: List[Dict[str, Any]] = []
+    for debut in range(0, len(ids), _TRANCHE_DE_VERIFICATION):
+        tranche = ids[debut:debut + _TRANCHE_DE_VERIFICATION]
+        anciennes = _lignes_par_id(db, modele, colonne_cle, old_snapshot_id, tranche)
+        nouvelles = _lignes_par_id(db, modele, colonne_cle, new_snapshot_id, tranche)
+        for identifiant in tranche:
+            avant_ent, apres_ent = anciennes.get(identifiant), nouvelles.get(identifiant)
+            if avant_ent is None or apres_ent is None:
+                continue
+            nom = next((apres_ent.get(c) for c in colonnes_nom if apres_ent.get(c)), "")
+            issue, ligne = _comparer(identifiant, nom, avant_ent, apres_ent, identite)
+            issues[issue] = issues.get(issue, 0) + 1
+            if issue == INCHANGEE:
+                empreinte = compute_checksum(apres_ent)
+                a_realigner.append({"pk": avant_ent["id"], "empreinte": empreinte})
+                a_realigner.append({"pk": apres_ent["id"], "empreinte": empreinte})
+                continue
+            if ligne is None:
+                # Forme du lecteur : rien a realigner, le contenu STOCKE differe
+                # bel et bien — la production garde l'ancienne forme jusqu'a ce
+                # qu'un lot relu soit homologue.
+                continue
+            nombre += 1
+            if ligne.get("nature") == NATURE_IDENTITE:
+                nb_identite += 1
+                cible = lignes_identite
+            else:
+                cible = lignes_information
+            # Deux reserves bornees : l'identite passe devant a la publication
+            if len(cible) < max(0, limite):
+                cible.append(ligne)
+    _realigner_empreintes(db, modele, a_realigner)
+    return {
+        "lignes": _ordre_de_publication(lignes_identite + lignes_information)[:max(0, limite)],
+        "nombre": nombre,
+        "identite": nb_identite if identite is not None else None,
+        "issues": issues,
+    }
 
-    def _par_id(snapshot_id):
-        rows = db.query(modele).filter(
-            modele.snapshot_id == snapshot_id,
-            getattr(modele, colonne_cle).in_(ids)).all()
-        return {getattr(r, colonne_cle): {c.name: getattr(r, c.name)
-                                          for c in modele.__table__.columns}
-                for r in rows}
 
-    anciennes, nouvelles = _par_id(old_snapshot_id), _par_id(new_snapshot_id)
-    sortie = []
-    for identifiant in ids:
-        avant_ent, apres_ent = anciennes.get(identifiant), nouvelles.get(identifiant)
-        if avant_ent is None or apres_ent is None:
-            continue
-        changements, avant, apres = find_differences(avant_ent, apres_ent)
-        if not changements:
-            continue
-        sortie.append({
-            "id": identifiant,
-            "primary_name": next((apres_ent.get(c) for c in colonnes_nom
-                                  if apres_ent.get(c)), ""),
-            "changes_detected": changements,
-            "before": avant,
-            "after": apres,
-        })
-    return sortie
+def _realigner_empreintes(db, modele, a_realigner: List[Dict[str, Any]]) -> None:
+    """Ecrit l'empreinte de leur contenu sur les fiches dont elle etait
+    perimee. Donnee derivee, idempotente : elle est committee tout de suite,
+    sans quoi un ecran d'examen la recalculerait a chaque ouverture."""
+    if not a_realigner:
+        return
+    from sqlalchemy import bindparam, update
+    table = modele.__table__
+    requete = (update(table).where(table.c.id == bindparam("pk"))
+               .values(entity_checksum=bindparam("empreinte")))
+    for debut in range(0, len(a_realigner), 1000):
+        db.execute(requete, a_realigner[debut:debut + 1000])
+    db.commit()
+    logger.info(f"Delta : {len(a_realigner) // 2} fiche(s) a l'empreinte perimee "
+                "(aucun champ different) realignee(s) sur leur contenu.")
+
+
+# Fiches ecartees du compte des modifiees, et DITES : un compteur qui baisse
+# sans raison visible ne se croit pas. Cles du detail (jamais du resume, que
+# les rapports archives et les tests lisent tel quel), absentes quand nulles.
+CLES_ECARTEES_DU_COMPTE = ("checksum_only_count", "reader_form_count",
+                           "reader_form_unverified_count")
 
 
 def _rapport(ajouts, nb_ajouts, retraits, nb_retraits,
-             modifiees, nb_modifiees, limite) -> Dict[str, Any]:
+             modifiees, nb_modifiees, limite, nb_identite: Optional[int] = None,
+             issues: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """Structure DEJA tronquee, identique a `_truncate_delta_details`."""
     details: Dict[str, Any] = {"added": ajouts, "removed": retraits,
                                "modified": modifiees}
@@ -310,8 +470,16 @@ def _rapport(ajouts, nb_ajouts, retraits, nb_retraits,
                                ("modified", nb_modifiees, modifiees)):
         if total > len(lignes):
             details[f"{cle}_truncated"] = total - len(lignes)
-    return {
-        "summary": {"added_count": nb_ajouts, "removed_count": nb_retraits,
-                    "modified_count": nb_modifiees},
-        "details": details,
+    issues = issues or {}
+    ecartees = {
+        "checksum_only_count": issues.get(INCHANGEE, 0),
+        # Les deux especes de forme, la seconde etant comprise dans la premiere
+        "reader_form_count": issues.get(FORME, 0) + issues.get(FORME_NON_VERIFIABLE, 0),
+        "reader_form_unverified_count": issues.get(FORME_NON_VERIFIABLE, 0),
     }
+    details.update({cle: n for cle, n in ecartees.items() if n})
+    summary = {"added_count": nb_ajouts, "removed_count": nb_retraits,
+               "modified_count": nb_modifiees}
+    if nb_identite is not None:
+        summary["modified_identity_count"] = nb_identite
+    return {"summary": summary, "details": details}

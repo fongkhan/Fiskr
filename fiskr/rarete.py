@@ -270,10 +270,12 @@ def construire_depuis_base(db, channel: str = caps.CHANNEL_SCREENING) -> TableRa
     Ne lit que les deux colonnes utiles : le corpus complet en fiches entieres
     ne tiendrait pas ici.
     """
-    from fiskr.database import Snapshot, WatchlistEntity, WATCHLIST_FILE_TYPES
-    _, empreinte = _reference(db)
-    snapshot_ids = [s.snapshot_id for s in db.query(Snapshot.snapshot_id).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES), Snapshot.status == "READY").all()]
+    from fiskr import univers
+    from fiskr.database import WatchlistEntity
+    # L'empreinte de la table est celle des lots MEMES qui sont comptes.
+    lots = univers.lots_en_production(db)
+    empreinte = univers.calculer(db, lots).empreinte
+    snapshot_ids = [s.snapshot_id for s in lots]
     if not snapshot_ids:
         return TableRarete(0, {}, empreinte)
     lignes = db.query(WatchlistEntity.primary_name, WatchlistEntity.aliases).filter(
@@ -284,19 +286,23 @@ def construire_depuis_base(db, channel: str = caps.CHANNEL_SCREENING) -> TableRa
                        for nom, alias in lignes), channel, empreinte)
 
 
-def _reference(db):
-    from fiskr.database import production_watchlist_reference
-    return production_watchlist_reference(db)
+def _empreinte_en_production(db) -> str:
+    from fiskr import univers
+    return univers.reference_en_production(db).empreinte
 
 
 def table_pour(db, channel: str = caps.CHANNEL_SCREENING) -> TableRarete:
     """
     Table du corpus en production dans CE processus, construite au besoin.
 
-    Memoisee par empreinte de liste : elle n'est reconstruite qu'apres une mise
-    en production. A appeler AVANT un fork de pool — les enfants en heritent.
+    Memoisee par empreinte de l'univers (fiskr/univers.py) : reconstruite des
+    qu'un lot, une exclusion ou une correction change ce qui est crible. Elle
+    l'etait par le hash du seul lot le plus recent, et survivait donc a
+    l'homologation d'un autre lot — comptant les mots d'un corpus qui n'etait
+    plus celui du criblage. A appeler AVANT un fork de pool — les enfants en
+    heritent.
     """
-    _, empreinte = _reference(db)
+    empreinte = _empreinte_en_production(db)
     courante = _TABLE
     if courante is not None and courante.empreinte == empreinte:
         return courante

@@ -67,6 +67,73 @@ def en_heures(secondes: Optional[int]) -> Optional[float]:
     return None if secondes is None else round(secondes / 3600.0, 1)
 
 
+# ------------------ GEL DES AVOIRS : DELAI CONFIRMATION -> DECLARATION ------------------
+
+def delai_de_declaration_secondes(ouverte_le: Optional[datetime],
+                                  declaree_le: Optional[datetime],
+                                  maintenant: Optional[datetime] = None) -> Optional[int]:
+    """
+    Delai entre la confirmation d'une alerte du perimetre SANCTION (ouverture
+    de la mesure de gel) et sa declaration a la DG Tresor — la SEULE
+    definition, lue par le registre, l'indicateur, la notification de retard
+    et le controle de mise en service.
+
+    Les lignes directrices DGT/ACPR (§99) font des « delais de declaration »
+    un point de controle interne : il faut donc un chiffre, et un seul.
+
+    - Mesure declaree : declaree_le - ouverte_le.
+    - Mesure NON declaree : le delai court encore (maintenant - ouverte_le) —
+      c'est ce chiffre-la que surveille le seuil de retard.
+    - Declaration ANTERIEURE a la confirmation dans Fiskr (la DG Tresor a ete
+      prevenue pendant la validation 4-yeux, ce que le §182 attend
+      justement) : 0. Elle n'est pas ecartee comme une horloge incoherente —
+      l'ecarter retirerait de la moyenne les declarations les plus rapides.
+    """
+    if ouverte_le is None:
+        return None
+    fin = declaree_le if declaree_le is not None else (maintenant or datetime.utcnow())
+    return max(0, int(round((fin - ouverte_le).total_seconds())))
+
+
+def declaration_en_retard(statut: Optional[str], ouverte_le: Optional[datetime],
+                          declaree_le: Optional[datetime], seuil_heures: float,
+                          maintenant: Optional[datetime] = None) -> bool:
+    """Une mesure ENCORE a declarer dont le delai depasse le seuil. Une mesure
+    declaree tard n'est plus « en retard » : elle est « declaree hors delai »,
+    un fait passe que l'indicateur compte, pas une action a mener."""
+    from fiskr.gels import STATUT_A_DECLARER
+    if statut != STATUT_A_DECLARER or declaree_le is not None:
+        return False
+    delai = delai_de_declaration_secondes(ouverte_le, None, maintenant)
+    return delai is not None and delai > seuil_heures * 3600
+
+
+def synthese_des_gels(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
+    """Le registre des mesures de gel, tel que le pilotage le lit."""
+    from fiskr.database import MesureDeGel
+    from fiskr.gels import STATUT_A_DECLARER, STATUT_DECLAREE, STATUT_LEVEE
+    from fiskr.settings import gel_declaration_delai_heures
+
+    now = maintenant or datetime.utcnow()
+    seuil = gel_declaration_delai_heures(db)
+    lignes = db.query(MesureDeGel.statut, MesureDeGel.ouverte_le,
+                      MesureDeGel.declaree_le).all()
+    delais = [delai_de_declaration_secondes(o, d) for _s, o, d in lignes if d is not None]
+    delais = [d for d in delais if d is not None]
+    return {
+        "to_declare": sum(1 for s, _o, _d in lignes if s == STATUT_A_DECLARER),
+        "overdue": sum(1 for s, o, d in lignes
+                       if declaration_en_retard(s, o, d, seuil, now)),
+        "declared": sum(1 for s, _o, _d in lignes if s == STATUT_DECLAREE),
+        "lifted": sum(1 for s, _o, _d in lignes if s == STATUT_LEVEE),
+        "declared_late": sum(1 for d in delais if d > seuil * 3600),
+        "avg_declaration_delay_seconds": (int(round(sum(delais) / len(delais)))
+                                          if delais else None),
+        "max_declaration_delay_seconds": max(delais) if delais else None,
+        "threshold_hours": seuil,
+    }
+
+
 def fraicheur_resumee(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
     """La fraicheur des listes, telle que le pilotage la lit."""
     from fiskr.fraicheur import mesurer
@@ -264,6 +331,10 @@ def indicateurs(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
         },
         "fp_rules": fp_rules_stats,
         "whitelist_active_pairs": active_whitelist,
+        # Ce qui suit un vrai positif sur une liste de gel : mesures a
+        # declarer, en retard, et le delai confirmation -> declaration
+        # (LD DGT/ACPR §99 : « delais de declaration », point de controle).
+        "asset_freezes": synthese_des_gels(db, now),
         "screening": {"decisions_by_status": audit_counts},
         "lists": {
             "production_entities_by_type": {k: int(v or 0) for k, v in ready_by_type.items()},

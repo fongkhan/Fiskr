@@ -43,7 +43,8 @@ PHASES = ("QUEUED", "UPLOAD", "DOWNLOAD", "HASH", "PARSE", "PERSIST", "DELTA",
 # regle : neuf des quatorze natures reellement soumises n'y figuraient pas, et
 # s'affichaient donc sans icone dans le panneau des travaux.
 KINDS = ("import", "ingest", "sync", "backtest", "approve", "batch",
-         "batch_campaign", "quality", "quality_check", "lookback", "mining",
+         "batch_campaign", "quality", "quality_check", "lookback",
+         "client_screening", "mining",
          "engine_simulation", "resource_simulation", "fprules_bench",
          "testpanel_generate")
 

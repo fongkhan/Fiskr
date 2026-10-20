@@ -139,14 +139,25 @@ def test_la_mesure_plafonnee_le_dit(db_clients):
 
 
 def test_une_base_illisible_ne_fait_pas_tomber_l_ecran():
-    """Une mesure qui lève emporterait l'écran qui l'affiche."""
+    """
+    Une mesure qui lève emporterait l'écran qui l'affiche.
+
+    RÉÉCRIT (19 octobre 2026) : ce test épinglait le défaut. Il exigeait
+    `sans_referentiel is True` et `jamais_cribles == 0` sur une base en panne
+    — c'est-à-dire que l'échec de la mesure se fasse passer pour « aucun
+    référentiel », que la mise en service traduisait en « rien à cribler pour
+    l'instant ». Son intention première — ne jamais lever — tient toujours ;
+    ce qui change, c'est que la mesure dit désormais qu'elle n'a pas pu
+    mesurer, au lieu de prendre l'une des deux réponses.
+    """
     class _SessionCassee:
         def query(self, *a, **k):
             raise RuntimeError("base injoignable")
 
     mesure = couverture_du_criblage(_SessionCassee())
-    assert mesure["sans_referentiel"] is True
-    assert mesure["jamais_cribles"] == 0
+    assert mesure["illisible"] is True
+    assert mesure["sans_referentiel"] is None and mesure["jamais_cribles"] is None
+    assert "base injoignable" in mesure["erreur"]
 
 
 def test_le_plafond_par_defaut_est_annonce():

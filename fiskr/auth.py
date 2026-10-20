@@ -321,6 +321,8 @@ def require_roles(*allowed: str):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Accès refusé. Rôle requis: " + " ou ".join(allowed) + "."
         )
+    # Lisible par l'inventaire des routes (tests) : qui cette garde laisse passer.
+    dependency.roles_admis = frozenset(allowed) | {"admin"}
     return dependency
 
 async def require_admin(
@@ -371,4 +373,14 @@ require_blocking = require_roles("blocking")
 
 # Gestion des regles anti-faux positifs (equipe criblage via le role 'rules', ou admin)
 require_fprules = require_roles("rules")
+
+# LECTURE du parametrage (regles anti-faux positifs, blocking keys, capacites
+# du moteur) : les roles metier, plus l'auditeur. `GET /api/fprules`
+# repondait 403 « Rôle requis: rules » a une cle auditeur, alors que ce role
+# promet la lecture integrale — et une regle qui clot des alertes sans que
+# personne ne les voie est precisement ce qu'un controleur vient lire. A ne
+# poser que sur des GET : l'ecriture garde `require_fprules`/`require_blocking`,
+# et `enforce_auditor_readonly` refuse de toute facon toute methode mutante.
+require_fprules_lecture = require_roles("rules", "auditor")
+require_blocking_lecture = require_roles("blocking", "auditor")
 

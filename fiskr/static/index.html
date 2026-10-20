@@ -124,7 +124,7 @@
  <main class="main-content">
  <header class="app-header">
  <div style="display: flex; align-items: center; gap: 0.75rem;">
- <button class="icon-btn hamburger-btn" onclick="toggleSidebar()" aria-label="Ouvrir le menu de navigation"></button>
+ <button class="icon-btn hamburger-btn" onclick="toggleSidebar()" aria-label="Ouvrir le menu de navigation"><svg class="ui-icon" aria-hidden="true"><use href="#i-list"></use></svg></button>
  <h1>Fiskr — Poste de Contrôle Conformité</h1>
  </div>
  <div class="header-actions">
@@ -233,7 +233,7 @@
  </div>
 
  <div id="sub-sec-watchlist-active" class="sub-tab-content active">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Watchlist list -->
  <div class="card result-card">
  <h2>Listés — Base de Données (en direct)</h2>
@@ -280,7 +280,7 @@
  </div>
 
  <div id="sub-sec-watchlist-import" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Ingest Snapshot Card -->
  <div class="card form-card">
  <h2>Importer un Instantané (Snapshot)</h2>
@@ -483,7 +483,7 @@
  </div>
 
  <div id="sub-sec-watchlist-manual" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card form-card">
  <h2>Ajouter une Entité à la Watchlist (à la volée)</h2>
  <p class="section-desc">Saisissez les informations de l'entité. Elle sera soumise au Data Quality Gate et indexée immédiatement dans le moteur de screening.</p>
@@ -749,7 +749,7 @@
  </button>
  <div id="sync-network-tuning" class="accordion-content hidden" style="padding-top: 1rem;">
  <p class="section-desc">Paramètres réseau communs à toutes les sources, appliqués à chaud : délais, reprises sur erreur transitoire et User-Agent. Les surcharges par source de <code>config.yaml</code> (<code>sync.&lt;source&gt;.network</code>) continuent de primer — une source lente garde son budget propre.</p>
- <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+ <div class="form-row colonnes-4" style="max-width: 760px;">
  <div class="form-group"><label for="net-timeout">Timeout requêtes (s)</label><input type="number" id="net-timeout" min="5" max="600" step="1"></div>
  <div class="form-group"><label for="net-dl-timeout">Timeout téléchargements (s)</label><input type="number" id="net-dl-timeout" min="5" max="1800" step="1"></div>
  <div class="form-group"><label for="net-retries">Reprises</label><input type="number" id="net-retries" min="0" max="20" step="1"></div>
@@ -794,7 +794,7 @@
  </div>
 
  <div id="sub-sec-watchlist-review" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
 
  <!-- Pending snapshots -->
  <div class="card result-card">
@@ -858,6 +858,7 @@
  <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.15);">
  <span class="metric-label" style="color: var(--color-warning); font-weight: 600;">Modifications (MODIFIED)</span>
  <span id="review-delta-modified" class="metric-value" style="font-size: 1.5rem; color: var(--color-warning);">0</span>
+ <small id="review-delta-modified-nature" style="color: var(--text-muted);"></small>
  </div>
  </div>
  <div id="review-delta-details"></div>
@@ -950,7 +951,7 @@
  </div>
 
  <div id="sub-sec-watchlist-history" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card result-card">
  <h2>Historique des Homologations</h2>
  <p class="section-desc">Chaque décision d'homologation — approbation comme rejet — constitue un dossier figé au moment où elle est prise : le delta par rapport à la liste alors en production, le cahier de tests avec son verdict, les exclusions posées, le réviseur et son commentaire. Ces dossiers ne sont jamais réécrits : rouvrir une homologation des mois plus tard montre exactement ce que le réviseur avait sous les yeux, même si la liste a été remplacée dix fois depuis.</p>
@@ -1004,6 +1005,9 @@
  <button id="sub-btn-alerts-screening" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-screening')">
  Alertes <span id="alerts-screening-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
  </button>
+ <button id="sub-btn-alerts-gels" class="sub-tab-btn" title="Mesures de gel et déclarations à la DG Trésor" onclick="switchSubTab('screening', 'alerts-gels')">
+ Registre des gels
+ </button>
  <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-whitelist')">
  Liste Blanche
  </button>
@@ -1056,6 +1060,12 @@
  <p class="section-desc">Renseignez les données du tiers pour évaluer son niveau de risque et de correspondance.</p>
  
  <form id="screening-form" onsubmit="handleScreening(event)">
+ <div class="form-group">
+ <label for="client-id">Identifiant client</label>
+ <input type="text" id="client-id" list="client-id-suggestions" maxlength="100" autocomplete="off" placeholder="Rechercher dans le référentiel (nom ou identifiant)…" oninput="chercherClientDuReferentiel()">
+ <datalist id="client-id-suggestions"></datalist>
+ <small id="client-id-hint" style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Vide : identifiant calculé à partir du nom normalisé, de la date de naissance et du type.</small>
+ </div>
  <div class="form-row">
  <div class="form-group">
  <label for="client-type">Type d'Entité *</label>
@@ -1254,6 +1264,7 @@
  </div>
 
  <!-- Continuité criblage -> alerte : lien direct vers l'alerte ouverte -->
+ <div id="screening-client-id-note" class="hidden" style="margin: 0.5rem 0 0;"></div>
  <div id="screening-alert-link" class="hidden" style="margin: 0.75rem 0;"></div>
  <div id="screening-restriction-note" class="hidden" style="margin: 0.25rem 0 0.75rem;"></div>
 
@@ -1352,8 +1363,9 @@
       importé n'était atteignable qu'en appelant l'API à la main. -->
  <div class="card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-shield"></use></svg> Couverture du criblage</h2>
- <p class="section-desc">Importer un référentiel clients ne les crible pas : c'est une mise à jour de liste (re-criblage delta, automatique) ou un lookback qui le fait. Cette carte dit combien de clients n'ont encore aucune décision à leur nom au journal de criblage.</p>
- <p id="couverture-constat" class="section-desc" role="status" style="margin-bottom: 0.75rem;">Mesure en cours…</p>
+ <p class="section-desc">Chaque passage de criblage date les fiches qu'il crible : le criblage des clients nouveaux ou modifiés qui suit un import de référentiel, le re-criblage qui suit une mise à jour de liste, le lookback. Cette carte dit combien de clients n'ont jamais été criblés, et combien ne le sont pas contre la version des listes en production.</p>
+ <p id="couverture-constat" class="section-desc" role="status" style="margin-bottom: 0.25rem;">Mesure en cours…</p>
+ <p id="couverture-passage" class="section-desc" style="margin-bottom: 0.75rem; color: var(--text-muted);"></p>
  <div class="filter-bar">
  <select id="lookback-file-type" aria-label="Restreindre le lookback à un type de liste" style="flex: 0 1 260px;">
  <option value="">Toutes les listes en production</option>
@@ -1434,7 +1446,7 @@
  </div>
 
  <div id="sub-sec-alerts-screening" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card result-card">
  <h2>Alertes de Criblage — Données Clients</h2>
  <p class="section-desc">Alertes issues du criblage du référentiel clients contre les listes. Chaque alerte s'instruit : assignation, analyse, proposition de décision (vrai/faux positif) puis validation 4-yeux par un réviseur différent du proposeur. Les alertes clôturées automatiquement par une règle anti-faux positifs (<code>CLOSED_BY_RULE</code>) restent visibles et auditables.</p>
@@ -1444,6 +1456,7 @@
  <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
  <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
  <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
+ <button class="btn btn-sm" data-filter="LAPSED" onclick="setAlertFilter('SCREENING','LAPSED')" style="background: var(--surface-3);" title="Alertes ouvertes dont la correspondance ne tient plus : fiche radiée, ou couple re-criblé sous le seuil">Caduques</button>
  <select id="screening-priority-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
  <option value="">Toutes priorités</option>
  <option value="CRITICAL">Critique</option>
@@ -1457,6 +1470,15 @@
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('SCREENING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
  <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
  </div>
+ <div class="file-outils">
+ <button class="btn btn-sm btn-primary" onclick="prendreLaSuivante('SCREENING')" title="S'assigner l'alerte non assignée la plus urgente (échéance SLA, puis priorité) et l'ouvrir">Prendre la suivante</button>
+ <label class="file-groupement" for="screening-group-by"><span>Regrouper</span>
+ <select id="screening-group-by" onchange="fetchAlerts('SCREENING', 1)" aria-label="Regrouper la file">
+ <option value="">Sans regroupement</option>
+ <option value="watchlist">Par fiche listée</option>
+ <option value="client">Par client</option>
+ </select></label>
+ </div>
  <div id="screening-bulk-bar" class="bulk-bar hidden">
  <span id="screening-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
  <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('SCREENING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
@@ -1468,8 +1490,11 @@
  <option value="LOW">Basse</option>
  </select>
  <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('SCREENING')">Appliquer la priorité</button>
+ <button class="btn btn-sm btn-primary" onclick="bulkProposeSelected('SCREENING', 'FALSE_POSITIVE')">Proposer faux positif…</button>
+ <button class="btn btn-sm btn-secondary" onclick="bulkProposeSelected('SCREENING', 'CONFIRMED')">Proposer vrai positif…</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('SCREENING')">✕ Vider la sélection</button>
  </div>
+ <div id="screening-bulk-report" class="bulk-report hidden" role="status" aria-live="polite"></div>
  <div class="table-container max-height-table">
  <table id="screening-alerts-table">
  <thead>
@@ -1487,16 +1512,62 @@
  </div>
  </div>
 
+ <!-- REGISTRE DES MESURES DE GEL (déclarations à la DG Trésor) -->
+ <div id="sub-sec-alerts-gels" class="sub-tab-content hidden">
+ <div class="grid-layout une-colonne">
+ <div class="card result-card">
+ <h2>Registre des mesures de gel</h2>
+ <p class="section-desc">Ce qui suit un vrai positif sur une liste de gel (périmètre SANCTION). Chaque action — gel d'un compte, crédit sur un compte gelé, refus d'entrée en relation, contournement — se déclare « immédiatement » à la DG Trésor (CMF L.562-4, R.562-3). Fiskr prépare le projet de déclaration, trace et date ; la transmission reste humaine, et une mesure ne passe « déclarée » qu'avec la pièce de transmission.</p>
+ <div id="gels-synthese" style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;"></div>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <select id="gels-statut-filter" onchange="fetchGels()" aria-label="Filtrer le registre par statut" style="width: auto; min-width: 200px;">
+ <option value="">Tous les statuts</option>
+ <option value="A_DECLARER">À déclarer</option>
+ <option value="EN_RETARD">En retard de déclaration</option>
+ <option value="RADIATION_A_EXAMINER">Radiation à examiner</option>
+ <option value="DECLAREE">Déclarée</option>
+ <option value="LEVEE">Levée</option>
+ </select>
+ <select id="gels-action-filter" onchange="fetchGels()" aria-label="Filtrer le registre par action" style="width: auto; max-width: 340px;"><option value="">Toutes les actions</option></select>
+ <input type="text" id="gels-recherche" onchange="fetchGels()" placeholder="Client ou fiche listée…" aria-label="Rechercher un client ou une fiche listée" style="width: auto; min-width: 220px;">
+ <button class="btn btn-sm btn-secondary" onclick="exportGelsCsv()" title="Exporter le registre filtré en CSV" style="margin-left: auto;">⬇ CSV</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="gels-table">
+ <thead>
+ <tr>
+ <th>Mesure</th><th>Confirmée le</th><th>Client</th><th>Listé</th><th>Liste</th>
+ <th>Action</th><th>Gel effectif</th><th>Statut</th><th>Déclarée le</th><th>Délai</th><th>Dossier</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <p id="gels-total" class="section-desc" style="margin-top: 0.5rem;"></p>
+ </div>
+ </div>
+ </div>
+
  <!-- FILE FILTRAGE TRANSACTIONNEL -->
  
 <div id="sub-sec-alerts-whitelist" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Liste blanche client x listé (« Good Guys », guidance Wolfsberg) -->
  <div class="card result-card">
  <h2>Liste Blanche (paires client × listé)</h2>
  <p class="section-desc">Suppression gouvernée des faux positifs récurrents : une paire active supprime les alertes futures de ce couple, mais chaque suppression reste tracée dans le journal d'audit (statut <code>WHITELISTED</code>). Révocation douce uniquement, avec motif.</p>
+ <p class="section-desc">Une paire n'absorbe que tant que la fiche listée et l'identification du client sont celles de sa décision. Dès que l'une change, l'alerte s'ouvre et dit ce qui a changé, et la paire passe « À réexaminer » : reconduisez-la ou révoquez-la.</p>
+ <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
  <div class="form-group" style="max-width: 260px;">
  <select id="whitelist-list-filter" data-combobox onchange="fetchWhitelist()" title="Filtrer par type de liste"></select>
+ </div>
+ <div class="form-group" style="max-width: 220px;">
+ <select id="whitelist-state-filter" onchange="fetchWhitelist(1)" title="Filtrer par état">
+ <option value="">Tous les états</option>
+ <option value="STALE">À réexaminer</option>
+ </select>
+ </div>
+ <p id="whitelist-stale-notice" class="hidden" style="margin: 0;"><span id="whitelist-stale-count" class="status-badge warning">0</span> <span>paire(s) à réexaminer</span></p>
  </div>
  <div class="table-container max-height-table">
  <table id="whitelist-table">
@@ -1523,7 +1594,7 @@
  </div>
  
 <div id="sub-sec-alerts-blocking" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card form-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Blocking Key — Criblage Clients</h2>
  <p class="section-desc">Composantes ordonnées de la clé de blocking qui sélectionne les candidats du criblage. Toute modification <strong>recharge immédiatement le cache de production</strong>.</p>
@@ -1532,7 +1603,7 @@
  </div>
  </div>
  <!-- ALGORITHMES DU MOTEUR (fusionné dans le paramétrage moteur) -->
- <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+ <div class="grid-layout une-colonne" style="margin-top: 1rem;">
  <div class="card result-card">
  <h2> Algorithmes du Moteur</h2>
  <p class="section-desc">Chaque mécanisme de rapprochement du moteur peut être activé ou coupé, canal par canal. Tout est actif à la livraison : votre installation ne change de comportement que si vous décidez d'en changer. Couper une capacité rend le moteur aveugle sur ce qu'elle couvrait — chaque bascule affiche donc ce que vous perdez, chaque changement part au journal d'administration, et l'écart se chiffre avant de décider avec <em>Mesurer l'impact</em>. Les capacités pilotent la comparaison, pas la normalisation faite à l'import : une capacité d'écriture agit tout de suite sur le client, et sur les fiches listées au prochain rechargement complet de leur liste.</p>
@@ -1559,7 +1630,7 @@
  </div>
 
  <!-- RARETÉ DES NOMS (calibrage des règles volumétriques) -->
- <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+ <div class="grid-layout une-colonne" style="margin-top: 1rem;">
  <div class="card result-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-chart"></use></svg> Rareté des noms — fréquence des mots dans vos listes</h2>
  <p class="section-desc">Rapprocher deux noms sur « MOHAMMED » et « ALI » n'identifie personne : des milliers de fiches les portent. Le faire sur « TYURIN » identifie presque sûrement. Ce tableau donne, sur <strong>votre</strong> univers criblé, les mots que le corpus porte le plus souvent — de quoi calibrer une règle avant d'écrire un seuil dans son code. Le classement dépend des listes activées. La rareté ne déplace aucun score : elle est jointe à l'alerte et lisible par les règles (<code>ctx["rarity"]</code>).</p>
@@ -1578,7 +1649,7 @@
  <!-- RESSOURCES LINGUISTIQUES (rôle blocking/admin) -->
  
 <div id="sub-sec-alerts-resources" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card result-card">
  <h2> Ressources Linguistiques — Équivalences</h2>
  <p class="section-desc">Tables d'équivalences déclarées : homonymes et variantes de translittération (Mohammad / Mohammed / Muhammad), équivalents entre langues (Henri / Harry / Heinrich), exonymes de villes et de pays (Londres / London, Allemagne / Germany / DE). Aucune métrique de chaîne ne peut déduire ces rapprochements : ils se déclarent. Les équivalences agissent au <strong>blocking</strong> (les termes équivalents deviennent candidats) <strong>et</strong> au <strong>scoring</strong>. Elles élargissent mécaniquement le périmètre des alertes : <strong>prénoms et noms sont actifs à la livraison</strong> — impact mesuré, +6 vrais positifs et 0 faux positif sur un panel de 716 clients — tandis que villes, pays et états restent inactifs faute de mesure. Chiffrez toute activation avec <em>Mesurer l'impact</em> avant de produire.</p>
@@ -1605,7 +1676,7 @@
  <div id="resources-files" style="margin-top: 1.25rem;"></div>
  </div>
  </div>
- <div class="grid-layout" style="grid-template-columns: 1fr; margin-top: 1rem;">
+ <div class="grid-layout une-colonne" style="margin-top: 1rem;">
  <div class="card result-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-search"></use></svg> Homonymes découverts — fouille quotidienne</h2>
  <p class="section-desc">Chaque nuit, le moteur cherche de nouveaux homonymes dans deux sources que l'installation possède déjà. Les <strong>alias déclarés par les listes officielles</strong> : quand une source affirme qu'une fiche « Mohammad AL-ASSAD » porte l'alias « Mohammed AL-ASAD », l'autorité elle-même établit que les deux graphies désignent la même personne. Les <strong>alertes confirmées en revue</strong> : un analyste a validé humainement que deux écritures désignent le même individu. Garde-fou décisif : les deux noms doivent avoir le même nombre de mots et ne différer que sur <strong>un seul</strong> — « Ali Hassan » et « Abu Muhammad » divergent sur deux mots et sont écartés, car c'est un surnom et non une variante d'écriture. Chaque découverte porte ses preuves et reste révocable.</p>
@@ -1646,7 +1717,7 @@
  <!-- RÈGLES FAUX POSITIFS (rôle rules/admin) -->
  
 <div id="sub-sec-alerts-rules" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card result-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-scale"></use></svg> Règles Anti-Faux Positifs (Python — mode DEV)</h2>
  <p class="section-desc">Chaque règle est du code Python (<code>def rule(ctx) -&gt; bool</code>) qui, en production, supprime les alertes correspondantes (auto-clôture <code>CLOSED_BY_RULE</code>, toujours tracée à l'audit). Cycle de vie façon branche : <strong>Brouillon → tests unitaires verts → Soumission → validation 4-yeux → Production</strong>. Une règle en production n'est jamais modifiée directement : « Modifier » crée une nouvelle version brouillon.</p>
@@ -1691,7 +1762,7 @@
  </button>
  </div>
 <div id="sub-sec-filtering-blocking" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card form-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Blocking Key — Filtrage Transactionnel</h2>
  <p class="section-desc">Clé propre au filtrage des paiements. Par défaut réduite à la phonétique (les données de paiement sont pauvres) ; le type PP/PM est testé dans les deux variantes. Réglée <strong>indépendamment</strong> du criblage clients.</p>
@@ -1703,7 +1774,7 @@
 <div id="sub-sec-screening-transactions" class="sub-tab-content active">
  <div class="card">
  <h2>Filtrage Transactionnel ISO 20022</h2>
- <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques — sont criblées contre les listes en production. Verdict <strong>PASS</strong> ou <strong>HIT</strong> ; chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+ <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques et intermédiaires — sont criblées contre les listes en production, sur leur nom ou leur identifiant exact (BIC, LEI), ainsi que le texte libre des informations de remise. Verdict <strong>HIT</strong>, <strong>INCOMPLETE</strong> (une partie n'a pu être criblée, ou une information obligatoire du règlement (UE) 2023/1113 manque) ou <strong>PASS</strong> ; chaque partie, criblée ou non, est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
  <div class="form-row" style="align-items: flex-end;">
  <div class="form-group" style="flex: 1;">
  <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
@@ -1717,6 +1788,7 @@
  <hr>
  <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
  <p class="section-desc" id="txn-message-info"></p>
+ <div id="txn-missing-info"></div>
  <div class="table-container max-height-table">
  <table id="txn-results-table">
  <thead>
@@ -1724,7 +1796,7 @@
  <th>Partie</th>
  <th>Rôle(s)</th>
  <th>Pays</th>
- <th>BIC</th>
+ <th>BIC / LEI</th>
  <th>Score</th>
  <th>Meilleur match</th>
  <th>Statut</th>
@@ -1739,7 +1811,7 @@
  </div>
  
 <div id="sub-sec-alerts-filtering" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card result-card">
  <h2>Alertes de Filtrage — Transactions (ISO 20022)</h2>
  <p class="section-desc">Alertes issues du filtrage des parties des messages de paiement (<code>pain.001</code> / <code>pacs.008</code>). Même cycle de vie 4-yeux que le criblage, avec des règles anti-faux positifs et un blocking key propres à ce canal.</p>
@@ -1762,6 +1834,15 @@
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
  <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
  </div>
+ <div class="file-outils">
+ <button class="btn btn-sm btn-primary" onclick="prendreLaSuivante('FILTERING')" title="S'assigner l'alerte non assignée la plus urgente (échéance SLA, puis priorité) et l'ouvrir">Prendre la suivante</button>
+ <label class="file-groupement" for="filtering-group-by"><span>Regrouper</span>
+ <select id="filtering-group-by" onchange="fetchAlerts('FILTERING', 1)" aria-label="Regrouper la file">
+ <option value="">Sans regroupement</option>
+ <option value="watchlist">Par fiche listée</option>
+ <option value="client">Par partie</option>
+ </select></label>
+ </div>
  <div id="filtering-bulk-bar" class="bulk-bar hidden">
  <span id="filtering-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
  <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('FILTERING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
@@ -1773,8 +1854,11 @@
  <option value="LOW">Basse</option>
  </select>
  <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('FILTERING')">Appliquer la priorité</button>
+ <button class="btn btn-sm btn-primary" onclick="bulkProposeSelected('FILTERING', 'FALSE_POSITIVE')">Proposer faux positif…</button>
+ <button class="btn btn-sm btn-secondary" onclick="bulkProposeSelected('FILTERING', 'CONFIRMED')">Proposer vrai positif…</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('FILTERING')">✕ Vider la sélection</button>
  </div>
+ <div id="filtering-bulk-report" class="bulk-report hidden" role="status" aria-live="polite"></div>
  <div class="table-container max-height-table">
  <table id="filtering-alerts-table">
  <thead>
@@ -1808,14 +1892,14 @@
  </div>
 
  <div id="sub-sec-kpi-overview" class="sub-tab-content active">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card result-card">
  <h2>Indicateurs de Pilotage du Dispositif</h2>
  <p class="section-desc">Volumes d'alertes, taux de faux positifs, délai moyen de décision, liste blanche active, listes en production et historique des synchronisations.</p>
  <div id="kpi-tiles" class="score-metrics" style="flex-direction: row; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem;">
  <!-- Populated dynamically -->
  </div>
- <div class="grid-layout" style="grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+ <div class="grid-layout deux-colonnes" style="gap: 1.5rem;">
  <div>
  <h3 style="font-size: 0.95rem;">Listes en production : volume et fraîcheur</h3>
  <div class="table-container">
@@ -1858,7 +1942,7 @@
  </div>
 
  <div id="sub-sec-kpi-workload" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Charge de travail des analystes (échéances SLA) -->
  <div class="card result-card" id="workload-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-users"></use></svg> Charge de Travail des Analystes</h2>
@@ -1886,7 +1970,7 @@
  </div>
 
  <div id="sub-sec-kpi-quality" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Qualité des données du référentiel clients -->
  <div class="card result-card" id="quality-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-flask"></use></svg> Qualité des Données Clients</h2>
@@ -1915,7 +1999,7 @@
  </div>
 
  <div id="sub-sec-kpi-activity" class="sub-tab-content hidden">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Rapport d'activité réglementaire sur période -->
  <div class="card result-card" id="activity-report-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-file-text"></use></svg> Rapport d'Activité (période)</h2>
@@ -1962,6 +2046,7 @@
  <option value="ALERT">Alerte</option>
  <option value="NO_MATCH">Aucun match</option>
  <option value="WHITELISTED">Liste blanche</option>
+ <option value="NOT_SCREENED">Non criblée</option>
  </select>
  <label for="audit-date-from" style="align-self: center;">Du</label>
  <input type="date" id="audit-date-from" onchange="fetchAuditHistory(1)" title="Date de début (incluse)">
@@ -2391,7 +2476,7 @@
  </div>
 
  <div id="sub-sec-settings-governance" class="sub-tab-content active" role="tabpanel" aria-labelledby="sub-btn-settings-governance">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <!-- Réglages transverses à chaud (gouvernent homologation, alertes, liste blanche, re-criblage) -->
  <div class="card form-card hidden" id="review-settings-card">
  <h2>Réglages de Gouvernance (Admin)</h2>
@@ -2473,7 +2558,7 @@
  <p class="section-desc">Identité de l'établissement assujetti : elle pré-remplit la rubrique « déclarant » des projets de déclaration de soupçon TRACFIN. Réglable à chaud — plus besoin d'éditer <code>config.yaml</code> sur le serveur.</p>
  <div class="form-group" style="max-width: 480px;"><label for="inst-name">Raison sociale</label><input type="text" id="inst-name"></div>
  <div class="form-group" style="max-width: 240px;"><label for="inst-siren">SIREN (9 chiffres)</label><input type="text" id="inst-siren" maxlength="9" inputmode="numeric"></div>
- <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 640px;">
+ <div class="form-row" style="max-width: 640px;">
  <div class="form-group"><label for="inst-corr-name">Correspondant TRACFIN</label><input type="text" id="inst-corr-name"></div>
  <div class="form-group"><label for="inst-corr-email">Email du correspondant</label><input type="email" id="inst-corr-email"></div>
  </div>
@@ -2485,7 +2570,7 @@
  <div class="card form-card hidden" id="security-access-card">
  <h2> Sécurité des Accès (Admin)</h2>
  <p class="section-desc">Politique d'accès effective immédiatement : verrouillage après échecs de connexion, longueur minimale des mots de passe humains, durée de session. Les propriétés du déploiement (cookies <code>Secure</code>, <code>SameSite</code>) restent dans <code>config.yaml</code> : elles dépendent du HTTPS, pas de l'exploitation.</p>
- <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+ <div class="form-row colonnes-4" style="max-width: 760px;">
  <div class="form-group"><label for="sec-max-failures">Échecs avant verrouillage</label><input type="number" id="sec-max-failures" min="1" max="100"></div>
  <div class="form-group"><label for="sec-lockout">Verrouillage (minutes)</label><input type="number" id="sec-lockout" min="1" max="1440"></div>
  <div class="form-group"><label for="sec-min-password">Mot de passe (min. caractères)</label><input type="number" id="sec-min-password" min="8" max="128"></div>
@@ -2498,7 +2583,7 @@
  <div class="card form-card hidden" id="retention-card">
  <h2> Rétention des Données (Admin)</h2>
  <p class="section-desc">Durée de conservation (jours) par famille — <strong>0 = conservation illimitée</strong> (défaut), minimum 30 jours quand une purge est activée. La purge tourne chaque jour à l'heure indiquée et chaque exécution est tracée <code>RETENTION_PURGE</code>. Le journal des actions d'administration n'est <strong>jamais</strong> purgé ; les décisions de criblage encore liées à une alerte conservée ne sont jamais supprimées.</p>
- <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+ <div class="form-row colonnes-4" style="max-width: 760px;">
  <div class="form-group"><label for="retention-audit">Décisions de criblage</label><input type="number" id="retention-audit" min="0" step="1"></div>
  <div class="form-group"><label for="retention-alerts">Alertes clôturées</label><input type="number" id="retention-alerts" min="0" step="1"></div>
  <div class="form-group"><label for="retention-syncs">Rapports de sync</label><input type="number" id="retention-syncs" min="0" step="1"></div>
@@ -2527,22 +2612,36 @@
  </div>
 
  <div id="sub-sec-settings-alerts" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-alerts">
- <div class="grid-layout" style="grid-template-columns: 1fr;">
+ <div class="grid-layout une-colonne">
  <div class="card form-card hidden" id="notifications-settings-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-bell"></use></svg> Alertes & Notifications (Admin)</h2>
  <p class="section-desc">Délais de traitement par priorité, courriels et webhooks émis à chaque étape, et récapitulatif périodique. Ces réglages appartiennent à la même famille que la gouvernance : le bouton ci-dessous enregistre l'ensemble en un seul appel, où qu'on le clique.</p>
  <h3 style="font-size: 1rem; margin: 0.5rem 0;"><svg class="ui-icon" aria-hidden="true"><use href="#i-clock"></use></svg> SLA de traitement des alertes</h3>
  <p class="section-desc" style="margin-bottom: 0.75rem;">Délai de traitement (heures) par priorité — l'échéance est calculée à la création de l'alerte, le retard est signalé dans la file. 0 = pas d'échéance.</p>
- <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 640px;">
+ <div class="form-row colonnes-4" style="max-width: 640px;">
  <div class="form-group"><label for="setting-sla-critical">Critique</label><input type="number" id="setting-sla-critical" min="0" step="1"></div>
  <div class="form-group"><label for="setting-sla-high">Haute</label><input type="number" id="setting-sla-high" min="0" step="1"></div>
  <div class="form-group"><label for="setting-sla-medium">Moyenne</label><input type="number" id="setting-sla-medium" min="0" step="1"></div>
  <div class="form-group"><label for="setting-sla-low">Basse</label><input type="number" id="setting-sla-low" min="0" step="1"></div>
  </div>
+ <div class="form-group" style="margin-top: 0.75rem; max-width: 640px;">
+ <label for="setting-gel-delay">Délai de déclaration d'un gel à la DG Trésor (heures)</label>
+ <input type="number" id="setting-gel-delay" min="1" max="72" step="1" style="max-width: 120px;">
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La déclaration est due « immédiatement » après la confirmation (CMF L.562-4). Au-delà de ce délai, une mesure non déclarée déclenche une notification immédiate et bloque la mise en service. De 1 à 72 heures.</small>
+ </div>
  <div class="form-group" style="margin-top: 0.75rem;">
- <label for="setting-close-reasons">Motifs de clôture proposés aux analystes</label>
- <textarea id="setting-close-reasons" rows="5" placeholder="Un motif par ligne…"></textarea>
- <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Un motif par ligne. Proposés au moment de la décision : le clic remplit le commentaire, qui reste éditable. Vider la liste retire les suggestions.</small>
+ <label for="setting-close-reasons-fp">Motifs de clôture : faux positif</label>
+ <textarea id="setting-close-reasons-fp" rows="4" placeholder="Un motif par ligne…"></textarea>
+ </div>
+ <div class="form-group" style="margin-top: 0.5rem;">
+ <label for="setting-close-reasons-confirmed">Motifs de clôture : vrai positif</label>
+ <textarea id="setting-close-reasons-confirmed" rows="3" placeholder="Un motif par ligne…"></textarea>
+ </div>
+ <div class="form-group" style="margin-top: 0.5rem;">
+ <label for="setting-close-reasons-both">Motifs de clôture : les deux décisions</label>
+ <textarea id="setting-close-reasons-both" rows="2" placeholder="Un motif par ligne…"></textarea>
+ <small id="setting-close-reasons-unclassified" class="hidden" style="color: var(--color-warning); display: block; margin-top: 0.3rem;"></small>
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Un motif par ligne. Chaque dialogue de décision ne propose que les motifs de sa décision : le clic remplit le commentaire, qui reste éditable. Un commentaire qui cite un motif réservé à l'autre décision est refusé. Vider les listes retire les suggestions.</small>
  </div>
  <h3 style="font-size: 1rem; margin: 1.25rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border-color);"><svg class="ui-icon" aria-hidden="true"><use href="#i-bell"></use></svg> Notifications métier (email / webhooks)</h3>
  <p class="section-desc" style="margin-bottom: 0.75rem;">Un mail à chaque étape de la production des listes, du criblage et du filtrage. Les étapes structurantes partent immédiatement ; les étapes à fort volume sont regroupées dans un récapitulatif périodique. Les destinataires sont déduits des rôles (adresse email du compte), avec repli sur les variables SMTP globales.</p>
@@ -2578,6 +2677,7 @@
  <input type="checkbox" id="setting-digest-enabled" style="width: 18px; height: 18px;">
  Activer le digest périodique
  </label>
+ <div id="digest-dernier-envoi" style="margin-top: 0.3rem;"></div>
  </div>
  <div class="form-group" style="margin-bottom: 1rem; max-width: 420px;">
  <label for="setting-digest-cron">Planification (cron 5 champs, ex. <code>0 8 * * 1-5</code> = 8h00 en semaine)</label>
@@ -2589,7 +2689,7 @@
  </div>
 
  <div id="sub-sec-settings-screening" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-screening">
- <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
+ <div class="grid-layout grille-cartes">
  <div class="card form-card hidden" id="scoring-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-target"></use></svg> Seuils de Score du Criblage (Admin)</h2>
  <p class="section-desc">Seuil de cut-off global et surcharges par type de liste, appliqués <strong>à chaud</strong> au criblage clients et au filtrage transactionnel (prioritaires sur <code>config.yaml</code>). Surcharge vide = seuil global. Toute modification est journalisée.</p>
@@ -2597,7 +2697,7 @@
  <label for="scoring-global">Seuil global (0-100)</label>
  <input type="number" id="scoring-global" min="0" max="100" step="0.5">
  </div>
- <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;" id="scoring-overrides-row">
+ <div class="form-row colonnes-4" style="max-width: 760px;" id="scoring-overrides-row">
  <!-- Rempli dynamiquement par liste -->
  </div>
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">
@@ -2612,13 +2712,13 @@
  <div id="scoring-engine-tuning" class="accordion-content hidden" style="padding-top: 1rem;">
  <p class="section-desc">Réglages fins du moteur, appliqués à chaud comme les seuils. Les pondérations composent le score de nom (leur somme doit rester positive) ; les bonus/malus ajustent le score selon la date de naissance, le genre et la géographie. Chiffrez tout changement avec la simulation d'impact ou le cahier de tests avant de produire.</p>
  <h4 style="margin: 0.5rem 0 0.4rem;">Pondérations des métriques de nom</h4>
- <div class="form-row" style="grid-template-columns: repeat(3, 1fr); max-width: 560px;">
+ <div class="form-row colonnes-3" style="max-width: 560px;">
  <div class="form-group"><label for="w-jaro">Jaro-Winkler</label><input type="number" id="w-jaro" min="0" max="1" step="0.05"></div>
  <div class="form-group"><label for="w-damerau">Damerau-Levenshtein</label><input type="number" id="w-damerau" min="0" max="1" step="0.05"></div>
  <div class="form-group"><label for="w-token">Token sort</label><input type="number" id="w-token" min="0" max="1" step="0.05"></div>
  </div>
  <h4 style="margin: 0.75rem 0 0.4rem;">Bonus / malus contextuels</h4>
- <div class="form-row" style="grid-template-columns: repeat(4, 1fr); max-width: 760px;">
+ <div class="form-row colonnes-4" style="max-width: 760px;">
  <div class="form-group"><label for="cr-dob-window">Tolérance DDN (années)</label><input type="number" id="cr-dob-window" min="0" max="20" step="1"></div>
  <div class="form-group"><label for="cr-dob-exact">DDN exacte (bonus)</label><input type="number" id="cr-dob-exact" min="-100" max="100" step="1"></div>
  <div class="form-group"><label for="cr-dob-tol">DDN dans la fenêtre</label><input type="number" id="cr-dob-tol" min="-100" max="100" step="1"></div>
@@ -2647,7 +2747,7 @@
  </div>
 
  <div id="sub-sec-settings-integrations" class="sub-tab-content hidden" role="tabpanel" aria-labelledby="sub-btn-settings-integrations">
- <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
+ <div class="grid-layout grille-cartes">
  <div class="card form-card hidden" id="apikeys-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-key"></use></svg> Clés d'API Techniques (Admin)</h2>
  <p class="section-desc">Comptes de service pour les intégrations systèmes (CFT, ordonnanceur, SI amont) : authentification par en-tête <code>X-API-Key</code>, rôles restreints (jamais admin), révocation immédiate, usage tracé. <strong>La clé complète n'est affichée qu'à la création.</strong></p>
@@ -2698,7 +2798,7 @@
  Activer la recherche adverse media
  </label>
  </div>
- <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 480px;">
+ <div class="form-row" style="max-width: 480px;">
  <div class="form-group"><label for="am-language">Langue (fr, en…)</label><input type="text" id="am-language" maxlength="8"></div>
  <div class="form-group"><label for="am-max-results">Résultats max (1-50)</label><input type="number" id="am-max-results" min="1" max="50"></div>
  </div>
@@ -2735,7 +2835,7 @@
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-inbox"></use></svg> Inbox CFT (Admin)</h2>
  <p class="section-desc">Répertoire du serveur où le moniteur de transfert (CFT/SFTP) dépose les fichiers clients CSV : chaque fichier stable devient une campagne criblée automatiquement puis est archivé. Chemins absolus sur le serveur ; vide = scrutation désactivée. Ces chemins sont propres à chaque machine et ne voyagent pas dans l'export de configuration.</p>
  <div class="form-group"><label for="inbox-dir">Répertoire de dépôt (absolu, vide = désactivé)</label><input type="text" id="inbox-dir" placeholder="/home/fiskr/inbox"></div>
- <div class="form-row" style="grid-template-columns: 1fr 2fr; max-width: 640px;">
+ <div class="form-row colonnes-1-2" style="max-width: 640px;">
  <div class="form-group"><label for="inbox-poll">Scrutation (secondes)</label><input type="number" id="inbox-poll" min="5" max="3600"></div>
  <div class="form-group"><label for="inbox-archive">Répertoire d'archive (vide = <code>&lt;dépôt&gt;/archive</code>)</label><input type="text" id="inbox-archive"></div>
  </div>
@@ -2748,7 +2848,7 @@
 
  </section>
 <section id="sec-account" class="tab-content">
- <div class="grid-layout" style="grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start;">
+ <div class="grid-layout grille-cartes">
 
  <div class="card form-card" id="profile-card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-user"></use></svg> Profil</h2>
@@ -2806,7 +2906,7 @@
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-calendar"></use></svg> Absence & Délégation</h2>
  <p class="section-desc">Pendant votre absence, toute alerte qui vous serait assignée ira à votre délégué, et vos alertes ouvertes peuvent lui être réassignées immédiatement (chaque réassignation est tracée dans l'historique de l'alerte).</p>
  <div id="absence-status" style="margin-bottom: 1rem;"></div>
- <div class="form-row" style="grid-template-columns: 1fr 1fr; max-width: 560px;">
+ <div class="form-row" style="max-width: 560px;">
  <div class="form-group">
  <label for="absence-until">Absent jusqu'au</label>
  <input type="datetime-local" id="absence-until">
@@ -2891,7 +2991,7 @@
  <button class="btn btn-sm btn-secondary" onclick="exporterTableAffichee('users-table', 'fiskr_comptes')" title="Exporter les lignes affichées (filtres appliqués) en CSV">⬇ CSV</button>
  </div>
  <div class="table-container">
- <table class="data-table" id="users-table">
+ <table class="data-table table-compact" id="users-table">
  <thead>
  <tr>
  <th>ID</th>

@@ -247,23 +247,70 @@ async function chargerCouvertureDuCriblage() {
  const response = await apiFetch("/api/screening/couverture", { silent: true });
  if (!response.ok) { constat.textContent = "Couverture indisponible."; return; }
  const data = await response.json();
+ // Une mesure en échec n'est ni « aucun référentiel » ni « tout est criblé » :
+ // elle le disait comme le premier, et l'écran le répétait.
+ if (data.illisible) {
+  constat.textContent = "Couverture illisible : la mesure a échoué côté serveur. Ce n'est pas l'absence de référentiel — on ne sait pas.";
+  constat.style.color = "var(--color-alert, #c62828)";
+  return;
+ }
+ afficherDernierPassage(data.dernier_passage);
  if (data.sans_referentiel) {
   constat.textContent = "Aucun référentiel clients en production : rien à cribler pour l'instant.";
   constat.style.color = "var(--text-muted)";
   return;
  }
- if (!data.jamais_cribles) {
-  constat.textContent = `Les ${data.clients} clients du référentiel ont tous été criblés au moins une fois.`;
+ // La mesure lit désormais la trace que chaque passage laisse sur chaque
+ // fiche : « tous criblés au moins une fois » ne suffit plus, la question est
+ // « contre la version des listes en production ».
+ if (!data.phrase) {
+  constat.textContent = `Les ${data.clients} clients du référentiel sont criblés contre la version des listes en production.`;
   constat.style.color = "var(--color-success, #2e7d32)";
   return;
  }
- constat.textContent = data.phrase || "";
+ constat.textContent = data.phrase;
  constat.style.color = "var(--color-warning, #b8860b)";
  } catch (e) {
  // Un « Mesure en cours… » qui ne finit jamais laisse croire au calcul.
  console.error("Couverture fetch error:", e);
  constat.textContent = "Couverture indisponible : le serveur n'a pas répondu.";
  constat.style.color = "var(--color-alert, #c62828)";
+ }
+}
+
+// Le passage le plus récent, tel que la base le décrit : nature, date,
+// effectif, et la version des listes contre laquelle il a criblé. Chaque
+// morceau est un nœud à part — l'i18n traduit les libellés fixes, la version
+// et la date restent ce qu'elles sont.
+const NATURES_DE_PASSAGE = {
+ LOOKBACK: "Lookback",
+ MISE_A_JOUR_LISTE: "Re-criblage après mise à jour de liste",
+ REFERENTIEL_CLIENTS: "Criblage des clients nouveaux ou modifiés",
+};
+
+function afficherDernierPassage(passage) {
+ const zone = document.getElementById("couverture-passage");
+ if (!zone) return;
+ zone.textContent = "";
+ if (!passage) return;
+ const statut = passage.statut === "ECHEC" ? "Dernier passage en échec :"
+  : passage.statut === "EN_COURS" ? "Passage en cours :" : "Dernier passage :";
+ const quand = passage.fin || passage.debut;
+ const morceaux = [statut, NATURES_DE_PASSAGE[passage.nature] || passage.nature,
+  quand ? formatDateTime(quand) : "",
+  `${passage.clients_cribles} client(s) criblé(s)`, passage.version || ""];
+ morceaux.filter(Boolean).forEach((texte, i) => {
+  if (i > 1) zone.appendChild(document.createTextNode(" · "));
+  else if (i === 1) zone.appendChild(document.createTextNode(" "));
+  const span = document.createElement("span");
+  span.textContent = texte;
+  zone.appendChild(span);
+ });
+ if (passage.statut === "ECHEC" && passage.erreur) {
+  zone.appendChild(document.createTextNode(" — "));
+  const cause = document.createElement("span");
+  cause.textContent = passage.erreur;
+  zone.appendChild(cause);
  }
 }
 
@@ -302,8 +349,11 @@ async function lancerLookback() {
  showToast(data.message || "Lookback lancé.", "success");
  // Même chemin que les autres travaux lourds : la pastille suit la
  // progression, et la couverture se relit quand le job se termine —
- // c'est précisément le chiffre que le lookback vient de changer.
- onOperationDone(data.job_token, () => chargerCouvertureDuCriblage());
+ // c'est précisément le chiffre que le lookback vient de changer. Sans
+ // jeton, le travail a déjà fini dans la requête : on relit tout de suite,
+ // sinon la carte attendrait une fin qui a déjà eu lieu.
+ if (data.job_token) onOperationDone(data.job_token, () => chargerCouvertureDuCriblage());
+ else chargerCouvertureDuCriblage();
  } catch (e) {
  console.error("Lookback error:", e);
  showToast("Erreur réseau au lancement du lookback.", "error");
@@ -322,7 +372,11 @@ function listTypeFilterOptions(withUnknown) {
 
 // ------------------ NOTIFICATIONS INTÉGRÉES (toasts & dialogs) ------------------
 
-function showToast(message, type = "info", durationMs = 4500) {
+// `action` (facultatif) : { label, suffixe, run } — un bouton dans le toast.
+// « Criblage terminé — alerte #28 » n'était pas cliquable : il fallait aller
+// chercher l'alerte dans la file. Le libellé reste un nœud texte à part, pour
+// être traduit ; le suffixe (« #28 ») ne se traduit pas.
+function showToast(message, type = "info", durationMs = 4500, action = null) {
  const container = document.getElementById("toast-container");
  if (!container) { console.log(`[${type}] ${message}`); return; }
  const toast = document.createElement("div");
@@ -330,6 +384,15 @@ function showToast(message, type = "info", durationMs = 4500) {
  const icons = { success: uiIcon("check-circle"), error: uiIcon("warning"), info: uiIcon("info") };
  toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span class="toast-msg">${escapeHtml(message)}</span>`;
  toast.onclick = () => toast.remove();
+ if (action && typeof action.run === "function") {
+  const bouton = document.createElement("button");
+  bouton.type = "button";
+  bouton.className = "btn btn-sm btn-secondary";
+  bouton.style.cssText = "margin-left: 0.6rem; white-space: nowrap; flex-shrink: 0;";
+  bouton.innerHTML = `<span>${escapeHtml(action.label)}</span>${action.suffixe ? " " + escapeHtml(action.suffixe) : ""}`;
+  bouton.addEventListener("click", (e) => { e.stopPropagation(); toast.remove(); action.run(); });
+  toast.appendChild(bouton);
+ }
  container.appendChild(toast);
  setTimeout(() => {
  toast.classList.add("toast-out");
@@ -338,7 +401,7 @@ function showToast(message, type = "info", durationMs = 4500) {
 }
 
 // Modale générique : résout une Promise (bouton, Escape = annulation)
-function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password, suggestions }) {
+function _openAppDialog({ title, message, input, textarea, placeholder, required, danger, confirmLabel, cancelLabel, password, suggestions, checkbox }) {
  return new Promise((resolve) => {
  const overlay = document.getElementById("app-dialog");
  const titleEl = document.getElementById("app-dialog-title");
@@ -369,12 +432,16 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
  if (suggestions && suggestions.length) {
  const rangee = document.createElement("div");
  rangee.className = "dialog-suggestions";
- for (const motif of suggestions) {
+ for (const suggestion of suggestions) {
+ // Une suggestion est un texte, ou { texte, titre, marque } quand elle a
+ // quelque chose à dire d'elle-même (motif hérité, non classé).
+ const motif = typeof suggestion === "string" ? suggestion : suggestion.texte;
  const puce = document.createElement("button");
  puce.type = "button";
  puce.className = "suggestion-chip";
  puce.textContent = motif.length > 60 ? motif.slice(0, 60) + "…" : motif;
- puce.title = motif;
+ puce.title = (typeof suggestion !== "string" && suggestion.titre) || motif;
+ if (typeof suggestion !== "string" && suggestion.marque) puce.style.borderStyle = "dashed";
  puce.addEventListener("click", () => {
  inputEl.value = inputEl.value.trim() ? inputEl.value.trim() + " " + motif : motif;
  inputEl.focus();
@@ -385,12 +452,30 @@ function _openAppDialog({ title, message, input, textarea, placeholder, required
  }
  fieldWrap.appendChild(inputEl);
  }
+ // Case à cocher facultative ({ label, aide, coche }) : la promesse rend
+ // alors { value, checked } au lieu de la seule valeur.
+ let caseEl = null;
+ if (checkbox) {
+ const bloc = document.createElement("label");
+ bloc.style.cssText = "display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.75rem; font-size: 0.88rem; cursor: pointer;";
+ caseEl = document.createElement("input");
+ caseEl.type = "checkbox";
+ caseEl.id = "app-dialog-checkbox";
+ caseEl.checked = !!checkbox.coche;
+ // Les champs de la modale prennent toute la largeur : pas une case à cocher
+ caseEl.style.cssText = "margin-top: 0.2rem; width: auto; flex: 0 0 auto;";
+ const textes = document.createElement("span");
+ textes.innerHTML = `<strong>${escapeHtml(checkbox.label)}</strong>${checkbox.aide ? `<br><small style="color: var(--text-muted);">${escapeHtml(checkbox.aide)}</small>` : ""}`;
+ bloc.appendChild(caseEl);
+ bloc.appendChild(textes);
+ fieldWrap.appendChild(bloc);
+ }
 
  const cleanup = (value) => {
  overlay.classList.add("hidden");
  document.removeEventListener("keydown", onKey);
  okBtn.onclick = cancelBtn.onclick = null;
- resolve(value);
+ resolve(caseEl && value !== null && value !== false ? { value, checked: caseEl.checked } : value);
  };
  const onKey = (e) => { if (e.key === "Escape") cleanup(null); };
 
@@ -425,7 +510,7 @@ function promptDialog(title, options = {}) {
  return _openAppDialog({ title, message: options.message || "", input: !options.textarea,
  textarea: options.textarea, placeholder: options.placeholder,
  required: options.required !== false, password: options.password,
- suggestions: options.suggestions,
+ suggestions: options.suggestions, checkbox: options.checkbox,
  confirmLabel: options.confirmLabel || "Valider" });
 }
 
@@ -527,8 +612,11 @@ function toggleSidebar(force) {
 async function apiFetch(url, options = {}) {
  const { silent, ...fetchOptions } = options;
  // Langue active envoyée au backend : les messages detail/message des
- // réponses JSON arrivent traduits (fiskr/apimessages.py)
- if (window.fiskrI18n && fiskrI18n.currentLang() !== "fr") {
+ // réponses JSON arrivent traduits (fiskr/apimessages.py). Français compris :
+ // sans l'en-tête, le navigateur envoie le sien — mesuré en Chromium
+ // « en-US » — et une interface en français recevait ses toasts en anglais
+ // (« User 'marie' created successfully. »).
+ if (window.fiskrI18n) {
  fetchOptions.headers = { ...(fetchOptions.headers || {}),
  "Accept-Language": fiskrI18n.currentLang() };
  }
@@ -903,12 +991,77 @@ const STATUS_LABELS = {
  DRAFT: "Brouillon", ACTIVE: "Active",
  // Divers
  ADDED: "Ajouté", REMOVED: "Supprimé", MODIFIED: "Modifié",
- NO_MATCH: "Aucun match", ALERT: "Alerte", WHITELISTED: "Liste blanche",
+ NO_MATCH: "Aucun match", ALERT: "Alerte", WHITELISTED: "Liste blanche", NOT_SCREENED: "Non criblée",
  SUCCESS: "Succès", NO_CHANGE: "Sans changement",
 };
 
 function statusLabel(status) {
  return STATUS_LABELS[status] || status || "—";
+}
+
+// Même principe, un vocabulaire par table : chaque écran qui affiche un de ces
+// codes passe par ici. Mesuré dans la modale d'alerte : l'historique montrait
+// CREATED, PROPOSED, REDETECTED bruts et l'explication du score les clés
+// `dob`, `gender`, `geography` — au milieu d'une interface en français.
+
+// Événements de l'historique d'une alerte (alert_events.action). Un test
+// (tests/test_libelles_derives.py) relève les actions que le serveur écrit et
+// exige un libellé pour chacune.
+const ALERT_EVENT_LABELS = {
+ CREATED: "Création", REDETECTED: "Re-détection", RULE_SUPPRESSED: "Clôture par règle",
+ ASSIGNED: "Assignation", COMMENT: "Commentaire", ESCALATED: "Escalade",
+ PROPOSED: "Décision proposée", VALIDATED: "Décision validée", RETURNED: "Renvoi en analyse",
+ PRIORITY_CHANGED: "Priorité modifiée", SNOOZED: "Mise en attente", WOKEN: "Réveil",
+ SLA_OVERDUE: "Échéance SLA dépassée", CHECKLIST: "Checklist d'instruction",
+ ATTACHMENT: "Pièce jointe", NARRATIVE: "Narratif généré",
+ STR_DRAFT_GENERATED: "Projet de déclaration généré", STR_DRAFT_SENT: "Projet de déclaration envoyé",
+ GEL_OUVERT: "Mesure de gel ouverte", GEL_MIS_A_JOUR: "Mesure de gel mise à jour",
+ GEL_DECLARE: "Gel déclaré à la DG Trésor", GEL_LEVE: "Gel levé",
+ GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
+ GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
+ WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
+ DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
+ LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
+};
+
+function alertEventLabel(action) {
+ return ALERT_EVENT_LABELS[action] || action || "—";
+}
+
+// Ajustements du score (decision_tree.adjustments, fiskr/scoring.py).
+const ADJUSTMENT_LABELS = { dob: "Date de naissance", gender: "Genre", geography: "Géographie" };
+
+function adjustmentLabel(cle) {
+ return ADJUSTMENT_LABELS[cle] || cle;
+}
+
+// Rôles (fiskr/auth.py). La barre latérale et la liste des comptes tenaient
+// chacune la leur : « Analyste Conformité » d'un côté, « ANALYSTE USER » de
+// l'autre, et `BLOCKING` / `RULES` bruts pour les rôles que la seconde
+// ignorait.
+const ROLE_LABELS = {
+ admin: "Administrateur", reviewer: "Réviseur", user: "Analyste",
+ blocking: "Paramétrage blocking", rules: "Règles faux positifs", auditor: "Auditeur (lecture seule)",
+};
+
+function roleLabel(role) {
+ return ROLE_LABELS[role] || role;
+}
+
+// Destinataires de notification qui ne sont pas des rôles (fiskr/events.py).
+const NOTIF_PSEUDO_AUDIENCE_LABELS = {
+ assignee: "analyste assigné", actor: "auteur de l'action",
+ followers: "suiveurs du dossier", mentioned: "personnes citées",
+};
+
+// Les lectures réservées, dans les termes du serveur (fiskr/auth.py,
+// require_roles : l'administrateur passe toujours). Taire un 403 ne le rend
+// pas silencieux : le navigateur l'inscrit en console à chaque page. Mesuré :
+// /api/setup/status pour tout compte non administrateur, /api/fprules pour un
+// réviseur à chaque « Examiner ». L'interface n'appelle que ce que le rôle lit.
+function peutLire(...roles) {
+ const r = userRoles(currentUser);
+ return r.includes("admin") || roles.some(x => r.includes(x));
 }
 
 // ------------------ ACCESSIBILITÉ (modales, onglets) ------------------
@@ -1788,6 +1941,16 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-10-20-gel-et-criblage", date: "2026-10-20",
+ titre: "Ce que le criblage a vraiment fait, et la suite d'un gel",
+ points: [
+ "L'alerte montre le client et la personne listée côte à côte, avec le verdict du moteur pour chaque champ.",
+ "Un vrai positif sur une liste de gel ouvre une mesure au registre des gels : gel, déclaration à la DG Trésor, levée.",
+ "« Prendre la suivante » vous assigne l'alerte la plus urgente ; une même décision se propose pour toute une sélection, chacune validée ensuite une par une.",
+ "Une alerte que la mise à jour d'une liste ne justifie plus est marquée caduque : elle reste ouverte, et le motif vous est proposé.",
+ ],
+ },
+ {
  id: "2026-08-27-lot-13", date: "2026-08-27",
  titre: "L'outil parle au bon moment",
  points: [
@@ -1944,7 +2107,9 @@ function initA11y() {
  if (e.key !== "Escape") return;
  const open = Array.from(document.querySelectorAll(".modal:not(.hidden)"))
  .filter((m) => m.id !== "app-dialog").pop();
- if (open) fermerModale(open);
+ // Touche consommée : sans le dire, le triage clavier (écouteur suivant)
+ // voyait une page sans modale et relâchait aussi la visée de la file.
+ if (open) { fermerModale(open); e.preventDefault(); }
  });
  document.querySelectorAll(".modal").forEach((m) => {
  m.setAttribute("role", "dialog");
@@ -2035,9 +2200,12 @@ let _setupDejaOuvert = false;
 
 async function rafraichirMiseEnService() {
  const cible = document.getElementById("setup-checks");
+ // Même porte que le serveur (require_admin_or_auditor) : un autre rôle
+ // ne l'appelle pas du tout, plutôt que de recevoir un 403 à chaque page.
+ if (!peutLire("auditor")) return null;
  try {
  const reponse = await apiFetch("/api/setup/status", { silent: true });
- if (!reponse.ok) return null;          // 403 pour un non-admin : normal
+ if (!reponse.ok) return null;
  const etat = await reponse.json();
  majBandeauMiseEnService(etat);
  if (cible) cible.innerHTML = rendreControles(etat);
@@ -2233,10 +2401,10 @@ document.addEventListener("DOMContentLoaded", () => {
  restaurerBrouillonDeSession();
  initDropZones();
  // Check authentication and load user info
- checkAuthUser();
- // Mise en service : après l'authentification (l'état est réservé à
- // l'administrateur), une seule fois, sans bloquer le reste du chargement.
- setTimeout(verifierMiseEnService, 1200);
+ // Mise en service : APRÈS l'authentification (l'état est réservé à
+ // l'administrateur et à l'auditeur — il faut connaître le rôle avant
+ // d'appeler), une seule fois, sans bloquer le reste du chargement.
+ checkAuthUser().then(() => setTimeout(verifierMiseEnService, 1200));
  initListTypeControls();
  // Le bouton d'aperçu suit le type de fichier sélectionné, dès l'arrivée.
  if (document.getElementById("ingest-file-type")) toggleSsieOptions();
@@ -2428,8 +2596,9 @@ async function checkAuthUser() {
  userEl.title = `Connecté en tant que @${data.user.username}`;
  }
  if (roleEl) {
- const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité", blocking: "Paramétrage Blocking", rules: "Règles Faux Positifs", auditor: "Auditeur (lecture seule)" };
- roleEl.textContent = roles.map(r => labels[r] || r).join(" / ") || "Analyste Conformité";
+ // Un nœud par rôle : l'i18n traduit chaque libellé, pas leur assemblage.
+ roleEl.innerHTML = (roles.length ? roles : ["user"])
+  .map(r => `<span>${escapeHtml(roleLabel(r))}</span>`).join(" / ");
  }
  if (navUsersItem) {
  navUsersItem.classList.toggle("hidden", !isAdmin);
@@ -2443,6 +2612,10 @@ async function checkAuthUser() {
  // commande dans cet écran.
  const adminLogBtn = document.getElementById("sub-btn-audit-admin");
  if (adminLogBtn) adminLogBtn.classList.toggle("hidden", !(isAdmin || isAuditor));
+ // Mise en service : même lecteurs que le journal. Ouverte à un autre rôle,
+ // elle promettait « chaque point ci-dessous est vérifié » au-dessus du vide.
+ const setupBtn = document.getElementById("sub-btn-guide-setup");
+ if (setupBtn) setupBtn.classList.toggle("hidden", !(isAdmin || isAuditor));
  // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
  const settingsCard = document.getElementById("review-settings-card");
  if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
@@ -2707,6 +2880,8 @@ function switchSubTab(sectionId, subTabId) {
  fetchAlerts("SCREENING");
  populateAssigneeFilters();
  fetchSavedViews("SCREENING");
+ } else if (subTabId === "alerts-gels") {
+ fetchGels();
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
  populateAssigneeFilters();
@@ -3373,7 +3548,7 @@ const OPERATION_KIND_ICONS = {
  approve: uiIcon("check-circle"),
  batch: uiIcon("package"), batch_campaign: uiIcon("package"),
  quality: uiIcon("activity"), quality_check: uiIcon("activity"),
- lookback: uiIcon("clock"), mining: uiIcon("search"),
+ lookback: uiIcon("clock"), client_screening: uiIcon("shield"), mining: uiIcon("search"),
  engine_simulation: uiIcon("sliders"), resource_simulation: uiIcon("sliders"),
  fprules_bench: uiIcon("target"), testpanel_generate: uiIcon("users"),
 };
@@ -3395,9 +3570,13 @@ function startProgressPolling(token, barPrefix, intervalMs = 1500) {
  const tick = async () => {
  if (stopped) return;
  try {
- const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(token)}`);
+ // `expected` : ce jeton vient d'être créé ici, et le serveur ne le
+ // connaît qu'une fois le fichier reçu — « pas encore connu » est normal
+ // (PENDING), pas un 404 en console à chaque import.
+ const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(token)}&expected=1`);
  if (resp.ok) {
  const p = await resp.json();
+ if (p.status === "PENDING") return; // garde « Préparation… »
  if (phaseEl) phaseEl.textContent = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "En cours…";
  if (countEl) {
  let txt = "";
@@ -3428,6 +3607,37 @@ function startProgressPolling(token, barPrefix, intervalMs = 1500) {
  wrap.classList.add("hidden");
  if (fillEl) fillEl.classList.remove("indeterminate");
  };
+}
+
+// Le criblage qui suit l'import d'un référentiel clients : lancé, terminé
+// (exécution immédiate), en échec, ou impossible faute de liste en production.
+// Chacun se dit ; « rien ne vous attend » n'est jamais la réponse par défaut.
+async function signalerCriblageDesClients(criblage) {
+ if (!criblage.launched) {
+  showToast("Ces clients ne sont PAS criblés : aucune liste n'est en production.", "error", 10000);
+  return;
+ }
+ if (criblage.status === "ERROR") {
+  showToast("Le criblage des clients a échoué : les fiches restent NON criblées. Relancez un lookback.", "error", 10000);
+  return;
+ }
+ const termine = criblage.status === "DONE";
+ if (termine) {
+  const r = criblage.result || {};
+  showToast(`Criblage des clients terminé : ${r.clients_screened || 0} criblé(s), ${r.unchanged_clients || 0} inchangé(s), ${r.new_alerts || 0} alerte(s) ouverte(s).`,
+            r.new_alerts ? "warning" : "success", 9000);
+ } else {
+  showToast("Criblage des clients nouveaux ou modifiés lancé : il se suit dans les opérations en cours.", "info", 9000);
+  onOperationDone(criblage.job_token, () => chargerCouvertureDuCriblage());
+ }
+ const ouvrir = await confirmDialog(termine
+  ? "Le criblage des clients nouveaux ou modifiés est terminé. Ouvrir la carte « Couverture du criblage » pour en voir le résultat ?"
+  : "Le criblage des clients nouveaux ou modifiés est lancé. Ouvrir la carte « Couverture du criblage » pour en suivre le résultat ?",
+  { confirmLabel: "Ouvrir la couverture", cancelLabel: "Plus tard" });
+ if (ouvrir) {
+  switchTab("screening");
+  switchSubTab("screening", "screening-batch");
+ }
 }
 
 // Handle Snapshot Ingestion (Upload file)
@@ -3494,6 +3704,12 @@ async function handleIngestion(event) {
  }
  
  let data = await response.json();
+ // Fichier déjà connu (même empreinte) : rien n'a été importé, et le dire
+ // « importé avec succès » serait affirmer ce qui n'a pas eu lieu.
+ if (data.already_imported) {
+  showToast(data.message, "info", 8000);
+  return;
+ }
  // 202 : l'upload est fini, mais le parsing, le Quality Gate, la
  // persistance et le re-criblage continuent en tâche de fond (démon
  // travailleur). On suit le jeton jusqu'au rapport final — l'écran
@@ -3522,6 +3738,10 @@ async function handleIngestion(event) {
   showToast(`${data.rejected_count} ligne(s) écartée(s) par le contrôle qualité.${motifs ? " " + motifs : ""}`,
             "warning", 10000);
  }
+ // Un référentiel clients part au criblage dès son entrée en production.
+ // L'import annonçait « Successfully imported 406 items » sans cribler
+ // personne : il dit maintenant ce qui se passe, et où en lire le résultat.
+ if (data.criblage) signalerCriblageDesClients(data.criblage);
  fileInput.value = "";
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();
@@ -3785,6 +4005,25 @@ async function fetchSyncConfig() {
 // mise en garde de régulateur n'ont pas la même conséquence).
 let _lastSourceState = null; // {source: {enabled, next}}, pour re-render sans refetch
 
+// Pas de date pour ce qui ne tournera pas. Le serveur ne donne une prochaine
+// récupération qu'aux sources que le planificateur lancera vraiment, et le
+// motif pour les autres (fiskr/sync.motif_hors_planification) : l'écran
+// affichait « prochaine : 20/10/2026 06:00 » pour des sources désactivées,
+// synchronisation automatique coupée.
+const MOTIFS_SANS_PROCHAINE = {
+ AUTO_COUPEE: "synchronisation automatique coupée",
+ SOURCE_DESACTIVEE: "source désactivée",
+ CRON_INVALIDE: "expression cron invalide",
+};
+
+function prochaineRecuperationHtml(cfg, source) {
+ const quand = (cfg.next_runs || {})[source];
+ if (quand) return `<span>prochaine :</span> ${escapeHtml(formatDateTime(quand))}`;
+ const motif = (cfg.next_run_missing_reason || {})[source];
+ if (!motif) return "<span>prochaine :</span> —";
+ return `<span>aucune récupération planifiée :</span> <span>${escapeHtml(MOTIFS_SANS_PROCHAINE[motif] || motif)}</span>`;
+}
+
 function renderSourcesTable(cfg) {
  if (cfg) _lastSourceState = cfg;
  cfg = _lastSourceState;
@@ -3794,7 +4033,6 @@ function renderSourcesTable(cfg) {
  const search = (document.getElementById("sources-search")?.value || "").trim().toLowerCase();
  const familyFilter = document.getElementById("sources-family-filter")?.value || "";
  const stateFilter = document.getElementById("sources-state-filter")?.value || "";
- const nextRuns = cfg.next_runs || {};
 
  const rows = [];
  for (const [family, familyLabel] of Object.entries(SOURCE_FAMILIES)) {
@@ -3811,7 +4049,6 @@ function renderSourcesTable(cfg) {
  for (const s of inFamily) {
  const enabled = (cfg[s.key] || {}).enabled;
  const state = sourceStateCell(s.alias); // état vivant (sync en cours/terminée)
- const nextRun = nextRuns[s.key] ? formatDateTime(nextRuns[s.key]) : "—";
  // Compacité : la description passe en infobulle, la ligne tient
  // sur une hauteur de texte — 25 sources se parcourent sans friction.
  rows.push(`<tr>
@@ -3819,7 +4056,7 @@ function renderSourcesTable(cfg) {
  <td>${enabled
  ? '<span class="status-badge no_match" title="Participe aux synchronisations planifiées">activée</span>'
  : '<span class="status-badge" style="opacity: 0.6;" title="Exclue des synchronisations planifiées — le bouton Synchroniser reste disponible">désactivée</span>'}</td>
- <td><div id="src-state-${s.key}">${state}</div><div class="section-desc" style="font-size: 0.72rem; margin-top: 0.1rem;">prochaine : ${escapeHtml(nextRun)}</div></td>
+ <td><div id="src-state-${s.key}">${state}</div><div class="section-desc" style="font-size: 0.72rem; margin-top: 0.1rem;">${prochaineRecuperationHtml(cfg, s.key)}</div></td>
  <td><button class="btn btn-primary" style="padding: 0.25rem 0.6rem; font-size: 0.78rem;"
  onclick="startSourceSync('${s.alias}')">Synchroniser</button></td>
  </tr>`);
@@ -3869,7 +4106,6 @@ function renderCronSchedules(cfg) {
  const tbody = document.querySelector("#cron-schedules-table tbody");
  if (!tbody || !cfg) return;
  const schedules = cfg.schedules || {};
- const nextRuns = cfg.next_runs || {};
  const origins = cfg.automation_sources || {};
 
  const autoBox = document.getElementById("sync-auto-enabled");
@@ -3899,7 +4135,7 @@ function renderCronSchedules(cfg) {
  <td><input type="text" id="cron-${source}" value="${escapeHtml(schedules[source] || "")}"
  style="font-family: monospace; max-width: 200px;"
  title="Expression cron 5 champs : minute heure jour mois jour-de-semaine"></td>
- <td>${nextRuns[source] ? formatDateTime(nextRuns[source]) : "—"}</td>
+ <td style="font-size: 0.82rem;">${prochaineRecuperationHtml(cfg, source)}</td>
  <td id="cron-state-${source}">${sourceStateCell(source)}</td>
  </tr>`;
  }).join("");
@@ -4437,15 +4673,85 @@ async function handleAdhocScreen(event) {
  <td><strong>${(m.final_score ?? 0).toFixed ? m.final_score.toFixed(1) : m.final_score}%</strong></td>
  <td>${escapeHtml(m.watchlist_name || "—")}${m.hard_match ? ` <span class="badge-secondary">${_tr("Hard match")}</span>` : ""}</td>
  <td>${listTypeBadge(m.list_type)}</td>
- <td><span class="status-badge ${m.status === "ALERT" ? "alert" : "no_match"}">${escapeHtml(m.status || "")}</span></td>
+ <td><span class="status-badge ${m.status === "ALERT" ? "alert" : "no_match"}">${escapeHtml(_STATUTS_D_APERCU[m.status] || statusLabel(m.status))}</span></td>
  </tr>`).join("") + `</tbody></table></div>`;
  }
- results.innerHTML = entete + table;
+ // Passer au criblage réglementaire sans tout ressaisir
+ const versTrace = `<div style="margin-top: 0.6rem;"><button type="button" class="btn btn-sm btn-secondary" onclick="criblerEnTrace()">Cribler en tracé</button>
+ <small style="color: var(--text-muted); margin-left: 0.4rem;">Pré-remplit le formulaire complet ci-dessous : journal d'audit et alerte.</small></div>`;
+ results.innerHTML = entete + table + versTrace;
  } catch (e) {
  results.innerHTML = `<p class="anomaly-item warning">${_tr("Vérification impossible (réseau).")}</p>`;
  } finally {
  if (btn) { btn.disabled = false; btn.textContent = _tr("Vérifier"); }
  }
+}
+
+// L'aperçu n'ouvre aucune alerte : « Alerte » serait faux, et « ALERT » brut
+// ne se traduisait pas. Il dit où la fiche tombe par rapport au seuil.
+const _STATUTS_D_APERCU = { ALERT: "Au-dessus du seuil", NO_MATCH: "Sous le seuil" };
+
+// Vérification rapide → formulaire complet : il fallait tout ressaisir pour
+// passer au criblage tracé. Rien ne part tout seul : l'analyste relit, puis
+// lance le criblage (journalisé, alerte au-dessus du seuil).
+function criblerEnTrace() {
+ const nom = (document.getElementById("adhoc-name")?.value || "").trim();
+ const type = document.getElementById("adhoc-type")?.value || "I";
+ const fixer = (id, valeur) => { const el = document.getElementById(id); if (el) el.value = valeur; };
+ fixer("client-type", type === "E" ? "E" : "I");
+ if (typeof toggleFormFields === "function") toggleFormFields();
+ if (type === "E") {
+ fixer("client-companyname", nom);
+ fixer("client-firstname", ""); fixer("client-lastname", "");
+ } else {
+ // Même découpage que le quality gate : premier mot = prénom, le reste = nom
+ const mots = nom.split(/\s+/).filter(Boolean);
+ fixer("client-firstname", mots.length > 1 ? mots[0] : "");
+ fixer("client-lastname", mots.length > 1 ? mots.slice(1).join(" ") : (mots[0] || ""));
+ fixer("client-companyname", "");
+ }
+ fixer("client-dob", document.getElementById("adhoc-dob")?.value || "");
+ fixer("client-countries", (document.getElementById("adhoc-country")?.value || "").trim().toUpperCase());
+ fixer("client-id", "");
+ majIdentifiantClient();
+ const formulaire = document.getElementById("screening-form");
+ if (formulaire) formulaire.scrollIntoView({ behavior: "smooth", block: "start" });
+ document.getElementById(type === "E" ? "client-companyname" : "client-lastname")?.focus({ preventScroll: true });
+}
+
+// ------------------ IDENTIFIANT CLIENT DU CRIBLAGE MANUEL ------------------
+// Le formulaire tirait `SCREEN-<Math.random()*10000>` : en production, 24
+// décisions sur 28 sous un identifiant aléatoire, et deux alertes sur la même
+// fiche, au même score, jamais rapprochées. Un identifiant du référentiel se
+// choisit ici ; à défaut le serveur le CALCULE (nom normalisé, naissance,
+// type) et l'écran le dit.
+
+let _rechercheClientMinuteur = null;
+
+function majIdentifiantClient() {
+ const champ = document.getElementById("client-id");
+ const aide = document.getElementById("client-id-hint");
+ if (!champ || !aide) return;
+ aide.textContent = champ.value.trim()
+ ? _tr("Identifiant fourni : les criblages de ce client se rapprochent sous lui.")
+ : _tr("Vide : identifiant calculé à partir du nom normalisé, de la date de naissance et du type.");
+}
+
+function chercherClientDuReferentiel() {
+ majIdentifiantClient();
+ clearTimeout(_rechercheClientMinuteur);
+ const terme = (document.getElementById("client-id")?.value || "").trim();
+ const liste = document.getElementById("client-id-suggestions");
+ if (!liste || terme.length < 2) return;
+ _rechercheClientMinuteur = setTimeout(async () => {
+ try {
+ const response = await apiFetch(`/api/search/quick?q=${encodeURIComponent(terme)}&limit=8`, { silent: true });
+ if (!response.ok) return;
+ const data = await response.json();
+ liste.innerHTML = ((data.clients || {}).items || []).map(c =>
+ `<option value="${escapeHtml(c.client_id)}">${escapeHtml(c.name || "")}</option>`).join("");
+ } catch (e) { /* sans suggestions, la saisie libre reste possible */ }
+ }, 250);
 }
 
 async function handleScreening(event) {
@@ -4491,8 +4797,11 @@ async function handleScreening(event) {
  
  const altAddressesList = altAddressesStr ? altAddressesStr.split(";").map(a => a.trim()) : [];
  
+ // Identifiant choisi dans le référentiel ou saisi ; vide = calculé par le
+ // serveur (jamais tiré au hasard : la déduplication des alertes en dépend)
+ const clientIdSaisi = (document.getElementById("client-id")?.value || "").trim();
  const payload = {
- client_id: `SCREEN-${Math.floor(Math.random() * 10000)}`,
+ client_id: clientIdSaisi || null,
  client_type: clientType,
  client_first_name: clientType === "PP" ? firstName : "",
  client_last_name: clientType === "PP" ? lastName : "",
@@ -4558,6 +4867,15 @@ async function handleScreening(event) {
  resultsCard.classList.remove("hidden");
 
  renderScreeningResult(data);
+
+ // Sous quel identifiant ce criblage est journalisé — et s'il est calculé
+ const idNote = document.getElementById("screening-client-id-note");
+ if (idNote) {
+ idNote.innerHTML = data.client_id
+ ? `<small><span>${data.client_id_calcule ? "Identifiant calculé" : "Identifiant client"}</span> : <strong>${escapeHtml(data.client_id)}</strong>${data.client_id_calcule ? ` <span style="color: var(--text-muted);">(nom normalisé, date de naissance, type)</span>` : ""}</small>`
+ : "";
+ idNote.classList.toggle("hidden", !data.client_id);
+ }
 
  // Continuité criblage -> alerte : lien direct vers l'alerte ouverte
  const alertLink = document.getElementById("screening-alert-link");
@@ -4927,7 +5245,7 @@ function renderAuditHistoryTable(logs) {
  <td><code>${escapeHtml(log.watchlist_id)}</code> - <strong>${escapeHtml(log.watchlist_name)}</strong></td>
  <td>${listTypeBadge(log.list_type)}</td>
  <td style="font-weight: 700; color: ${log.status === "ALERT" ? "var(--color-alert)" : "var(--color-safe)"}">${log.final_score.toFixed(1)}%</td>
- <td><span class="status-badge ${log.status === "ALERT" ? "alert" : "no_match"}">${log.status}</span></td>
+ <td><span class="status-badge ${log.status === "ALERT" ? "alert" : (log.status === "NOT_SCREENED" ? "warning" : "no_match")}">${log.status}</span></td>
  <td><button class="btn btn-secondary" style="font-size:0.75rem; padding: 0.25rem 0.5rem;" onclick="viewAuditLogDetail(${log.id})">Inspecter</button></td>
  `;
  tbody.appendChild(tr);
@@ -4968,11 +5286,13 @@ async function viewAuditLogDetail(logId) {
  if (tree.hard_match_triggered) {
  adjHtml = `<p style="color:var(--color-warning); font-weight:700"> HARD MATCH déclenché : ${escapeHtml(tree.hard_match_details)}</p>`;
  } else if (tree && tree.adjustments) {
+ // Libellés lus dans ADJUSTMENT_LABELS ; chaque champ du moteur reste nommé
+ // et échappé un par un (garde-fou XSS de tests/test_security.py).
  adjHtml = `
  <ul>
- <li>Date de Naissance : <strong>${escapeHtml(tree.adjustments.dob.score)} points</strong> (${escapeHtml(tree.adjustments.dob.description)})</li>
- <li>Genre : <strong>${escapeHtml(tree.adjustments.gender.score)} points</strong> (${escapeHtml(tree.adjustments.gender.description)})</li>
- <li>Géographie : <strong>${escapeHtml(tree.adjustments.geography.score)} points</strong> (${escapeHtml(tree.adjustments.geography.description)})</li>
+ <li><span>${escapeHtml(adjustmentLabel("dob"))}</span> : <strong>${escapeHtml(tree.adjustments.dob.score)} points</strong> (${escapeHtml(tree.adjustments.dob.description)})</li>
+ <li><span>${escapeHtml(adjustmentLabel("gender"))}</span> : <strong>${escapeHtml(tree.adjustments.gender.score)} points</strong> (${escapeHtml(tree.adjustments.gender.description)})</li>
+ <li><span>${escapeHtml(adjustmentLabel("geography"))}</span> : <strong>${escapeHtml(tree.adjustments.geography.score)} points</strong> (${escapeHtml(tree.adjustments.geography.description)})</li>
  </ul>
  `;
  }
@@ -4981,9 +5301,9 @@ async function viewAuditLogDetail(logId) {
  content.innerHTML = `
  <div class="modal-section">
  <h4>Informations Générales</h4>
- <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.85rem">
+ <div class="details-grid" style="gap: 1rem; margin-top: 0; font-size: 0.85rem">
  <div>Horodatage : <strong>${escapeHtml(dateStr)}</strong></div>
- <div>Statut : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${log.status}</strong></div>
+ <div>Statut : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${escapeHtml(statusLabel(log.status))}</strong></div>
  <div>Watchlist : <strong><code>${escapeHtml(log.watchlist_id)}</code> - ${escapeHtml(log.watchlist_name)}</strong></div>
  <div>Client : <strong>${escapeHtml(log.client_name)} (${log.client_type})</strong></div>
  <div>Liste d'origine : ${listTypeBadge(log.list_type)}</div>
@@ -4995,7 +5315,7 @@ async function viewAuditLogDetail(logId) {
  
  <div class="modal-section">
  <h4>Analyse Algorithmique</h4>
- <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.85rem">
+ <div class="details-grid" style="gap: 1rem; margin-top: 0; font-size: 0.85rem">
  <div>Score Textuel : <strong>${log.base_score.toFixed(1)}%</strong></div>
  <div>Score Final : <strong>${log.final_score.toFixed(1)}%</strong></div>
  </div>
@@ -5662,10 +5982,11 @@ function renderUsersTable(users) {
  reviewer: 'background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--color-warning); font-weight: 600;',
  user: 'background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; font-weight: 600;'
  };
- const badgeLabels = { admin: "ADMINISTRATEUR", reviewer: "RÉVISEUR", user: "ANALYSTE USER", auditor: "AUDITEUR (LECTURE SEULE)" };
- const roleBadge = userRoles(u).map(r =>
- `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block;">${badgeLabels[r] || escapeHtml(r.toUpperCase())}</span>`
- ).join("") || `<span style="${badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem;">ANALYSTE USER</span>`;
+ // Majuscules par la feuille de style, libellé par ROLE_LABELS : la
+ // traduction porte sur le libellé, pas sur une casse figée dans le texte.
+ const roleBadge = (userRoles(u).length ? userRoles(u) : ["user"]).map(r =>
+ `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block; text-transform: uppercase;">${escapeHtml(roleLabel(r))}</span>`
+ ).join("");
 
  const dateFormatted = u.created_at ? new Date(u.created_at).toLocaleDateString(uiLocale(), { hour: "2-digit", minute: "2-digit" }) : "N/A";
  const isSelf = currentUser && currentUser.id === u.id;
@@ -5782,6 +6103,9 @@ async function handleSaveUser(event) {
  }
 
  closeUserModal();
+ // La modale se fermait sans un mot : on ne savait pas, sans relire la
+ // liste, si le compte était créé. Le serveur dit ce qu'il a fait.
+ showToast(data.message, "success");
  fetchUsersList();
  if (currentUser && currentUser.id === parseInt(editId, 10)) {
  checkAuthUser();
@@ -5805,6 +6129,7 @@ async function deleteUserAccount(userId, username) {
  return;
  }
 
+ showToast(data.message, "success");
  fetchUsersList();
  } catch (err) {
  console.error("Delete user error:", err);
@@ -5831,12 +6156,61 @@ let pendingReviews = [];
 let reviewCurrentSnapshotId = null;
 let reviewCurrentPage = 1;
 let reviewExcludedSelection = new Set();
+// Approuver le lot examiné exige un motif écrit (cahier WARN ou périmé)
+let reviewMotifExige = false;
 
 // Roles empilables : "user,reviewer" -> ["user", "reviewer"]
 function userRoles(user) {
  if (!user) return [];
  if (Array.isArray(user.roles)) return user.roles;
  return (user.role || "").split(",").map(r => r.trim().toLowerCase()).filter(Boolean);
+}
+
+// Motifs de clôture, une case par décision. Un motif hérité que la migration
+// n'a pas pu classer (texte écrit avant que les motifs ne portent leur
+// décision) arrive dans « les deux » : l'écran le dit, l'enregistrement vaut
+// classement.
+const _CASES_DE_MOTIFS = [
+ ["setting-close-reasons-fp", ["FALSE_POSITIVE"]],
+ ["setting-close-reasons-confirmed", ["CONFIRMED"]],
+ ["setting-close-reasons-both", ["FALSE_POSITIVE", "CONFIRMED"]],
+];
+
+function _caseDuMotif(decisions) {
+ const fp = (decisions || []).includes("FALSE_POSITIVE"), vp = (decisions || []).includes("CONFIRMED");
+ return fp && vp ? "setting-close-reasons-both" : vp ? "setting-close-reasons-confirmed" : "setting-close-reasons-fp";
+}
+
+function afficherMotifsDeCloture(motifs) {
+ const parCase = {};
+ let aClasser = 0;
+ for (const m of motifs) {
+ const entree = typeof m === "string" ? { motif: m, decisions: ["FALSE_POSITIVE", "CONFIRMED"], a_classer: true } : m;
+ if (entree.a_classer) aClasser += 1;
+ const cle = _caseDuMotif(entree.decisions);
+ (parCase[cle] = parCase[cle] || []).push(entree.motif);
+ }
+ for (const [id] of _CASES_DE_MOTIFS) {
+ const el = document.getElementById(id);
+ if (el) el.value = (parCase[id] || []).join("\n");
+ }
+ const note = document.getElementById("setting-close-reasons-unclassified");
+ if (note) {
+ note.classList.toggle("hidden", !aClasser);
+ note.innerHTML = aClasser
+ ? `<strong>${aClasser}</strong> <span>motif(s) hérité(s) non classé(s) : ils sont proposés pour les deux décisions. Déplacez chacun dans la case de sa décision, puis enregistrez.</span>`
+ : "";
+ }
+}
+
+function motifsDeClotureSaisis() {
+ const motifs = [];
+ for (const [id, decisions] of _CASES_DE_MOTIFS) {
+ for (const ligne of (document.getElementById(id)?.value || "").split("\n")) {
+ if (ligne.trim()) motifs.push({ motif: ligne.trim(), decisions });
+ }
+ }
+ return motifs;
 }
 
 async function fetchIngestionSettings() {
@@ -5893,14 +6267,15 @@ async function fetchIngestionSettings() {
  const qualityMinEl = document.getElementById("setting-quality-min");
  if (qualityMinEl) qualityMinEl.value = ingestionSettings.quality_min_score_pct ?? 0;
  // SLA par priorité + notifications métier
- const motifsEl = document.getElementById("setting-close-reasons");
- if (motifsEl) motifsEl.value = (ingestionSettings.alert_close_reasons || []).join("\n");
+ afficherMotifsDeCloture(ingestionSettings.alert_close_reasons || []);
  const sla = ingestionSettings.alert_sla_hours || {};
  for (const [prio, id] of [["CRITICAL", "setting-sla-critical"], ["HIGH", "setting-sla-high"],
  ["MEDIUM", "setting-sla-medium"], ["LOW", "setting-sla-low"]]) {
  const el = document.getElementById(id);
  if (el) el.value = sla[prio] ?? 0;
  }
+ const gelDelayEl = document.getElementById("setting-gel-delay");
+ if (gelDelayEl) gelDelayEl.value = ingestionSettings.gel_declaration_delay_hours ?? "";
  // Notifications : l'écran est généré depuis le catalogue du serveur
  fetchNotificationsCatalog();
  // Digest KPI périodique
@@ -5909,6 +6284,7 @@ async function fetchIngestionSettings() {
  const digestCronEl = document.getElementById("setting-digest-cron");
  if (digestEnabledEl) digestEnabledEl.checked = !!digest.enabled;
  if (digestCronEl) digestCronEl.value = digest.cron || "0 8 * * 1-5";
+ renderDernierEnvoiDuDigest();
  // Encart de l'onglet Homologation : parcours actif seulement si le mode l'est
  const modeHint = document.getElementById("review-mode-hint");
  if (modeHint) modeHint.classList.toggle("hidden", !!ingestionSettings.require_approval);
@@ -6016,14 +6392,18 @@ async function saveIngestionSettings() {
  auto_backtest_panel: document.getElementById("setting-auto-backtest-panel")?.value ?? "",
  // 0 = pas de seuil : `|| 0` conserve bien la desactivation
  quality_min_score_pct: parseFloat(document.getElementById("setting-quality-min")?.value) || 0,
- alert_close_reasons: (document.getElementById("setting-close-reasons")?.value || "")
- .split("\n").map(m => m.trim()).filter(Boolean),
+ alert_close_reasons: motifsDeClotureSaisis(),
  alert_sla_hours: {
  CRITICAL: parseInt(document.getElementById("setting-sla-critical")?.value, 10) || 0,
  HIGH: parseInt(document.getElementById("setting-sla-high")?.value, 10) || 0,
  MEDIUM: parseInt(document.getElementById("setting-sla-medium")?.value, 10) || 0,
  LOW: parseInt(document.getElementById("setting-sla-low")?.value, 10) || 0,
  },
+ // Pas de repli silencieux : un champ vide n'envoie rien, une valeur hors
+ // bornes est refusée par le serveur avec la raison.
+ ...(document.getElementById("setting-gel-delay")?.value
+   ? { gel_declaration_delay_hours: parseInt(document.getElementById("setting-gel-delay").value, 10) }
+   : {}),
  // Activation étape par étape : cases générées depuis le catalogue serveur
  notification_events: collectNotificationEvents(),
  digest: {
@@ -6082,8 +6462,14 @@ async function fetchNotificationsCatalog() {
  const fallback = (notificationsCatalog.default_recipients || []).length
  ? `repli : ${escapeHtml(notificationsCatalog.default_recipients.join(", "))}`
  : "aucun destinataire de repli (NOTIFY_EMAIL_TO)";
- statusEl.innerHTML = `${smtp} · ${link} · <span style="color: var(--text-muted);">${escapeHtml(fallback)}</span>`;
+ // « Jamais envoyé » s'entend sur la fenêtre du journal : le dire, plutôt
+ // qu'affirmer un « jamais » que la purge rend invérifiable au-delà.
+ const fenetre = notificationsCatalog.journal_ttl_jours
+ ? ` · <small style="color: var(--text-muted);"><span>Dates d'envoi lues au journal des envois, conservé</span> ${Number(notificationsCatalog.journal_ttl_jours)} <span>jours</span></small>`
+ : "";
+ statusEl.innerHTML = `${smtp} · ${link} · <span style="color: var(--text-muted);">${escapeHtml(fallback)}</span>${fenetre}`;
  }
+ renderDernierEnvoiDuDigest();
  } catch (e) {
  console.error("Notifications catalog error:", e);
  }
@@ -6105,16 +6491,17 @@ function renderNotificationsCatalog() {
  const badge = ev.urgency === "immediate"
  ? '<span class="notif-badge notif-badge-now">immédiat</span>'
  : '<span class="notif-badge notif-badge-digest">récap</span>';
- const audience = (ev.audience || []).map(a => ({
- assignee: "analyste assigné", actor: "auteur de l'action",
- admin: "admin", reviewer: "reviewer", rules: "rôle règles", user: "analystes",
- }[a] || a)).join(", ");
+ // Les rôles se nomment par ROLE_LABELS ; seuls les destinataires qui ne
+ // sont pas des rôles (fiskr/events.PSEUDO_AUDIENCES) ont un libellé ici —
+ // `followers` et `mentioned` s'affichaient bruts.
+ const audience = (ev.audience || []).map(a => NOTIF_PSEUDO_AUDIENCE_LABELS[a] || roleLabel(a)).join(", ");
  return `
  <label class="notif-row">
  <input type="checkbox" class="notif-event" data-event="${escapeHtml(ev.key)}" ${enabled[ev.key] ? "checked" : ""}>
  <span class="notif-label">${escapeHtml(ev.label)}</span>
  ${badge}
  <small class="notif-audience">${escapeHtml(audience)}</small>
+ ${dernierEnvoiHtml(ev.key, !!enabled[ev.key])}
  </label>`;
  }).join("");
  return `
@@ -6123,6 +6510,29 @@ function renderNotificationsCatalog() {
  ${rows}
  </details>`;
  }).join("");
+}
+
+// Ce qui est RÉELLEMENT parti, lu au journal des envois, à côté de la case
+// cochée. Relevé en production : la synthèse conformité cochée n'avait jamais
+// rien envoyé, et l'échec de synchronisation comptait 0 réussite sur 335
+// tentatives — la case cochée se lisait « actif », et rien d'autre.
+function dernierEnvoiHtml(cle, actif) {
+ // Journal pas encore lu : ne rien dire plutôt qu'un « jamais » non vérifié.
+ if (!notificationsCatalog || !notificationsCatalog.derniers_envois) return "";
+ const envoi = notificationsCatalog.derniers_envois[cle] || {};
+ const rates = Number(envoi.sans_envoi || 0);
+ const ratesHtml = rates ? ` · ${rates} <span>tentative(s) sans envoi</span>` : "";
+ if (envoi.dernier_envoi) {
+ return `<small class="notif-dernier-envoi" style="color: var(--text-muted);"><span>Dernier envoi réel</span> ${escapeHtml(formatDateTime(envoi.dernier_envoi))}${ratesHtml}</small>`;
+ }
+ // Activé et jamais parti : c'est le cas qui demande un regard.
+ const couleur = actif && rates ? "var(--color-warning)" : "var(--text-muted)";
+ return `<small class="notif-dernier-envoi" style="color: ${couleur};"><span>Jamais envoyé</span>${ratesHtml}</small>`;
+}
+
+function renderDernierEnvoiDuDigest() {
+ const el = document.getElementById("digest-dernier-envoi");
+ if (el) el.innerHTML = dernierEnvoiHtml("kpi_digest", !!document.getElementById("setting-digest-enabled")?.checked);
 }
 
 // Payload d'activation envoyé avec les réglages d'ingestion (une clé par étape)
@@ -6306,11 +6716,16 @@ function pendingBacktestCell(snap) {
  if (!snap.backtest_verdict) {
  return `<span style="color: var(--text-muted);">—</span>`;
  }
- const ok = snap.backtest_verdict === "OK";
+ const ok = snap.backtest_verdict === "OK" && !snap.backtest_stale;
  const gap = (snap.backtest_gap_pct !== null && snap.backtest_gap_pct !== undefined)
  ? ` (écart ${snap.backtest_gap_pct} %)` : "";
+ // Un verdict ne vaut que pour ce qu'il a testé : un rapport périmé
+ // (exclusions posées ou levées, production changée depuis) n'affiche plus
+ // de coche verte — la raison est au survol.
+ const perime = snap.backtest_stale
+ ? ` <span class="status-badge warning" style="white-space: nowrap;" title="${escapeHtml((snap.backtest_stale_reasons || []).join(" "))}">Périmé</span>` : "";
  return `<span style="color: ${ok ? "var(--success-soft-text)" : "var(--color-warning)"}; font-weight: 600;"
- title="Verdict du cahier de tests${gap}">${ok ? "✓ OK" : " " + escapeHtml(snap.backtest_verdict)}</span>`;
+ title="Verdict du cahier de tests${gap}">${ok ? "✓ OK" : " " + escapeHtml(snap.backtest_verdict)}</span>${perime}`;
 }
 
 // Delta d'une ligne de la file d'attente : le delta mémorisé à la
@@ -6328,9 +6743,13 @@ function pendingDeltaCell(snap) {
  if (zero) {
  return `<span style="color: var(--text-muted);" title="Contenu identique à la liste en production">aucun changement</span>`;
  }
+ // Parmi les modifiées, celles qui touchent l'identité : c'est elles qui
+ // décident d'une homologation, le reste se lit.
+ const identite = typeof d.modified_identity_count === "number"
+  ? ` title="dont ${d.modified_identity_count} d'identité"` : "";
  return `<span style="white-space: nowrap;">`
  + `<strong style="color: var(--success-soft-text);">+${d.added_count}</strong> / `
- + `<strong style="color: var(--color-warning);">~${d.modified_count}</strong> / `
+ + `<strong style="color: var(--color-warning);"${identite}>~${d.modified_count}</strong> / `
  + `<strong style="color: var(--color-danger);">−${d.removed_count}</strong></span>`;
 }
 
@@ -6407,14 +6826,29 @@ async function approveSelectedSnapshots() {
  { title: "Homologation groupée", confirmLabel: "Mettre en production" }
  );
  if (!ok) return;
+ // Lots dont le cahier est WARN ou périmé : un motif est exigé. Un motif
+ // COMMUN est accepté s'il est explicite — on nomme ces lots avant de le
+ // demander, et la requête les désigne (`comment_covers`) : un lot devenu
+ // WARN entre l'affichage et le clic n'est pas couvert, il est refusé seul.
+ const aMotiver = pendingReviews.filter(s => ids.includes(s.snapshot_id) && s.approval_comment_required);
+ let comment = (document.getElementById("review-comment") || {}).value || "";
+ if (aMotiver.length) {
+ const motif = await promptDialog("Motif commun d'approbation", {
+  message: `${aMotiver.length} liste(s) au cahier de tests WARN ou périmé : `
+  + `${aMotiver.map(s => listTypeLabel(s.file_type)).join(", ")}. `
+  + "Le motif saisi sera tracé au dossier d'homologation de chacune.",
+  textarea: true, required: true, placeholder: "Pourquoi l'écart ou la péremption est accepté…" });
+ if (motif === null) return;
+ comment = motif;
+ }
  const btn = document.getElementById("review-bulk-approve-btn");
  if (btn) { btn.disabled = true; btn.textContent = "Mise en production…"; }
  try {
- const comment = (document.getElementById("review-comment") || {}).value || "";
  const response = await apiFetch("/api/review/snapshots/approve-bulk", {
  method: "POST",
  headers: { "Content-Type": "application/json" },
- body: JSON.stringify({ snapshot_ids: ids, comment })
+ body: JSON.stringify({ snapshot_ids: ids, comment,
+  comment_covers: aMotiver.map(s => s.snapshot_id) })
  });
  const data = await response.json();
  if (!response.ok) { showToast(data.detail || "Homologation groupée impossible.", "error"); return; }
@@ -6478,13 +6912,15 @@ async function openReviewDetail(snapshotId) {
  document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
  document.getElementById("review-delta-removed").textContent = summary.removed_count ?? 0;
  document.getElementById("review-delta-modified").textContent = summary.modified_count ?? 0;
+ renderReviewDeltaNature(summary);
  renderReviewDeltaDetails(data.delta_details);
  // Cahier de tests : panels disponibles + dernier rapport archivé
  showReviewStep(1);
  fetchTestPanels();
  fetchBacktestCandidateRules();
- renderBacktestReport(data.backtest_report);
+ renderBacktestReport(data.backtest_report, data);
  renderBacktestJobState(data.backtest_job, snapshotId);
+ libelleDuCommentaireDeRevue(data);
  // Reprise d'état : un cahier de tests lancé avant un rechargement de
  // page (ou depuis un autre poste) reverrouille le bouton et se
  // reconnecte à sa fin — la progression ne se perd jamais
@@ -6599,14 +7035,47 @@ function ouvrirDiffDeFiche(contexte, index) {
 // d'homologation et le dossier figé montrent exactement la même chose.
 function _lignesModifiees(items, contexte) {
  _diffsDeFiches[contexte] = items || [];
- return `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th><th></th></tr></thead><tbody>`
+ return `<thead><tr><th>ID</th><th>Nom</th><th>Nature</th><th>Champs modifiés</th><th></th></tr></thead><tbody>`
   + (items || []).map((e, i) => `<tr>
    <td><code>${escapeHtml(e.id || "")}</code></td>
    <td><strong>${escapeHtml(e.primary_name || "")}</strong></td>
+   <td>${_badgeDeNature(e.nature)}</td>
    <td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td>
    <td><button type="button" class="btn btn-sm btn-secondary" onclick="ouvrirDiffDeFiche('${escapeHtml(contexte)}', ${i})">Comparer</button></td>
   </tr>`).join("")
   + `</tbody>`;
+}
+
+// Nature d'une modification, classée par le serveur (fiskr/delta.py) :
+// IDENTITÉ = un champ que le moteur lit pour intercepter (noms, alias, date de
+// naissance, pays, identifiants) ou un programme de sanction ; INFORMATION =
+// le reste. Les dossiers antérieurs à la classification n'en portent pas.
+function _badgeDeNature(nature) {
+ if (nature === "IDENTITE") return '<span class="status-badge alert">Identité</span>';
+ if (nature === "INFORMATION") return '<span class="status-badge no_match">Information</span>';
+ return '<span style="color: var(--text-muted);">—</span>';
+}
+
+// Sous le compteur « Modifications » : combien touchent l'identité. C'est ce
+// qui change qui est intercepté — le reste se lit, il ne se décide pas.
+function renderReviewDeltaNature(summary) {
+ const el = document.getElementById("review-delta-modified-nature");
+ if (!el) return;
+ const identite = summary && summary.modified_identity_count;
+ if (typeof identite !== "number") {
+  el.innerHTML = "";
+  return;
+ }
+ const information = Math.max(0, (summary.modified_count || 0) - identite);
+ el.innerHTML = `<span>Identité</span> <strong>${identite}</strong> · <span>Information</span> <strong>${information}</strong>`;
+}
+
+// Ce que la liste ne montre pas, dit en clair : le détail est borné, les
+// compteurs non. Sans cette ligne, l'écran affichait « Modifications 24 » au
+// -dessus d'une liste de 19, et rien sur les 5 autres.
+function _ligneNonDetaillee(restant) {
+ if (!restant) return "";
+ return `<p class="section-desc" style="margin: 0.4rem 0 0; font-style: italic;"><span>${Number(restant)} autre(s) non détaillée(s) ici : le compteur reste exact.</span></p>`;
 }
 
 // Delta détaillé (étape 1) : listes des ajouts / modifications / suppressions
@@ -6617,8 +7086,23 @@ function renderReviewDeltaDetails(deltaDetails) {
  const added = details.added || [];
  const removed = details.removed || [];
  const modified = details.modified || [];
+ // Empreinte seule différente, aucun champ comparé changé : écartée du
+ // compte par le serveur, et dite ici — un compteur qui baisse sans raison
+ // visible ne se croit pas.
+ const empreinteSeule = details.checksum_only_count
+  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${Number(details.checksum_only_count)} fiche(s) dont seule l'empreinte différait (aucun champ comparé ne change) : non comptée(s) comme modifiée(s).</span></p>`
+  : "";
+ // Correction du lecteur OpenSanctions (fiskr/ingest.py) : une fiche dont
+ // seule la FORME change n'est pas une modification de la source, mais le
+ // lot reste à homologuer une fois — c'est ce que la production gardera.
+ const forme = details.reader_form_count
+  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${Number(details.reader_form_count)} fiche(s) ne changent que de forme : les programmes de sanction passent de pep_role à sanction_programs (lecteur corrigé), sans modification de la source.</span>`
+    + (details.reader_form_unverified_count
+     ? ` <span>Dont ${Number(details.reader_form_unverified_count)} comparée(s) en partie seulement : l'ancienne version tronquait ce texte à 500 caractères.</span>` : "")
+    + `</p>`
+  : "";
  if (!added.length && !removed.length && !modified.length) {
- container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>';
+ container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>' + forme + empreinteSeule;
  return;
  }
 
@@ -6626,16 +7110,19 @@ function renderReviewDeltaDetails(deltaDetails) {
  <tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td>
  <td><span class="status-badge ${cls}">${escapeHtml(e.primary_name || "")}</span></td></tr>`).join("");
 
- const section = (title, count, inner) => count ? `
+ // Le titre porte le TOTAL (celui des compteurs), pas le nombre de lignes
+ // reçues : le détail est borné à cent par catégorie.
+ const section = (title, items, restant, inner) => (items.length || restant) ? `
  <details style="margin-bottom: 0.6rem;">
- <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${count})</summary>
+ <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${items.length + Number(restant || 0)})</summary>
  <div class="table-container" style="max-height: 260px; overflow-y: auto;"><table>${inner}</table></div>
+ ${_ligneNonDetaillee(restant)}
  </details>` : "";
 
- container.innerHTML =
- section(" Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
- section(" Modifications (avant → après)", modified.length, _lignesModifiees(modified, "review")) +
- section(" Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
+ container.innerHTML = forme + empreinteSeule +
+ section(" Ajouts", added, details.added_truncated, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
+ section(" Modifications (avant → après)", modified, details.modified_truncated, _lignesModifiees(modified, "review")) +
+ section(" Suppressions", removed, details.removed_truncated, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
 }
 
 // ------------------ HISTORIQUE DES HOMOLOGATIONS ------------------
@@ -6688,6 +7175,8 @@ async function fetchReviewHistory(page = 1) {
      ? `<span class="status-badge ${r.backtest_verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(r.backtest_verdict)}</span>`
        + (r.backtest_gap_pct !== null && r.backtest_gap_pct !== undefined
           ? ` <small style="color:var(--text-muted)">écart ${r.backtest_gap_pct} %</small>` : "")
+       // Le verdict tel qu'il valait À LA DÉCISION : un OK périmé le dit
+       + (r.backtest_stale ? ` <span class="status-badge warning">Périmé à la décision</span>` : "")
      : '<small style="color:var(--text-muted)">aucun</small>';
     return `
     <tr>
@@ -6750,10 +7239,13 @@ async function openReviewHistoryDetail(recordId) {
    <td>${valeur}</td></tr>`;
 
   const details = (d.delta_details && d.delta_details.details) || d.delta_details || {};
-  const bloc = (titre, items, rendu) => (items && items.length) ? `
+  // Même franchise que l'écran d'homologation : le titre porte le total, et
+  // ce qui n'est pas détaillé est dit.
+  const bloc = (titre, items, rendu, restant) => ((items && items.length) || restant) ? `
    <details style="margin-bottom:0.6rem;">
-    <summary style="cursor:pointer; font-weight:600; padding:0.4rem 0;">${titre} (${items.length})</summary>
-    <div class="table-container" style="max-height:240px; overflow-y:auto;"><table>${rendu(items)}</table></div>
+    <summary style="cursor:pointer; font-weight:600; padding:0.4rem 0;">${titre} (${(items || []).length + Number(restant || 0)})</summary>
+    <div class="table-container" style="max-height:240px; overflow-y:auto;"><table>${rendu(items || [])}</table></div>
+    ${_ligneNonDetaillee(restant)}
    </details>` : "";
   const lignesSimples = items => `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>`
    + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td><td>${escapeHtml(e.primary_name || "")}</td></tr>`).join("")
@@ -6766,7 +7258,14 @@ async function openReviewHistoryDetail(recordId) {
   const cahier = report ? `
    <table style="width:100%; margin-bottom:0.8rem;"><tbody>
     ${ligne("Verdict", `<span class="status-badge ${report.verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(report.verdict || "-")}</span>`)}
+    ${d.backtest_validity && d.backtest_validity.stale
+      ? ligne("Validité à la décision", `<span class="status-badge warning">Périmé à la décision</span> <small>${escapeHtml((d.backtest_validity.reasons || []).join(" "))}</small>`)
+      : ""}
+    ${d.backtest_validity && d.backtest_validity.comment_required
+      ? ligne("Motif exigé", `<span>${escapeHtml(d.backtest_validity.comment_required)}</span>${d.backtest_validity.comment_shared_by ? ` · <span>motif commun à une homologation groupée</span> (${d.backtest_validity.comment_shared_by})` : ""}`)
+      : ""}
     ${ligne("Écart", `${report.gap_pct} % (seuil ${report.threshold_pct} %)`)}
+    ${SENS_DE_L_ECART[report.gap_direction] ? ligne("Sens de l'écart", `<span>${SENS_DE_L_ECART[report.gap_direction]}</span>`) : ""}
     ${ligne("Clients interceptés — production", (report.current || {}).alerts)}
     ${ligne("Clients interceptés — candidate", (report.candidate || {}).alerts)}
     ${ligne("Alertes ouvertes — production", (report.current || {}).hits,
@@ -6797,9 +7296,9 @@ async function openReviewHistoryDetail(recordId) {
 
    <h3 style="margin:1rem 0 0.5rem;">Delta au moment de la décision</h3>
    <p class="section-desc">${escapeHtml(deltaSummaryLabel(d.delta_summary))}</p>
-   ${bloc("Ajouts", details.added, lignesSimples)}
-   ${bloc("Modifications", details.modified, lignesModifiees)}
-   ${bloc("Suppressions", details.removed, lignesSimples)}
+   ${bloc("Ajouts", details.added, lignesSimples, details.added_truncated)}
+   ${bloc("Modifications", details.modified, lignesModifiees, details.modified_truncated)}
+   ${bloc("Suppressions", details.removed, lignesSimples, details.removed_truncated)}
 
    <h3 style="margin:1rem 0 0.5rem;">Cahier de tests</h3>
    ${cahier}
@@ -6834,11 +7333,11 @@ async function fetchTestPanels(selectSnapshotId = null) {
 }
 
 // Règles anti-FP candidates proposées au cahier de tests (canal criblage) :
-// brouillons en tête, puis en validation, puis actives. Silencieux si le
-// compte n'a pas le rôle `rules` (403) — le select reste sur « Aucune ».
+// brouillons en tête, puis en validation, puis actives. Sans le rôle `rules`,
+// pas d'appel (peutLire) — le select reste sur « Aucune ».
 async function fetchBacktestCandidateRules() {
  const select = document.getElementById("backtest-candidate-rule");
- if (!select) return;
+ if (!select || !peutLire("rules")) return;
  try {
  const response = await apiFetch("/api/fprules?channel=SCREENING", { silent: true });
  if (!response.ok) return;
@@ -6947,10 +7446,15 @@ async function loadBacktestReportFor(snapshotId) {
  const detail = await response.json();
  const report = detail.backtest_report;
  if (!report) return;
- if (reviewCurrentSnapshotId === snapshotId) renderBacktestReport(report);
+ if (reviewCurrentSnapshotId === snapshotId) {
+ renderBacktestReport(report, detail);
+ libelleDuCommentaireDeRevue(detail);
+ }
  showToast(report.verdict === "OK"
  ? "Cahier de tests terminé : écart dans le seuil toléré."
- : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes.",
+ : (report.gap_direction === "INTERCEPTION_LOSS"
+  ? "Cahier de tests terminé : des interceptions sont perdues — examinez les alertes disparues."
+  : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes."),
  report.verdict === "OK" ? "success" : "warning", 7000);
  } catch (e) {
  console.error("Error loading backtest report:", e);
@@ -6959,9 +7463,34 @@ async function loadBacktestReportFor(snapshotId) {
 
 function backtestVerdictBadge(report) {
  if (!report) return "";
- return report.verdict === "OK"
- ? '<span class="status-badge no_match">ÉCART OK</span>'
+ if (report.verdict === "OK") return '<span class="status-badge no_match">ÉCART OK</span>';
+ // Le badge nomme le SENS de l'écart : une perte d'interception ne se
+ // corrige pas comme un surplus d'alertes.
+ return report.gap_direction === "INTERCEPTION_LOSS"
+ ? `<span class="status-badge alert">PERTE D'INTERCEPTION</span>`
  : '<span class="status-badge warning">ÉCART ÉLEVÉ</span>';
+}
+
+// Libellé du sens de l'écart (fiskr/backtest.py, GAP_*). Absent des rapports
+// antérieurs à l'écart orienté : rien n'est alors affiché.
+const SENS_DE_L_ECART = {
+ INTERCEPTION_LOSS: "Perte d'interception",
+ INCREASE: "Hausse des alertes",
+ FEWER_FALSE_POSITIVES: "Moins de faux positifs",
+ NONE: "Aucun écart",
+};
+
+// Issue d'une alerte de production que la candidate ne produit plus.
+const ISSUES_DES_RESOLUES = {
+ INTERCEPTION_LOST: ["alert", "Interception perdue"],
+ FALSE_POSITIVE_REMOVED: ["no_match", "Faux positif écarté"],
+ STILL_INTERCEPTED: ["warning", "Toujours intercepté"],
+};
+
+function _badgeDIssue(p) {
+ const issue = ISSUES_DES_RESOLUES[p.outcome];
+ if (!issue) return '<span style="color: var(--text-muted);">—</span>';
+ return `<span class="status-badge ${issue[0]}" title="${escapeHtml(p.outcome_reason || "")}">${issue[1]}</span>`;
 }
 
 // État du DERNIER job de cahier de tests du snapshot, rendu DANS l'étape 3
@@ -7062,10 +7591,56 @@ function attributionParListe(report) {
   </div>`;
 }
 
-function renderBacktestReport(report) {
+// Le libellé du commentaire dit quand un motif est EXIGÉ pour approuver
+// (cahier WARN ou périmé) : l'apprendre au refus, c'est l'apprendre trop tard.
+function libelleDuCommentaireDeRevue(detail) {
+ reviewMotifExige = !!(detail && detail.approval_comment_required);
+ const commentLabel = document.querySelector('label[for="review-comment"]');
+ if (commentLabel) commentLabel.textContent = reviewMotifExige
+ ? "Motif de l'approbation (obligatoire : cahier de tests WARN ou périmé)"
+ : "Commentaire de revue (obligatoire pour un rejet)";
+}
+
+// Une exclusion posée ou levée peut rendre le cahier périmé : l'écran le
+// redit tout de suite (bandeau, rappel, libellé du commentaire), sans
+// changer d'étape.
+async function rafraichirValiditeDuCahier(snapshotId) {
+ try {
+ const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
+ if (!response.ok || reviewCurrentSnapshotId !== snapshotId) return;
+ const detail = await response.json();
+ renderBacktestReport(detail.backtest_report, detail);
+ libelleDuCommentaireDeRevue(detail);
+ } catch (e) {
+ console.error("Error refreshing backtest validity:", e);
+ }
+}
+
+// Le cahier de tests a perdu sa validité : on relance d'un geste, depuis
+// l'étape 3 (même panel, même règle candidate que le formulaire).
+function relancerCahierPerime() {
+ showReviewStep(3);
+ runReviewBacktest();
+}
+
+// `detail` : le détail du snapshot (GET /api/review/snapshots/{id}), qui dit si
+// le rapport est PÉRIMÉ et pourquoi, et ce que le réglage exige.
+function renderBacktestReport(report, detail = null) {
  const container = document.getElementById("backtest-results");
  const reminder = document.getElementById("review-backtest-reminder");
  if (!container) return;
+ // Un verdict ne vaut que pour ce qu'il a testé (fiskr/backtest.py) : un
+ // rapport périmé reste affiché tel qu'il était, sous un bandeau qui dit
+ // pourquoi il ne vaut plus OK — et propose de le relancer.
+ const perime = !!(report && detail && detail.backtest_stale);
+ const obligatoire = !!(detail && detail.backtest_required);
+ const bandeauPerime = perime ? `
+ <div class="job-row warn" style="display:block; padding: 0.6rem 0.8rem; margin-bottom: 0.75rem;">
+ <strong>Rapport périmé : il ne vaut pas OK.</strong>
+ <div style="font-size: 0.85rem;"><span>Ce rapport ne décrit plus ce qui serait mis en production :</span></div>
+ <ul style="margin: 0.3rem 0 0.5rem 1.1rem; font-size: 0.85rem;">${(detail.backtest_stale_reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ul>
+ <button class="btn btn-sm btn-secondary" onclick="relancerCahierPerime()">↻ Relancer le cahier de tests</button>
+ </div>` : "";
  if (!report) {
  container.classList.add("hidden");
  container.innerHTML = "";
@@ -7086,34 +7661,50 @@ function renderBacktestReport(report) {
  <small style="color: var(--text-muted);">${typeof side.hits === "number" ? `${side.hits} alerte(s) ouverte(s) · ` : ""}taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
  </div>`;
 
- const pairRow = (p, withCheckbox) => `
+ const pairRow = (p, withCheckbox, withOutcome) => `
  <tr>
  ${withCheckbox ? `<td><input type="checkbox" class="goodguy-cb" data-client-id="${escapeHtml(p.client_id)}" data-entity-id="${escapeHtml(p.entity_id)}" data-client-name="${escapeHtml(p.client_name || "")}" data-entity-name="${escapeHtml(p.entity_name || "")}" data-list-type="${escapeHtml(p.list_type || "")}"></td>` : ""}
  <td><code>${escapeHtml(p.client_id)}</code><br><small>${escapeHtml(p.client_name || "")}</small></td>
  <td><code>${escapeHtml(p.entity_id)}</code><br><small><strong>${escapeHtml(p.entity_name || "")}</strong></small></td>
  <td>${listTypeBadge(p.list_type)}</td>
  <td><span class="status-badge alert">${p.score}</span></td>
+ ${withOutcome ? `<td>${_badgeDIssue(p)}</td>` : ""}
  </tr>`;
 
  const newPairs = report.new_pairs || [];
  const resolvedPairs = report.resolved_pairs || [];
  const executedStr = report.executed_at ? new Date(report.executed_at).toLocaleString(uiLocale()) : "";
+ // Écart ORIENTÉ (rapports postérieurs à fiskr/backtest.py « SENS DE
+ // L'ÉCART ») : le mouvement signé, puis ce qui reste à examiner. Un rapport
+ // plus ancien garde son affichage d'origine.
+ const oriente = typeof report.net_gap_pct === "number";
+ const signe = v => (v > 0 ? "+" : (v < 0 ? "−" : "")) + Math.abs(v);
+ const sens = oriente ? SENS_DE_L_ECART[report.gap_direction] : null;
+ const perte = report.gap_direction === "INTERCEPTION_LOSS";
+ // Lignes EMPILÉES : le sens, l'écart à examiner et la lecture des alertes
+ // disparues ne tiennent pas sur une ligne à côté du chiffre.
+ const ecartCard = `
+ <div class="metric" style="flex: 1; ${oriente ? "flex-direction: column; align-items: flex-start; gap: 0.2rem; " : ""}background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+ <span class="metric-label" style="font-weight: 600; color: var(--color-warning);">Écart</span>
+ <span class="metric-value" style="font-size: 1.4rem;">${oriente ? signe(report.net_gap_pct) : report.gap_pct} %</span>
+ ${sens ? `<small style="font-weight: 600; color: ${perte ? "var(--color-danger)" : "var(--text-secondary)"};"><span>${sens}</span></small>` : ""}
+ ${oriente ? `<small style="color: var(--text-muted);"><span>Écart à examiner</span> <strong>${report.gap_pct} %</strong></small>` : ""}
+ <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
+ ${oriente ? `<small style="color: var(--text-muted);"><span>Faux positifs écartés</span> <strong>${report.false_positives_removed_count}</strong> · <span>Interceptions perdues</span> <strong>${report.lost_interceptions_count}</strong></small>` : ""}
+ </div>`;
 
  container.classList.remove("hidden");
  container.innerHTML = `
+ ${bandeauPerime}
  <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
  <h3 style="margin: 0;">Résultats du cahier de tests</h3>
- ${backtestVerdictBadge(report)}
+ ${backtestVerdictBadge(report)}${perime ? ' <span class="status-badge warning">Périmé</span>' : ""}
  <small style="color: var(--text-muted);">panel de ${report.panel_size} pseudo-clients · exécuté par @${escapeHtml(report.executed_by || "")} le ${escapeHtml(executedStr)}</small>
  </div>
  <div class="score-metrics" style="flex-direction: row; gap: 1.5rem; margin-bottom: 1rem;">
  ${rateCard("Liste actuelle (production)", report.current, "var(--text-secondary)")}
  ${rateCard("Liste candidate", report.candidate, "var(--color-accent)")}
- <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
- <span class="metric-label" style="font-weight: 600; color: var(--color-warning);">Écart</span>
- <span class="metric-value" style="font-size: 1.4rem;">${report.gap_pct} %</span>
- <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
- </div>
+ ${ecartCard}
  </div>
  ${attributionParListe(report)}
  ${newPairs.length ? `
@@ -7130,12 +7721,12 @@ function renderBacktestReport(report) {
  </table>
  </div>` : '<p class="section-desc"> Aucune nouvelle alerte par rapport à la liste actuelle.</p>'}
  ${resolvedPairs.length ? `
- <details style="margin-top: 0.75rem;">
+ <details style="margin-top: 0.75rem;"${report.lost_interceptions_count ? " open" : ""}>
  <summary style="cursor: pointer; font-weight: 600;">Alertes résolues par la liste candidate (${report.resolved_pairs_count})</summary>
  <div class="table-container" style="max-height: 240px; overflow-y: auto;">
  <table>
- <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th></tr></thead>
- <tbody>${resolvedPairs.map(p => pairRow(p, false)).join("")}</tbody>
+ <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th>${oriente ? "<th>Issue</th>" : ""}</tr></thead>
+ <tbody>${resolvedPairs.map(p => pairRow(p, false, oriente)).join("")}</tbody>
  </table>
  </div>
  </details>` : ""}
@@ -7143,9 +7734,28 @@ function renderBacktestReport(report) {
  `;
 
  if (reminder) {
- reminder.innerHTML = report.verdict === "OK"
- ? `<p class="section-desc" style="color: var(--color-safe);"> Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).</p>`
- : `<p class="section-desc" style="color: var(--color-warning);"> Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+ // Le conseil suit le sens de l'écart. Devant une perte d'interception,
+ // « posez des Good Guys » creuserait la perte : il n'est plus donné.
+ if (report.verdict === "OK") {
+  const ecartes = report.gap_direction === "FEWER_FALSE_POSITIVES"
+   ? ` <span>La liste candidate écarte ${report.false_positives_removed_count} faux positif(s) sans perte d'interception.</span>` : "";
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-safe);"> Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).${ecartes}</p>`;
+ } else if (perte) {
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-danger);"><span>La liste candidate perd ${report.lost_interceptions_count} interception(s) : examinez les fiches retirées ou modifiées.</span> <span>Des Good Guys ou des exclusions creuseraient la perte ; si elle n'est pas justifiée, rejetez le lot.</span></p>`;
+ } else {
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-warning);"> Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+ }
+ // Sans cahier obligatoire, un WARN s'approuvait sans un mot : le motif est
+ // désormais exigé, et l'écran le dit avant le clic.
+ if (report.verdict !== "OK" && !obligatoire) {
+  reminder.innerHTML += `<p class="section-desc" style="color: var(--color-warning);">Un commentaire motivé est exigé pour approuver malgré l'écart ; il est tracé au dossier d'homologation.</p>`;
+ }
+ // Périmé : ce qui précède décrit un état qui n'est plus celui du lot.
+ if (perime) {
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-warning);"><span>Rapport périmé : il ne vaut pas OK.</span> <span>${obligatoire
+   ? "L'approbation est refusée tant qu'il n'est pas relancé (cahier de tests obligatoire)."
+   : "Pour approuver malgré tout, un commentaire motivé est exigé ; il est tracé au dossier d'homologation."}</span></p>`;
+ }
  }
 }
 
@@ -7178,7 +7788,7 @@ function backtestRulesBlockHtml(report) {
  <span>Supprimées par règles — production : <strong>${rules.current_suppressed}</strong></span>
  <span>candidat : <strong>${rules.candidate_suppressed}</strong></span>
  <span>${cand ? `Effet : <strong>${deltaTxt}</strong>` : ""}</span>
- <span>Écart avant règles : <strong>${rules.gap_pct_before_rules} %</strong> (vs ${report.gap_pct} % après)</span>
+ <span>Écart avant règles : <strong>${rules.gap_pct_before_rules} %</strong> (vs ${typeof report.net_gap_pct === "number" ? Math.abs(report.net_gap_pct) : report.gap_pct} % après)</span>
  </div>
  ${suppressedPairs.length ? `
  <details style="margin-top: 0.5rem;">
@@ -7349,6 +7959,7 @@ async function submitExclusions(event) {
  showToast(data.message, "success");
  loadReviewEntitiesPage(reviewCurrentPage);
  fetchPendingReviews();
+ rafraichirValiditeDuCahier(reviewCurrentSnapshotId);
  } catch (e) {
  console.error("Error submitting exclusions:", e);
  showToast("Erreur réseau de communication.", "error");
@@ -7375,6 +7986,7 @@ async function removeExclusions() {
  showToast(data.message, "success");
  loadReviewEntitiesPage(reviewCurrentPage);
  fetchPendingReviews();
+ rafraichirValiditeDuCahier(reviewCurrentSnapshotId);
  } catch (e) {
  console.error("Error removing exclusions:", e);
  showToast("Erreur réseau de communication.", "error");
@@ -7383,6 +7995,10 @@ async function removeExclusions() {
 
 async function approvePendingSnapshot() {
  if (!reviewCurrentSnapshotId) return;
+ if (reviewMotifExige && !document.getElementById("review-comment").value.trim()) {
+ showToast("Un commentaire motivé est exigé : le cahier de tests de ce lot est WARN ou périmé.", "error");
+ return;
+ }
  if (!await confirmDialog("Approuver ce snapshot ?\nIl sera mis en production et remplacera les listes antérieures du même type (hors entités exclues).", { title: "Approbation d'homologation", confirmLabel: "Approuver" })) return;
  const comment = document.getElementById("review-comment").value.trim();
  try {
@@ -7450,6 +8066,12 @@ async function rejectPendingSnapshot() {
 const DEFAULT_ALERT_FILTER = "OPEN,IN_PROGRESS,ESCALATED,PENDING_VALIDATION";
 let alertsFilterByChannel = { SCREENING: DEFAULT_ALERT_FILTER, FILTERING: DEFAULT_ALERT_FILTER };
 let currentAlertId = null;
+// Détail de l'alerte ouverte : la décision proposée et le client décident de
+// ce que les dialogues de décision offrent (case « liste blanche »).
+let currentAlertData = null;
+
+// Motif de clôture proposé par la caducité de l'alerte ouverte (vide sinon)
+let currentAlertLapsedReason = "";
 
 const ALERT_CHANNEL_CONF = {
  SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter",
@@ -7496,12 +8118,75 @@ function alertSnoozeChip(a) {
  return `<br><span title="Mise en attente — reprend sa place dans la file à cette échéance" style="color: var(--text-muted); font-size: 0.7rem; font-weight: 700;"><span>EN ATTENTE</span><span> → ${escapeHtml(quand)}</span></span>`;
 }
 
+// Pastille d'une alerte CADUQUE (fiskr/caducite.py) : la correspondance ne
+// tient plus — fiche radiée, ou couple re-criblé sous le seuil. L'alerte reste
+// ouverte (un humain la clôt) ; le motif proposé est au survol.
+function alertLapsedChip(a) {
+ if (!a.lapsed) return "";
+ const libelle = a.delisted_at ? "RADIÉE" : "CADUQUE";
+ return `<br><span title="${escapeHtml(a.lapsed_reason || "")}" style="color: var(--color-warning); font-size: 0.7rem; font-weight: 700;">${libelle}</span>`;
+}
+
+// Modale : le dernier criblage du couple, quand un criblage l'a re-rencontré.
+// L'arbre affiché est le sien (`decision_tree`, servi par l'API) ; celui de la
+// création reste consultable juste en dessous.
+function dernierScoreHtml(a) {
+ if (!a.decision_tree_origin || typeof a.latest_score !== "number") return "";
+ return ` · <span>dernier criblage</span> <strong>${a.latest_score.toFixed(1)}%</strong> (<span>Audit</span> #${a.decision_tree_audit_id})`;
+}
+
+function bandeauCaduciteHtml(a) {
+ if (!a.lapsed) return "";
+ return `<div class="job-row warn" style="display:block; padding: 0.6rem 0.8rem; margin: 0.5rem 0;">
+ <strong>${a.delisted_at ? "Fiche radiée" : "Caduque"}</strong> — ${escapeHtml(a.lapsed_reason || "")}
+ <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.25rem;">L'alerte reste ouverte : un humain la clôt. Le motif ci-dessus est proposé à la décision.</div>
+ </div>`;
+}
+
+function arbreDOrigineHtml(a) {
+ const origine = a.decision_tree_origin;
+ if (!origine) return "";
+ // Même table de libellés que l'arbre courant quand elle existe (branche
+ // intégrée : `adjustmentLabel`) — sinon la clé, comme l'arbre courant ici.
+ const libelle = (k) => (typeof adjustmentLabel === "function" ? adjustmentLabel(k) : k);
+ const lignes = Object.entries(origine.adjustments || {}).map(([k, v]) =>
+ `<tr><td>${escapeHtml(libelle(k))}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`).join("");
+ return `<details style="margin-top: 0.5rem;">
+ <summary style="cursor: pointer; font-size: 0.85rem;"><span>Arbre de décision à la création</span> (<span>Audit</span> #${a.audit_id}, ${a.final_score.toFixed(1)}%)</summary>
+ <div class="table-container" style="max-height: 160px;"><table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${lignes || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table></div>
+ </details>`;
+}
+
+// Score de la file : le DERNIER criblage du couple quand il diffère de la
+// création — c'est lui qui dit si la correspondance tient encore.
+function alertScoreCell(a) {
+ const dernier = (typeof a.latest_score === "number") ? a.latest_score : a.final_score;
+ const couleur = dernier >= 90 ? "var(--color-alert)" : "var(--color-warning)";
+ const origine = (typeof a.latest_score === "number" && a.latest_score !== a.final_score)
+ ? `<br><small style="color: var(--text-muted);"><span>à la création</span> ${a.final_score.toFixed(1)}%</small>` : "";
+ return `<strong style="color: ${couleur};">${dernier.toFixed(1)}%</strong>${origine}`;
+}
+
+// Filtre « Caduques » : les alertes OUVERTES dont la correspondance ne tient
+// plus. Ce n'est pas un statut (l'alerte reste ouverte) : il se traduit en
+// statuts ouverts + `lapsed=true`.
+const LAPSED_FILTER = "LAPSED";
+
+function _parametresDeStatut(params, filter) {
+ if (filter === LAPSED_FILTER) {
+ params.set("status", DEFAULT_ALERT_FILTER);
+ params.set("lapsed", "true");
+ } else if (filter) {
+ params.set("status", filter);
+ }
+}
+
 // Export CSV de la file d'alertes avec les filtres actifs de l'écran
 function exportAlertsCsv(channel) {
  const conf = ALERT_CHANNEL_CONF[channel];
  const params = new URLSearchParams({ channel });
  const filter = alertsFilterByChannel[channel];
- if (filter) params.set("status", filter);
+ _parametresDeStatut(params, filter);
  const listFilterEl = document.getElementById(conf.listFilter);
  if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
  const prioEl = document.getElementById(conf.priorityFilter);
@@ -7547,13 +8232,15 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  try {
  const params = new URLSearchParams({ page: String(currentPage), page_size: String(ALERTS_PAGE_SIZE), channel });
  const filter = alertsFilterByChannel[channel];
- if (filter) params.set("status", filter);
+ _parametresDeStatut(params, filter);
  const listFilterEl = document.getElementById(conf.listFilter);
  if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
  const prioFilterEl = document.getElementById(conf.priorityFilter);
  if (prioFilterEl && prioFilterEl.value) params.set("priority", prioFilterEl.value);
  const assigneeFilterEl = document.getElementById(conf.assigneeFilter);
  if (assigneeFilterEl && assigneeFilterEl.value) params.set("assigned_to", assigneeFilterEl.value);
+ // Vue regroupée (par fiche listée, par client) : mêmes filtres, toute la file
+ if (_modeDeRegroupement(channel)) { await _chargerLaFileRegroupee(channel, params); return; }
  tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
  const response = await apiFetch(`/api/alerts?${params}`);
  if (!response.ok) {
@@ -7663,16 +8350,17 @@ function renderAlertsTable(channel, items) {
  <td>${etoile}${subject}</td>
  <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(a.list_type)}</td>
- <td><strong style="color: ${a.final_score >= 90 ? 'var(--color-alert)' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
- <td>${alertStatusBadge(a.status)}${alertSnoozeChip(a)}</td>
+ <td>${alertScoreCell(a)}</td>
+ <td>${alertStatusBadge(a.status)}${alertSnoozeChip(a)}${alertLapsedChip(a)}</td>
  <td>${escapeHtml(a.assigned_to || "—")}</td>
  <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})"> Instruire</button></td>
  </tr>`;
  }).join("");
- // La visée clavier (j/k) survit au re-rendu : on la repose par identifiant.
+ // La visée clavier (j/k) survit au re-rendu : on la repose par identifiant,
+ // et le focus avec elle s'il s'était perdu avec les lignes remplacées.
  if (_viseAlerteId !== null) {
  const ligne = tbody.querySelector(`tr[data-alert-id="${_viseAlerteId}"]`);
- if (ligne) ligne.classList.add("ligne-visee");
+ if (ligne) { ligne.classList.add("ligne-visee"); _focaliserLaVisee(ligne); }
  }
 }
 
@@ -7681,10 +8369,15 @@ async function openAlertModal(alertId) {
  try {
  const response = await apiFetch(`/api/alerts/${alertId}`);
  const a = await response.json();
+ // Une réponse dépassée ne remplace pas l'alerte demandée depuis : « Proposer
+ // & suivante » recharge l'alerte proposée PUIS ouvre la suivante, et la
+ // première réponse pouvait arriver la dernière.
+ if (currentAlertId !== alertId) return;
  if (!response.ok) {
  showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
  return;
  }
+ currentAlertData = a;
  _memoriserRecent("alerte", a.id, `${a.client_name} × ${a.watchlist_name}`);
  const sousOnglet = (a.channel === "FILTERING") ? "filtering/alerts-filtering" : "screening/alerts-screening";
  const lienDossier = `${location.origin}${location.pathname}#${sousOnglet}/alerte-${a.id}`;
@@ -7698,12 +8391,12 @@ async function openAlertModal(alertId) {
 
  const adjustments = ((a.decision_tree || {}).adjustments) || {};
  const adjRows = Object.entries(adjustments).map(([k, v]) =>
- `<tr><td>${escapeHtml(k)}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`
+ `<tr><td>${escapeHtml(adjustmentLabel(k))}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`
  ).join("");
 
  const eventsHtml = (a.events || []).map(e => `
  <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
- <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+ <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · <span>${escapeHtml(alertEventLabel(e.action))}</span></small>
  ${e.detail ? `<div style="font-size: 0.85rem;">${marquerLesCitations(e.detail)}</div>` : ""}
  </div>
  `).join("");
@@ -7725,6 +8418,7 @@ async function openAlertModal(alertId) {
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')"> Escalader</button>`;
  actionsHtml += `<button class="btn btn-sm btn-primary" onclick="proposeAlertDecision('FALSE_POSITIVE')"> Proposer : Faux positif</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposeAlertDecision('CONFIRMED')"> Proposer : Vrai positif</button>`;
+ actionsHtml += boutonProposerEtSuivante();
  } else if (isReviewer && a.proposed_by !== me) {
  actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Proposé par @${escapeHtml(a.proposed_by)} : <strong>${a.proposed_decision === "CONFIRMED" ? "vrai positif" : "faux positif"}</strong></span>`;
  actionsHtml += `<button class="btn btn-sm btn-primary" onclick="validateAlertDecision(true)">✓ Valider (4-yeux)</button>`;
@@ -7739,7 +8433,8 @@ async function openAlertModal(alertId) {
  } else {
  actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
  // Faux positif avere : proposer la mise en liste blanche (reviseurs)
- if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer) {
+ // (sauf si la paire a été posée à la validation : un second clic serait refusé)
+ if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer && !(a.events || []).some(e => e.action === "WHITELISTED")) {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="openWhitelistModal('${escapeHtml(a.client_id || "")}', '${escapeHtml(a.watchlist_entity_id)}', '${escapeHtml(a.client_name)}', '${escapeHtml(a.watchlist_name)}')"> Mettre en liste blanche</button>`;
  }
  }
@@ -7764,7 +8459,7 @@ async function openAlertModal(alertId) {
 
  document.getElementById("alert-modal-body").innerHTML = `
  <p class="section-desc" style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
- Score final <strong>${a.final_score.toFixed(1)}%</strong> · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong>
+ Score final <strong>${a.final_score.toFixed(1)}%</strong>${dernierScoreHtml(a)} · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong>
  · journal d'audit #${a.audit_id} (${escapeHtml(a.watchlist_version || "")})
  · Priorité : ${prioritySelector}
  ${a.due_at ? `· Échéance SLA : <strong style="${a.overdue ? "color: var(--color-alert);" : ""}">${formatDateTime(a.due_at)}${a.overdue ? " " : ""}</strong>` : ""}
@@ -7774,10 +8469,13 @@ async function openAlertModal(alertId) {
  <a class="btn btn-sm btn-secondary" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)"> Rapport</a>
  </span>
  </p>
- <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score (decision tree)</h3>
+ ${bandeauCaduciteHtml(a)}
+ ${blocComparaison(a)}
+ <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
  <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
  </div>
+ ${arbreDOrigineHtml(a)}
  ${resourceEquivalencesHtml(a.decision_tree)}
  ${nameRarityHtml(a.decision_tree)}
  ${blocNotesDeFiche(a.watchlist_entity_id, a.watchlist_notes)}
@@ -7790,6 +8488,7 @@ async function openAlertModal(alertId) {
  <button class="btn btn-sm btn-secondary" onclick="uploadAlertAttachment()"> Joindre</button>
  </div>
  ${actionsHtml}
+ ${blocMesuresDeGel(a, isReviewer)}
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
  <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()"> Générer un narratif</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchAlertAdverseMedia('client')"> Presse : client</button>
@@ -7799,15 +8498,96 @@ async function openAlertModal(alertId) {
  <div id="alert-adverse-container" class="hidden" style="margin-top: 0.75rem;"></div>
  `;
  currentAlertNames = { client: a.client_name || "", watchlist: a.watchlist_name || "" };
+ currentAlertLapsedReason = a.lapsed ? (a.lapsed_reason || "") : "";
  document.getElementById("alert-modal").classList.remove("hidden");
  } catch (e) {
  console.error("Error opening alert:", e);
  }
 }
 
+// ------------------ CLIENT ET PERSONNE LISTÉE CÔTE À CÔTE ------------------
+// L'alerte ne montrait que deux noms : la date de naissance du client se lisait
+// dans « Client 360° » (troisième modale empilée), celle de la personne listée
+// par la palette — environ neuf gestes par alerte pour cocher « identité
+// vérifiée ». Les lignes et leurs verdicts viennent du serveur
+// (fiskr/comparaison.py) : ce sont les comparaisons du moteur, pas une liste
+// tenue ici.
+
+const _COULEURS_DE_VERDICT = {
+ CONCORDANCE: ["var(--success-soft-text)", "rgba(34,197,94,0.08)"],
+ ECART: ["var(--color-alert)", "rgba(239,68,68,0.10)"],
+ NEUTRE: ["var(--text-muted)", ""],
+ ABSENT: ["var(--text-muted)", ""],
+ VIDE: ["var(--text-muted)", ""],
+};
+
+function _celluleDeComparaison(entrees) {
+ if (!entrees || !entrees.length) return '<span style="color: var(--text-muted);">—</span>';
+ return entrees.map(e => `<div><small style="color: var(--text-muted);">${escapeHtml(e.libelle)}</small> <span style="overflow-wrap: anywhere;">${escapeHtml((e.valeurs || []).join(", "))}</span></div>`).join("");
+}
+
+function blocComparaison(a) {
+ const c = a.comparison;
+ if (!c) return "";
+ if (!c.available) {
+  return `<h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Client et personne listée</h3>
+  <p class="section-desc">${escapeHtml(c.reason || "")}</p>`;
+ }
+ const lignes = (c.lignes || []).map(l => {
+  const [couleur, fond] = _COULEURS_DE_VERDICT[l.verdict] || ["var(--text-muted)", ""];
+  let verdict = "";
+  if (l.famille === "names") {
+   verdict = `<span>Score de nom</span> <strong>${l.score_de_nom != null ? Number(l.score_de_nom).toFixed(1) : "—"} %</strong>`;
+  } else if (l.verdict) {
+   verdict = `<strong style="color: ${couleur};">${escapeHtml(l.verdict_libelle || l.verdict)}</strong>`
+    + (l.detail ? `<br><small style="color: var(--text-muted);">${escapeHtml(l.detail)}</small>` : "");
+  }
+  return `<tr data-famille="${escapeHtml(l.famille)}" data-verdict="${escapeHtml(l.verdict || "")}" style="${fond ? `background: ${fond};` : ""}">
+   <th scope="row" style="text-align: left; white-space: nowrap; font-weight: 600;">${escapeHtml(l.libelle)}</th>
+   <td>${_celluleDeComparaison(l.client)}</td>
+   <td>${_celluleDeComparaison(l.fiche)}</td>
+   <td>${verdict}</td>
+  </tr>`;
+ }).join("");
+ const contexte = (c.contexte || []).map(e =>
+  `<div class="details-item"><strong>${escapeHtml(e.libelle)}</strong><span style="overflow-wrap: anywhere;">${escapeHtml((e.valeurs || []).join(", "))}</span></div>`).join("");
+ const liens = [
+  c.watchlist_db_id ? `<button class="btn btn-sm btn-secondary" onclick="ouvrirFicheDepuisLAlerte(${Number(c.watchlist_db_id)})">Fiche listée complète</button>` : "",
+  c.watchlist_current_db_id ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="ouvrirFicheDepuisLAlerte(${Number(c.watchlist_current_db_id)})">Version en production</button>` : "",
+ ].join(" ");
+ const notes = (c.notes || []).map(n => `<div class="anomaly-item warning" style="font-size: 0.82rem;">${escapeHtml(n)}</div>`).join("");
+ return `
+ <div id="alert-comparison" style="margin: 0.75rem 0 0.5rem;">
+  <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+   <h3 style="font-size: 0.95rem; margin: 0;">Client et personne listée</h3>
+   <span style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap;">${liens}</span>
+  </div>
+  <p style="font-size: 0.78rem; color: var(--text-muted); margin: 0.3rem 0 0.4rem;">
+   <span>Client</span> : <span>${escapeHtml(c.client_source_label || "")}</span> · <span>Fiche</span> : <span>${escapeHtml(c.watchlist_source_label || "")}</span>
+  </p>
+  ${notes}
+  <div class="table-container">
+   <table class="comparison-table">
+    <thead><tr><th></th><th>Client</th><th>Personne listée</th><th>Verdict du moteur</th></tr></thead>
+    <tbody>${lignes}</tbody>
+   </table>
+  </div>
+  ${contexte ? `<div class="details-grid" style="margin-top: 0.5rem;">${contexte}</div>` : ""}
+ </div>`;
+}
+
+// La fiche s'ouvre PAR-DESSUS l'alerte : la modale de détail précède celle de
+// l'alerte dans la page et, à hauteur égale, passait dessous.
+function ouvrirFicheDepuisLAlerte(dbId) {
+ const modale = document.getElementById("details-modal");
+ if (modale) modale.style.zIndex = "1001";
+ showWatchlistDetails({ id: dbId });
+}
+
 function closeAlertModal() {
  document.getElementById("alert-modal").classList.add("hidden");
  currentAlertId = null;
+ _revenirALaFile();
 }
 
 async function _postAlertAction(path, body) {
@@ -7821,6 +8601,9 @@ async function _postAlertAction(path, body) {
  showToast("Erreur : " + (data.detail || "Action refusée."), "error");
  return null;
  }
+ // Avant le re-rendu que l'appelant déclenche : la ligne suivante se lit
+ // dans la file telle qu'elle est encore affichée.
+ if (["propose", "validate", "escalate"].includes(path)) _viseeApresTraitement(currentAlertId);
  return data;
 }
 
@@ -7860,6 +8643,7 @@ async function _posterReport(alertId, corps) {
  // L'avertissement SLA n'est pas un détail : l'échéance réglementaire
  // tombera pendant l'attente. Plus long à l'écran, et en avertissement.
  if (data.warning) showToast(data.warning, "warning", 9000);
+ if (corps.until) _viseeApresTraitement(alertId);   // reportée : traitée pour aujourd'hui
  refreshAlertQueues();
  const modale = document.getElementById("alert-modal");
  if (modale && _modaleVisible(modale) && currentAlertId === alertId) openAlertModal(alertId);
@@ -7915,6 +8699,287 @@ async function suivreAlerte(alertId) {
  }
 }
 
+// ------------------ MESURES DE GEL (registre et étapes dans l'alerte) ------------------
+// Un vrai positif sur une liste de gel ouvre une mesure « à déclarer »
+// (fiskr/gels.py) : gel effectif, déclaration à la DG Trésor, levée. Rien ne
+// part tout seul vers la DG Trésor — l'écran prépare, l'humain transmet puis
+// enregistre la pièce qui le prouve. Le vocabulaire (actions, motifs,
+// adresses) vient du serveur : une seule définition.
+
+// Horodatage serveur (UTC naïf) -> valeur d'un champ datetime-local (heure locale)
+function _versSaisieLocale(iso) {
+ if (!iso) return "";
+ const d = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+ if (isNaN(d.getTime())) return "";
+ const p = (n) => String(n).padStart(2, "0");
+ return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function badgeStatutGel(m) {
+ // La fiche a été radiée de sa liste : la mesure reste en vigueur, la levée
+ // est à instruire (fiskr/caducite.py). Dit À CÔTÉ du statut, qui ne change pas.
+ const radiation = m.radiation_a_examiner
+ ? ` <span class="status-badge alert" style="white-space: nowrap;" title="${escapeHtml(m.radiation_detail || "")}">Radiation à examiner</span>` : "";
+ // nowrap : un statut coupé sur trois lignes dans une colonne étroite se lit mal
+ if (m.en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">En retard de déclaration</span>${radiation}`;
+ const classe = { A_DECLARER: "warning", DECLAREE: "no_match" }[m.statut] || "";
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(m.statut_label)}</span>${radiation}`;
+}
+
+function _options(liste, valeur, cle = "code", libelle = "label") {
+ return (liste || []).map(o =>
+  `<option value="${escapeHtml(o[cle])}" ${o[cle] === valeur ? "selected" : ""}>${escapeHtml(o[libelle])}</option>`).join("");
+}
+
+function _etapeDeclaration(m, vocab, isReviewer, auditeur) {
+ if (m.statut !== "A_DECLARER") {
+  const piece = m.piece_declaration;
+  const lienPiece = !piece ? "—" : piece.file_present === false
+   ? `<span style="text-decoration: line-through; color: var(--text-muted);">${escapeHtml(piece.file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : `<a href="/api/alerts/attachments/${piece.id}" target="_blank" style="color: var(--color-accent);">${escapeHtml(piece.file_name)}</a>`;
+  return `<p style="font-size: 0.85rem;"><span>Déclarée le</span> <strong>${formatDateTime(m.declaree_le)}</strong> · @${escapeHtml(m.declaree_par || "")}
+   ${m.reference_dgt ? ` · <span>réf.</span> ${escapeHtml(m.reference_dgt)}` : ""}${m.canal_dgt ? ` · ${escapeHtml(m.canal_dgt)}` : ""}
+   · <span>délai depuis la confirmation</span> : <strong>${formatDuree(m.delai_declaration_secondes)}</strong><br>
+   <span>Pièce de transmission</span> : ${lienPiece}</p>`;
+ }
+ const projet = isReviewer
+  ? `<a class="btn btn-sm btn-secondary" href="/api/gels/${m.id}/draft/print" target="_blank" title="Projet pré-rempli aux rubriques du formulaire de la DG Trésor — à relire, compléter et transmettre">Projet de déclaration de gel</a>`
+  : "";
+ const retard = m.en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;">Délai de déclaration dépassé : <span>${formatDuree(m.delai_declaration_secondes)}</span> (<span>seuil</span> ${m.seuil_heures} h).</p>`
+  : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>Due immédiatement — délai écoulé</span> : ${formatDuree(m.delai_declaration_secondes)} (<span>seuil</span> ${m.seuil_heures} h).</p>`;
+ if (!isReviewer || auditeur) {
+  return `${retard}<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">${projet}</div>
+   <p style="font-size: 0.82rem; color: var(--text-muted);">L'enregistrement de la déclaration est réservé aux réviseurs.</p>`;
+ }
+ return `${retard}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   ${projet}
+   <div class="form-group" style="margin: 0;"><label for="gel-declaree-${m.id}">Transmise le</label>
+    <input type="datetime-local" id="gel-declaree-${m.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-reference-${m.id}">Référence DG Trésor</label>
+    <input type="text" id="gel-reference-${m.id}" maxlength="255" placeholder="Référence ou objet du courriel"></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-canal-${m.id}">Adresse</label>
+    <select id="gel-canal-${m.id}"><option value="">—</option>${_options(vocab.adresses_dgt, "", "adresse", "adresse")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-piece-${m.id}">Pièce de transmission</label>
+    <input type="file" id="gel-piece-${m.id}" title="Accusé de réception de la DG Trésor, ou copie du courriel envoyé"></div>
+   <button class="btn btn-sm btn-primary" onclick="enregistrerDeclarationGel(${m.id}, ${m.alert_id})">Enregistrer la déclaration</button>
+  </div>`;
+}
+
+function _etapeLevee(m, vocab, isReviewer, auditeur) {
+ if (m.statut === "LEVEE") {
+  return `<p style="font-size: 0.85rem;"><span>Levée le</span> <strong>${formatDateTime(m.levee_le)}</strong> · @${escapeHtml(m.levee_par || "")}
+   · <span>${escapeHtml(m.motif_levee_label || m.motif_levee || "")}</span> — ${escapeHtml(m.justification_levee || "")}</p>`;
+ }
+ if (m.statut !== "DECLAREE") {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">Possible une fois la mesure déclarée.</p>`;
+ }
+ if (!isReviewer || auditeur) {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">La levée est réservée aux réviseurs.</p>`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+  <div class="form-group" style="margin: 0;"><label for="gel-levee-le-${m.id}">Levée le</label>
+   <input type="datetime-local" id="gel-levee-le-${m.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+  <div class="form-group" style="margin: 0;"><label for="gel-motif-${m.id}">Motif</label>
+   <select id="gel-motif-${m.id}">${_options(vocab.motifs_de_levee, "")}</select></div>
+  <div class="form-group" style="margin: 0; flex: 1 1 260px;"><label for="gel-justif-${m.id}">Acte de levée</label>
+   <input type="text" id="gel-justif-${m.id}" maxlength="4000" placeholder="Règlement, arrêté ou décision, avec sa date"></div>
+  <button class="btn btn-sm btn-secondary" onclick="leverMesureDeGel(${m.id}, ${m.alert_id})">Lever la mesure</button>
+ </div>`;
+}
+
+function _blocMesure(m, vocab, isReviewer, auditeur) {
+ const saisie = !auditeur && m.statut === "A_DECLARER";
+ const comptes = (m.comptes || []).map(c =>
+  `<tr><td>${escapeHtml(c.numero)}</td><td>${escapeHtml(c.nature || "—")}</td><td>${escapeHtml(c.devise || "—")}</td><td>${escapeHtml(c.montant_gel || "—")}</td><td>${escapeHtml(c.montant_declaration || "—")}</td></tr>`).join("");
+ const etapeGel = saisie ? `
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="gel-action-${m.id}">Action</label>
+    <select id="gel-action-${m.id}">${_options(vocab.actions, m.type_action)}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-effet-${m.id}">Date d'effet</label>
+    <input type="datetime-local" id="gel-effet-${m.id}" value="${_versSaisieLocale(m.date_effet)}"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="gel-comptes-${m.id}">Comptes et montants gelés</label>
+   <textarea id="gel-comptes-${m.id}" rows="3" placeholder="numéro ; nature ; devise ; montant à la date du gel ; montant à la date de la déclaration">${escapeHtml(m.comptes_texte || "")}</textarea>
+   <small style="color: var(--text-muted);">Une ligne par compte, dans l'ordre du formulaire de la DG Trésor.</small></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="gel-precisions-${m.id}">Précisions</label>
+   <textarea id="gel-precisions-${m.id}" rows="2" placeholder="Co-titulaires, mandataires, prélèvements, ressources économiques…">${escapeHtml(m.precisions || "")}</textarea></div>
+  <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="enregistrerGelEffectif(${m.id}, ${m.alert_id})">Enregistrer le gel effectif</button>`
+  : `<p style="font-size: 0.85rem;"><span>Action</span> : <span>${escapeHtml(m.type_action_label)}</span> · <span>Date d'effet</span> : <strong>${formatDateTime(m.date_effet)}</strong>${m.client_gele ? ` · <strong style="color: var(--color-alert);">Client gelé</strong>` : ""}</p>
+   ${comptes ? `<div class="table-container" style="max-height: 160px;"><table><thead><tr><th>Compte</th><th>Nature</th><th>Devise</th><th>Montant à la date du gel</th><th>Montant déclaré</th></tr></thead><tbody>${comptes}</tbody></table></div>` : ""}
+   ${m.precisions ? `<p style="font-size: 0.82rem;">${escapeHtml(m.precisions)}</p>` : ""}`;
+ return `<div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem;">
+  <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+   <strong><span>Mesure de gel</span> #${m.id}</strong> ${badgeStatutGel(m)}
+   <small style="color: var(--text-muted);"><span>ouverte à la confirmation</span> · ${formatDateTime(m.ouverte_le)} · @${escapeHtml(m.ouverte_par || "")}</small>
+  </div>
+  <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${m.radiation_a_examiner ? `
+   <p style="font-size: 0.85rem; color: var(--color-alert);"><strong>Radiation à examiner</strong> — ${escapeHtml(m.radiation_detail || "")}<br>
+   <span>Levée à instruire : rien n'est levé automatiquement. Vérifiez l'acte d'abrogation et qu'aucun autre régime ne désigne encore la personne.</span></p>` : ""}${_etapeLevee(m, vocab, isReviewer, auditeur)}
+ </div>`;
+}
+
+function blocMesuresDeGel(a, isReviewer) {
+ const mesures = a.gel_mesures || [];
+ if (!mesures.length && !a.gel_du) return "";
+ const vocab = a.gel_vocabulaire || {};
+ const auditeur = userRoles(currentUser).includes("auditor");
+ // Vrai positif confirmé AVANT le registre (cas de production) : rien ne
+ // l'y fera entrer tout seul — le bouton le dit, et le délai courra depuis
+ // la confirmation.
+ const manquante = !mesures.length && !auditeur
+  ? `<p style="color: var(--color-alert); font-size: 0.85rem; font-weight: 600;">Vrai positif sur une liste de gel sans mesure au registre : aucune déclaration à la DG Trésor n'est tracée.</p>
+   <button class="btn btn-sm btn-primary" onclick="ouvrirMesureDeGel(${a.id}, 'GEL')">Ouvrir la mesure de gel</button>`
+  : "";
+ const ajout = mesures.length && !auditeur
+  ? `<div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+   <select id="gel-nouvelle-action-${a.id}" aria-label="Action de la nouvelle mesure">${_options(vocab.actions, "CREDIT_COMPTE_GELE")}</select>
+   <button class="btn btn-sm btn-secondary" onclick="ouvrirMesureDeGel(${a.id})">Ajouter une mesure</button>
+  </div>`
+  : "";
+ return `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Mesures de gel (DG Trésor)</h3>
+  ${mesures.map(m => _blocMesure(m, vocab, isReviewer, auditeur)).join("")}
+  ${manquante}${ajout}
+ </div>`;
+}
+
+async function _gelRequete(url, options, alertId) {
+ try {
+  const response = await apiFetch(url, options);
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  showToast(data.message, "success");
+  (data.warnings || []).forEach(w => showToast(w, "warning", 9000));
+  if (alertId) openAlertModal(alertId);
+  rafraichirSiAffichee("screening", "alerts-gels", fetchGels);
+  return data;
+ } catch (e) {
+  showToast("Erreur réseau de communication.", "error");
+  return null;
+ }
+}
+
+async function ouvrirMesureDeGel(alertId, action) {
+ const type = action || document.getElementById(`gel-nouvelle-action-${alertId}`)?.value;
+ if (!type) return;
+ await _gelRequete(`/api/alerts/${alertId}/gels`, {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ type_action: type }),
+ }, alertId);
+}
+
+async function enregistrerGelEffectif(mesureId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${mesureId}`)?.value ?? "";
+ const payload = { type_action: valeur("gel-action"), comptes: valeur("gel-comptes"),
+  precisions: valeur("gel-precisions") };
+ if (valeur("gel-effet")) payload.date_effet = new Date(valeur("gel-effet")).toISOString();
+ await _gelRequete(`/api/gels/${mesureId}`, {
+  method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
+async function enregistrerDeclarationGel(mesureId, alertId) {
+ const fichier = document.getElementById(`gel-piece-${mesureId}`)?.files?.[0];
+ if (!fichier) {
+  showToast("Joignez la pièce de transmission : accusé de réception de la DG Trésor, ou copie du courriel envoyé.", "error");
+  return;
+ }
+ const quand = document.getElementById(`gel-declaree-${mesureId}`)?.value;
+ const form = new FormData();
+ form.append("file", fichier);
+ if (quand) form.append("declaree_le", new Date(quand).toISOString());
+ form.append("reference", document.getElementById(`gel-reference-${mesureId}`)?.value || "");
+ form.append("canal", document.getElementById(`gel-canal-${mesureId}`)?.value || "");
+ await _gelRequete(`/api/gels/${mesureId}/declaration`, { method: "POST", body: form }, alertId);
+}
+
+async function leverMesureDeGel(mesureId, alertId) {
+ const quand = document.getElementById(`gel-levee-le-${mesureId}`)?.value;
+ const payload = {
+  motif: document.getElementById(`gel-motif-${mesureId}`)?.value || "",
+  justification: document.getElementById(`gel-justif-${mesureId}`)?.value || "",
+ };
+ if (quand) payload.levee_le = new Date(quand).toISOString();
+ if (!await confirmDialog("Lever cette mesure de gel ? Le client retrouvera son statut d'avant le gel, sauf si une autre mesure le tient encore.")) return;
+ await _gelRequete(`/api/gels/${mesureId}/levee`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
+function _parametresDuRegistre() {
+ const params = new URLSearchParams();
+ const statut = document.getElementById("gels-statut-filter")?.value;
+ const action = document.getElementById("gels-action-filter")?.value;
+ const recherche = (document.getElementById("gels-recherche")?.value || "").trim();
+ if (statut) params.set("statut", statut);
+ if (action) params.set("type_action", action);
+ if (recherche) params.set("q", recherche);
+ return params;
+}
+
+function exportGelsCsv() {
+ // Tout le registre filtré, côté serveur : la pièce qu'un contrôle demande entière
+ window.open(`/api/export/gels.csv?${_parametresDuRegistre().toString()}`, "_blank");
+}
+
+function _afficherSyntheseDesGels(s) {
+ const el = document.getElementById("gels-synthese");
+ if (!el || !s) return;
+ el.innerHTML = `
+  <span><strong>${s.to_declare}</strong> <span>à déclarer</span></span>
+  <span style="${s.overdue ? "color: var(--color-alert); font-weight: 600;" : ""}"><strong>${s.overdue}</strong> <span>en retard</span> (<span>seuil</span> ${s.threshold_hours} h)</span>
+  <span><strong>${s.declared}</strong> <span>déclarée(s)</span></span>
+  <span><strong>${s.lifted}</strong> <span>levée(s)</span></span>
+  <span><span>Délai moyen confirmation → déclaration</span> : <strong>${formatDuree(s.avg_declaration_delay_seconds)}</strong></span>
+  ${s.declared_late ? `<span style="color: var(--color-warning);"><strong>${s.declared_late}</strong> <span>déclarée(s) hors délai</span></span>` : ""}`;
+}
+
+async function fetchGels() {
+ const tbody = document.querySelector("#gels-table tbody");
+ if (!tbody) return;
+ tableLoading("#gels-table", 11);
+ const params = _parametresDuRegistre();
+ const filtre = params.toString() !== "";
+ params.set("page_size", "200");
+ try {
+  const response = await apiFetch(`/api/gels?${params.toString()}`);
+  if (!response.ok) { tableError("#gels-table", 11); return; }
+  const data = await response.json();
+  const select = document.getElementById("gels-action-filter");
+  if (select && select.options.length <= 1) {
+   select.insertAdjacentHTML("beforeend", _options((data.vocabulaire || {}).actions, ""));
+  }
+  _afficherSyntheseDesGels(data.synthese);
+  const total = document.getElementById("gels-total");
+  if (total) total.textContent = data.total > data.items.length ? `${data.items.length} / ${data.total}` : "";
+  if (!data.items.length) {
+   tableEmpty("#gels-table", 11, filtre ? "Aucune mesure pour ces filtres." : "Aucune mesure de gel au registre.", "",
+    filtre ? "" : "Une mesure s'ouvre à la confirmation d'une alerte sur une liste de gel (périmètre SANCTION).");
+   return;
+  }
+  tbody.innerHTML = data.items.map(m => `
+   <tr>
+    <td>#${m.id}</td>
+    <td>${formatDateTime(m.ouverte_le)}</td>
+    <td>${escapeHtml(m.client_name)}</td>
+    <td>${escapeHtml(m.watchlist_name)}</td>
+    <td>${m.list_type ? listTypeBadge(m.list_type) : "—"}</td>
+    <td>${escapeHtml(m.type_action_label)}</td>
+    <td>${m.date_effet ? formatDateTime(m.date_effet) : "—"}</td>
+    <td>${badgeStatutGel(m)}</td>
+    <td>${m.declaree_le ? formatDateTime(m.declaree_le) : "—"}</td>
+    <td>${formatDuree(m.delai_declaration_secondes)}</td>
+    <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${m.alert_id})" title="Ouvrir l'alerte et les étapes de la mesure">Ouvrir</button></td>
+   </tr>`).join("");
+ } catch (e) {
+  tableError("#gels-table", 11);
+ }
+}
+
 // ------------------ TRIAGE AU CLAVIER DES FILES (j / k / o / r) ------------------
 // Le motif des clients mail : j/k parcourent la file affichée, o (ou Entrée)
 // instruit la ligne visée, r la reporte, Échap relâche la visée. Inactif dès
@@ -7941,18 +9006,64 @@ function _viserLigne(ligne) {
  ligne.classList.add("ligne-visee");
  _viseAlerteId = parseInt(ligne.dataset.alertId, 10);
  ligne.scrollIntoView({ block: "nearest" });
+ _focaliserLaVisee(ligne);
+}
+
+// Le focus suit la visée : mesuré, après une proposition puis Échap, le focus
+// tombait sur BODY et la surbrillance repartait du haut de la file. La ligne
+// visée prend le focus (tabindex -1 : focalisable sans entrer dans la
+// tabulation) quand personne d'autre ne l'a — jamais par-dessus une modale ni
+// en volant le focus d'un champ.
+function _focaliserLaVisee(ligne) {
+ if (!ligne || !ligne.isConnected) return;
+ ligne.tabIndex = -1;
+ const actif = document.activeElement;
+ const libre = !actif || actif === document.body || actif === document.documentElement
+  || (actif.closest && (actif.closest("tbody") === ligne.parentElement || actif.closest(".modal.hidden")));
+ if (libre && !document.querySelector(".modal:not(.hidden)")) ligne.focus({ preventScroll: true });
+}
+
+// Une alerte traitée (proposée, validée, escaladée, reportée) passe la visée à
+// la ligne qui la SUIT dans la file affichée — mémorisée par identifiant, pas
+// par rang : le re-rendu qui suit l'action déplace ou retire des lignes. À
+// défaut de suivante, la précédente.
+function _viseeApresTraitement(alertId) {
+ const conf = _fileAffichee();
+ const tbody = conf && document.querySelector(`#${conf.table} tbody`);
+ const ligne = tbody && tbody.querySelector(`tr[data-alert-id="${alertId}"]`);
+ if (!ligne) return;
+ const lignes = Array.from(tbody.querySelectorAll("tr[data-alert-id]"));
+ const i = lignes.indexOf(ligne);
+ const voisine = lignes[i + 1] || lignes[i - 1] || null;
+ _viseAlerteId = voisine ? parseInt(voisine.dataset.alertId, 10) : null;
+}
+
+// Fermer l'alerte rend la main à la file, sur la ligne visée.
+function _revenirALaFile() {
+ const conf = _fileAffichee();
+ if (!conf || _viseAlerteId === null) return;
+ const ligne = document.querySelector(`#${conf.table} tbody tr[data-alert-id="${_viseAlerteId}"]`);
+ if (!ligne) return;
+ document.querySelectorAll("tr.ligne-visee").forEach((tr) => tr.classList.remove("ligne-visee"));
+ ligne.classList.add("ligne-visee");
+ _focaliserLaVisee(ligne);
 }
 
 function initTriageClavier() {
  document.addEventListener("keydown", (e) => {
  if (e.ctrlKey || e.metaKey || e.altKey) return;
+ // Une touche déjà consommée (Échap qui vient de fermer une modale) n'est
+ // pas un ordre de triage.
+ if (e.defaultPrevented) return;
  if (!["j", "k", "o", "r", "Enter", "Escape"].includes(e.key)) return;
  const cible = e.target;
  if (cible && (cible.tagName === "INPUT" || cible.tagName === "TEXTAREA"
   || cible.tagName === "SELECT" || cible.isContentEditable)) return;
  // Entrée active déjà l'élément focalisé (tri des colonnes, boutons) : on
- // ne la prend que quand le focus est au corps de page, à personne.
- if (e.key === "Enter" && cible !== document.body && cible !== document.documentElement) return;
+ // ne la prend que quand le focus est au corps de page, à personne — ou sur
+ // la ligne visée elle-même.
+ const surLaVisee = cible && cible.matches && cible.matches("tr.ligne-visee");
+ if (e.key === "Enter" && cible !== document.body && cible !== document.documentElement && !surLaVisee) return;
  if (document.querySelector(".modal:not(.hidden)")) return;
  const conf = _fileAffichee();
  if (!conf) return;
@@ -8057,27 +9168,100 @@ async function chargerMotifsDeCloture() {
  return [];
 }
 
+// Les motifs de CETTE décision seulement : la liste plate offrait « Correspondance
+// confirmée » au faux positif et l'homonymie au vrai positif — un clic distrait
+// produisait un faux positif motivé par une confirmation. Un motif hérité que
+// la migration n'a pas pu classer vaut pour les deux, et le dit.
+function motifsDeLaDecision(motifs, decision) {
+ return (motifs || [])
+ .map(m => typeof m === "string" ? { motif: m, decisions: ["FALSE_POSITIVE", "CONFIRMED"], a_classer: true } : m)
+ .filter(m => (m.decisions || []).includes(decision))
+ .map(m => m.a_classer
+ ? { texte: m.motif, marque: true, titre: "Motif non classé : proposé pour les deux décisions (Paramètres → motifs de clôture)." }
+ : m.motif);
+}
+
+// « Mémoriser en liste blanche » : au moment où le faux positif est VALIDÉ.
+// Sans elle, l'alerte n° 20, close en faux positif après 4-yeux, s'est
+// rouverte dix minutes plus tard en n° 28 sur la même paire (« Recribler ce
+// client ») ; la liste blanche ne se proposait qu'après coup, par un bouton
+// séparé. La pose suit le flux existant côté serveur (justification,
+// empreintes de ce que la décision couvre).
+function caseListeBlanche() {
+ const pieceExigee = !!(ingestionSettings && ingestionSettings.whitelist_file_required);
+ return {
+ label: "Mémoriser en liste blanche",
+ aide: pieceExigee
+ ? "Pièce justificative exigée : le formulaire de liste blanche s'ouvrira après la validation."
+ : "La paire reprend cette motivation. Sans elle, le prochain criblage de ce client rouvrira une alerte sur cette fiche.",
+ };
+}
+
+function _estReviseur() {
+ const roles = userRoles(currentUser);
+ return roles.includes("admin") || roles.includes("reviewer");
+}
+
+// Pièce exigée par le réglage : le JSON de la décision ne la transporte pas,
+// la paire se pose donc par le formulaire existant, juste après la clôture,
+// pré-rempli de la motivation.
+function _poserApresCloture(a, motivation) {
+ openWhitelistModal(a.client_id || "", a.watchlist_entity_id, a.client_name, a.watchlist_name);
+ const champ = document.getElementById("whitelist-justification");
+ if (champ) champ.value = motivation || "";
+}
+
 async function proposeAlertDecision(decision) {
  const label = decision === "CONFIRMED" ? "vrai positif" : "faux positif";
- const comment = await promptDialog(`Proposer « ${label} »`, {
+ const a = currentAlertData || {};
+ // 4-yeux coupé : la proposition CLÔT le faux positif, c'est le moment de valider
+ const clotureDirecte = ingestionSettings && ingestionSettings.alert_four_eyes_required === false;
+ const offrirListeBlanche = decision === "FALSE_POSITIVE" && clotureDirecte && _estReviseur() && !!a.client_id;
+ const motifs = motifsDeLaDecision(await chargerMotifsDeCloture(), decision);
+ // Alerte caduque (fiskr/caducite.py) : le motif constaté vient en tête des
+ // suggestions d'un faux positif — proposé, jamais imposé.
+ const suggestions = currentAlertLapsedReason && decision === "FALSE_POSITIVE"
+  ? [currentAlertLapsedReason, ...motifs] : motifs;
+ const reponse = await promptDialog(`Proposer « ${label} »`, {
  message: "Commentaire obligatoire motivant la décision proposée (validation 4-yeux ensuite).",
  textarea: true, placeholder: "Motivation réglementaire de la décision...",
- suggestions: await chargerMotifsDeCloture()
+ suggestions,
+ checkbox: offrirListeBlanche ? caseListeBlanche() : null,
  });
- if (comment === null) return;
- const data = await _postAlertAction("propose", { decision, comment });
- if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
+ if (reponse === null) return;
+ const comment = offrirListeBlanche ? reponse.value : reponse;
+ const memoriser = offrirListeBlanche && reponse.checked;
+ const pieceExigee = !!(ingestionSettings && ingestionSettings.whitelist_file_required);
+ const corps = { decision, comment };
+ if (memoriser && !pieceExigee) corps.whitelist = {};
+ const data = await _postAlertAction("propose", corps);
+ if (data) {
+ showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues();
+ if (memoriser && pieceExigee) _poserApresCloture(a, comment);
+ }
+ return data;
 }
 
 async function validateAlertDecision(approve) {
- const comment = await promptDialog(approve ? "Valider la décision (4-yeux)" : "Refuser et renvoyer en analyse", {
+ const a = currentAlertData || {};
+ const offrirListeBlanche = approve && a.proposed_decision === "FALSE_POSITIVE" && !!a.client_id;
+ const reponse = await promptDialog(approve ? "Valider la décision (4-yeux)" : "Refuser et renvoyer en analyse", {
  message: approve ? "Commentaire (optionnel)." : "Motif du refus (obligatoire) — l'alerte repartira en analyse.",
  textarea: true, required: !approve,
- placeholder: approve ? "Commentaire éventuel..." : "Motif du refus..."
+ placeholder: approve ? "Commentaire éventuel..." : "Motif du refus...",
+ checkbox: offrirListeBlanche ? caseListeBlanche() : null,
  });
- if (comment === null) return;
- const data = await _postAlertAction("validate", { approve, comment });
- if (data) { showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues(); }
+ if (reponse === null) return;
+ const comment = offrirListeBlanche ? reponse.value : reponse;
+ const memoriser = offrirListeBlanche && reponse.checked;
+ const pieceExigee = !!(ingestionSettings && ingestionSettings.whitelist_file_required);
+ const corps = { approve, comment };
+ if (memoriser && !pieceExigee) corps.whitelist = {};
+ const data = await _postAlertAction("validate", corps);
+ if (data) {
+ showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues();
+ if (memoriser && pieceExigee) _poserApresCloture(a, comment || a.proposal_comment);
+ }
 }
 
 // ------------------ LISTE BLANCHE CLIENT x LISTÉ (GOOD GUYS) ------------------
@@ -8090,9 +9274,19 @@ async function fetchWhitelist(page = null) {
  const params = new URLSearchParams({ page: String(whitelistPage), page_size: "100" });
  const listFilterEl = document.getElementById("whitelist-list-filter");
  if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
+ const stateFilterEl = document.getElementById("whitelist-state-filter");
+ if (stateFilterEl && stateFilterEl.value) params.set("state", stateFilterEl.value);
  const response = await apiFetch(`/api/whitelist?${params}`);
  if (!response.ok) return;
  const data = await response.json();
+ // Le compte des paires a réexaminer est rendu quel que soit le filtre :
+ // c'est lui qui demande une action. Rien n'est affiché quand il est nul.
+ const staleNotice = document.getElementById("whitelist-stale-notice");
+ if (staleNotice) {
+ staleNotice.classList.toggle("hidden", !data.stale_total);
+ const staleCount = document.getElementById("whitelist-stale-count");
+ if (staleCount) staleCount.textContent = String(data.stale_total || 0);
+ }
  renderWhitelistTable(data.items || []);
  renderQueuePagination("whitelist-pagination", data.page, data.total, data.page_size, "fetchWhitelist");
  } catch (e) {
@@ -8110,12 +9304,23 @@ function renderWhitelistTable(items) {
  return;
  }
  const stateBadge = (state) => {
- const map = { ACTIVE: ["var(--success-soft-text)", "ACTIVE"], EXPIRED: ["var(--color-warning)", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
+ const map = { ACTIVE: ["var(--success-soft-text)", "ACTIVE"], STALE: ["var(--color-alert)", "À RÉEXAMINER"], EXPIRED: ["var(--color-warning)", "EXPIRÉE"], REVOKED: ["#9ca3af", "RÉVOQUÉE"] };
  const [color, label] = map[state] || ["#9ca3af", state];
  return `<span style="color: ${color}; font-weight: 600; font-size: 0.8rem;">${label}</span>`;
  };
+ // Ce qui a changé depuis la décision : libellé rendu par le serveur
+ // (fiskr/empreintes.py, MOTIFS_DE_REEXAMEN), jamais recopié ici.
+ const staleReason = (p) => p.state === "STALE" && p.stale_reason_label
+ ? `<br><small style="color: var(--text-muted);">${escapeHtml(p.stale_reason_label)}</small>` : "";
+ const actions = (p) => {
+ const revoke = `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>`;
+ if (p.state === "STALE") return `<button class="btn btn-sm btn-primary" onclick="reconductWhitelistPair(${p.id})">Reconduire</button> ${revoke}`;
+ return p.state === "ACTIVE" ? revoke : "";
+ };
+ // Une paire à réexaminer n'est pas estompée comme une paire close : elle
+ // attend une décision.
  tbody.innerHTML = items.map(p => `
- <tr ${p.state !== "ACTIVE" ? 'style="opacity: 0.55;"' : ""}>
+ <tr ${p.state !== "ACTIVE" && p.state !== "STALE" ? 'style="opacity: 0.55;"' : ""}>
  <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
  <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(p.list_type)}</td>
@@ -8124,10 +9329,34 @@ function renderWhitelistTable(items) {
    : `<br><a href="/api/whitelist/evidence/${p.id}" target="_blank" style="color: var(--color-accent); font-size: 0.75rem;"> ${escapeHtml(p.evidence_file_name)}</a>`) : ""}</td>
  <td>@${escapeHtml(p.created_by)}<br><small style="color:var(--text-muted)">${p.created_at ? new Date(p.created_at).toLocaleDateString(uiLocale()) : ""}</small></td>
  <td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString(uiLocale()) : "—"}</td>
- <td>${stateBadge(p.state)}</td>
- <td>${p.state === "ACTIVE" ? `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="revokeWhitelistPair(${p.id})">Révoquer</button>` : ""}</td>
+ <td>${stateBadge(p.state)}${staleReason(p)}</td>
+ <td>${actions(p)}</td>
  </tr>
  `).join("");
+}
+
+async function reconductWhitelistPair(pairId) {
+ const comment = await promptDialog("Reconduire la paire de liste blanche", {
+ message: "Vous avez examiné ce qui a changé (événement WHITELIST_STALE de l'alerte) et le faux positif demeure. Motif obligatoire : la paire couvrira la fiche et le client tels qu'ils ont été criblés en dernier.",
+ textarea: true, placeholder: "Motif du maintien en liste blanche..."
+ });
+ if (comment === null) return;
+ try {
+ const response = await apiFetch(`/api/whitelist/${pairId}/reconduct`, {
+ method: "POST",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ comment })
+ });
+ const data = await response.json();
+ if (!response.ok) {
+ showToast("Erreur : " + (data.detail || "Reconduction refusée."), "error");
+ return;
+ }
+ showToast(data.message, "success");
+ fetchWhitelist();
+ } catch (e) {
+ console.error("Error reconducting whitelist pair:", e);
+ }
 }
 
 async function revokeWhitelistPair(pairId) {
@@ -8493,6 +9722,7 @@ const DASHBOARD_WIDGETS = {
  go: "switchTab('screening'); switchSubTab('screening', 'alerts-whitelist')" },
  "tile-rules": { cat: "kpi", icon: uiIcon("grid"), title: "Règles actives", sub: "anti-faux positifs",
  fetchValue: async () => {
+ if (!peutLire("rules")) return "—";
  const r = await apiFetch("/api/fprules", { silent: true });
  if (!r.ok) return "—";
  return ((await r.json()).items || []).filter(x => x.status === "ACTIVE" && x.enabled).length;
@@ -8669,6 +9899,15 @@ async function renderMaJourneeWidget(body) {
  for (const a of j.mes_alertes.items.slice(0, 4)) {
   morceaux.push(ligne(`#${a.id} — ${escapeHtml(a.client_name || "?")}`,
    `${escapeHtml(a.priority || "—")}${a.overdue ? " · en retard" : ""}`, ouvrir(a)));
+ }
+ // Ce qui n'est à personne : dit tel quel, jamais « à vous ». L'accueil
+ // affichait « Rien ne vous attend » devant 26 alertes non assignées.
+ const libres = j.non_assignees || { total: 0 };
+ if (libres.total) {
+  morceaux.push(`<li style="cursor: default;">
+   <span class="item-main" style="white-space: normal;"><strong>${libres.total}</strong> <span>${libres.total === 1 ? "alerte non assignée attend quelqu'un" : "alertes non assignées attendent quelqu'un"}</span>${libres.en_retard ? ` · <strong style="color: var(--color-alert);">${libres.en_retard}</strong> <span>en retard</span>` : ""}</span>
+   ${libres.peut_prendre ? `<button class="btn btn-sm btn-primary" onclick="prendreLaSuivante()">Prendre la suivante</button>` : ""}
+  </li>`);
  }
  for (const a of j.a_valider.items.slice(0, 3)) {
   morceaux.push(ligne(`#${a.id} — <span>à valider</span> · ${escapeHtml(a.client_name || "?")}`,
@@ -8978,25 +10217,61 @@ function renderTransactionResult(data) {
  const verdictLine = document.getElementById("txn-verdict-line");
  if (data.verdict === "HIT") {
  verdictLine.innerHTML = `Verdict : <span class="status-badge alert">HIT — ${data.hits_count} partie(s) en alerte</span>`;
+ } else if (data.verdict === "INCOMPLETE") {
+ // Ni HIT ni PASS : le filtrage n'a pas pu établir le PASS. Le libellé est
+ // celui du serveur (fiskr/transactions.py VERDICTS), jamais recopié ici.
+ verdictLine.innerHTML = `Verdict : <span class="status-badge warning">INCOMPLETE</span> <small>${escapeHtml(data.verdict_label || "")}</small>`;
  } else {
  verdictLine.innerHTML = `Verdict : <span class="status-badge safe">PASS — aucune correspondance</span>`;
  }
  const m = data.message || {};
- document.getElementById("txn-message-info").textContent =
- `Message ${m.message_type || "?"} · MsgId ${m.msg_id || "—"} · ${data.transactions_count} transaction(s) · ` +
- `${(data.parties || []).length} partie(s) distincte(s) criblée(s).`;
+ const parties = data.parties || [];
+ const nonCriblees = data.not_screened_count || 0;
+ const remises = (data.free_text || {}).screened || 0;
+ const art5 = (data.completeness || {}).transactions_article_5 || 0;
+ // Chaque compteur dans son propre nœud : c'est ce qui le rend traduisible.
+ document.getElementById("txn-message-info").innerHTML =
+ escapeHtml(`Message ${m.message_type || "?"} · MsgId ${m.msg_id || "—"} · ${data.transactions_count} transaction(s) · ` +
+ `${parties.length - nonCriblees} partie(s) distincte(s) criblée(s).`) +
+ (nonCriblees ? ` <strong style="color:var(--color-warning)">${nonCriblees} partie(s) non criblée(s)</strong>` : "") +
+ (remises ? ` <span>${remises} information(s) de remise criblée(s)</span>` : "") +
+ // Ce que la dérogation intra-Union a levé se voit aussi : un PASS sous
+ // l'art. 5 n'a pas exigé l'adresse du donneur d'ordre.
+ (art5 ? ` <span>${art5} transaction(s) sous la dérogation intra-Union (art. 5)</span>` : "");
+
+ // Informations obligatoires absentes (règlement (UE) 2023/1113, art. 4 et 5) :
+ // on ne nomme que ce qui manque — un message complet n'affiche rien. Un
+ // manque que la dérogation aurait levé dit pourquoi elle ne s'applique pas.
+ const manques = data.missing_information || [];
+ document.getElementById("txn-missing-info").innerHTML = manques.length ? `
+ <div class="card" style="border-left: 3px solid var(--color-warning); margin: 0.5rem 0; padding: 0.75rem 1rem;">
+ <strong>Informations obligatoires manquantes</strong> <small style="color:var(--text-muted)">Règlement (UE) 2023/1113, art. 4 et 5</small>
+ <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${manques.map(x => `
+ <li><span>${escapeHtml(x.label)}</span> <small style="color:var(--text-muted)">${escapeHtml(x.reference)}</small>
+ <small><code>${escapeHtml((x.transactions || []).join(", "))}${x.transactions_count > (x.transactions || []).length ? " …" : ""}</code></small>${(x.general_rule_reasons || []).map(r => `
+ <br><small>${escapeHtml(r.label)}</small> <small style="color:var(--text-muted)">${escapeHtml((r.providers || []).join(", "))}</small>`).join("")}</li>`).join("")}
+ </ul>
+ </div>` : "";
 
  const tbody = document.querySelector("#txn-results-table tbody");
- tbody.innerHTML = (data.parties || []).map(p => {
+ tbody.innerHTML = parties.map(p => {
  let badge;
  if (p.status === "ALERT") badge = '<span class="status-badge alert">ALERT</span>';
  else if (p.status === "WHITELISTED") badge = '<span class="status-badge warning">WHITELISTED</span>';
+ else if (p.status === "NOT_SCREENED") badge = `<span class="status-badge warning" style="white-space:nowrap">Non criblée</span><br><small>${escapeHtml(p.not_screened_label || "")}</small>`;
  else badge = '<span class="status-badge safe">NO_MATCH</span>';
+ // Rapprochée sur son seul identifiant : le nom n'a pas été comparé, il
+ // n'était pas fourni. L'écran le dit plutôt que de laisser croire l'inverse.
+ const surIdentifiant = (p.screened_on || []).length && !(p.screened_on || []).includes("NOM") && !p.free_text;
+ // Partie non criblée : ce qu'elle porte d'autre que ce qui la nomme déjà.
+ const autres = (p.identifiers || []).filter(i => i !== p.label);
+ const detail = p.free_text ? `<br><small style="color:var(--text-muted)">« ${escapeHtml(p.free_text.excerpt || "")} »</small>`
+ : (p.status === "NOT_SCREENED" && autres.length ? `<br><small style="color:var(--text-muted)">${escapeHtml(autres.join(", "))}</small>` : "");
  return `<tr>
- <td>${escapeHtml(p.name)}${p.is_agent ? ' <small style="color:var(--text-muted)">(banque)</small>' : ""}</td>
+ <td>${escapeHtml(p.label || p.name)}${p.is_agent ? ' <small style="color:var(--text-muted)">(banque)</small>' : ""}${detail}</td>
  <td><small>${escapeHtml((p.roles || []).join(", "))}</small></td>
  <td>${escapeHtml(p.country || "—")}</td>
- <td><small>${escapeHtml(p.bic || "—")}</small></td>
+ <td><small>${escapeHtml(p.bic || p.lei || "—")}</small>${surIdentifiant ? '<br><small style="color:var(--text-muted)">sur identifiant seul</small>' : ""}</td>
  <td>${p.best_watchlist_name ? p.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${p.best_watchlist_name ? escapeHtml(p.best_watchlist_name) + (p.list_type ? ` <small style="color:var(--text-muted)">${escapeHtml(p.list_type)}</small>` : "") : "—"}</td>
  <td>${badge}${p.hard_match ? ' <small style="color:var(--color-alert)">hard match</small>' : ""}</td>
@@ -10701,10 +11976,12 @@ const ADMIN_ACTION_LABELS = {
  LEARNED_EQUIVALENCE_DECIDED: "Équivalence minée tranchée",
  // Listes
  SNAPSHOTS_PURGED: "Snapshots purgés", SNAPSHOTS_BULK_APPROVED: "Homologations en masse",
+ SNAPSHOT_APPROVED: "Liste homologuée (mise en production)", SNAPSHOT_REJECTED: "Liste rejetée à l'homologation",
  SNAPSHOT_REPAIRED: "Snapshot réparé",
  RELATION_CREATED: "Relation créée", RELATION_DELETED: "Relation supprimée",
  // Alertes et rétention
- WHITELIST_REVOKED: "Liste blanche révoquée", RETENTION_PURGE: "Purge de rétention",
+ WHITELIST_REVOKED: "Liste blanche révoquée", WHITELIST_RECONDUCTED: "Liste blanche reconduite",
+ RETENTION_PURGE: "Purge de rétention",
  NOTIFICATION_RESENT: "Notification renvoyée", NOTIFICATION_DELETED: "Notification supprimée",
  NOTIFICATIONS_PURGED: "Notifications purgées",
  // Exploitation
@@ -11268,12 +12545,18 @@ async function fetchHookStats() {
  const recent = (data.recent || []).map(r => {
  const code = r.status_code || 0;
  const codeColor = code >= 400 ? "var(--color-alert)" : "var(--color-safe, #22c55e)";
+ // Un refus est tracé sans sa clé (rien à rejouer) : « sans clé » y
+ // affirmerait une absence d'en-tête que la trace ne connaît pas.
  return `<tr>
  <td>${r.created_at ? formatDateTime(r.created_at) : "—"}</td>
  <td><code>${escapeHtml(r.endpoint || "?")}</code></td>
  <td>${escapeHtml(r.caller || "?")}</td>
  <td style="color: ${codeColor}; font-weight: 600;">${code || "—"}</td>
- <td>${r.idempotent
+ <td>${r.replayed
+ ? `<span title="Retransmission : réponse d'origine renvoyée, rien n'a été recriblé ni réappliqué">rejouée</span>`
+ : code >= 400
+ ? '<span style="color: var(--text-muted);" title="Refus : tracé, sans réponse conservée ni rejeu possible">—</span>'
+ : r.idempotent
  ? '<span title="Clé X-Idempotency-Key fournie par l\'appelant"> idempotent</span>'
  : '<span style="color: var(--text-muted);" title="Sans en-tête X-Idempotency-Key : tracé mais jamais rejoué">— sans clé</span>'}</td>
  </tr>`;
@@ -11285,6 +12568,8 @@ async function fetchHookStats() {
  <small style="color: var(--text-muted);">livraisons sur ${data.window_days || 30} j</small></div>
  <div><strong style="font-size: 1.4rem; color: ${errColor};">${nb(totals.errors)}</strong><br>
  <small style="color: var(--text-muted);">erreurs (HTTP ≥ 400)</small></div>
+ <div title="Retransmissions servies avec la réponse d'origine : même appelant, même point d'entrée, même corps"><strong style="font-size: 1.4rem;">${nb(totals.replays)}</strong><br>
+ <small style="color: var(--text-muted);">rejeux</small></div>
  <div><strong style="font-size: 1.4rem;">${nb(totals.callers)}</strong><br>
  <small style="color: var(--text-muted);">appelant(s) distinct(s)</small></div>
  <div><strong style="font-size: 1.4rem;">${nb(totals.all_time)}</strong><br>
@@ -11915,14 +13200,28 @@ async function recriblerClient(clientId) {
  showToast("Erreur : " + (data.detail || "criblage impossible."), "error");
  return;
  }
- const statut = data.status || (data.best_match || {}).status || "—";
- if (statut === "ALERT") {
- showToast(`Criblage terminé : correspondance au-dessus du seuil${data.alert_id ? ` — alerte #${data.alert_id}` : ""}.`, "warning", 7000);
+ // L'alerte à instruire : celle de la meilleure correspondance que la liste
+ // blanche n'a pas absorbée (`best_alert`), à défaut celle de la meilleure.
+ const alerteId = (data.best_alert && data.best_alert.alert_id) || data.alert_id;
+ if (alerteId) {
+ showToast("Criblage terminé : correspondance au-dessus du seuil.", "warning", 9000, {
+ label: "Ouvrir l'alerte", suffixe: `#${alerteId}`,
+ run: () => {
+ document.getElementById("client360-modal")?.classList.add("hidden");
+ switchTab("screening"); switchSubTab("screening", "alerts-screening");
+ openAlertModal(alerteId);
+ },
+ });
  refreshAlertQueues?.();
+ } else if (data.whitelisted) {
+ showToast("Criblage terminé : correspondance couverte par la liste blanche (journalisée, sans alerte).", "success", 6000);
  } else {
  showToast("Criblage terminé : aucune correspondance au-dessus du seuil.", "success", 5000);
  }
  refreshSidebarCounters?.();
+ // La vue 360 ouverte montre le criblage qui vient d'être journalisé
+ const vue360 = document.getElementById("client360-modal");
+ if (vue360 && !vue360.classList.contains("hidden")) openClient360(clientId);
  } catch (e) {
  console.error("Rescreen client error:", e);
  showToast("Erreur réseau pendant le criblage.", "error");
@@ -11981,7 +13280,7 @@ async function openClient360(clientId) {
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `
- <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
+ <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.state === "STALE" && p.stale_reason_label ? " (" + escapeHtml(p.stale_reason_label) + ")" : ""}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
 
  body.innerHTML = `
  ${kycHtml}
@@ -12070,6 +13369,7 @@ async function runBulkAlertAction(channel, payload, confirmMsg) {
  return;
  }
  showToast(data.message || "Action en masse effectuée.", "success");
+ _rendreCompteDeLActionEnMasse(channel, data);
  clearAlertSelection(channel, false);
  fetchAlerts(channel);
  refreshSidebarCounters();
@@ -12087,6 +13387,233 @@ function bulkPrioritySelected(channel) {
  if (!priority) { showToast("Choisissez d'abord une priorité.", "error"); return; }
  runBulkAlertAction(channel, { action: "priority", priority },
  `Passer les {n} alerte(s) sélectionnée(s) en priorité ${priority} (échéance SLA recalculée) ?`);
+}
+
+// =========================================================================
+// FILE DE L'ANALYSTE : REGROUPER, PROPOSER EN SÉRIE, PRENDRE LA SUIVANTE
+// =========================================================================
+
+// Mesuré sur une file de 26 alertes : une seule fiche listée (PIERRE DUBOIS)
+// en produisait 10, et deux clients en portaient deux chacun (une OFAC, une
+// UE, la même personne). Regrouper montre le travail qui se fait d'un geste.
+// Le regroupement se calcule sur TOUTE la file filtrée — pages relues jusqu'au
+// plafond —, jamais sur la page affichée : un groupe compté sur une page
+// annoncerait 4 alertes là où il y en a 40. Au-delà du plafond, l'écran le dit.
+const _REGROUPEMENT_MAX = 1000;
+
+function _prefixeDeFile(channel) { return channel === "FILTERING" ? "filtering" : "screening"; }
+
+function _modeDeRegroupement(channel) {
+ const el = document.getElementById(`${_prefixeDeFile(channel)}-group-by`);
+ return el ? el.value : "";
+}
+
+function _cleDeGroupe(a, mode) {
+ if (mode === "watchlist") return `w:${a.watchlist_entity_id}`;
+ // Un identifiant client stable regroupe ; une partie de message de paiement
+ // (TXN:message:rang) est unique par message — c'est son nom qui la retrouve.
+ if (a.client_id && !String(a.client_id).startsWith("TXN:")) return `c:${a.client_id}`;
+ return `n:${String(a.client_name || "").trim().toUpperCase()}`;
+}
+
+async function _chargerLaFileRegroupee(channel, params) {
+ const conf = ALERT_CHANNEL_CONF[channel];
+ const tbody = document.querySelector(`#${conf.table} tbody`);
+ tableLoading(tbody, 10);
+ const mode = _modeDeRegroupement(channel);
+ const items = [];
+ let total = 0;
+ params.set("page_size", "200");
+ for (let page = 1; items.length < _REGROUPEMENT_MAX; page++) {
+  params.set("page", String(page));
+  const response = await apiFetch(`/api/alerts?${params}`);
+  if (!response.ok) { tableError(`#${conf.table}`, 10, "File d'alertes indisponible."); return; }
+  const data = await response.json();
+  total = data.total;
+  items.push(...(data.items || []));
+  if (!(data.items || []).length || items.length >= total) break;
+ }
+ // Les plus gros groupes d'abord ; à taille égale, l'ordre de la file (celui
+ // de leur membre le plus urgent). Les membres gardent l'ordre de la file.
+ const groupes = new Map();
+ items.forEach((a, rang) => {
+  const cle = _cleDeGroupe(a, mode);
+  if (!groupes.has(cle)) groupes.set(cle, { rang, membres: [] });
+  groupes.get(cle).membres.push(a);
+ });
+ const tries = Array.from(groupes.values())
+  .sort((x, y) => (y.membres.length - x.membres.length) || (x.rang - y.rang));
+ renderAlertsTable(channel, tries.flatMap((g) => g.membres));
+ _poserLesEntetesDeGroupe(channel, tries, mode);
+ const pagination = document.getElementById(`${_prefixeDeFile(channel)}-alerts-pagination`);
+ if (pagination) pagination.classList.add("hidden");
+ if (total > items.length && tbody.firstElementChild) {
+  tbody.insertAdjacentHTML("afterbegin", `<tr class="entete-groupe"><td colspan="10">
+   <span>Regroupement calculé sur les premières alertes de la file seulement :</span> ${items.length} / ${total}.
+   <span>Affinez les filtres pour des groupes complets.</span></td></tr>`);
+ }
+}
+
+function _poserLesEntetesDeGroupe(channel, groupes, mode) {
+ const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
+ if (!tbody || !groupes.length) return;
+ const ligneDe = (id) => tbody.querySelector(`tr[data-alert-id="${id}"]`);
+ const seules = groupes.filter((g) => g.membres.length === 1);
+ for (const g of groupes) {
+  if (g.membres.length < 2) continue;
+  const premier = g.membres[0];
+  const ids = g.membres.filter((a) => !a.status.startsWith("CLOSED")).map((a) => a.id);
+  const listes = Array.from(new Set(g.membres.map((a) => a.list_type))).map(listTypeBadge).join(" ");
+  const titre = mode === "watchlist"
+   ? `<strong>${escapeHtml(premier.watchlist_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(premier.watchlist_entity_id)}</small>`
+   : `<strong>${escapeHtml(premier.client_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(premier.client_id || "")}</small>`;
+  const autres = mode === "watchlist"
+   ? `${new Set(g.membres.map((a) => a.client_id || a.client_name)).size} <span>clients différents</span>`
+   : `${new Set(g.membres.map((a) => a.watchlist_entity_id)).size} <span>fiches listées différentes</span>`;
+  const ligne = ligneDe(premier.id);
+  if (!ligne) continue;
+  ligne.insertAdjacentHTML("beforebegin", `<tr class="entete-groupe">
+   <td>${ids.length ? `<input type="checkbox" onchange="selectionnerLeGroupe('${channel}', [${ids.join(",")}], this.checked)" aria-label="Sélectionner le groupe">` : ""}</td>
+   <td colspan="9"><span class="groupe-compte">${g.membres.length}</span> <span>alertes</span> · ${titre} · ${listes} · ${autres}</td>
+  </tr>`);
+ }
+ const premiereSeule = seules.length ? ligneDe(seules[0].membres[0].id) : null;
+ if (premiereSeule && seules.length < groupes.length) {
+  premiereSeule.insertAdjacentHTML("beforebegin", `<tr class="entete-groupe"><td></td>
+   <td colspan="9"><span class="groupe-compte">${seules.length}</span> <span>alertes sans regroupement</span></td></tr>`);
+ }
+}
+
+function selectionnerLeGroupe(channel, ids, checked) {
+ const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
+ const selection = selectedAlertsByChannel[channel];
+ for (const id of ids) {
+  const boite = tbody && tbody.querySelector(`.alert-select[data-alert-id="${id}"]`);
+  if (boite) boite.checked = checked;
+  if (checked) selection.add(id); else selection.delete(id);
+ }
+ updateBulkBar(channel);
+}
+
+// Compte rendu d'une action en masse : ce qui a été écarté, et pourquoi. Rien
+// n'est affiché quand rien n'a été écarté — le toast suffit.
+function _rendreCompteDeLActionEnMasse(channel, data) {
+ const el = document.getElementById(`${_prefixeDeFile(channel)}-bulk-report`);
+ if (!el) return;
+ const ecartees = (data && data.skipped) || [];
+ if (!ecartees.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+ const detail = (e) => e.assigned_to ? ` (@${escapeHtml(e.assigned_to)})`
+  : e.status ? ` (${escapeHtml(statusLabel(e.status))})` : "";
+ el.innerHTML = `
+  <div style="display: flex; justify-content: space-between; gap: 0.5rem; align-items: flex-start;">
+   <span><strong>${ecartees.length}</strong> <span>alerte(s) écartée(s) de l'action en masse :</span></span>
+   <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="this.closest('.bulk-report').classList.add('hidden')" aria-label="Fermer le compte rendu">✕</button>
+  </div>
+  <ul>${ecartees.map((e) => `<li><a href="#" onclick="openAlertModal(${e.id}); return false;">#${e.id}</a> — <span>${escapeHtml(e.reason || e.code)}</span>${detail(e)}</li>`).join("")}</ul>`;
+ el.classList.remove("hidden");
+}
+
+async function _posterLaPropositionEnMasse(corps) {
+ const response = await apiFetch("/api/alerts/bulk", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(corps),
+ });
+ return { ok: response.ok, status: response.status, data: await response.json() };
+}
+
+// Proposer la même décision, avec le même motif, pour toute la sélection. Le
+// serveur écrit une proposition par alerte ; la validation 4-yeux reste une
+// par une. Un faux positif sur une liste de gel (périmètre SANCTION) demande
+// une confirmation explicite : le serveur la réclame (409) avant d'écrire quoi
+// que ce soit, et dit pourquoi.
+async function bulkProposeSelected(channel, decision) {
+ const ids = Array.from(selectedAlertsByChannel[channel]);
+ if (!ids.length) { showToast("Aucune alerte sélectionnée.", "error"); return; }
+ const titre = decision === "CONFIRMED"
+  ? "Proposer « vrai positif » pour la sélection" : "Proposer « faux positif » pour la sélection";
+ const comment = await promptDialog(titre, {
+  message: "Un même motif pour chaque alerte sélectionnée : chacune reçoit sa proposition, et chacune sera validée une par une (4-yeux) par un réviseur différent de vous.",
+  textarea: true, placeholder: "Motivation réglementaire commune...",
+  // Les motifs de CETTE décision seulement : en masse, un clic distrait se
+  // multiplierait par le nombre d'alertes cochées.
+  suggestions: motifsDeLaDecision(await chargerMotifsDeCloture(), decision),
+ });
+ if (comment === null) return;
+ const corps = { ids, action: "propose", decision, comment };
+ try {
+  let reponse = await _posterLaPropositionEnMasse(corps);
+  const detail = reponse.data && reponse.data.detail;
+  if (reponse.status === 409 && detail && detail.code === "CONFIRMATION_SANCTION") {
+   const ok = await confirmDialog(detail.message, {
+    title: "Faux positif sur une liste de gel (périmètre SANCTION)",
+    confirmLabel: "Je confirme : chacune a été instruite", danger: true });
+   if (!ok) return;
+   reponse = await _posterLaPropositionEnMasse({ ...corps, confirm_sanction: true });
+  }
+  if (!reponse.ok) {
+   const d = reponse.data && reponse.data.detail;
+   showToast("Erreur : " + ((d && d.message) || d || "Action en masse refusée."), "error");
+   return;
+  }
+  const data = reponse.data;
+  showToast(data.message, data.skipped.length ? "warning" : "success", 7000);
+  _rendreCompteDeLActionEnMasse(channel, data);
+  clearAlertSelection(channel, false);
+  fetchAlerts(channel);
+  refreshSidebarCounters();
+ } catch (e) { console.error("Bulk propose error:", e); }
+}
+
+// « Prendre la suivante » : le serveur s'assigne, atomiquement, l'alerte non
+// assignée la plus urgente (échéance SLA, puis priorité) ; l'écran l'ouvre et
+// pose la visée de la file dessus. Rien à prendre n'est pas une erreur.
+async function prendreLaSuivante(channel = null) {
+ try {
+  const url = channel ? `/api/alerts/claim-next?channel=${encodeURIComponent(channel)}` : "/api/alerts/claim-next";
+  const response = await apiFetch(url, { method: "POST" });
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  _maJournee = null;   // l'accueil relira ce qui reste à prendre
+  if (!data.claimed) {
+   showToast(data.message, "info", 6000);
+   if (data.snoozed_unassigned) {
+    showToast(`${data.snoozed_unassigned} alerte(s) non assignée(s) en attente : elles reviennent d'elles-mêmes à l'échéance de leur report.`, "info", 7000);
+   }
+   return null;
+  }
+  const a = data.alert;
+  showToast(data.message, "success");
+  const espace = a.channel === "FILTERING" ? "filtering" : "screening";
+  switchTab(espace);
+  switchSubTab(espace, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening");
+  _viseAlerteId = a.id;
+  refreshAlertQueues();
+  openAlertModal(a.id);
+  return a;
+ } catch (e) {
+  console.error("Claim next error:", e);
+  return null;
+ }
+}
+
+// « Proposer & suivante » dans la modale : un bouton qui se déplie en ses deux
+// décisions — la décision reste dite en toutes lettres, jamais devinée.
+function boutonProposerEtSuivante() {
+ return `<span id="alert-proposer-suivante" style="display: inline-flex; gap: 0.5rem; flex-wrap: wrap;"><button class="btn btn-sm btn-secondary" onclick="deplierProposerEtSuivante()" title="Proposer une décision pour cette alerte, puis prendre la suivante non assignée la plus urgente">Proposer & suivante…</button></span>`;
+}
+
+function deplierProposerEtSuivante() {
+ const el = document.getElementById("alert-proposer-suivante");
+ if (!el) return;
+ el.innerHTML = `<button class="btn btn-sm btn-primary" onclick="proposerEtSuivante('FALSE_POSITIVE')">Faux positif & suivante</button>
+  <button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposerEtSuivante('CONFIRMED')">Vrai positif & suivante</button>`;
+ const premier = el.querySelector("button");
+ if (premier) premier.focus();
+}
+
+async function proposerEtSuivante(decision) {
+ const data = await proposeAlertDecision(decision);
+ if (data) await prendreLaSuivante(data.channel || "SCREENING");
 }
 
 // --- MFA TOTP (carte Paramètres + réinitialisation admin) ---
@@ -12988,7 +14515,7 @@ function renderCasefile(cf) {
 
  const eventsHtml = (cf.events || []).slice(-15).map(e => `
  <div style="border-left: 2px solid var(--border-color); padding: 0.3rem 0 0.3rem 0.7rem;">
- <small style="color: var(--text-muted);">${e.timestamp ? formatDateTime(e.timestamp) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+ <small style="color: var(--text-muted);">${e.timestamp ? formatDateTime(e.timestamp) : ""} — <strong>@${escapeHtml(e.username)}</strong> · <span>${escapeHtml(alertEventLabel(e.action))}</span></small>
  ${e.detail ? `<div style="font-size: 0.83rem;">${escapeHtml(e.detail)}</div>` : ""}
  </div>`).join("");
 

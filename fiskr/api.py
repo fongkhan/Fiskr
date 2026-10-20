@@ -11,13 +11,14 @@ import secrets
 import logging
 import shutil
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -25,6 +26,7 @@ from sqlalchemy.orm import Session
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
 from fiskr import rarete
+from fiskr import univers
 from fiskr.quality import evaluate_and_clean
 from fiskr.blocking import (generate_blocking_keys, lookup_blocking_keys,
                             BLOCKING_FIELDS as _BLOCKING_FIELDS)
@@ -48,15 +50,16 @@ from fiskr.database import (
     SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistNote, CsvColumnMapping,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
-    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
+    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES, ALERT_PRIORITY_LABELS,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
     BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
     NotificationDelivery, LearnedEquivalence
 )
 from fiskr.alerts import (open_or_redetect_alerts,
-                          is_whitelisted, whitelisted_pairs, compute_due_at)
+                          is_whitelisted, whitelisted_pairs, compute_due_at,
+                          PLANCHER_SANCTION, STATUTS_A_PRENDRE, critere_de_canal,
+                          criteres_prenables, prendre_la_suivante, rang_de_priorite_sql)
 from fiskr.notify import (
-    notify_event,
     smtp_configured as notify_smtp_configured,
     public_url as notify_public_url,
     default_recipients as notify_default_recipients,
@@ -73,32 +76,36 @@ from fiskr.fprules import (
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.backtest import (
     run_backtest, validate_candidate_rule, generate_test_panel,
-    TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
+    TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES,
+    MOTIF_D_APPROBATION_MIN, motif_d_approbation_exige, validite_du_cahier,
+    validites_des_cahiers,
 )
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
     run_pep_sync, run_ofsi_sync, run_seco_sync, run_ofac_nonsdn_sync, run_csl_sync,
     run_canada_sync, run_dfat_sync, run_hk_sfc_sync, run_amf_sync, run_worldbank_sync,
     OPENSANCTIONS_RUNNERS,
-    get_sync_config, EURLEX_ARCHIVE_DIR,
+    get_sync_config, motif_hors_planification, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _latest_ready_snapshot,
     _truncate_delta_details
 )
 from fiskr.names import ensure_parsed_name
+from fiskr.identification import elements_d_identification
 from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
 from fiskr.transactions import (parse_iso20022_payment, screen_payment_message,
-                                MessageTropVolumineux, MAX_PARTIES_PAR_MESSAGE)
+                                MessageTropVolumineux, MessageSansPartieCriblable,
+                                MAX_PARTIES_PAR_MESSAGE)
 from fiskr.adverse_media import search_adverse_media
-from fiskr.narrative import generate_alert_narrative
+from fiskr.narrative import generate_alert_narrative, ALERT_STATUS_LABELS
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
-    require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
+    require_fprules_lecture, require_blocking_lecture, require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
     validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN,
     generate_totp_secret, verify_totp, totp_provisioning_uri, require_admin_or_auditor
 )
 from fiskr.settings import (
-    require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
+    require_approval_enabled, require_approval_setting, exclusion_requirements, alert_four_eyes_required,
     whitelist_requirements, auto_rescreen_enabled,
     backtest_max_gap_pct, backtest_required,
     get_setting_with_source, set_setting,
@@ -111,7 +118,8 @@ from fiskr.settings import (
     BLOCKING_COMPONENTS, BLOCKING_FIELD_COMPONENTS, MAX_BLOCKING_FIELDS,
     blocking_layout, blocking_layout_with_source, blocking_config_for,
     alert_sla_hours, notification_events, alert_close_reasons,
-    SETTING_ALERT_CLOSE_REASONS,
+    SETTING_ALERT_CLOSE_REASONS, DECISIONS_DE_CLOTURE, motifs_de_cloture,
+    motifs_d_une_autre_decision,
     SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS, DEFAULT_NOTIFICATION_EVENTS,
     sync_schedules, SETTING_SYNC_SCHEDULES, SYNC_SOURCES,
     sync_auto_enabled, sync_sources_enabled, sync_automation_sources,
@@ -140,6 +148,10 @@ from fiskr.settings import (
 )
 from fiskr import resources as resource_tables
 from fiskr import country_risk
+from fiskr import gels as registre_des_gels
+from fiskr.database import MesureDeGel
+from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
+                            gel_declaration_delai_heures, perimeter_overrides)
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
@@ -167,8 +179,14 @@ watchlist_index: Dict[str, List[Dict[str, Any]]] = {}
 # Index de recherche plein texte de la palette Ctrl+K : (blob normalise, entite).
 # Construit avec le cache — la recherche globale ne touche jamais la base.
 watchlist_search_index: List[Tuple[str, Dict[str, Any]]] = []
-watchlist_version: str = "Database Active Snapshot"
-watchlist_hash: str = "N/A"
+# Reference de l'univers CHARGE dans ce processus (fiskr/univers.py) : version
+# lisible et empreinte, posees par `load_watchlist_cache` avec le cache meme
+# qu'elles decrivent. La version etait une constante (« Database Active
+# Snapshot ») et l'empreinte le hash du seul lot le plus recent : le journal
+# citait le meme univers pour deux criblages qui n'avaient pas compare au meme.
+watchlist_reference = univers.VIDE
+watchlist_version: str = univers.VIDE.version
+watchlist_hash: str = univers.EMPREINTE_VIDE
 # Layout de blocking utilise pour CONSTRUIRE l'index en memoire : les sondes
 # du criblage doivent utiliser le meme (coherence index/sonde garantie)
 watchlist_index_layout: List[str] = ["COUNTRY_ISO", "ENTITY_TYPE", "PHONETIC_FIRST"]
@@ -191,38 +209,66 @@ def _entity_search_blob(ent: Dict[str, Any]) -> str:
     return strip_accents(" | ".join(p for p in parts if p)).upper()
 
 
+def _valeur_de_cache(valeur):
+    """Une colonne telle que le cache de criblage doit la porter : serialisable."""
+    if isinstance(valeur, (datetime, date_type)):
+        return valeur.isoformat()
+    return valeur
+
+
 def load_watchlist_cache(db: Session):
     """Loads the active READY watchlist entities from the database into the in-memory cache."""
     global watchlist_store, watchlist_index, watchlist_hash, watchlist_index_layout, watchlist_search_index, watchlist_types
-    
-    # 1. Look for latest READY snapshots in DB of watchlist types (OFAC / EU / SSIE)
-    snapshots = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY"
-    ).order_by(Snapshot.uploaded_at.desc()).all()
+    global watchlist_reference, watchlist_version
+
+    # Ce chargement est aussi celui que declenche l'EPOQUE, dans les processus
+    # qui n'ont pas fait le changement (autres processus web, demon). Or les
+    # capacites du moteur et le reglage des ressources vivent dans des caches
+    # de processus que seul le processus qui recoit le PUT vidait : reproduit,
+    # un demon recharge apres la coupure de `adjust.dob` la voyait toujours
+    # active, et rebatissait son index avec. Les cles de l'index dependent de
+    # ces deux reglages : ils sont relus ICI, avant de batir quoi que ce soit.
+    caps.invalidate_context()
+    resource_tables.invalidate_context()
+    univers.invalider()
+
+    # Les lots READY des types WATCHLIST_* : la definition de l'univers vit
+    # dans fiskr/univers.py, ce chargement la lit.
+    #
+    # Aucun semis. Quand rien n'est en production, ce chargement versait le
+    # fichier de demonstration watchlist.json (5 fiches) dans la base, sous le
+    # type WATCHLIST_OFAC et au statut READY : sur une installation neuve, le
+    # premier criblage rendait NO_MATCH avec une ligne d'audit, la mise en
+    # service affichait « 1 liste en production », et le refus
+    # `exiger_un_univers` ne mordait jamais. Le cache reste desormais VIDE et le
+    # criblage est refuse ; une demonstration est un geste explicite
+    # (python tools/charger_demo.py).
+    snapshots = univers.lots_en_production(db)
 
     if not snapshots:
-        # Fallback: Ingest watchlist.json if it exists to seed the database
-        seed_watchlist_json(db)
-        # Re-fetch
-        snapshots = db.query(Snapshot).filter(
-            Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-            Snapshot.status == "READY"
-        ).order_by(Snapshot.uploaded_at.desc()).all()
-        
-    if not snapshots:
+        # Le cache precedent ne decrit plus rien de ce qui est en production :
+        # il est vide, et sa reference avec lui, plutot que garde a cote d'un
+        # univers declare vide.
         logger.warning("No watchlist snapshots found in database to load cache.")
         watchlist_types = set()
+        watchlist_store = []
+        watchlist_index = {}
+        watchlist_search_index = []
+        watchlist_reference = univers.VIDE
+        watchlist_version = univers.VIDE.version
+        watchlist_hash = univers.EMPREINTE_VIDE
+        rarete.installer(None)
         return
-        
-    # Get active watchlist hash
-    active_hash = snapshots[0].file_hash
-    watchlist_hash = active_hash
-    
+
     # Load all entities for these active snapshots (excluded entities stay out
     # of production but are kept in DB for audit; NULL = legacy rows, not excluded)
     snapshot_ids = [s.snapshot_id for s in snapshots]
     snapshot_types = {s.snapshot_id: s.file_type for s in snapshots}
+    # Reference calculee sur les lots MEMES qui vont etre charges, et avant les
+    # fiches : une exclusion posee pendant la lecture laisse une empreinte plus
+    # ancienne que le cache — un rechargement de plus au prochain changement
+    # d'epoque —, jamais un cache plus ancien que l'empreinte qu'il cite.
+    reference = univers.calculer(db, snapshots)
     entities = db.query(WatchlistEntity).filter(
         WatchlistEntity.snapshot_id.in_(snapshot_ids),
         WatchlistEntity.excluded.isnot(True)
@@ -238,8 +284,13 @@ def load_watchlist_cache(db: Session):
     screening_cfg = blocking_config_for(screening_layout)
 
     for ent in entities:
-        # Convert SQLAlchemy object to dictionary for cache
-        ent_dict = {c.name: getattr(ent, c.name) for c in ent.__table__.columns}
+        # Convert SQLAlchemy object to dictionary for cache. Les dates y
+        # voyagent en ISO 8601 : la fiche rencontree finit dans l'arbre de
+        # decision, que la colonne JSON du journal refuse brut — une fiche
+        # corrigee a la main (`modified_at`) rendait tout criblage qui la
+        # touchait en 500, sans ligne d'audit.
+        ent_dict = {c.name: _valeur_de_cache(getattr(ent, c.name))
+                    for c in ent.__table__.columns}
         # Type de liste d'origine : permet les seuils de cut-off par liste
         ent_dict["_list_type"] = snapshot_types.get(ent.snapshot_id)
         temp_store.append(ent_dict)
@@ -257,6 +308,12 @@ def load_watchlist_cache(db: Session):
     watchlist_index_layout = screening_layout
     watchlist_search_index = temp_search
     watchlist_types = {e["_list_type"] for e in temp_store if e.get("_list_type")}
+    # La reference est posee AVEC l'index qu'elle decrit, jamais avant : un
+    # criblage servi pendant le chargement citerait sinon le nouvel univers en
+    # comparant a l'ancien.
+    watchlist_reference = reference
+    watchlist_version = reference.version
+    watchlist_hash = reference.empreinte
     # Frequence des mots de nom sur le corpus qui vient d'etre charge : c'est
     # la seule fois ou l'on tient l'univers crible en entier, et le compte doit
     # porter sur CE corpus, pas sur un autre. La table est posee dans le
@@ -264,92 +321,6 @@ def load_watchlist_cache(db: Session):
     rarete.installer(rarete.construire(temp_store, "SCREENING", watchlist_hash))
     logger.info(f"Loaded {len(watchlist_store)} active database entities into memory across {len(watchlist_index)} blocking blocks.")
 
-def seed_watchlist_json(db: Session):
-    """Seeds the DB watchlist from watchlist.json if DB is empty."""
-    watchlist_path = PROJECT_ROOT / "watchlist.json"
-    if not watchlist_path.exists():
-        return
-        
-    logger.info("Seeding database watchlist from watchlist.json...")
-    try:
-        with open(watchlist_path, "rb") as f:
-            content = f.read()
-            fhash = hashlib.sha256(content).hexdigest()
-            data = json.loads(content)
-            
-        snap_id = f"seed-snap-{str(uuid.uuid4())[:8]}"
-        snap = Snapshot(
-            snapshot_id=snap_id,
-            file_type="WATCHLIST_OFAC",
-            file_name="watchlist.json",
-            file_hash=fhash,
-            record_count=len(data),
-            status="READY"
-        )
-        db.add(snap)
-        
-        for idx, item in enumerate(data):
-            entity_id = item.get("entity_id") or f"WL-SEED-{idx}"
-            
-            # Map parsed fields
-            parsed = item.get("individual_name_parsed") or {}
-            aliases = item.get("aliases") or []
-            if not isinstance(aliases, dict):
-                # Classify aliases dynamically
-                from fiskr.ingest import categorize_aliases
-                raw_aliases = [{"name": a, "type": "Strong"} for a in aliases if a]
-                aliases = categorize_aliases(raw_aliases)
-                
-            countries = item.get("countries") or {}
-            
-            # Create checksum
-            ent_checksum = compute_checksum(item)
-            
-            raw_etype = item.get("entity_type", "I")
-            etype = "I" if raw_etype == "PP" else ("E" if raw_etype == "PM" else raw_etype)
-            
-            alt_addrs = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
-            
-            db_ent = WatchlistEntity(
-                snapshot_id=snap_id,
-                entity_id=entity_id,
-                entity_type=etype,
-                primary_name=item.get("primary_name", ""),
-                individual_name_parsed=parsed,
-                aliases=aliases,
-                dates_of_birth=item.get("dates_of_birth", []),
-                date_of_death=item.get("date_of_death"),
-                is_deceased=str(item.get("is_deceased", "False")).lower() == "true",
-                gender=item.get("gender") or (item.get("genders", ["U"])[0] if item.get("genders") else "U"),
-                countries=countries,
-                # New fields
-                place_of_birth=item.get("place_of_birth"),
-                address=item.get("address") or item.get("adress"),
-                city=item.get("city"),
-                state=item.get("state"),
-                country=item.get("country"),
-                origin=item.get("origin"),
-                designation=item.get("designation"),
-                designation_reasons=item.get("designation_reasons"),
-                additional_informations=item.get("additional_informations") or item.get("additional_info"),
-                alternative_addresses=alt_addrs,
-                imo_number=item.get("imo_number"),
-                aircraft_tail_number=item.get("aircraft_tail_number"),
-                lei_number=item.get("lei_number"),
-                national_registry_ids=item.get("national_registry_ids"),
-                other_registration_ids=item.get("other_registration_ids"),
-                passport_documents=item.get("passport_documents"),
-                national_id_documents=item.get("national_id_documents"),
-                other_id_documents=item.get("other_id_documents"),
-                entity_checksum=ent_checksum
-            )
-            db.add(db_ent)
-            
-        db.commit()
-        logger.info("Successfully seeded database watchlist snapshot.")
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to seed watchlist from JSON: {e}")
 
 # Executeurs de sync par source (planification cron individuelle)
 _SYNC_RUNNERS = {
@@ -383,13 +354,13 @@ def _cron_sync_tick(tick=None) -> None:
         # Etat EFFECTIF (reglage a chaud > config.yaml) : l'interrupteur et les
         # sources actives se pilotent depuis l'application, sans redemarrage
         sync_cfg = get_sync_config(db)
-        if not sync_cfg.get("auto_enabled"):
+        if motif_hors_planification(sync_cfg):
             return
         schedules = sync_schedules(db)
     finally:
         db.close()
     for source, expr in schedules.items():
-        if not sync_cfg.get(source, {}).get("enabled"):
+        if motif_hors_planification(sync_cfg, source):
             continue
         try:
             if not cron_matches(expr, tick):
@@ -597,10 +568,14 @@ def _digest_tick(tick=None) -> None:
             logger.error(f"Cron du digest invalide ({digest_cfg['cron']}) : {bad}")
             return
         payload = build_kpi_digest(db)
+        logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
+        # Par `emit`, le chemin journalise : le digest partait par l'ancien
+        # `notify_event`, qui n'ecrit rien au journal des envois. L'ecran
+        # disait « actif » sur un envoi dont personne ne pouvait savoir s'il
+        # etait jamais parti — releve en production : 0 envoi au journal.
+        emit(db, "kpi_digest", payload)
     finally:
         db.close()
-    logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
-    notify_event("kpi_digest", payload)
 
 
 async def _digest_scheduler():
@@ -703,6 +678,15 @@ def _notification_batch_tick(tick=None) -> None:
     tick = tick or datetime.now()
     db = next(get_db())
     try:
+        # Mesures de gel non declarees au-dela du seuil : AVANT le reglage du
+        # recapitulatif, et a chaque minute. Le recapitulatif peut etre coupe
+        # ou ne passer qu'une fois l'heure ; une declaration due
+        # « immediatement » (LD DGT/ACPR §182) n'attend ni l'un ni l'autre.
+        try:
+            registre_des_gels.detecter_retards(db)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Détection des déclarations de gel en retard impossible : {e}")
         batch_cfg = notification_batch_settings(db)
         if not batch_cfg["enabled"]:
             return
@@ -774,6 +758,53 @@ async def _retention_scheduler():
         except Exception as e:
             logger.error(f"Purge de rétention en échec sur ce tick : {e}")
 
+
+# Cadence de la surveillance de fraicheur : les seuils se comptent en heures
+# et en jours, un quart d'heure de latence ne change rien au geste attendu.
+_FRAICHEUR_CADENCE_MIN = 15
+
+
+def _fraicheur_tick(tick=None) -> None:
+    """
+    UN tic de la surveillance de fraicheur : s'il constate que des listes
+    viennent de franchir un seuil de la mise en service, il emet UN
+    `fraicheur_depassee` qui les nomme (une fois par liste et par seuil, cf.
+    fraicheur.signaler_les_franchissements). Synchrone (API ou demon).
+
+    Pourquoi un tic periodique, et pas apres chaque synchronisation ou
+    homologation : un seuil se franchit avec le TEMPS, pas a l'occasion d'un
+    evenement. Le retard se mesure depuis la plus ancienne version en attente,
+    qu'une synchronisation de plus ne deplace pas ; une homologation ne fait que
+    le faire baisser, elle n'a rien a signaler. Et le cas qui compte le plus —
+    personne n'homologue rien, 47 jours durant — est precisement celui ou aucun
+    evenement ne se produit. Le tic vit avec les autres planificateurs, dans le
+    demon : si celui-ci meurt, c'est la sonde de conformite qui le voit.
+    """
+    from fiskr.fraicheur import signaler_les_franchissements
+
+    tick = tick or datetime.now()
+    if tick.minute % _FRAICHEUR_CADENCE_MIN:
+        return
+    db = next(get_db())
+    try:
+        signales = signaler_les_franchissements(db)
+        if signales:
+            logger.warning("Fraîcheur : seuil franchi pour " + ", ".join(
+                f"{s['type']} ({s['niveau']})" for s in signales))
+    finally:
+        db.close()
+
+
+async def _fraicheur_scheduler():
+    """Boucle minute de la surveillance de fraicheur (mode thread, sans demon)."""
+    while True:
+        now = datetime.now()
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        try:
+            await asyncio.to_thread(_fraicheur_tick, datetime.now())
+        except Exception as e:
+            logger.error(f"Surveillance de fraîcheur en échec sur ce tick : {e}")
+
 _STUCK_SNAPSHOT_AFTER_HOURS = 1
 
 
@@ -827,6 +858,11 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
                         f"{real_count} fiche(s) réellement présentes."),
             )
         db.commit()
+        if any(s.status == "READY" and s.file_type in WATCHLIST_FILE_TYPES for s in stuck):
+            # Une liste vient d'entrer en production. Le demon, qui porte cette
+            # reparation, ne peut pas toucher la memoire des processus web :
+            # seule l'epoque leur dit de recharger — et de changer d'empreinte.
+            bump_watchlist_epoch(db)
         logger.warning(
             f"Snapshots réparés au démarrage : {summary['repaired']} remis en production, "
             f"{summary['failed']} marqués en erreur (aucune fiche)."
@@ -1138,6 +1174,7 @@ async def lifespan(app: FastAPI):
         background_tasks.append(asyncio.create_task(_retention_scheduler()))
         background_tasks.append(asyncio.create_task(_notification_batch_scheduler()))
         background_tasks.append(asyncio.create_task(_resource_mining_scheduler()))
+        background_tasks.append(asyncio.create_task(_fraicheur_scheduler()))
     yield
     # Shutdown
     for task in background_tasks:
@@ -1289,6 +1326,41 @@ async def healthcheck():
         "watchlist_in_production": referentiel,
         "watchlist_cache_loaded": len(watchlist_store) > 0,
     }
+
+
+@app.get("/api/health/conformite")
+def healthcheck_conformite(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(require_roles("auditor")),
+):
+    """
+    Sonde de CONFORMITE pour une supervision externe : **503** quand un
+    controle BLOQUANT de la mise en service le dit (fraicheur au-dela de
+    7 jours, demon arrete ou travail fige, aucune liste en production, liste
+    de sanctions sans sa source de reference, secrets du code source), **200**
+    sinon. Le corps nomme ce qui ne va pas, et la portee de ce qui a ete regarde.
+
+    Releve en production le 19 octobre 2026 : 47 jours sans homologation, la
+    notification coupee, 0 envoi immediat reussi sur 335 — et `/api/health`
+    repondait « ok ». Elle dit que le processus vit ; elle ne dit pas ce que
+    vaut ce qu'il crible. Celle-ci le dit sans passer par le courriel :
+    UptimeRobot, Zabbix ou Nagios alertent sur un code HTTP.
+
+    Lisible par une cle d'API de role `auditor` (X-API-Key) : lecture seule par
+    construction. Rapide : les controles rejoues ne font que quelques lectures
+    d'index (cf. mise_en_service._CONTROLES_DE_LA_SONDE). Route `def` et non
+    `async` : ses lectures passent par le pool de fils au lieu de bloquer la
+    boucle d'evenements, qu'une supervision sollicite chaque minute.
+    """
+    from fiskr.mise_en_service import etat_de_conformite
+    etat = etat_de_conformite(db)
+    corps = {
+        "status": "ok" if etat["conforme"] else "degraded",
+        "checked_at": datetime.utcnow().isoformat() + "Z",
+        "bloquants": etat["bloquants"],
+        "portee": etat["portee"],
+    }
+    return JSONResponse(status_code=200 if etat["conforme"] else 503, content=corps)
 
 # ------------------ PYDANTIC MODELS ------------------
 
@@ -2393,6 +2465,7 @@ _PORTABLE_SETTINGS = {
     SETTING_AUTO_BACKTEST_ENABLED,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
+    SETTING_GEL_DELAI,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
     # Synchronisation automatique : les cles de source sont universelles,
@@ -2698,11 +2771,17 @@ def _match_allege(resultat: Dict[str, Any]) -> Dict[str, Any]:
     Elle reste rendue EN ENTIER sur `best_match`, et ECRITE dans le journal
     d'audit immuable de CHAQUE correspondance : la base fait foi, la reponse
     n'a pas a la retransporter autant de fois qu'il y a de correspondances.
+
+    Meme traitement pour l'empreinte du client (fiskr.empreintes) : identique
+    sur chaque correspondance d'un meme criblage, journalisee avec chacune,
+    rendue une fois sur `best_match`. Repetee sur chaque ligne, elle rompait
+    le meme contrat (mesure : +10,6 % entre 60 et 200 candidats).
     """
-    if "name_rarity" not in resultat:
+    if "name_rarity" not in resultat and "client_fingerprint" not in resultat:
         return resultat
     allege = dict(resultat)
-    del allege["name_rarity"]
+    allege.pop("name_rarity", None)
+    allege.pop("client_fingerprint", None)
     return allege
 
 
@@ -2850,7 +2929,12 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         client_dict["client_type"] = "PP"
     else:
         client_dict["client_type"] = "PM"
-        
+    # Identification du client telle que CE criblage la recoit, avant tout
+    # nettoyage (le re-criblage, lui, ne nettoie pas) : journalisee avec chaque
+    # decision, comparee a celle des paires de liste blanche (fiskr.empreintes).
+    from fiskr.empreintes import empreinte_client, examiner_la_paire, notifier_les_bascules
+    empreinte = empreinte_client(client_dict)
+
     # Evaluate Data Quality. Canal CRIBLAGE : la normalisation de la sonde
     # client obeit aux capacites du moteur (translitteration par ecriture,
     # diacritiques, suffixes juridiques), contrairement a l'ingestion.
@@ -2934,9 +3018,13 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
     # Audit trail persistence
     audit_id = None
     alert_id = None
+    best_alert = None
     whitelist_pair_id = None
     hits_summary = {"hits": 0, "opened": 0, "closed_by_rule": 0,
                     "redetected": 0, "whitelisted": 0,
+                    # Paires qui n'ont PAS absorbe : fiche ou client change
+                    # depuis leur decision (l'alerte s'ouvre et le dit)
+                    "whitelist_stale": 0,
                     # Ventilation par perimetre : sur SANCTION, un ecart entre
                     # ce qui est trouve et ce qui reste ouvert doit sauter aux
                     # yeux — c'est le perimetre ou un manquement est
@@ -2963,17 +3051,27 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         classement = perimeter_overrides(db) if hits else {}
 
         a_journaliser: List[Any] = []
+        reexamens: Dict[int, Dict[str, Any]] = {}
         for position, hit in enumerate(hits, start=1):
             fiche = hit.get("watchlist_entity") or {}
+            hit["client_fingerprint"] = empreinte
             paire = paires.get(fiche.get("entity_id"))
             if paire is not None:
-                hit["status"] = "WHITELISTED"
-                hit["whitelist_pair_id"] = paire.id
-                hits_summary["whitelisted"] += 1
-                if hit is best_match:
-                    whitelist_pair_id = paire.id
-                a_journaliser.append((hit, None))
-                continue
+                reexamen = examiner_la_paire(db, paire, fiche, empreinte)
+                if reexamen is None:
+                    hit["status"] = "WHITELISTED"
+                    hit["whitelist_pair_id"] = paire.id
+                    hits_summary["whitelisted"] += 1
+                    if hit is best_match:
+                        whitelist_pair_id = paire.id
+                    a_journaliser.append((hit, None))
+                    continue
+                # La fiche ou le client a change depuis la decision de la
+                # paire : elle ne couvre plus cette correspondance, qui suit le
+                # chemin de toutes les autres — l'alerte s'ouvre et dit pourquoi.
+                hit["whitelist_stale"] = {"pair_id": paire.id, "reason": reexamen["motif"]}
+                reexamens[id(hit)] = reexamen
+                hits_summary["whitelist_stale"] += 1
             # Regle des 50 % : risque herite par detention majoritaire du
             # liste matche (informatif, trace dans le decision_tree). Calcule
             # pour la meilleure correspondance — c'est celle qui porte le
@@ -2997,6 +3095,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         # seuil (« ce client a bien ete crible, meilleur score X »).
         if not hits:
             best_match["screening_lists_restriction"] = requested_lists or "ALL"
+            best_match["client_fingerprint"] = empreinte
             fiche = best_match.get("watchlist_entity") or {}
             if fiche.get("entity_id"):
                 inherited = compute_inherited_risk(db, fiche["entity_id"], max_depth=2)
@@ -3018,7 +3117,8 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
 
         # Une decision ALERT ouvre (ou re-detecte) une alerte de travail —
         # pour CHAQUE correspondance retenue, pas seulement la meilleure.
-        a_alerter = [{"audit": ligne, "match": hit, "rule": regle}
+        a_alerter = [{"audit": ligne, "match": hit, "rule": regle,
+                      "whitelist_stale": reexamens.get(id(hit))}
                      for (hit, regle), ligne in zip(a_journaliser, lignes)
                      if hit.get("status") == "ALERT"]
         if not a_alerter:
@@ -3043,6 +3143,22 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
                 if entree["match"] is best_match:
                     alert_id = identifiant
                     break
+            # La meilleure correspondance que la liste blanche n'a PAS
+            # absorbee (`hits` est trie par score), et son alerte. Distincte
+            # de `best_match` des qu'une paire couvre la meilleure : une
+            # campagne classait alors le client « sans correspondance » alors
+            # qu'une autre venait d'ouvrir une alerte.
+            retenue = a_alerter[0]
+            fiche_retenue = retenue["match"].get("watchlist_entity") or {}
+            best_alert = {
+                "entity_id": fiche_retenue.get("entity_id"),
+                "primary_name": fiche_retenue.get("primary_name"),
+                "list_type": fiche_retenue.get("_list_type"),
+                "final_score": retenue["match"].get("final_score"),
+                "audit_trail_id": retenue["audit"].id,
+                "alert_id": resultat_alertes["alert_ids"][0],
+            }
+        notifier_les_bascules(db, reexamens.values())
     else:
         # Log dummy NO_MATCH result
         no_match_result = {
@@ -3085,6 +3201,7 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
         "hits": hits_summary,
         "audit_trail_id": audit_id,
         "alert_id": alert_id,
+        "best_alert": best_alert,
         "whitelisted": whitelist_pair_id is not None,
         "whitelist_pair_id": whitelist_pair_id,
         "screening_lists": requested_lists or "ALL",
@@ -3154,6 +3271,46 @@ def _validate_screening_lists(raw_lists) -> Optional[List[str]]:
         return None  # toutes les listes = aucune restriction
     return requested
 
+
+def cribler_un_profil(db: Session, client_dict: Dict[str, Any], username: str,
+                      requested_lists: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Criblage unitaire declenche par une requete : cache moteur garanti charge
+    ET a l'epoque courante, puis le cœur partage `screen_client_profile`.
+
+    Le chemin de fraicheur n'est ecrit qu'ici, et chaque route le prend. Il
+    etait recopie route par route, et le webhook temps reel l'avait oublie :
+    sous Passenger (pas de lifespan, pas de veilleur d'epoque), un processus
+    neuf repondait 409 « Aucune liste n'est en production » avec une liste
+    READY en base, et un processus dont une autre route avait charge le cache
+    criblait contre la version de ce moment-la — mesure : une DGT mise en
+    production designant le client, NO_MATCH journalise par le webhook, ALERT
+    rendu par /api/screen pour le meme profil.
+    """
+    _ensure_watchlist_cache(db)
+    return screen_client_profile(db, client_dict, username, requested_lists)
+
+
+def cribler_la_requete(db: Session, payload: ScreenClientRequest, username: str) -> Dict[str, Any]:
+    """Criblage temps reel d'une charge utile /api/screen — la meme fonction
+    pour la route humaine et pour le webhook du SI amont."""
+    from fiskr.identification import identifiant_calcule
+    client_dict = payload.model_dump()
+    # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
+    client_dict.pop("screening_lists", None)
+    requested_lists = _validate_screening_lists(payload.screening_lists)
+    # Sans identifiant, le client n'en changeait pas moins a chaque saisie : le
+    # formulaire en tirait un au hasard, et l'API n'en posait aucun — aucune
+    # deduplication d'alerte, aucune paire de liste blanche possible. Il est
+    # derive de ce qui le decrit, et la reponse dit qu'il est calcule.
+    calcule = False
+    if not (client_dict.get("client_id") or "").strip():
+        client_dict["client_id"] = identifiant_calcule(client_dict)
+        calcule = client_dict["client_id"] is not None
+    resultat = cribler_un_profil(db, client_dict, username, requested_lists)
+    return {**resultat, "client_id": client_dict.get("client_id"), "client_id_calcule": calcule}
+
+
 @app.post("/api/screen")
 async def screen_client(
     request: ScreenClientRequest,
@@ -3174,13 +3331,9 @@ async def screen_client(
     jamais charge son cache. Le premier criblage apres un redemarrage paie
     donc le chargement ; c'est le prix de la justesse sur un endpoint
     reglementaire, et le seul chemin ou il se paie encore.
+    La garantie vit dans `cribler_un_profil`, partagee avec les webhooks.
     """
-    _ensure_watchlist_cache(db)
-    client_dict = request.model_dump()
-    # Restriction eventuelle du perimetre (retiree du profil : elle n'en fait pas partie)
-    client_dict.pop("screening_lists", None)
-    requested_lists = _validate_screening_lists(request.screening_lists)
-    return screen_client_profile(db, client_dict, current_user["username"], requested_lists)
+    return cribler_la_requete(db, request, current_user["username"])
 
 
 @app.get("/api/screen/preview")
@@ -3224,8 +3377,25 @@ async def screen_transaction_message(
     ou pacs.008, crible chaque partie (donneur d'ordre, bénéficiaire, ultimes,
     agents bancaires) contre les listes en production — ou le sous-ensemble
     `screening_lists` (CSV de types WATCHLIST_*, restriction tracée dans
-    l'audit) — et rend un verdict global PASS / HIT. Chaque partie criblée
-    est tracée dans le journal d'audit ; chaque hit ouvre une alerte.
+    l'audit) — ainsi que ses informations de remise (`RmtInf/Ustrd`), et rend
+    un verdict global :
+
+    - `HIT` : au moins une correspondance en alerte (partie ou texte libre) ;
+      chaque hit ouvre une alerte adjudicable ;
+    - `INCOMPLETE` : rien n'est en alerte, mais le filtrage ne peut pas établir
+      un PASS — une partie n'a pu être comparée à rien (statut
+      `NOT_SCREENED`, motif dans `not_screened_label`), ou une information
+      obligatoire du règlement (UE) 2023/1113 manque (`missing_information`,
+      liste nommée avec les transactions concernées) — art. 5 (les deux
+      numéros de compte) quand tous les prestataires de la chaîne sont établis
+      dans l'Union ou l'EEE d'après leur BIC, art. 4 sinon, et le manque dit
+      pourquoi (`general_rule_reasons`) ;
+    - `PASS` : toutes les parties criblées sans correspondance, message complet.
+
+    Chaque partie, criblée ou non, est tracée dans le journal d'audit. Une
+    partie sans nom est rapprochée sur son identifiant exact (BIC, LEI). Un
+    message dont aucune partie ne porte de nom ni d'identifiant exact est
+    refusé (422) : un verdict n'y porterait sur rien.
     """
     requested_lists = None
     if screening_lists and screening_lists.strip():
@@ -3263,13 +3433,17 @@ async def screen_transaction_message(
         # d'attente : le message dit combien de parties il porte et quoi faire.
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
+    except MessageSansPartieCriblable as e:
+        # Bien forme, mais rien a comparer : ni PASS ni HIT n'auraient de sens.
+        raise HTTPException(
+            status_code=422, detail=str(e))
     if result.get("verdict") == "HIT":
         hits = [p for p in (result.get("parties") or []) if p.get("status") == "ALERT"]
         emit(db, "filtering_hit", {
             "Fichier": file.filename, "Type de message": parsed.get("message_type"),
             "Identifiant du message": parsed.get("msg_id"),
             "Parties en alerte": result.get("hits_count"),
-            "Parties criblées": len(result.get("parties") or []),
+            "Parties criblées": len(result.get("parties") or []) - result.get("not_screened_count", 0),
             "Détail": ", ".join(
                 f"{h.get('name')} → {h.get('best_watchlist_name')} ({h.get('final_score')})"
                 for h in hits[:5]
@@ -3476,7 +3650,7 @@ async def preview_ingest(
             CsvColumnMapping.headers_fingerprint == empreinte).first()
         for brut in parse_csv_file(str(chemin), delimiter=delimiter,
                                    mapping_dict=correspondance or None):
-            item = ensure_parsed_name(dict(brut))
+            item = ensure_parsed_name(_normaliser_ligne_csv(file_type, dict(brut)))
             report = evaluate_and_clean(item)
             if report["is_valid"]:
                 acceptees += 1
@@ -3528,15 +3702,52 @@ async def preview_ingest(
         except Exception:
             pass
 
-# Champs que l'import LIT réellement, par type de fichier. Dérivés du Quality
-# Gate, qui les nomme déjà dans ses messages de refus : les recopier ici
-# serait une seconde source de vérité, vouée à diverger.
-_APERCU_CHAMPS = {
-    "CLIENT_BASE": ("client_id", "client_type", "client_first_name", "client_last_name",
-                    "client_company_name", "client_dob", "nationality", "residence"),
-    "WATCHLIST_EU": ("entity_id", "entity_type", "primary_name", "nationality",
-                     "birth_date", "origin"),
+# Correspondance UNIQUE des colonnes CSV : pour chaque champ que l'import lit,
+# les autres en-têtes qu'il accepte à sa place. L'aperçu (champs affichés),
+# son assistant (champs proposés), la validation d'une correspondance et
+# l'import lisent tous CETTE table, au travers de `_normaliser_ligne_csv`.
+#
+# Il y en avait deux. L'aperçu proposait `birth_date` et montrait la date
+# « retenue » ; l'import ne lisait que `dates_of_birth` ou `dob`. Une liste UE
+# de 25 fiches est entrée en production avec 25 dates de naissance vides — et
+# chaque alerte disait « Pas de comparaison DOB » : le criblage perdait son
+# premier discriminant d'homonymes, sous un aperçu qui affirmait l'inverse.
+# L'écart jouait aussi dans l'autre sens : l'import acceptait `id` et `dob`,
+# que l'aperçu montrait vides.
+_CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "CLIENT_BASE": {
+        "client_id": (), "client_type": (), "client_first_name": (),
+        "client_last_name": (), "client_company_name": (), "client_dob": (),
+        "nationality": (), "residence": (),
+    },
+    "WATCHLIST_EU": {
+        "entity_id": ("id",),
+        "entity_type": (),
+        "primary_name": (),
+        "nationality": (),
+        "dates_of_birth": ("dob", "birth_date"),
+        "origin": (),
+    },
 }
+
+# Champs attendus par type, dans l'ordre d'affichage : DÉRIVÉS de la table.
+_APERCU_CHAMPS = {t: tuple(champs) for t, champs in _CHAMPS_CSV.items()}
+
+
+def _normaliser_ligne_csv(file_type: str, ligne: Dict[str, Any]) -> Dict[str, Any]:
+    """Remplit chaque champ attendu depuis le premier en-tête accepté qui porte
+    une valeur. Appelée à l'identique par l'aperçu et par l'import : ce que
+    l'aperçu montre est ce que l'import écrit."""
+    for champ, autres in _CHAMPS_CSV.get(file_type, {}).items():
+        if str(ligne.get(champ) or "").strip():
+            continue
+        for entete in autres:
+            valeur = str(ligne.get(entete) or "").strip()
+            if valeur:
+                ligne[champ] = valeur
+                break
+    return ligne
+
 
 def _apercu_champs_compris(file_type: str, item: Dict[str, Any]) -> Dict[str, str]:
     """Ce que le moteur a retenu de la ligne, champ par champ. Une valeur vide
@@ -3624,8 +3835,11 @@ def ingest_snapshot(
         exists = db.query(Snapshot).filter(Snapshot.file_hash == fhash).first()
         if exists:
             # Snapshot already loaded (possibly pending review or rejected), reuse it.
+            # Dit comme tel : l'écran annonçait « importé avec succès » sur un
+            # fichier dont rien n'avait été réimporté (et en anglais).
             return {
-                "message": "Snapshot with this hash already uploaded.",
+                "message": "Fichier déjà importé (même empreinte SHA-256) : rien n'a été réimporté.",
+                "already_imported": True,
                 "snapshot_id": exists.snapshot_id,
                 "record_count": exists.record_count,
                 "status": exists.status
@@ -3747,6 +3961,48 @@ def _memoriser_correspondance(db: Session, file_type: str, chemin, delimiter: st
             db.rollback()
         except Exception:
             pass
+
+
+def _cribler_le_referentiel_importe(db: Session, snapshot_id: str,
+                                    username: str) -> Dict[str, Any]:
+    """
+    Un referentiel clients entre en production : ses clients nouveaux ou
+    modifies partent au criblage (travail `client_screening`), et le message
+    d'import dit ce qui se passe — ou pourquoi rien ne se passe.
+
+    L'import ne criblait personne et annoncait, en anglais, 406 elements
+    importes ; l'accueil disait « Rien ne vous attend ». Un client arrive apres la
+    derniere mise a jour des listes n'etait confronte a rien.
+    """
+    from fiskr.rescreen import lots_en_production
+    if not lots_en_production(db):
+        return {"launched": False, "reason": "NO_LIST_IN_PRODUCTION",
+                "message": ("Ces clients ne sont PAS criblés : aucune liste n'est en "
+                            "production, ils n'ont été comparés à rien. Ils le restent "
+                            "tant qu'aucune liste n'est en production.")}
+    token = f"client-screening:{snapshot_id}"
+    suivi = ("Il se suit dans les opérations en cours ; son résultat s'affiche sur la "
+             "carte « Couverture du criblage » (Criblage → Batch).")
+    try:
+        job = job_queue.submit("client_screening", token=token,
+                               label="Criblage des clients nouveaux ou modifiés",
+                               params={"snapshot_id": snapshot_id, "username": username},
+                               created_by=username, dedupe_key=token,
+                               snapshot_id=snapshot_id)
+    except JobConflict:
+        return {"launched": True, "job_token": token, "status": "QUEUED",
+                "message": f"Criblage des clients nouveaux ou modifiés déjà en cours. {suivi}"}
+    if job.status == "DONE":
+        return {"launched": True, "job_token": token, "status": "DONE",
+                "result": job.result,
+                "message": f"Criblage terminé : {(job.result or {}).get('message', '')}"}
+    if job.status == "ERROR":
+        return {"launched": True, "job_token": token, "status": "ERROR",
+                "message": (f"Le criblage des clients a échoué : {job.error}. Les fiches "
+                            f"concernées restent NON criblées — relancez un lookback.")}
+    return {"launched": True, "job_token": token, "status": job.status,
+            "message": ("Criblage des clients nouveaux ou modifiés lancé contre les "
+                        f"listes en production. {suivi}")}
 
 
 def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
@@ -3969,8 +4225,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
                                         mapping_dict=column_mapping or None):
                     # Moteur de detection des noms : colonnes explicites ou
-                    # decoupage du nom principal pour les individus (PP/I)
-                    item = ensure_parsed_name(item)
+                    # decoupage du nom principal pour les individus (PP/I).
+                    # En-têtes acceptés résolus d'abord, comme dans l'aperçu.
+                    item = ensure_parsed_name(_normaliser_ligne_csv(file_type, item))
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
                         rejets.ajouter(report)
@@ -3987,7 +4244,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     elif not isinstance(aliases, dict):
                         aliases = {"high_priority": [], "low_priority": []}
                         
-                    dob = item.get("dates_of_birth") or item.get("dob")
+                    dob = item.get("dates_of_birth")
                     dob_arr = [dob] if dob else []
                     
                     countries = {
@@ -4002,7 +4259,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     alt_addrs_csv = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
-                        entity_id=item.get("entity_id") or item.get("id") or str(uuid.uuid4())[:8],
+                        entity_id=item.get("entity_id") or str(uuid.uuid4())[:8],
                         entity_type=etype,
                         primary_name=report["cleansed_name"],
                         individual_name_parsed=parsed_csv,
@@ -4036,6 +4293,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             # Client base CSV
             for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
                                         mapping_dict=column_mapping or None):
+                item = _normaliser_ligne_csv(file_type, item)
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
                     rejets.ajouter(report)
@@ -4107,10 +4365,19 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         # Update Snapshot status. En mode homologation, les watchlists attendent
         # un pointage humain (PENDING_REVIEW) et restent hors du cache de criblage.
         staging = file_type in WATCHLIST_FILE_TYPES and require_approval_enabled(db)
+        # Reference de l'univers AVANT que ce lot n'y entre : le re-criblage qui
+        # suit en prolonge la couverture des clients (cf. rescreen).
+        from fiskr.rescreen import reference_de_l_univers
+        reference_avant = (reference_de_l_univers(db)[1]
+                           if file_type in WATCHLIST_FILE_TYPES and not staging else None)
         snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
         snap.processed_count = record_count
         snap.phase = "RELOAD" if (file_type in WATCHLIST_FILE_TYPES and not staging) else "DONE"
+        if file_type == "CLIENT_BASE":
+            # Le SI amont ignore le registre des gels : sans cela, l'import
+            # nocturne rendrait « ACTIF » un client dont les avoirs sont geles.
+            registre_des_gels.reappliquer_aux_clients(db, snap_id)
         db.commit()
 
         # Reload cache to integrate newly loaded watchlists
@@ -4125,7 +4392,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             # Surveillance continue : re-criblage du referentiel clients
             # contre les entites du nouveau snapshot
             if auto_rescreen_enabled(db):
-                rescreen_result = rescreen_after_snapshot_change(db, file_type, snap_id, None)
+                rescreen_result = rescreen_after_snapshot_change(
+                    db, file_type, snap_id, None, reference_avant=reference_avant,
+                    started_by=username)
 
         if staging:
             message = (
@@ -4137,11 +4406,12 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Importé par": username, "Snapshot": snap_id,
             })
         else:
-            message = f"Successfully imported {record_count} items."
+            message = f"{record_count} fiches importées et mises en production."
             emit(db, "list_import_done", {
                 "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
                 "Importé par": username, "Snapshot": snap_id,
             })
+        criblage = None
         if file_type == "CLIENT_BASE" and snap.status == "READY":
             # Contrôle de complétude en tâche de fond : hors de la requête
             # (un référentiel volumineux doublerait le temps d'import perçu)
@@ -4153,6 +4423,8 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                  snapshot_id=snap_id)
             except JobConflict:
                 pass
+            criblage = _cribler_le_referentiel_importe(db, snap_id, username)
+            message = f"{message} {criblage['message']}"
         # Une correspondance qui retombe sur une alerte deja ouverte ne cree
         # rien : la porte reste la meme (le re-criblage a bien produit
         # quelque chose), mais les trois nombres sont maintenant distincts.
@@ -4182,6 +4454,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             "record_count": record_count,
             "status": snap.status,
             "rescreen": rescreen_result,
+            "criblage": criblage,
             **rejets.rapport(),
         }
     except Exception as e:
@@ -4719,11 +4992,10 @@ def _touch_official_reference_date(reference: Optional[str]):
 
 
 # Colonnes exclues du recalcul de checksum (traces de gouvernance, pas des
-# donnees de la fiche) — s'ajoutent aux cles deja filtrees par compute_checksum
-_CHECKSUM_EXCLUDED_COLS = {
-    "modified_by", "modified_at", "excluded", "exclusion_justification",
-    "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
-}
+# donnees de la fiche). Une seule definition, celle de l'empreinte : le delta
+# compare les champs en excluant exactement les memes, et le champ-a-champ
+# de la liste blanche aussi.
+from fiskr.database import CLES_HORS_EMPREINTE as _CHECKSUM_EXCLUDED_COLS
 
 
 class WatchlistEntityPatch(BaseModel):
@@ -5345,20 +5617,24 @@ async def delete_relationship(
 
 def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
     """
-    Hash et volume du referentiel EN PRODUCTION, lus en base.
+    Empreinte, composition et volume du referentiel EN PRODUCTION, lus en base.
 
-    Meme regle que le cache moteur (`load_watchlist_cache`) : les snapshots
-    READY de type WATCHLIST_*, le plus recent donnant le hash opposable.
-    Deux requetes bornees, servies par les index de consultation.
+    Meme definition que le cache moteur et le journal d'audit
+    (fiskr/univers.py). Ce badge publiait le hash du lot le plus recent — une
+    empreinte pour 39 listes, qui ne bougeait ni quand on homologuait un autre
+    lot, ni quand on excluait ou corrigeait une fiche.
+
+    Les lots sont lus sans leur rapport de cahier de tests (cf.
+    `univers.lots_en_production`) : ce badge est charge a chaque ouverture de
+    page.
     """
-    snapshots = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY",
-    ).order_by(Snapshot.uploaded_at.desc()).all()
-    if not snapshots:
+    snapshots = univers.lots_en_production(db)
+    reference = univers.calculer(db, snapshots)
+    if reference.vide:
         # Aucun referentiel en production : le badge affiche son etat vide
         # (« NONE »), jamais un hash inventé.
-        return {"version": watchlist_version, "hash": None, "count": 0}
+        return {"version": reference.version, "hash": None, "count": 0,
+                "composition": []}
     # Meme univers que la consultation paginee (snapshots READY de type
     # WATCHLIST_*, fiches non exclues), donc meme chiffre et meme memorisation :
     # ce badge est charge a CHAQUE ouverture de page, et ce COUNT porte sur
@@ -5367,7 +5643,9 @@ def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
         WatchlistEntity.snapshot_id.in_([s.snapshot_id for s in snapshots]),
         WatchlistEntity.excluded.isnot(True),
     ))
-    return {"version": watchlist_version, "hash": snapshots[0].file_hash, "count": int(count)}
+    return {"version": reference.version, "hash": reference.empreinte, "count": int(count),
+            "composition": [{"file_type": t, "snapshot_id": s}
+                            for t, s in reference.composition]}
 
 
 @app.get("/api/watchlist/summary")
@@ -5573,19 +5851,39 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                 result = screen_client_profile(db, profile, username, requested_lists)
                 best = result.get("best_match") or {}
                 wl_entity = best.get("watchlist_entity") or {}
-                result_status = best.get("status") or "NO_MATCH"
+                # Le sort d'un client se derive de TOUTES ses correspondances :
+                # la liste blanche n'efface que la paire qu'elle couvre. Lu sur
+                # la seule meilleure, un client dont la meilleure etait blanchie
+                # partait en « sans correspondance » alors qu'une autre venait
+                # d'ouvrir une alerte — et le filtre ALERT de la campagne
+                # restait vide.
+                retenue = result.get("best_alert")
+                if retenue:
+                    resultat_client = {
+                        "status": "ALERT", "final_score": retenue["final_score"],
+                        "watchlist_entity_id": retenue["entity_id"],
+                        "watchlist_name": retenue["primary_name"],
+                        "list_type": retenue["list_type"],
+                        "audit_id": retenue["audit_trail_id"],
+                        "alert_id": retenue["alert_id"],
+                    }
+                else:
+                    resultat_client = {
+                        "status": best.get("status") or "NO_MATCH",
+                        "final_score": best.get("final_score"),
+                        "watchlist_entity_id": wl_entity.get("entity_id"),
+                        "watchlist_name": wl_entity.get("primary_name"),
+                        "list_type": wl_entity.get("_list_type"),
+                        "audit_id": result.get("audit_trail_id"),
+                        "alert_id": result.get("alert_id"),
+                    }
+                result_status = resultat_client["status"]
                 db.add(BatchResult(
                     campaign_id=campaign_id,
                     client_id=profile.get("client_id"),
                     client_name=(result.get("client_quality_report") or {}).get("cleansed_name")
                                 or profile.get("client_company_name") or profile.get("client_last_name"),
-                    status=result_status,
-                    final_score=best.get("final_score"),
-                    watchlist_entity_id=wl_entity.get("entity_id"),
-                    watchlist_name=wl_entity.get("primary_name"),
-                    list_type=wl_entity.get("_list_type"),
-                    audit_id=result.get("audit_trail_id"),
-                    alert_id=result.get("alert_id"),
+                    **resultat_client,
                 ))
                 # Deux chiffres, deux questions. `hits` compte ce que le
                 # criblage a TROUVE au-dessus du seuil ; `opened`, ce qu'il a
@@ -6483,6 +6781,7 @@ def _audit_row(r: AuditTrail, *, details: bool) -> Dict[str, Any]:
     if details:
         row["decision_tree"] = r.decision_tree
         row["config_state"] = r.config_state
+        row["watchlist_composition"] = r.watchlist_composition
     return row
 
 
@@ -6572,20 +6871,49 @@ async def screen_existing_client(
     `screen_client_profile`, alimente par la fiche du referentiel plutot que
     par un formulaire.
     """
-    snap_ids = [s.snapshot_id for s in db.query(Snapshot).filter(
-        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
-    row = None
-    if snap_ids:
-        row = db.query(ClientEntity).filter(
-            ClientEntity.client_id == client_id,
-            ClientEntity.snapshot_id.in_(snap_ids)).first()
+    row = _fiche_du_referentiel(db, client_id)
     if row is None:
         raise HTTPException(status_code=404,
                             detail="Client introuvable dans le référentiel en production.")
-    client_dict = {c.name: getattr(row, c.name) for c in row.__table__.columns
-                   if c.name not in ("id", "snapshot_id", "entity_checksum")}
-    _ensure_watchlist_cache(db)
-    return screen_client_profile(db, client_dict, current_user["username"], None)
+    resultat = cribler_un_profil(db, _profil_du_referentiel(row), current_user["username"], None)
+    # La fiche porte la date et la reference de ce criblage (cf. couverture)
+    from fiskr.rescreen import dater_un_criblage_unitaire
+    dater_un_criblage_unitaire(db, row, resultat.get("audit_trail_id"))
+    db.commit()
+    return resultat
+
+
+def _profil_du_referentiel(row: ClientEntity) -> Dict[str, Any]:
+    """Profil de criblage d'une fiche du referentiel : toutes ses colonnes,
+    hors la plomberie de stockage et la trace de criblage."""
+    from fiskr.database import CLIENT_SCREENING_TRACE_COLUMNS
+    return {c.name: getattr(row, c.name) for c in row.__table__.columns
+            if c.name not in ("id", "snapshot_id", "entity_checksum")
+            and c.name not in CLIENT_SCREENING_TRACE_COLUMNS}
+
+
+def _trace_de_criblage(db: Session, fiche: ClientEntity) -> Optional[Dict[str, Any]]:
+    """
+    Le dernier criblage d'une fiche : quand, par quel passage, et si elle est
+    couverte contre la version des listes en production. None : la fiche ne
+    porte aucune trace (jamais criblee, ou criblee avant que les passages ne
+    laissent la leur — son historique de decisions le dit alors).
+    """
+    from fiskr.database import ScreeningPass
+    from fiskr.rescreen import reference_de_l_univers
+    if fiche.screened_at is None and fiche.covered_universe_hash is None:
+        return None
+    passage = (db.get(ScreeningPass, fiche.screening_pass_id)
+               if fiche.screening_pass_id else None)
+    return {
+        "screened_at": fiche.screened_at.isoformat() if fiche.screened_at else None,
+        "screening_pass_id": fiche.screening_pass_id,
+        "nature": passage.nature if passage else "UNITAIRE",
+        "watchlist_version": passage.watchlist_version if passage else None,
+        "covered_universe_hash": fiche.covered_universe_hash,
+        "covered_by_production_version":
+            fiche.covered_universe_hash == reference_de_l_univers(db)[1],
+    }
 
 
 @app.get("/api/clients/{client_id}/overview")
@@ -6621,6 +6949,8 @@ async def get_client_overview(
             "segment": entity.client_segment, "activity_sector": entity.client_activity_sector,
             "relationship_start": entity.client_relationship_start, "status": entity.client_status,
             "snapshot_uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
+            # Quand cette fiche a ete criblee, et contre quelle version des listes
+            "dernier_criblage": _trace_de_criblage(db, entity),
         }
 
     audits = db.query(AuditTrail).filter(AuditTrail.client_id == client_id) \
@@ -6705,11 +7035,16 @@ async def export_alerts_csv(
     list_type: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     assigned_to: Optional[str] = Query(None),
+    lapsed: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Export CSV de la file d'alertes (les filtres de l'ecran s'appliquent)."""
     query = db.query(Alert)
+    if lapsed is not None:
+        # Meme filtre « Caduques » que la file (fiskr/caducite.py)
+        query = query.filter(Alert.lapsed_since.isnot(None) if lapsed
+                             else Alert.lapsed_since.is_(None))
     if channel:
         ch = channel.strip().upper()
         if ch == "SCREENING":
@@ -6728,13 +7063,16 @@ async def export_alerts_csv(
     rows = query.order_by(Alert.created_at.desc()).limit(_EXPORT_MAX_ROWS).all()
     header = ["id", "cree_le", "canal", "priorite", "echeance_sla", "client_id", "client",
               "fiche_listee_id", "fiche_listee", "liste", "score", "statut", "assignee_a",
-              "decide_par", "decide_le", "commentaire_decision"]
+              "decide_par", "decide_le", "commentaire_decision",
+              "dernier_score", "caduque_depuis", "motif_de_caducite"]
     data = [
         [a.id, a.created_at.isoformat() if a.created_at else "", a.channel or "SCREENING",
          a.priority or "", a.due_at.isoformat() if a.due_at else "", a.client_id or "",
          a.client_name, a.watchlist_entity_id, a.watchlist_name, a.list_type or "",
          f"{a.final_score:.1f}", a.status, a.assigned_to or "", a.decided_by or "",
-         a.decided_at.isoformat() if a.decided_at else "", a.decision_comment or ""]
+         a.decided_at.isoformat() if a.decided_at else "", a.decision_comment or "",
+         f"{a.latest_score:.1f}" if a.latest_score is not None else "",
+         a.lapsed_since.isoformat() if a.lapsed_since else "", a.lapsed_reason or ""]
         for a in rows
     ]
     return _csv_response(f"fiskr_alertes_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
@@ -7336,14 +7674,22 @@ async def get_sync_configuration(
     cfg["automation_sources"] = sync_automation_sources(db)
     schedules = sync_schedules(db)
     cfg["schedules"] = schedules
-    next_runs = {}
+    # Une date seulement pour ce que le planificateur lancera VRAIMENT (même
+    # condition que lui) ; à défaut, le motif, que l'écran nomme.
+    next_runs, sans_prochaine = {}, {}
     for source, expr in schedules.items():
+        next_runs[source] = None
+        motif = motif_hors_planification(cfg, source)
+        if motif:
+            sans_prochaine[source] = motif
+            continue
         try:
             occurrence = cron_next_run(expr)
             next_runs[source] = occurrence.isoformat() if occurrence else None
         except CronError:
-            next_runs[source] = None
+            sans_prochaine[source] = "CRON_INVALIDE"
     cfg["next_runs"] = next_runs
+    cfg["next_run_missing_reason"] = sans_prochaine
     # Synchronisations en cours d'execution (le front peut alors interroger
     # GET /api/progress?id=sync:<source> pour afficher la progression) —
     # lues dans la file de travaux : elles y sont quel que soit le processus
@@ -7357,6 +7703,7 @@ async def get_sync_configuration(
 @app.get("/api/progress")
 async def get_operation_progress(
     id: str = Query(..., description="Jeton de progression (UUID d'ingestion, sync:<source> ou snapshot_id)"),
+    expected: bool = Query(False, description="Le client vient de créer ce jeton et la requête qui l'alimentera est en vol : « pas encore connu » est alors un état normal (200, status PENDING), pas une opération inconnue."),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -7366,7 +7713,13 @@ async def get_operation_progress(
     alimente quand l'operation tourne dans CE processus), puis la ligne de la
     file de travaux persistee (jobs — seul canal qui traverse les processus
     et les redemarrages, elle porte aussi le rapport final `result`), puis
-    les colonnes persistees du Snapshot (imports historiques)."""
+    les colonnes persistees du Snapshot (imports historiques).
+
+    `expected` : le suivi d'un import fabrique son jeton AVANT d'envoyer le
+    fichier, et le serveur ne le connait qu'une fois le televersement recu —
+    chaque import produisait donc un 404 en console, pour un etat parfaitement
+    normal. Le client qui sait avoir cree le jeton le dit ; sans ce drapeau, un
+    jeton inconnu reste un 404 franc (faute de frappe, operation expiree)."""
     state = progress_registry.get(id)
     if state is not None:
         return {"id": id, **state}
@@ -7390,6 +7743,9 @@ async def get_operation_progress(
             "error": "Import en erreur (voir la table des snapshots)" if status == "ERROR" else None,
             "updated_at": None,
         }
+    if expected:
+        return {"id": id, "status": "PENDING", "phase": None, "processed": 0,
+                "total": None, "pct": None, "updated_at": None}
     raise HTTPException(status_code=404, detail="Operation inconnue ou expiree")
 
 
@@ -7409,6 +7765,8 @@ _OPERATION_LINKS = {
     "quality": "#kpi/kpi-quality",
     "quality_check": "#kpi/kpi-quality",
     "lookback": "#screening/alerts-screening",
+    # Le resultat d'un import de referentiel se lit sur la carte de couverture
+    "client_screening": "#screening/screening-batch",
     "mining": "#alerts/alerts-resources",
     "engine_simulation": "#alerts/alerts-blocking",
     "resource_simulation": "#alerts/alerts-resources",
@@ -7875,6 +8233,13 @@ async def diagnostic_jobs(
             "heartbeat_stale": j.heartbeat_at is None
                 or (now - j.heartbeat_at) > job_queue.STALE_AFTER,
             "running_for_s": _age(j.started_at),
+            # Le battement dit que le PROCESSUS vit, la progression que le
+            # TRAVAIL avance. Ce diagnostic ne montrait que le premier : il a
+            # affiche « heartbeat_stale: false » 26 jours durant pour une
+            # synchronisation figee (cf. jobs.declarer_figes).
+            "progress_age_s": _age(j.progress_at or j.started_at),
+            "progress_stale": (j.progress_at or j.started_at) is not None
+                and (now - (j.progress_at or j.started_at)) > job_queue.stall_after(),
         })
         running.append(row)
     queued = []
@@ -8116,8 +8481,12 @@ class IngestionSettingsUpdate(BaseModel):
     quality_min_score_pct: Optional[float] = None
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
     alert_sla_hours: Optional[Dict[str, int]] = None
-    # Motifs de cloture proposes aux analystes ([] = aucune suggestion)
-    alert_close_reasons: Optional[List[str]] = None
+    # Delai de declaration d'une mesure de gel a la DG Tresor (heures)
+    gel_declaration_delay_hours: Optional[int] = None
+    # Motifs de cloture proposes aux analystes ([] = aucune suggestion) :
+    # {"motif", "decisions"} — une simple chaine (ancien client) est classee
+    # comme a la migration (fiskr/settings.py, `motifs_de_cloture`)
+    alert_close_reasons: Optional[List[Union[str, Dict[str, Any]]]] = None
     notification_events: Optional[Dict[str, bool]] = None
     # Digest KPI periodique : {"enabled": bool, "cron": "0 8 * * 1-5"}
     digest: Optional[Dict[str, Any]] = None
@@ -8143,7 +8512,7 @@ class ExclusionRemoveRequest(BaseModel):
     entity_ids: List[int]
 
 def _settings_payload(db: Session) -> Dict[str, Any]:
-    approval = get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
+    approval = require_approval_setting(db)
     justif = get_setting_with_source(db, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, True)
     evidence = get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)
     four_eyes = get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)
@@ -8173,6 +8542,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_backtest_panel": str(auto_bt_panel["value"]) if auto_bt_panel["value"] else None,
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
+        "gel_declaration_delay_hours": gel_declaration_delai_heures(db),
         "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
@@ -8231,6 +8601,7 @@ async def update_ingestion_settings(
     changed = {k: v for k, v in updates.items() if v is not None}
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
+              payload.gel_declaration_delay_hours,
               payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
@@ -8280,15 +8651,36 @@ async def update_ingestion_settings(
         merged = dict(alert_sla_hours(db))
         merged.update(sla)
         set_setting(db, SETTING_ALERT_SLA_HOURS, merged, updated_by=admin_user["username"])
+    if payload.gel_declaration_delay_hours is not None:
+        bas, haut = GEL_DELAI_BORNES_HEURES
+        if not (bas <= payload.gel_declaration_delay_hours <= haut):
+            # Refus franc : un reglage hors bornes retomberait en silence sur
+            # le defaut a la lecture, et l'ecran afficherait autre chose que
+            # ce que l'administrateur a cru enregistrer.
+            raise HTTPException(status_code=400,
+                                detail=f"Délai de déclaration d'un gel : entre {bas} et {haut} heures.")
+        set_setting(db, SETTING_GEL_DELAI, int(payload.gel_declaration_delay_hours),
+                    updated_by=admin_user["username"])
     if payload.alert_close_reasons is not None:
-        motifs = [str(m).strip() for m in payload.alert_close_reasons if str(m).strip()]
-        if len(motifs) > 50:
+        bruts = [m for m in payload.alert_close_reasons
+                 if str((m.get("motif") if isinstance(m, dict) else m) or "").strip()]
+        if len(bruts) > 50:
             raise HTTPException(status_code=400, detail="Au plus 50 motifs de clôture.")
-        if any(len(m) > 300 for m in motifs):
+        if any(len(str((m.get("motif") if isinstance(m, dict) else m)).strip()) > 300 for m in bruts):
             raise HTTPException(status_code=400, detail="Un motif de clôture tient en 300 caractères.")
+        inconnues = sorted({str(d) for m in bruts if isinstance(m, dict)
+                            for d in (m.get("decisions") or []) if d not in DECISIONS_DE_CLOTURE})
+        if inconnues:
+            raise HTTPException(status_code=400, detail=(
+                f"Décision de motif inconnue : {', '.join(inconnues)} "
+                f"({' ou '.join(DECISIONS_DE_CLOTURE)})."))
         # [] est un choix valable : « pas de suggestions » — distinct de None
-        # (non fourni), qui laisse la bibliothèque par défaut.
-        set_setting(db, SETTING_ALERT_CLOSE_REASONS, motifs, updated_by=admin_user["username"])
+        # (non fourni), qui laisse la bibliothèque par défaut. Un motif sans
+        # décision (simple chaîne, ancien client) est classé comme à la
+        # migration : livré, il garde son classement ; sinon il vaut pour les
+        # deux décisions et le dit.
+        set_setting(db, SETTING_ALERT_CLOSE_REASONS, motifs_de_cloture(bruts),
+                    updated_by=admin_user["username"])
     if payload.notification_events is not None:
         unknown = [e for e in payload.notification_events if e not in DEFAULT_NOTIFICATION_EVENTS]
         if unknown:
@@ -8489,9 +8881,9 @@ class BlockingSettingsUpdate(BaseModel):
 @app.get("/api/settings/blocking")
 async def get_blocking_settings(
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_blocking)
+    param_user: Dict[str, Any] = Depends(require_blocking_lecture)
 ):
-    """Layouts de blocking effectifs par canal (rôle blocking ou admin)."""
+    """Layouts de blocking effectifs par canal (rôle blocking, auditeur ou admin)."""
     return _blocking_payload(db)
 
 @app.put("/api/settings/blocking")
@@ -8614,9 +9006,9 @@ class EngineSettingsUpdate(BaseModel):
 @app.get("/api/settings/engine")
 async def get_engine_settings(
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_blocking)
+    param_user: Dict[str, Any] = Depends(require_blocking_lecture)
 ):
-    """Capacités du moteur, par canal (rôle blocking ou admin)."""
+    """Capacités du moteur, par canal (rôle blocking, auditeur ou admin)."""
     return _engine_payload(db)
 
 
@@ -8667,6 +9059,13 @@ async def update_engine_settings(
         # rebatir aussi. L'epoque est le seul canal qui les previent.
         _refresh_production_cache(db)
         reloaded = True
+    elif delta:
+        # Canal FILTERING : l'index de criblage n'en depend pas, celui du
+        # filtrage se rebatit seul (sa signature porte les capacites du canal).
+        # Mais l'invalidation ci-dessus ne vaut que pour CE processus : sans
+        # epoque, les autres processus web filtraient indefiniment avec les
+        # capacites d'avant. L'epoque leur fait relire le reglage.
+        bump_watchlist_epoch(db)
 
     log_admin_action(
         db, param_user["username"], "ENGINE_UPDATED", target=f"engine:{payload.channel}",
@@ -9250,7 +9649,7 @@ async def get_name_rarity(
 @app.get("/api/fprules/templates")
 async def list_fp_rule_templates(
     channel: Optional[str] = Query(None),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     """
     Modeles de regles proposes, avec ce que chacun FAIT PERDRE.
@@ -9274,9 +9673,9 @@ async def list_fp_rules(
     channel: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
-    """Regles anti-faux positifs (rôle rules ou admin)."""
+    """Regles anti-faux positifs (rôle rules, auditeur ou admin)."""
     query = db.query(FpRule)
     if channel:
         query = query.filter(FpRule.channel == channel.strip().upper())
@@ -9330,7 +9729,7 @@ async def validate_fp_rule_code(
 async def fp_rule_context_from_alert(
     alert_id: int,
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     """Contexte rule(ctx) reconstruit depuis une alerte reelle : pre-remplit
     un cas de test de regle sans saisir le JSON a la main."""
@@ -9457,7 +9856,7 @@ async def delete_fp_rule(
 async def get_fp_rule_changes(
     rule_id: int,
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     """Journal immuable des modifications d'une regle (antichronologique)."""
     rows = db.query(FpRuleChange).filter(FpRuleChange.rule_id == rule_id) \
@@ -9619,7 +10018,7 @@ async def toggle_fp_rule(
 async def list_fp_rule_tests(
     rule_id: int,
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     tests = db.query(FpRuleTest).filter(FpRuleTest.rule_id == rule_id) \
              .order_by(FpRuleTest.id.asc()).all()
@@ -9847,14 +10246,19 @@ def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
     return snap
 
 def _snapshot_summary(db: Session, snap: Snapshot,
-                      excluded_count: Optional[int] = None) -> Dict[str, Any]:
+                      excluded_count: Optional[int] = None,
+                      validites: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     # `excluded_count` fourni : l'appelant l'a deja compte pour tout un lot
-    # (voir _excluded_counts). Sinon on compte pour ce seul snapshot.
+    # (voir _excluded_counts). Sinon on compte pour ce seul snapshot. Meme
+    # regle pour `validites` (fiskr/backtest.validites_des_cahiers).
     if excluded_count is None:
         excluded_count = db.query(WatchlistEntity).filter(
             WatchlistEntity.snapshot_id == snap.snapshot_id,
             WatchlistEntity.excluded.is_(True)
         ).count()
+    if validites is None:
+        validites = validites_des_cahiers(db, [snap])
+    validite = validites.get(snap.snapshot_id)
     return {
         "snapshot_id": snap.snapshot_id,
         "file_type": snap.file_type,
@@ -9872,10 +10276,19 @@ def _snapshot_summary(db: Session, snap: Snapshot,
         "backtest_verdict": (snap.backtest_report or {}).get("verdict"),
         "backtest_gap_pct": (snap.backtest_report or {}).get("gap_pct"),
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
+        # Un verdict ne vaut que pour ce qu'il a teste : un rapport PERIME
+        # (exclusions posees ou levees, production changee depuis) ne vaut
+        # pas OK, et la file le dit sur la ligne.
+        "backtest_stale": bool(validite and validite["stale"]),
+        "backtest_stale_reasons": (validite or {}).get("reasons") or [],
+        # Approuver ce lot exige un motif ecrit (cahier WARN ou perime)
+        "approval_comment_required": motif_d_approbation_exige(
+            snap.backtest_report, validite) is not None,
     }
 
 def _capture_review_record(db: Session, snap: Snapshot, decision: str,
-                           reviewer: str, comment: Optional[str]) -> "ReviewRecord":
+                           reviewer: str, comment: Optional[str],
+                           validite: Optional[Dict[str, Any]] = None) -> "ReviewRecord":
     """
     Constitue le dossier d'homologation, A APPELER AVANT de changer le statut.
 
@@ -9915,6 +10328,10 @@ def _capture_review_record(db: Session, snap: Snapshot, decision: str,
         delta_summary=delta_summary, delta_details=delta_details,
         backtest_report=snap.backtest_report, backtest_at=snap.backtest_at,
         backtest_by=snap.backtest_by,
+        # Ce que valait le cahier a l'instant de la decision : un dossier qui
+        # recopie « verdict OK » d'un rapport perime affirme un controle qui
+        # n'a pas porte sur ce qui a ete mis en production.
+        backtest_validity=validite,
     )
     db.add(record)
     return record
@@ -9939,6 +10356,9 @@ def _review_record_row(record) -> Dict[str, Any]:
         "backtest_verdict": report.get("verdict"),
         "backtest_gap_pct": report.get("gap_pct"),
         "has_backtest": bool(report),
+        # Etat du cahier A LA DECISION (NULL : dossier anterieur au suivi)
+        "backtest_stale": bool((record.backtest_validity or {}).get("stale")),
+        "backtest_validity": record.backtest_validity,
     }
 
 
@@ -10036,10 +10456,12 @@ async def list_pending_reviews(
     exclus = _excluded_counts(db, ids)
     productions = _latest_ready_by_type(db, types)
     rapports = _stored_sync_deltas(db, ids)
+    validites = validites_des_cahiers(db, snaps)
 
     pending = []
     for snap in snaps:
-        row = _snapshot_summary(db, snap, excluded_count=exclus.get(snap.snapshot_id, 0))
+        row = _snapshot_summary(db, snap, excluded_count=exclus.get(snap.snapshot_id, 0),
+                                validites=validites)
         production = productions.get(snap.file_type)
         production_id = production.snapshot_id if production else None
         rapport = rapports.get(snap.snapshot_id)
@@ -10184,6 +10606,9 @@ async def get_review_detail(
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
         "backtest_by": snap.backtest_by,
         "backtest_job": backtest_job,
+        # Ce que le reglage exige, pour que l'ecran annonce un refus AVANT le clic
+        "backtest_required": backtest_required(db),
+        "approval_comment_min": MOTIF_D_APPROBATION_MIN,
     }
 
 class BacktestRequest(BaseModel):
@@ -10435,10 +10860,21 @@ async def set_review_exclusions(
         "Pièce jointe": evidence_name or "—",
     })
     return {
-        "message": f"{len(rows)} entité(s) exclue(s) du snapshot.",
+        "message": f"{len(rows)} entité(s) exclue(s) du snapshot." + _cahier_perime_par(db, snap),
         "snapshot_id": snapshot_id,
         "excluded_ids": sorted(r.id for r in rows),
     }
+
+
+def _cahier_perime_par(db: Session, snap: Snapshot) -> str:
+    """La phrase a ajouter au retour d'une exclusion posee ou levee quand elle
+    vient de rendre le cahier de tests du lot perime : celui qui exclut doit
+    l'apprendre la, pas au moment d'approuver."""
+    validite = validite_du_cahier(db, snap)
+    if not (validite and validite["stale"]):
+        return ""
+    return (" Le cahier de tests de ce lot est désormais périmé : il ne vaut plus "
+            "pour ce qui serait mis en production. Relancez-le.")
 
 @app.post("/api/review/snapshots/{snapshot_id}/exclusions/remove")
 async def remove_review_exclusions(
@@ -10448,7 +10884,7 @@ async def remove_review_exclusions(
     reviewer: Dict[str, Any] = Depends(require_reviewer)
 ):
     """Annule des exclusions posees sur un snapshot encore en attente d'homologation."""
-    _get_pending_snapshot(db, snapshot_id)
+    snap = _get_pending_snapshot(db, snapshot_id)
     if not payload.entity_ids:
         raise HTTPException(status_code=400, detail="entity_ids ne peut pas être vide.")
     rows = db.query(WatchlistEntity).filter(
@@ -10469,7 +10905,8 @@ async def remove_review_exclusions(
         "Action": "exclusions retirées", "Snapshot": snapshot_id,
         "Entités": len(rows), "Par": reviewer["username"],
     })
-    return {"message": f"{len(rows)} exclusion(s) annulée(s).", "snapshot_id": snapshot_id}
+    return {"message": f"{len(rows)} exclusion(s) annulée(s)." + _cahier_perime_par(db, snap),
+            "snapshot_id": snapshot_id}
 
 @app.get("/api/review/exclusion-evidence/{entity_pk}")
 async def download_exclusion_evidence(
@@ -10524,8 +10961,26 @@ def _retirer_les_versions_depassees(db: Session, approuve: Snapshot) -> int:
     ).update({"status": "SUPERSEDED"}, synchronize_session=False)
 
 
+def _validite_au_dossier(snap: Snapshot, validite: Optional[Dict[str, Any]],
+                         pourquoi: Optional[str], groupee: bool = False,
+                         motif_couvre: Optional[set] = None) -> Optional[Dict[str, Any]]:
+    """L'etat du cahier tel que le dossier d'homologation le fige."""
+    if not snap.backtest_report:
+        return None
+    return {
+        "stale": bool(validite and validite["stale"]),
+        "reasons": (validite or {}).get("reasons") or [],
+        "verdict": snap.backtest_report.get("verdict"),
+        "comment_required": pourquoi,
+        # Motif commun d'une homologation groupee : le dossier dit qu'il l'est,
+        # et combien de listes il couvrait.
+        "comment_shared_by": (len(motif_couvre or ()) if groupee and pourquoi else None),
+    }
+
+
 def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any],
-                          comment: Optional[str]) -> Dict[str, Any]:
+                          comment: Optional[str], groupee: bool = False,
+                          motif_couvre: Optional[set] = None) -> Dict[str, Any]:
     """
     Promotion d'UN snapshot : controles de gouvernance, bascule READY,
     supersede des anciens, puis job de rechargement/re-criblage. Les refus
@@ -10578,17 +11033,67 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                 detail="Le cahier de tests est obligatoire avant la mise en production (réglage actif). Exécutez-le depuis l'étape « Cahier de tests »."
             )
         if snap.backtest_report.get("verdict") != "OK":
+            # Le conseil suit le SENS de l'ecart : devant une perte
+            # d'interception, des Good Guys ou des exclusions la creuseraient.
+            from fiskr.backtest import GAP_INTERCEPTION_LOSS
+            if snap.backtest_report.get("gap_direction") == GAP_INTERCEPTION_LOSS:
+                detail = ("Le dernier cahier de tests signale un écart au-delà du seuil toléré : "
+                          "la liste candidate perd des interceptions. Examinez les fiches retirées "
+                          "ou modifiées ; si la perte n'est pas justifiée, rejetez le lot.")
+            else:
+                detail = ("Le dernier cahier de tests signale un écart de taux d'interception au-delà "
+                          "du seuil toléré. Posez des Good Guys (liste blanche) ou des exclusions, "
+                          "puis relancez le cahier de tests.")
+            raise HTTPException(status_code=400, detail=detail)
+
+    # Un verdict OK ne vaut que pour ce qu'il a teste (fiskr/backtest.py,
+    # « CE QUE LE CAHIER A TESTE ») : exclusions posees ou levees depuis,
+    # production changee, fiche corrigee — le rapport est perime.
+    validite = validite_du_cahier(db, snap)
+    if backtest_required(db) and validite and validite["stale"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Le cahier de tests de ce lot est périmé : " + " ".join(validite["reasons"])
+                   + " Un rapport périmé ne vaut pas OK : relancez le cahier de tests "
+                     "avant la mise en production (réglage actif).")
+
+    # Approuver malgre un cahier WARN ou perime exige un motif ecrit, trace au
+    # dossier. Le cahier n'est bloquant que si `backtest_required` est actif ;
+    # sans lui, un WARN s'approuvait sans un mot (46 des 200 dernieres
+    # approbations en production, aucune commentee).
+    pourquoi = motif_d_approbation_exige(snap.backtest_report, validite)
+    motif = (comment or "").strip()
+    if pourquoi is not None:
+        if len(motif) < MOTIF_D_APPROBATION_MIN:
             raise HTTPException(
                 status_code=400,
-                detail="Le dernier cahier de tests signale un écart de taux d'interception au-delà du seuil toléré. Posez des Good Guys (liste blanche) ou des exclusions, puis relancez le cahier de tests."
-            )
+                detail=f"Approuver ce lot malgré un {pourquoi} exige un commentaire motivé "
+                       f"(au moins {MOTIF_D_APPROBATION_MIN} caractères) : il est tracé au "
+                       f"dossier d'homologation.")
+        if groupee and snapshot_id not in (motif_couvre or set()):
+            # Un motif commun n'est recevable que s'il NOMME les listes qu'il
+            # couvre : sans quoi un lot devenu WARN ou perime entre l'affichage
+            # et le clic passerait sous un motif ecrit pour d'autres.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ce lot porte un {pourquoi} et le motif commun ne le couvre pas "
+                       f"explicitement : approuvez-le seul, ou relancez l'homologation "
+                       f"groupée en le désignant.")
 
     # Snapshot de production remplace (pour cibler le re-criblage post-delta)
     previous_prod = _latest_ready_snapshot(db, snap.file_type)
 
     # Dossier d'homologation constitue AVANT la bascule : ensuite, ce snapshot
     # EST la production et le delta ne serait plus calculable (voir ReviewRecord).
-    _capture_review_record(db, snap, "APPROVED", reviewer["username"], comment)
+    _capture_review_record(db, snap, "APPROVED", reviewer["username"], comment,
+                           validite=_validite_au_dossier(snap, validite, pourquoi,
+                                                         groupee, motif_couvre))
+
+    # Reference de l'univers AVANT la bascule, pour la meme raison : le
+    # re-criblage qui suit prolonge la couverture des clients couverts contre
+    # elle, et elle n'est plus lisible une fois ce lot en production.
+    from fiskr.rescreen import reference_de_l_univers
+    reference_avant = reference_de_l_univers(db)[1]
 
     snap.status = "READY"
     snap.reviewed_by = reviewer["username"]
@@ -10597,6 +11102,20 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     _settle_sync_reports(db, snap.snapshot_id, "SUCCESS")
     perimes = _retirer_les_versions_depassees(db, snap)
+    # Trace au journal d'administration, dans LA transaction de la bascule :
+    # pas de mise en production sans sa ligne, pas de ligne sans elle. Seule
+    # l'homologation groupee y ecrivait — releve en production : 68
+    # approbations unitaires des 31/08 et 02/09 absentes du journal que lit un
+    # controleur, alors que leur notification etait partie. Ecrite ici, sur le
+    # chemin que partagent les deux, chaque approbation y figure une fois.
+    log_admin_action(db, reviewer["username"], "SNAPSHOT_APPROVED",
+                     target=snap.file_type,
+                     before={"production": previous_prod.snapshot_id if previous_prod else None},
+                     after={"snapshot_id": snap.snapshot_id, "fiches": snap.record_count,
+                            "exclusions": len(excluded_rows),
+                            "versions_retirees_de_la_file": perimes,
+                            "homologation": "groupée" if groupee else "unitaire"},
+                     detail=snap.review_comment)
     db.commit()
 
     job_token = f"approve:{snap.snapshot_id}"
@@ -10605,7 +11124,8 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                 params={"snapshot_id": snap.snapshot_id,
                         "previous_snapshot_id": previous_prod.snapshot_id if previous_prod else None,
                         "excluded_count": len(excluded_rows),
-                        "username": reviewer["username"]},
+                        "username": reviewer["username"],
+                        "reference_avant": reference_avant},
                 started_by=reviewer["username"],
                 dedupe_key=job_token, snapshot_id=snap.snapshot_id)
     message = "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours."
@@ -10647,6 +11167,10 @@ async def approve_pending_snapshot(
 class BulkApproveRequest(BaseModel):
     snapshot_ids: List[str]
     comment: Optional[str] = None
+    # Lots au cahier WARN ou perime que le motif commun couvre EXPLICITEMENT
+    # (l'ecran les nomme avant de demander le motif). Un tel lot absent d'ici
+    # est refuse, avec son motif, sans interrompre les autres.
+    comment_covers: Optional[List[str]] = None
 
 
 @app.post("/api/review/snapshots/approve-bulk", status_code=status.HTTP_202_ACCEPTED)
@@ -10673,9 +11197,11 @@ async def approve_pending_snapshots_bulk(
                             detail="Homologation groupée limitée à 50 listes à la fois.")
 
     approved, refused = [], []
+    couverts = {s.strip() for s in (payload.comment_covers or []) if (s or "").strip()}
     for snapshot_id in dict.fromkeys(ids):  # dedoublonne en gardant l'ordre
         try:
-            approved.append(_approve_one_snapshot(db, snapshot_id, reviewer, payload.comment))
+            approved.append(_approve_one_snapshot(db, snapshot_id, reviewer, payload.comment,
+                                                  groupee=True, motif_couvre=couverts))
         except HTTPException as refus:
             db.rollback()
             refused.append({"snapshot_id": snapshot_id, "reason": refus.detail})
@@ -10685,9 +11211,13 @@ async def approve_pending_snapshots_bulk(
             refused.append({"snapshot_id": snapshot_id, "reason": f"Erreur inattendue : {err}"})
 
     if approved:
+        # Le GESTE groupe, pas ses approbations : chacune a deja sa ligne
+        # SNAPSHOT_APPROVED (cf. _approve_one_snapshot). Les relister ici les
+        # ferait figurer deux fois au journal ; restent le compte et les refus,
+        # que rien d'autre ne trace.
         log_admin_action(db, reviewer["username"], "SNAPSHOTS_BULK_APPROVED",
                          target=", ".join(a["file_type"] for a in approved),
-                         after={"approved": [a["snapshot_id"] for a in approved],
+                         after={"approuvees": len(approved),
                                 "refused": [r["snapshot_id"] for r in refused]})
         db.commit()
 
@@ -10723,12 +11253,20 @@ async def reject_pending_snapshot(
         raise HTTPException(status_code=400, detail="Un commentaire est requis pour rejeter un snapshot.")
     # Un rejet s'historise autant qu'une approbation : c'est la trace de ce qui
     # a ete ecarte, et de ce qu'on avait sous les yeux pour l'ecarter.
-    _capture_review_record(db, snap, "REJECTED", reviewer["username"], comment)
+    validite = validite_du_cahier(db, snap)
+    _capture_review_record(db, snap, "REJECTED", reviewer["username"], comment,
+                           validite=_validite_au_dossier(snap, validite, None))
     snap.status = "REJECTED"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
     snap.review_comment = comment
     _settle_sync_reports(db, snap.snapshot_id, "REJECTED")
+    # Meme raison que l'approbation (cf. _approve_one_snapshot) : la decision
+    # d'homologation figure au journal d'administration, dans sa transaction.
+    log_admin_action(db, reviewer["username"], "SNAPSHOT_REJECTED",
+                     target=snap.file_type,
+                     after={"snapshot_id": snap.snapshot_id, "fiches": snap.record_count},
+                     detail=comment)
     db.commit()
     emit(db, "snapshot_rejected", {
         "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
@@ -10749,13 +11287,22 @@ class AlertAssignRequest(BaseModel):
 class AlertCommentRequest(BaseModel):
     comment: str
 
+class AlertWhitelistOnClose(BaseModel):
+    """« Memoriser en liste blanche » au moment ou un faux positif est valide.
+    Sans justification propre, la paire reprend la motivation de la decision."""
+    justification: Optional[str] = None
+    expires_at: Optional[str] = None
+
 class AlertProposeRequest(BaseModel):
     decision: str  # CONFIRMED | FALSE_POSITIVE
     comment: str
+    # Cloture directe (4-yeux coupe) d'un faux positif uniquement
+    whitelist: Optional[AlertWhitelistOnClose] = None
 
 class AlertValidateRequest(BaseModel):
     approve: bool
     comment: Optional[str] = None
+    whitelist: Optional[AlertWhitelistOnClose] = None
 
 def _alert_summary(alert: Alert) -> Dict[str, Any]:
     return {
@@ -10792,6 +11339,17 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
             alert.snoozed_until and alert.snoozed_until > datetime.utcnow()
             and alert.status in ALERT_OPEN_STATUSES
         ),
+        # Dernier criblage du couple (fiskr/alerts.py) : NULL tant qu'aucun
+        # criblage ne l'a re-rencontre. `final_score` reste celui d'origine.
+        "latest_audit_id": alert.latest_audit_id,
+        "latest_score": alert.latest_score,
+        "latest_at": alert.latest_at.isoformat() if alert.latest_at else None,
+        # Caduque (fiskr/caducite.py) : la correspondance ne tient plus — une
+        # alerte OUVERTE seulement ; clore reste un geste humain.
+        "lapsed": bool(alert.lapsed_since and alert.status in ALERT_OPEN_STATUSES),
+        "lapsed_since": alert.lapsed_since.isoformat() if alert.lapsed_since else None,
+        "lapsed_reason": alert.lapsed_reason,
+        "delisted_at": alert.delisted_at.isoformat() if alert.delisted_at else None,
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -10818,7 +11376,7 @@ def _get_open_alert(db: Session, alert_id: int) -> Alert:
     if not alert:
         raise HTTPException(status_code=404, detail="Alerte introuvable.")
     if alert.status in ALERT_CLOSED_STATUSES:
-        raise HTTPException(status_code=409, detail=f"Alerte déjà close ({alert.status}).")
+        raise HTTPException(status_code=409, detail=f"Alerte déjà {ALERT_STATUS_LABELS.get(alert.status, alert.status)}.")
     return alert
 
 def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
@@ -11059,10 +11617,15 @@ async def get_notifications_catalog(
     cette reponse (aucune liste d'evenements codee en dur cote front).
     """
     from fiskr.events import catalog_payload, event_categories
+    from fiskr.notifier import DELIVERY_TTL_DAYS, derniers_envois
     return {
         "categories": event_categories(),
         "events": catalog_payload(),
         "enabled": notification_events(db),
+        # Ce qui est REELLEMENT parti, a cote de ce qui est active : l'ecran
+        # affichait « actif » sur un digest qui n'avait jamais rien envoye.
+        "derniers_envois": derniers_envois(db),
+        "journal_ttl_jours": DELIVERY_TTL_DAYS,
         "batch": notification_batch_settings(db),
         "smtp_configured": notify_smtp_configured(),
         "public_url_configured": bool(notify_public_url()),
@@ -11498,35 +12061,7 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
     events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert.id) \
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
 
-    # Personne concernee : fiche KYC du dernier referentiel en production
-    # (criblage clients) ou partie du message (filtrage transactionnel)
-    person: Dict[str, Any] = {"nom_complet": alert.client_name, "reference_interne": alert.client_id}
-    kyc_row = None
-    if alert.client_id and not str(alert.client_id).startswith("TXN:"):
-        kyc_row = (
-            db.query(ClientEntity, Snapshot)
-              .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
-              .filter(ClientEntity.client_id == alert.client_id, Snapshot.status == "READY")
-              .order_by(Snapshot.uploaded_at.desc()).first()
-        )
-    if kyc_row:
-        entity, _snap = kyc_row
-        person.update({
-            "type": "Personne physique" if entity.client_type == "PP" else "Personne morale",
-            "prenom": entity.client_first_name, "nom": entity.client_last_name,
-            "raison_sociale": entity.client_company_name,
-            "date_naissance": entity.client_dob,
-            "lieu_naissance": entity.client_place_of_birth,
-            "adresse": entity.client_address, "ville": entity.client_city,
-            "pays": entity.client_country, "nationalites": (entity.client_countries or {}).get("nationality"),
-            "iban": entity.client_iban, "bic": entity.client_bic,
-            "identifiant_fiscal": entity.client_tax_id,
-            "telephone": entity.client_phone, "email": entity.client_email,
-            "segment": entity.client_segment, "secteur_activite": entity.client_activity_sector,
-            "notation_risque": entity.client_risk_rating,
-            "ppe_declare": bool(entity.client_pep_flag),
-            "entree_en_relation": entity.client_relationship_start,
-        })
+    person = _personne_concernee(db, alert)
 
     # Operation concernee (filtrage transactionnel) : donnees du message
     operation = None
@@ -11596,6 +12131,45 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
     }
 
 
+def _personne_concernee(db: Session, alert: Alert) -> Dict[str, Any]:
+    """Personne concernee d'une declaration (TRACFIN comme DG Tresor) : fiche
+    KYC du dernier referentiel en production (criblage clients) ou partie du
+    message (filtrage transactionnel). Une seule definition pour les deux
+    projets — deux copies finiraient par ne plus decrire le meme client."""
+    person: Dict[str, Any] = {"nom_complet": alert.client_name, "reference_interne": alert.client_id}
+    kyc_row = None
+    if alert.client_id and not str(alert.client_id).startswith("TXN:"):
+        kyc_row = (
+            db.query(ClientEntity, Snapshot)
+              .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
+              .filter(ClientEntity.client_id == alert.client_id, Snapshot.status == "READY")
+              .order_by(Snapshot.uploaded_at.desc()).first()
+        )
+    if kyc_row:
+        entity, _snap = kyc_row
+        person.update({
+            "type": "Personne physique" if entity.client_type == "PP" else "Personne morale",
+            "prenom": entity.client_first_name, "nom": entity.client_last_name,
+            "raison_sociale": entity.client_company_name,
+            "date_naissance": entity.client_dob,
+            "lieu_naissance": entity.client_place_of_birth,
+            "adresse": entity.client_address, "ville": entity.client_city,
+            "pays": entity.client_country, "nationalites": (entity.client_countries or {}).get("nationality"),
+            "iban": entity.client_iban, "bic": entity.client_bic,
+            "identifiant_fiscal": entity.client_tax_id,
+            "telephone": entity.client_phone, "email": entity.client_email,
+            "segment": entity.client_segment, "secteur_activite": entity.client_activity_sector,
+            "notation_risque": entity.client_risk_rating,
+            "ppe_declare": bool(entity.client_pep_flag),
+            "entree_en_relation": entity.client_relationship_start,
+        })
+    return person
+
+
+# Ferme a l'auditeur A DESSEIN, bien que ce soit un GET : il ECRIT dans
+# l'historique de l'alerte (STR_DRAFT_GENERATED, ci-dessous). L'ouvrir ferait
+# d'une lecture de controleur une ligne au dossier — un auditeur ne laisse pas
+# de trace dans ce qu'il controle. Meme chose pour /print.
 @app.get("/api/alerts/{alert_id}/str-draft")
 async def get_alert_str_draft(
     alert_id: int,
@@ -11782,6 +12356,540 @@ def send_alert_str_draft(
     db.commit()
     return {"message": f"Projet de déclaration envoyé à {correspondent}.",
             "recipient": correspondent, "alert_id": alert.id}
+
+
+# ------------------ REGISTRE DES MESURES DE GEL (DG TRESOR) ------------------
+# Ce qui suit un vrai positif sur une liste de gel : la mesure, sa declaration
+# a la DG Tresor, sa levee (fiskr/gels.py). Les endpoints suivent le motif du
+# projet de declaration TRACFIN ci-dessus : JSON structure, version imprimable,
+# aucune transmission automatique — l'humain transmet et joint la piece.
+
+GEL_DISCLAIMER = (
+    "PROJET généré par Fiskr à partir du registre des mesures de gel et du journal "
+    "d'audit. Il doit être relu, complété et transmis par un humain à la DG Trésor — "
+    "aucune transmission automatique n'est effectuée. La mesure ne passe « déclarée » "
+    "qu'à l'enregistrement de la pièce de transmission (accusé de réception ou copie "
+    "du courriel envoyé)."
+)
+
+_GEL_TYPES_DE_NATURE = {"I": "Personne physique", "E": "Personne morale / entité",
+                        "V": "Navire", "O": "Autre"}
+
+
+def _mesure_ou_404(db: Session, mesure_id: int) -> MesureDeGel:
+    mesure = db.query(MesureDeGel).filter(MesureDeGel.id == mesure_id).first()
+    if mesure is None:
+        raise HTTPException(status_code=404, detail="Mesure de gel introuvable.")
+    return mesure
+
+
+def _refus_de_gel(refus: "registre_des_gels.RefusDeGel") -> HTTPException:
+    return HTTPException(status_code=refus.status_code, detail=str(refus))
+
+
+class GelOuvertureRequest(BaseModel):
+    type_action: str
+
+
+class GelMiseAJourRequest(BaseModel):
+    type_action: Optional[str] = None
+    date_effet: Optional[str] = None
+    # Texte libre structure : une ligne par compte (cf. gels.lire_comptes)
+    comptes: Optional[str] = Field(None, max_length=20000)
+    precisions: Optional[str] = Field(None, max_length=4000)
+
+
+class GelLeveeRequest(BaseModel):
+    motif: str
+    justification: str = Field(..., max_length=4000)
+    levee_le: Optional[str] = None
+
+
+def _registre_filtre(db: Session, statut: Optional[str], type_action: Optional[str],
+                     list_type: Optional[str], q: Optional[str]):
+    """Filtres du registre, partages par l'ecran et l'export CSV."""
+    query = db.query(MesureDeGel)
+    if statut:
+        code = statut.strip().upper()
+        if code == "EN_RETARD":
+            # La definition du retard est celle de fiskr/kpi.py, lue telle quelle
+            ids = [m.id for m in registre_des_gels.mesures_en_retard(db)]
+            query = query.filter(MesureDeGel.id.in_(ids or [-1]))
+        elif code == registre_des_gels.FILTRE_RADIATION:
+            # Meme definition que `gels.radiation_a_examiner`
+            query = query.filter(MesureDeGel.radiation_constatee_le.isnot(None),
+                                 MesureDeGel.statut != registre_des_gels.STATUT_LEVEE)
+        elif code in registre_des_gels.STATUTS:
+            query = query.filter(MesureDeGel.statut == code)
+        else:
+            raise HTTPException(status_code=400, detail="Statut de mesure inconnu.")
+    if type_action:
+        code = type_action.strip().upper()
+        if code not in registre_des_gels.ACTIONS:
+            raise HTTPException(status_code=400, detail="Action de gel inconnue.")
+        query = query.filter(MesureDeGel.type_action == code)
+    query = _apply_list_type_filter(query, MesureDeGel.list_type, list_type)
+    if q and q.strip():
+        motif = f"%{q.strip()[:100]}%"
+        query = query.filter(MesureDeGel.client_name.ilike(motif)
+                             | MesureDeGel.watchlist_name.ilike(motif)
+                             | MesureDeGel.client_id.ilike(motif))
+    return query
+
+
+@app.get("/api/gels")
+async def list_gel_measures(
+    statut: Optional[str] = Query(None),
+    type_action: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    alert_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Registre des mesures de gel (lecture, auditeur compris) : filtrable par
+    statut (A_DECLARER, DECLAREE, LEVEE, ou EN_RETARD), action, liste et
+    client. Porte la synthese du pilotage (delai confirmation -> declaration,
+    fiskr/kpi.py) et le vocabulaire de l'ecran.
+    """
+    from fiskr.kpi import synthese_des_gels
+    query = _registre_filtre(db, statut, type_action, list_type, q)
+    if alert_id is not None:
+        query = query.filter(MesureDeGel.alert_id == alert_id)
+    total = query.count()
+    lignes = query.order_by(MesureDeGel.ouverte_le.desc(), MesureDeGel.id.desc()) \
+                  .offset((page - 1) * page_size).limit(page_size).all()
+    seuil = gel_declaration_delai_heures(db)
+    ids_pieces = [m.piece_declaration_id for m in lignes if m.piece_declaration_id]
+    pieces = {p.id: p for p in db.query(AlertAttachment).filter(
+        AlertAttachment.id.in_(ids_pieces)).all()} if ids_pieces else {}
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in lignes],
+        "synthese": synthese_des_gels(db),
+        "vocabulaire": registre_des_gels.vocabulaire(),
+    }
+
+
+@app.get("/api/gels/{mesure_id}")
+async def get_gel_measure(
+    mesure_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Une mesure de gel, avec les etapes tracees au journal de son alerte."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    evenements = db.query(AlertEvent).filter(
+        AlertEvent.alert_id == mesure.alert_id, AlertEvent.action.like("GEL_%")) \
+        .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    return {
+        **registre_des_gels.serialiser(db, mesure),
+        "evenements": [
+            {"timestamp": e.timestamp.isoformat() if e.timestamp else None,
+             "username": e.username, "action": e.action, "detail": e.detail}
+            for e in evenements if re.search(rf"#{mesure.id}\b", e.detail or "")
+        ],
+    }
+
+
+@app.post("/api/alerts/{alert_id}/gels")
+async def open_gel_measure(
+    alert_id: int,
+    payload: GelOuvertureRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Mesure SUPPLEMENTAIRE sur une alerte confirmee (credit recu sur un compte
+    gele, tentative de contournement...) : chacune se declare (LD §181)."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    try:
+        mesure = registre_des_gels.ouvrir(db, alert, payload.type_action, current_user["username"])
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Mesure de gel #{mesure.id} ouverte : déclaration à la DG Trésor due immédiatement.",
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+@app.put("/api/gels/{mesure_id}")
+async def update_gel_measure(
+    mesure_id: int,
+    payload: GelMiseAJourRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Gel effectif : action, date d'effet, comptes et montants, precisions.
+    La date d'effet posee sur un gel passe le client en « GELE »."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    try:
+        avertissements = registre_des_gels.enregistrer_gel(
+            db, mesure, username=current_user["username"], type_action=payload.type_action,
+            date_effet=payload.date_effet, comptes=payload.comptes, precisions=payload.precisions)
+    except registre_des_gels.RefusDeGel as refus:
+        db.rollback()
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Mesure de gel #{mesure.id} enregistrée.", "warnings": avertissements,
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[str, Any]:
+    """Projet de declaration de mise en oeuvre d'une mesure de gel, aux
+    rubriques du formulaire de la DG Tresor (« Formulaire de declaration de gel
+    d'avoirs ») — exclusivement depuis le registre et le journal d'audit."""
+    alert = db.query(Alert).filter(Alert.id == mesure.alert_id).first()
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first() if alert else None
+    tree = (audit.decision_tree if audit else {}) or {}
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == mesure.alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    fiche = registre_des_gels.fiche_en_production(db, mesure.watchlist_entity_id)
+    nom_parse = (fiche.individual_name_parsed if fiche is not None else None) or {}
+    alias = []
+    if fiche is not None:
+        for groupe in ("high_priority", "low_priority"):
+            alias += list(((fiche.aliases or {}).get(groupe)) or [])
+    declarant = _institution_config(db)
+    gelante = mesure.type_action in registre_des_gels.ACTIONS_QUI_GELENT
+
+    # Le formulaire de la DG Tresor nomme son minimum : « le nom de la
+    # personne/entite gelee, le n° de compte et les montants ». Un projet qui
+    # se tairait sur leur absence passerait pour complet.
+    manquants = []
+    if mesure.date_effet is None:
+        manquants.append("date du gel (date d'effet de l'action)")
+    if gelante and not mesure.comptes:
+        manquants.append("numéro(s) de compte gelé(s)")
+    if gelante and mesure.comptes and any(not c.get("montant_gel") for c in mesure.comptes):
+        manquants.append("montant des fonds gelés à la date du gel")
+    if not (declarant.get("correspondent_name") and (declarant.get("correspondent_email")
+                                                    or declarant.get("correspondent_phone"))):
+        manquants.append("point de contact du déclarant (Paramètres → Établissement déclarant)")
+
+    def iso(d):
+        return d.isoformat() if d else None
+
+    operation = None
+    if alert is not None and (alert.channel or "SCREENING") == "FILTERING":
+        operation = {"reference_message": alert.client_id,
+                     "type_message": tree.get("message_type"),
+                     "partie_en_cause": alert.client_name,
+                     "role_partie": tree.get("party_role")}
+
+    return {
+        "type": "PROJET_DECLARATION_GEL",
+        "avertissement": GEL_DISCLAIMER,
+        "fondement": ("CMF L.562-4 et R.562-3 ; lignes directrices conjointes DGT/ACPR "
+                      "sur le gel des avoirs du 18 mars 2026, §180-182."),
+        "genere_le": datetime.utcnow().isoformat() + "Z",
+        "genere_par": username,
+        "mesure": {
+            "id": mesure.id, "alerte_id": mesure.alert_id,
+            "action": mesure.type_action,
+            "action_libelle": registre_des_gels.ACTIONS.get(mesure.type_action),
+            "statut": mesure.statut, "ouverte_le": iso(mesure.ouverte_le),
+            "date_effet": iso(mesure.date_effet),
+        },
+        "declarant": declarant,
+        "destinataires": registre_des_gels.vocabulaire()["adresses_dgt"],
+        "regime": {
+            "liste": mesure.list_type,
+            "programmes": mesure.programmes or (fiche.sanction_programs if fiche is not None else None),
+            "reference_designation": mesure.reference_designation
+                                     or (fiche.official_reference if fiche is not None else None),
+            "inscrite_le": fiche.listed_on if fiche is not None else None,
+            "liste_en_vigueur_du": (fiche.snapshot.uploaded_at.strftime("%d/%m/%Y")
+                                    if fiche is not None and fiche.snapshot is not None
+                                    and fiche.snapshot.uploaded_at else None),
+        },
+        "personne_listee": {
+            "identifiant": mesure.watchlist_entity_id,
+            "nom_complet": mesure.watchlist_name,
+            "nom": nom_parse.get("last_name"), "prenom": nom_parse.get("first_name"),
+            "type_nature": _GEL_TYPES_DE_NATURE.get(fiche.entity_type) if fiche is not None else None,
+            "alias": alias[:15],
+            "dates_naissance": (fiche.dates_of_birth if fiche is not None else None),
+            "presente_dans_les_listes_en_production": fiche is not None,
+        },
+        "fonds_geles": {
+            "etablissement": declarant.get("name"),
+            "comptes": mesure.comptes or [],
+            "date_du_gel": iso(mesure.date_effet),
+            "precisions": mesure.precisions,
+        },
+        "personne_concernee": _personne_concernee(db, alert) if alert is not None
+                              else {"nom_complet": mesure.client_name},
+        "operation_concernee": operation,
+        "traitement_alerte": {
+            "score_final": alert.final_score if alert else None,
+            "correspondance_exacte": bool(tree.get("hard_match_triggered", False)),
+            "propose_par": alert.proposed_by if alert else None,
+            "propose_le": iso(alert.proposed_at) if alert else None,
+            "decide_par": alert.decided_by if alert else None,
+            "decide_le": iso(alert.decided_at) if alert else None,
+            "commentaire": alert.decision_comment if alert else None,
+        },
+        "informations_minimales_manquantes": manquants,
+        "chronologie": [
+            {"date": iso(e.timestamp), "par": e.username, "action": e.action, "detail": e.detail}
+            for e in events
+        ],
+    }
+
+
+def _render_gel_draft_html(mesure: MesureDeGel, draft: Dict[str, Any], generated_by: str) -> str:
+    """Projet de declaration de gel en HTML autonome (impression -> PDF) :
+    aucune ressource externe, bandeau « projet a transmettre par un humain »,
+    et bandeau rouge des informations minimales manquantes."""
+    from html import escape
+
+    def esc(value):
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value) if value else None
+        return escape(str(value)) if value not in (None, "", []) else "—"
+
+    def rows(mapping: Dict[str, Any], labels: Dict[str, str]) -> str:
+        return "\n".join(f"<tr><th>{escape(label)}</th><td>{esc(mapping.get(key))}</td></tr>"
+                         for key, label in labels.items() if not isinstance(mapping.get(key), dict))
+
+    def date(value):
+        return esc((value or "")[:16].replace("T", " ") + (" UTC" if value else ""))
+
+    m = draft["mesure"]
+    comptes_html = "\n".join(
+        f"<tr><td>{esc(c.get('numero'))}</td><td>{esc(c.get('nature'))}</td>"
+        f"<td>{esc(c.get('devise'))}</td><td>{esc(c.get('montant_gel'))}</td>"
+        f"<td>{esc(c.get('montant_declaration'))}</td></tr>"
+        for c in draft["fonds_geles"]["comptes"]) or (
+        '<tr><td colspan="5">Aucun compte renseigné.</td></tr>')
+    destinataires_html = "".join(
+        f"<li>☐ <strong>{escape(d['adresse'])}</strong> — {escape(d['regimes'])}</li>"
+        for d in draft["destinataires"])
+    chrono_html = "\n".join(
+        f"<tr><td>{date(e['date'])}</td><td>@{esc(e['par'])}</td>"
+        f"<td>{esc(e['action'])}</td><td>{esc(e['detail'])}</td></tr>"
+        for e in draft["chronologie"])
+    manquants = draft["informations_minimales_manquantes"]
+    manquants_html = (
+        '<div class="banner missing">⚠ Informations minimales manquantes — à compléter '
+        "avant transmission : " + escape(" ; ".join(manquants)) + ".</div>") if manquants else ""
+    operation = draft.get("operation_concernee")
+    operation_html = (
+        "<h2>Identification d'un paiement gelé</h2><table><tbody>"
+        + rows(operation, {"reference_message": "Référence du message",
+                           "type_message": "Type de message", "partie_en_cause": "Partie en cause",
+                           "role_partie": "Rôle de la partie"})
+        + "</tbody></table>") if operation else ""
+    listee = draft["personne_listee"]
+    absente = ("" if listee["presente_dans_les_listes_en_production"] else
+               "<p class=\"sub\">⚠ La fiche n'est plus présente dans les listes en production : "
+               "vérifiez le registre national des gels avant de déclarer.</p>")
+
+    return f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Fiskr — Projet de déclaration de gel — Mesure #{mesure.id}</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #111; margin: 2rem auto; max-width: 860px; }}
+h1 {{ font-size: 1.3rem; }} h2 {{ font-size: 1.02rem; margin-top: 1.4rem; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }}
+th, td {{ border: 1px solid #ccc; padding: 5px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #f0f0f0; width: 240px; }}
+.banner {{ border: 2px solid #b45309; background: #fef3c7; color: #7c2d12; padding: 0.7rem 1rem; border-radius: 6px; font-size: 0.9rem; margin: 1rem 0; }}
+.banner.missing {{ border-color: #b91c1c; background: #fee2e2; color: #7f1d1d; }}
+.sub {{ color: #555; }} ul {{ margin: 0.4rem 0 0 1.2rem; list-style: none; padding-left: 0; }}
+@media print {{ .no-print {{ display: none; }} body {{ margin: 0; }} }}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
+<h1>Projet de déclaration de gel d'avoirs (DG Trésor) — Mesure #{mesure.id}</h1>
+<p class="sub">Généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC par @{esc(generated_by)} —
+{esc(m['action_libelle'])} — alerte #{m['alerte_id']} — fondement : {esc(draft['fondement'])}</p>
+<div class="banner">⚠ {escape(GEL_DISCLAIMER)}</div>
+{manquants_html}
+<h2>Destinataire (à cocher par le déclarant, selon le régime)</h2>
+<ul>{destinataires_html}</ul>
+<h2>1. Déclarant</h2>
+<table><tbody>{rows(draft['declarant'], {"name": "Institution concernée", "siren": "SIREN",
+    "correspondent_name": "Point de contact", "correspondent_email": "Courriel",
+    "correspondent_phone": "Téléphone"})}</tbody></table>
+<h2>2. Régime de sanction &amp; personne concernés</h2>
+<table><tbody>{rows(draft['regime'], {"liste": "Liste d'origine", "programmes": "Régime concerné",
+    "reference_designation": "Référence et date du règlement UE ou de l'arrêté",
+    "inscrite_le": "Date d'inscription", "liste_en_vigueur_du": "Selon la liste en vigueur du"})}
+{rows(listee, {"identifiant": "Id", "type_nature": "Type de nature", "nom": "Nom",
+    "prenom": "Prénom", "nom_complet": "Nom sur la liste", "alias": "Alias",
+    "dates_naissance": "Date(s) de naissance"})}</tbody></table>
+{absente}
+<h2>3. Identification des fonds gelés</h2>
+<table><tbody>{rows(draft['fonds_geles'], {"etablissement": "Institution tenant les fonds gelés",
+    "date_du_gel": "Date du gel des fonds", "precisions": "Co-titulaires, mandataires, prélèvements, autres"})}</tbody></table>
+<table><thead><tr><th>Numéro du compte</th><th>Nature du compte / produit</th><th>Devise</th>
+<th>Montant à la date du gel</th><th>Montant à la date de la déclaration</th></tr></thead>
+<tbody>{comptes_html}</tbody></table>
+<h2>4. Client concerné</h2>
+<table><tbody>{rows(draft['personne_concernee'], {"type": "Type", "nom_complet": "Nom complet",
+    "prenom": "Prénom", "nom": "Nom", "raison_sociale": "Raison sociale",
+    "date_naissance": "Date de naissance", "lieu_naissance": "Lieu de naissance",
+    "adresse": "Adresse", "ville": "Ville", "pays": "Pays", "nationalites": "Nationalité(s)",
+    "iban": "IBAN", "bic": "BIC", "entree_en_relation": "Entrée en relation",
+    "reference_interne": "Référence interne"})}</tbody></table>
+{operation_html}
+<h2>5. Traitement de l'alerte</h2>
+<table><tbody>{rows(draft['traitement_alerte'], {"score_final": "Score final (%)",
+    "correspondance_exacte": "Concordance d'identifiant (hard match)",
+    "propose_par": "Proposée par", "propose_le": "Proposée le",
+    "decide_par": "Confirmée par", "decide_le": "Confirmée le", "commentaire": "Motivation"})}</tbody></table>
+<h2>6. Chronologie (append-only)</h2>
+<table><thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
+<tbody>{chrono_html}</tbody></table>
+</body></html>"""
+
+
+@app.get("/api/gels/{mesure_id}/draft")
+async def get_gel_draft(
+    mesure_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Projet de declaration de mise en oeuvre d'une mesure de gel (JSON
+    structure aux rubriques du formulaire de la DG Tresor). AUCUNE
+    transmission automatique : la DG Tresor n'a pas d'API publique, l'humain
+    transmet. Generation tracee GEL_DRAFT_GENERATED dans l'historique de
+    l'alerte.
+    """
+    mesure = _mesure_ou_404(db, mesure_id)
+    draft = _build_gel_draft(db, mesure, reviewer["username"])
+    _log_alert_event(db, mesure.alert_id, reviewer["username"], "GEL_DRAFT_GENERATED",
+                     f"Projet de déclaration de la mesure de gel #{mesure.id} généré (format JSON).")
+    db.commit()
+    return draft
+
+
+@app.get("/api/gels/{mesure_id}/draft/print")
+async def print_gel_draft(
+    mesure_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Projet de declaration de gel en HTML autonome imprimable."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    draft = _build_gel_draft(db, mesure, reviewer["username"])
+    _log_alert_event(db, mesure.alert_id, reviewer["username"], "GEL_DRAFT_GENERATED",
+                     f"Projet de déclaration de la mesure de gel #{mesure.id} généré (format imprimable).")
+    db.commit()
+    return HTMLResponse(content=_render_gel_draft_html(mesure, draft, reviewer["username"]))
+
+
+@app.post("/api/gels/{mesure_id}/declaration")
+async def record_gel_declaration(
+    mesure_id: int,
+    file: Optional[UploadFile] = File(None),
+    declaree_le: Optional[str] = Form(None),
+    reference: Optional[str] = Form(None),
+    canal: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Enregistre la declaration faite a la DG Tresor (hors de Fiskr) : date et
+    heure de transmission, reference, adresse, et la PIECE qui la prouve —
+    obligatoire, conservee comme piece jointe de l'alerte (inventaire des
+    pieces probantes). Statut DECLAREE ; le delai confirmation -> declaration
+    est trace.
+    """
+    mesure = _mesure_ou_404(db, mesure_id)
+    try:
+        verifiee = registre_des_gels.verifier_declaration(db, mesure, declaree_le=declaree_le,
+                                                         canal=canal)
+        if file is None or not (file.filename or "").strip():
+            raise registre_des_gels.RefusDeGel(
+                "La pièce de transmission est obligatoire (accusé de réception de la DG "
+                "Trésor, ou copie du courriel envoyé).")
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    safe_name, target_path = _chemin_de_piece_d_alerte(mesure.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, mesure.alert_id, safe_name, target_path,
+        f"Transmission à la DG Trésor de la mesure de gel #{mesure.id}.", reviewer["username"])
+    registre_des_gels.enregistrer_declaration(db, mesure, username=reviewer["username"],
+                                              piece=piece, verifiee=verifiee, reference=reference)
+    db.commit()
+    return {"message": f"Déclaration de la mesure de gel #{mesure.id} enregistrée.",
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+@app.post("/api/gels/{mesure_id}/levee")
+async def lift_gel_measure(
+    mesure_id: int,
+    payload: GelLeveeRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Levee d'une mesure declaree (LD §209-213) : motif, justification (acte
+    de levee), date. Le client retrouve son statut d'avant le gel, sauf si une
+    autre mesure le tient encore — ce qui est dit dans `warnings`."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    try:
+        avertissements = registre_des_gels.lever(
+            db, mesure, username=reviewer["username"], motif=payload.motif,
+            justification=payload.justification, levee_le=payload.levee_le)
+    except registre_des_gels.RefusDeGel as refus:
+        db.rollback()
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Mesure de gel #{mesure.id} levée.", "warnings": avertissements,
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+@app.get("/api/export/gels.csv")
+async def export_gels_csv(
+    statut: Optional[str] = Query(None),
+    type_action: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV du registre des mesures de gel (memes filtres que l'ecran) :
+    la piece que le controle demande entiere, pas la page affichee."""
+    from fiskr.kpi import delai_de_declaration_secondes
+    rows = _registre_filtre(db, statut, type_action, list_type, q) \
+        .order_by(MesureDeGel.ouverte_le.desc(), MesureDeGel.id.desc()).limit(_EXPORT_MAX_ROWS).all()
+    retard = {m.id for m in registre_des_gels.mesures_en_retard(db)}
+
+    def iso(d):
+        return d.isoformat() if d else ""
+
+    header = ["mesure", "alerte", "action", "statut", "en_retard", "client_id", "client",
+              "fiche_listee_id", "fiche_listee", "liste", "programmes", "reference_designation",
+              "confirmee_le", "confirmee_par", "date_effet", "comptes", "declaree_le",
+              "declaree_par", "reference_dgt", "adresse_dgt", "delai_declaration_heures",
+              "levee_le", "levee_par", "motif_levee", "justification_levee",
+              "radiation_constatee_le"]
+    data = []
+    for m in rows:
+        delai = delai_de_declaration_secondes(m.ouverte_le, m.declaree_le)
+        data.append([
+            m.id, m.alert_id, m.type_action, m.statut, "oui" if m.id in retard else "non",
+            m.client_id or "", m.client_name, m.watchlist_entity_id, m.watchlist_name,
+            m.list_type or "", ", ".join(str(p) for p in (m.programmes or [])),
+            m.reference_designation or "",
+            iso(m.ouverte_le), m.ouverte_par or "", iso(m.date_effet),
+            " | ".join(" ; ".join(c.get(k, "") for k in ("numero", "nature", "devise",
+                                                         "montant_gel", "montant_declaration"))
+                       for c in (m.comptes or [])),
+            iso(m.declaree_le), m.declaree_par or "", m.reference_dgt or "", m.canal_dgt or "",
+            f"{delai / 3600:.1f}" if (delai is not None and m.declaree_le) else "",
+            iso(m.levee_le), m.levee_par or "", m.motif_levee or "", m.justification_levee or "",
+            iso(m.radiation_constatee_le),
+        ])
+    return _csv_response(f"fiskr_registre_gels_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+                         header, data)
 
 
 # ------------------ QUALITE DES DONNEES CLIENTS ------------------
@@ -12021,40 +13129,115 @@ def _hook_purge_expired(db: Session) -> None:
     ).delete(synchronize_session=False)
 
 
-def _hook_idempotency_replay(db: Session, request: Request) -> Tuple[Optional[str], Optional[JSONResponse]]:
-    """Si X-Idempotency-Key correspond a une livraison connue, rejoue la
-    reponse d'origine a l'identique."""
+def _hook_empreinte_corps(body: bytes) -> str:
+    """
+    Empreinte SHA-256 de ce que la requete DEMANDE : le JSON canonique (cles
+    triees, sans blancs) quand le corps se lit — une retransmission qui
+    reserialise le meme objet dans un autre ordre reste la meme requete —,
+    les octets bruts sinon (un corps illisible est refuse juste apres, 422).
+    """
+    try:
+        canon = json.dumps(json.loads(body), sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8")
+    except (ValueError, TypeError):
+        canon = body
+    return hashlib.sha256(canon).hexdigest()
+
+
+def _hook_portee_de_cle(current_user: Dict[str, Any], endpoint: str, key: str) -> str:
+    """
+    Ce qui est stocke et cherche pour une cle d'idempotence : l'empreinte du
+    triplet (appelant, point d'entree, cle). L'appelant est la cle d'API
+    elle-meme (son identifiant, pas seulement son nom, que deux cles peuvent
+    partager).
+    """
+    appelant = f"{current_user.get('id')}:{current_user.get('username')}"
+    portee = "\x1f".join((appelant, endpoint, key))
+    return "sha256:" + hashlib.sha256(portee.encode("utf-8")).hexdigest()
+
+
+def _hook_idempotency_replay(db: Session, request: Request, endpoint: str,
+                             current_user: Dict[str, Any], body: bytes
+                             ) -> Tuple[Optional[Tuple[str, str]], Optional[JSONResponse]]:
+    """
+    Si X-Idempotency-Key designe une livraison de CE meme appelant sur CE meme
+    point d'entree, rejoue la reponse d'origine a l'identique — a condition que
+    le corps soit celui d'origine.
+
+    La cle etait cherchee dans toute la table, sans l'appelant, le point
+    d'entree ni le contenu. Mesure : le SI A crible « Jean Dupont » sous la cle
+    « 42 », le SI B envoie « Vladimir Putin » sous « 42 » — 200, rejoue, la
+    ligne d'audit de A, aucune ligne pour B, aucune alerte. Un upsert client
+    envoye sous « 42 » recevait la reponse du criblage et n'etait jamais
+    applique. Une cle choisie par l'appelant n'a de sens que chez lui.
+
+    Meme cle, autre corps : refus 422 explicite. Rejouer serait rendre la
+    decision d'une autre requete ; traiter serait trahir la promesse faite a
+    la cle — l'appelant a un defaut de generation de cles, il doit le voir.
+
+    Les livraisons anterieures a cette mesure (cle brute, sans empreinte) ne
+    sont plus atteignables par aucune recherche : on ne peut pas prouver
+    qu'une retransmission est la meme requete, elle est donc traitee a neuf —
+    un vrai criblage plutot qu'une reponse empruntee. Elles s'eteignent a
+    90 jours avec la purge.
+
+    Retourne ((portee, empreinte) ou None, reponse rejouee ou None).
+    """
     key = (request.headers.get("X-Idempotency-Key") or "").strip()
     if not key:
         return None, None
     if len(key) > 200:
         raise HTTPException(status_code=400, detail="X-Idempotency-Key : 200 caractères maximum.")
-    existing = db.query(HookDelivery).filter(HookDelivery.idempotency_key == key).first()
-    if existing:
-        return key, JSONResponse(
-            status_code=existing.status_code,
-            content=existing.response_json,
-            headers={"X-Idempotency-Replayed": "true"},
-        )
-    return key, None
+    cle = (_hook_portee_de_cle(current_user, endpoint, key), _hook_empreinte_corps(body))
+    existing = db.query(HookDelivery).filter(HookDelivery.idempotency_key == cle[0]).first()
+    if existing is None:
+        return cle, None
+    if existing.request_sha256 != cle[1]:
+        raise HTTPException(
+            status_code=422,
+            detail="X-Idempotency-Key déjà utilisée par cet appelant sur ce point "
+                   "d'entrée pour une requête DIFFÉRENTE (corps différent) : la "
+                   "réponse d'origine ne vaut pas pour celle-ci et n'est pas "
+                   "rejouée. Rien n'a été criblé ni modifié. Une clé "
+                   "d'idempotence désigne une seule requête : générez-en une "
+                   "nouvelle pour chaque demande distincte.")
+    # Un rejeu est un appel recu : sans trace, une retransmission en boucle du
+    # SI amont serait invisible en supervision.
+    _hook_store_delivery(db, None, endpoint, current_user["username"],
+                         existing.status_code, replay_of=existing.id)
+    return cle, JSONResponse(
+        status_code=existing.status_code,
+        content=existing.response_json,
+        headers={"X-Idempotency-Replayed": "true"},
+    )
 
 
-def _hook_store_delivery(db: Session, key: Optional[str], endpoint: str,
+def _hook_store_delivery(db: Session, cle: Optional[Tuple[str, str]], endpoint: str,
                          caller: str, status_code: int,
-                         response: Optional[Dict[str, Any]] = None) -> None:
+                         response: Optional[Dict[str, Any]] = None,
+                         replay_of: Optional[int] = None) -> None:
     """
     Trace TOUTE livraison de webhook — le tableau de bord a besoin des appels
     sans en-tete d'idempotence, qui sont la majorite. Sans cle appelant, une
     cle serveur « auto:<uuid> » est generee : elle n'est jamais retransmise,
     donc jamais rejouee par erreur. La reponse n'est stockee que pour les cles
     appelant (seule raison d'etre du champ : le rejeu ; un arbre de decision
-    de criblage pese plusieurs Ko).
+    de criblage pese plusieurs Ko), avec l'empreinte du corps qui l'a produite.
+    Un rejeu est trace comme une livraison `auto:` qui pointe sur l'origine.
+
+    La reponse est stockee telle que FastAPI la SERIALISE (`jsonable_encoder`),
+    c'est-a-dire telle que l'appelant l'a recue : la fiche listee d'une
+    correspondance porte des dates (`modified_at` d'une fiche corrigee), qu'une
+    colonne JSON refuse brutes — la trace leverait apres coup, et l'appelant
+    recevrait une 500 sans rien a rejouer a sa retransmission.
     """
-    auto = not key
+    auto = cle is None
     db.add(HookDelivery(
-        idempotency_key=key or f"auto:{uuid.uuid4()}",
+        idempotency_key=f"auto:{uuid.uuid4()}" if auto else cle[0],
+        request_sha256=None if auto else cle[1],
         endpoint=endpoint, caller=caller, status_code=status_code,
-        response_json=None if auto else response,
+        response_json=None if auto else jsonable_encoder(response),
+        replay_of=replay_of,
     ))
     _hook_purge_expired(db)
     db.commit()
@@ -12081,23 +13264,21 @@ async def hook_screening(
     Webhook entrant de criblage temps reel (SI amont -> Fiskr) : meme charge
     utile que POST /api/screen, authentifie par cle d'API fsk_ (+ signature
     HMAC-SHA256 si hooks.secret est configure), idempotent par X-Idempotency-Key
-    (la reponse d'origine est rejouee a la retransmission). Meme cœur de
-    criblage que le temps reel : audit immuable et alerte crees a l'identique.
+    (la reponse d'origine est rejouee a la retransmission du MEME corps par le
+    MEME appelant). Meme fonction que le temps reel (`cribler_la_requete`) :
+    meme fraicheur du cache, audit immuable et alerte crees a l'identique.
     """
     try:
         body = await _verify_hook_request(request, current_user)
-        key, replay = _hook_idempotency_replay(db, request)
+        cle, replay = _hook_idempotency_replay(db, request, "screening", current_user, body)
         if replay is not None:
             return replay
         try:
             payload = ScreenClientRequest.model_validate_json(body)
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"Charge utile invalide : {e}")
-        client_dict = payload.model_dump()
-        client_dict.pop("screening_lists", None)
-        requested_lists = _validate_screening_lists(payload.screening_lists)
-        result = screen_client_profile(db, client_dict, current_user["username"], requested_lists)
-        _hook_store_delivery(db, key, "screening", current_user["username"], 200, result)
+        result = cribler_la_requete(db, payload, current_user["username"])
+        _hook_store_delivery(db, cle, "screening", current_user["username"], 200, result)
         return result
     except HTTPException as exc:
         # Les refus post-authentification sont traces (signature, charge utile,
@@ -12135,6 +13316,84 @@ class HookClientUpsert(BaseModel):
     client_status: Optional[str] = None
 
 
+def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
+                          changed_fields: List[str], identification: List[str],
+                          username: str) -> Dict[str, Any]:
+    """
+    Crible la fiche que le SI amont vient de creer ou de modifier, quand il le
+    faut, et dit franchement ce qui a ete fait.
+
+    Le webhook modifiait la fiche SANS la cribler : un client cree par le CRM,
+    ou dont le nom venait de changer, restait hors criblage jusqu'au prochain
+    lookback. Lignes directrices conjointes DGT/ACPR sur le gel des avoirs
+    (18 mars 2026) : cribler avant toute entree en relation (§122) et « a
+    chaque mise a jour des elements d'identification » (§141).
+
+    - creation : toujours criblee ;
+    - mise a jour : criblee si un element d'identification a change — la
+      liste est RELEVEE sur le moteur (fiskr/identification.py), pas recopiee ;
+      sinon, rien n'est recrible et la reponse le dit ;
+    - aucune liste en production (409 de `exiger_un_univers`) ou profil
+      refuse par le quality gate (400) : la fiche reste enregistree, et la
+      reponse dit qu'elle n'a PAS ete criblee — jamais « aucune
+      correspondance » pour une comparaison qui n'a pas eu lieu.
+
+    Meme cœur que le temps reel (`cribler_un_profil`) : fraicheur du cache,
+    journal d'audit, alertes. Le criblage valide la fiche dans la meme
+    transaction que son journal ; un echec imprevu annule les deux, et la
+    retransmission du SI recommencera tout.
+    """
+    if operation == "updated" and not identification:
+        neutres = ", ".join(changed_fields)
+        return {
+            "performed": False, "reason": "NO_IDENTIFICATION_CHANGE",
+            "identification_fields_changed": [],
+            "summary": (f"non recriblée : aucun élément d'identification n'a changé "
+                        f"(champs modifiés, sans effet sur le criblage : {neutres})."
+                        if neutres else "non recriblée : aucun champ n'a changé."),
+        }
+    db.flush()
+    try:
+        result = cribler_un_profil(db, _profil_du_referentiel(row), username, None)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            reason = "NO_LIST_IN_PRODUCTION"
+            summary = ("NON criblée : aucune liste n'est en production, la fiche n'a été "
+                       "comparée à rien. Recriblez-la (POST /api/clients/{id}/screen) "
+                       "dès qu'une liste est en production.")
+        elif exc.status_code == status.HTTP_400_BAD_REQUEST:
+            reason = "QUALITY_GATE_REJECTED"
+            summary = ("NON criblée : le profil est refusé par le contrôle qualité "
+                       "(voir detail) ; complétez la fiche.")
+        else:
+            raise
+        return {"performed": False, "reason": reason,
+                "identification_fields_changed": identification,
+                "summary": summary, "detail": exc.detail}
+    # La fiche porte la date et la reference de ce criblage (cf. couverture) :
+    # le commit de l'appelant la valide avec la fiche.
+    from fiskr.rescreen import dater_un_criblage_unitaire
+    dater_un_criblage_unitaire(db, row, result.get("audit_trail_id"))
+    best = result.get("best_match") or {}
+    statut = best.get("status") or "NO_MATCH"
+    summary = f"criblée contre les listes en production : {statut}"
+    if result.get("alert_id"):
+        summary += f", alerte #{result['alert_id']}"
+    return {
+        "performed": True,
+        "reason": "CREATED" if operation == "created" else "IDENTIFICATION_CHANGED",
+        "identification_fields_changed": identification,
+        "summary": summary + ".",
+        "status": statut,
+        "final_score": best.get("final_score"),
+        "audit_trail_id": result.get("audit_trail_id"),
+        "alert_id": result.get("alert_id"),
+        "hits": result.get("hits"),
+        # Meme contrat que POST /api/hooks/screening
+        "result": result,
+    }
+
+
 @app.post("/api/hooks/client-upsert")
 async def hook_client_upsert(
     request: Request,
@@ -12146,10 +13405,13 @@ async def hook_client_upsert(
     dernier referentiel CLIENT_BASE en production : mise a jour par client_id
     ou creation. Trace au journal des actions d'administration
     (CLIENT_UPSERT_HOOK), idempotent par X-Idempotency-Key.
+
+    Une creation, ou une mise a jour d'un element d'identification, CRIBLE la
+    fiche (voir `_cribler_apres_upsert`) : la reponse porte le resultat.
     """
     try:
         body = await _verify_hook_request(request, current_user)
-        key, replay = _hook_idempotency_replay(db, request)
+        cle, replay = _hook_idempotency_replay(db, request, "client-upsert", current_user, body)
         if replay is not None:
             return replay
         try:
@@ -12182,26 +13444,34 @@ async def hook_client_upsert(
             existing.entity_checksum = compute_checksum(values)
             action_detail = "updated"
             changed_fields = sorted(before.keys())
+            row = existing
         else:
-            db.add(ClientEntity(snapshot_id=snap.snapshot_id,
-                                entity_checksum=compute_checksum(values), **values))
+            row = ClientEntity(snapshot_id=snap.snapshot_id,
+                               entity_checksum=compute_checksum(values), **values)
+            db.add(row)
             snap.record_count = (snap.record_count or 0) + 1
             action_detail = "created"
             changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
 
+        identification = elements_d_identification(changed_fields)
         log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
                          target=payload.client_id,
                          after={"operation": action_detail, "fields": changed_fields,
+                                "identification_fields": identification,
                                 "snapshot_id": snap.snapshot_id})
+        screening = _cribler_apres_upsert(db, row, action_detail, changed_fields,
+                                          identification, current_user["username"])
         db.commit()
         result = {
-            "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} dans le référentiel en production.",
+            "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} "
+                       f"dans le référentiel en production — {screening['summary']}",
             "operation": action_detail,
             "client_id": payload.client_id,
             "snapshot_id": snap.snapshot_id,
             "changed_fields": changed_fields,
+            "screening": screening,
         }
-        _hook_store_delivery(db, key, "client-upsert", current_user["username"], 200, result)
+        _hook_store_delivery(db, cle, "client-upsert", current_user["username"], 200, result)
         return result
     except HTTPException as exc:
         if exc.status_code != status.HTTP_403_FORBIDDEN:
@@ -12216,7 +13486,7 @@ async def get_hook_stats(
 ):
     """
     Supervision des webhooks entrants : volumes par endpoint et par appelant,
-    erreurs, serie des 30 derniers jours et dernieres livraisons. Ni la charge
+    erreurs, rejeux, serie des 30 derniers jours et dernieres livraisons. Ni la charge
     utile de reponse ni la cle d'idempotence ne sont exposees (la cle est
     choisie par l'appelant : elle peut porter une reference metier sensible).
     """
@@ -12228,17 +13498,24 @@ async def get_hook_stats(
     by_caller: Dict[str, Dict[str, int]] = {}
     daily: Dict[str, Dict[str, int]] = {}
     errors = 0
+    # Rejeux : retransmissions servies avec la reponse d'origine, sans
+    # recriblage. Comptes a part — un SI qui retransmet en boucle se voit ici.
+    replays = 0
     for row in rows:
         failed = int(row.status_code or 200) >= 400
+        rejeu = row.replay_of is not None
         errors += 1 if failed else 0
+        replays += 1 if rejeu else 0
         for bucket, key in ((by_endpoint, row.endpoint or "?"), (by_caller, row.caller or "?")):
-            entry = bucket.setdefault(key, {"count": 0, "errors": 0})
+            entry = bucket.setdefault(key, {"count": 0, "errors": 0, "replays": 0})
             entry["count"] += 1
             entry["errors"] += 1 if failed else 0
+            entry["replays"] += 1 if rejeu else 0
         day = (row.created_at or datetime.utcnow()).strftime("%Y-%m-%d")
-        slot = daily.setdefault(day, {"count": 0, "errors": 0})
+        slot = daily.setdefault(day, {"count": 0, "errors": 0, "replays": 0})
         slot["count"] += 1
         slot["errors"] += 1 if failed else 0
+        slot["replays"] += 1 if rejeu else 0
 
     recent = db.query(HookDelivery).order_by(
         HookDelivery.created_at.desc(), HookDelivery.id.desc()).limit(20).all()
@@ -12247,6 +13524,7 @@ async def get_hook_stats(
         "totals": {
             "deliveries": len(rows),
             "errors": errors,
+            "replays": replays,
             "callers": len(by_caller),
             "all_time": db.query(func.count(HookDelivery.id)).scalar() or 0,
         },
@@ -12260,7 +13538,11 @@ async def get_hook_stats(
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "endpoint": r.endpoint, "caller": r.caller,
                 "status_code": r.status_code,
-                "idempotent": not str(r.idempotency_key or "").startswith("auto:"),
+                # Un rejeu porte une cle serveur `auto:`, mais l'appelant avait
+                # bien fourni une cle : c'est elle qui a ete rejouee.
+                "idempotent": (r.replay_of is not None
+                               or not str(r.idempotency_key or "").startswith("auto:")),
+                "replayed": r.replay_of is not None,
             }
             for r in recent
         ],
@@ -12336,6 +13618,7 @@ async def list_alerts(
     channel: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    lapsed: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -12344,9 +13627,13 @@ async def list_alerts(
     """File de travail des alertes, triee par priorite puis echeance puis
     risque (score). Le canal separe le criblage clients (SCREENING) du
     filtrage transactionnel (FILTERING). `search` cherche sur le client,
-    la fiche listee et leurs identifiants (recherche globale Ctrl+K)."""
+    la fiche listee et leurs identifiants (recherche globale Ctrl+K).
+    `lapsed=true` ne garde que les alertes caduques (fiskr/caducite.py)."""
     from sqlalchemy import case, or_
     query = db.query(Alert)
+    if lapsed is not None:
+        query = query.filter(Alert.lapsed_since.isnot(None) if lapsed
+                             else Alert.lapsed_since.is_(None))
     if channel:
         ch = channel.strip().upper()
         if ch == "SCREENING":
@@ -12381,11 +13668,9 @@ async def list_alerts(
     ).one()
     open_count = int(open_count)
     # CRITICAL d'abord, puis echeance la plus proche, puis score : la file
-    # se lit de haut en bas dans l'ordre de traitement attendu
-    priority_rank = case(
-        {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
-        value=Alert.priority, else_=2
-    )
+    # se lit de haut en bas dans l'ordre de traitement attendu (rang derive
+    # de ALERT_PRIORITIES, partage avec « Prendre la suivante »)
+    priority_rank = rang_de_priorite_sql()
     # Les mises en attente descendent en bas de la file — visibles (jamais
     # masquees : un produit de conformite ne cache pas du travail), mais
     # apres les alertes actives. Un report expire redevient actif tout seul.
@@ -12423,6 +13708,12 @@ async def get_alert_detail(
     if not alert:
         raise HTTPException(status_code=404, detail="Alerte introuvable.")
     audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    # Le DERNIER criblage du couple, quand un criblage l'a re-rencontre : c'est
+    # son arbre que le valideur doit lire. L'arbre d'origine reste servi a
+    # cote (`decision_tree_origin`), consultable, jamais remplace en base.
+    dernier = None
+    if alert.latest_audit_id and alert.latest_audit_id != alert.audit_id:
+        dernier = db.query(AuditTrail).filter(AuditTrail.id == alert.latest_audit_id).first()
     events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
     attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id) \
@@ -12455,8 +13746,12 @@ async def get_alert_detail(
             }
             for att in attachments
         ],
-        "decision_tree": audit.decision_tree if audit else None,
+        "decision_tree": (dernier.decision_tree if dernier is not None
+                          else (audit.decision_tree if audit else None)),
+        "decision_tree_origin": (audit.decision_tree if (audit and dernier is not None) else None),
+        "decision_tree_audit_id": dernier.id if dernier is not None else alert.audit_id,
         "watchlist_version": audit.watchlist_version if audit else None,
+        "latest_watchlist_version": dernier.watchlist_version if dernier is not None else None,
         "events": [
             {
                 "timestamp": e.timestamp.isoformat() if e.timestamp else None,
@@ -12466,7 +13761,156 @@ async def get_alert_detail(
             }
             for e in events
         ],
+        # La suite d'un vrai positif sur une liste de gel : mesures et etapes.
+        # `gel_du` dit si cette alerte en impose une (perimetre SANCTION,
+        # confirmee) — l'ecran propose de l'ouvrir quand elle manque.
+        "gel_mesures": _mesures_de_l_alerte(db, alert.id, attachments),
+        "gel_du": registre_des_gels.est_due(alert, perimeter_overrides(db)),
+        "gel_vocabulaire": registre_des_gels.vocabulaire(),
+        # Client et personne listee cote a cote (fiskr/comparaison.py)
+        "comparison": _comparaison_de_l_alerte(db, alert, audit),
     }
+
+
+# Provenances des deux colonnes du tableau de comparaison. Libelles rendus
+# tels quels et traduits par fiskr/static/i18n.js (une ligne par libelle).
+_SOURCES_DE_COMPARAISON = {
+    "REFERENTIEL": "Référentiel clients en production",
+    "AUDIT": "Identification journalisée par ce criblage (client hors référentiel)",
+    "AUDIT_NOM": "Client hors référentiel, criblé avant que le journal ne porte son identification : seul son nom est restituable",
+    "FICHE_RENCONTREE": "Version de la fiche rencontrée par ce criblage",
+    "FICHE_EN_PRODUCTION": "Version en production (la ligne d'audit de ce criblage n'est plus disponible)",
+}
+_NOTES_DE_COMPARAISON = {
+    "CLIENT_MODIFIE": "L'identification du client a changé depuis ce criblage : le tableau compare le référentiel actuel, l'explication du score porte sur l'identification criblée.",
+    "FICHE_PURGEE": "La version rencontrée n'est plus conservée en base : elle est restituée depuis le journal d'audit.",
+    "FICHE_CORRIGEE": "La fiche a été corrigée depuis ce criblage : le tableau compare la version rencontrée, la fiche complète montre la version corrigée.",
+    "FICHE_PLUS_RECENTE": "Une version plus récente de cette fiche est en production.",
+}
+
+
+def _fiche_du_referentiel(db: Session, client_id: Optional[str]) -> Optional[ClientEntity]:
+    """La fiche du client dans le referentiel EN PRODUCTION (lots CLIENT_BASE
+    prets ; les panels du cahier de tests n'en sont pas)."""
+    if not client_id:
+        return None
+    snap_ids = [s.snapshot_id for s in db.query(Snapshot.snapshot_id).filter(
+        Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY").all()]
+    if not snap_ids:
+        return None
+    return db.query(ClientEntity).filter(
+        ClientEntity.client_id == client_id,
+        ClientEntity.snapshot_id.in_(snap_ids)).first()
+
+
+def _fiche_listee_en_production(db: Session, entity_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Version en production d'une fiche listee, sous la forme du cache moteur."""
+    if not entity_id:
+        return None
+    ligne = db.query(WatchlistEntity, Snapshot.file_type).join(
+        Snapshot, Snapshot.snapshot_id == WatchlistEntity.snapshot_id
+    ).filter(
+        WatchlistEntity.entity_id == entity_id,
+        WatchlistEntity.excluded.isnot(True),
+        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
+        Snapshot.status == "READY",
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    if ligne is None:
+        return None
+    ent, type_de_liste = ligne
+    fiche = {c.name: _valeur_de_cache(getattr(ent, c.name)) for c in ent.__table__.columns}
+    fiche["_list_type"] = type_de_liste
+    return fiche
+
+
+def _comparaison_de_l_alerte(db: Session, alert: Alert,
+                             audit: Optional[AuditTrail]) -> Dict[str, Any]:
+    """
+    Les deux colonnes du tableau de comparaison, et d'ou elles viennent.
+
+    La fiche : la version RENCONTREE, celle que la ligne d'audit a journalisee
+    (le cache moteur la porte entiere, identifiant de ligne compris) — c'est
+    elle que l'alerte instruit. Purgee de la base depuis, elle reste lisible
+    dans le journal, et l'ecran le dit ; sans ligne d'audit (retention), la
+    version en production, en le disant aussi.
+
+    Le client : le referentiel en production d'abord. Un client connu
+    seulement par l'appel temps reel (criblage manuel, API) n'y est pas : son
+    identification est celle que la ligne d'audit a journalisee
+    (`client_identification`). Une ligne anterieure a ce journal ne porte que
+    son nom — l'ecran dit qu'il n'y a rien d'autre, plutot qu'une colonne vide
+    qui passerait pour un client sans date de naissance.
+    """
+    from fiskr.comparaison import comparer
+    from fiskr.empreintes import empreinte_client
+
+    arbre = (audit.decision_tree if audit else None) or {}
+    canal = alert.channel or "SCREENING"
+    notes: List[str] = []
+
+    fiche = arbre.get("watchlist_entity") or None
+    fiche_db_id = fiche_courante_db_id = None
+    en_production = _fiche_listee_en_production(db, alert.watchlist_entity_id)
+    if fiche:
+        source_fiche = "FICHE_RENCONTREE"
+        rangee = db.query(WatchlistEntity.id, WatchlistEntity.entity_checksum).filter(
+            WatchlistEntity.id == fiche.get("id")).first() if fiche.get("id") else None
+        if rangee is None:
+            notes.append("FICHE_PURGEE")
+        else:
+            fiche_db_id = rangee[0]
+            if rangee[1] != fiche.get("entity_checksum"):
+                notes.append("FICHE_CORRIGEE")
+        if en_production and en_production.get("entity_checksum") != fiche.get("entity_checksum") \
+                and en_production.get("id") != fiche_db_id:
+            notes.append("FICHE_PLUS_RECENTE")
+            fiche_courante_db_id = en_production.get("id")
+    elif en_production:
+        source_fiche, fiche = "FICHE_EN_PRODUCTION", en_production
+        fiche_db_id = en_production.get("id")
+    else:
+        return {"available": False,
+                "reason": "Ni la ligne d'audit ni la production ne décrivent plus cette fiche : rien à comparer."}
+
+    referentiel = None if str(alert.client_id or "").startswith("TXN:") \
+        else _fiche_du_referentiel(db, alert.client_id)
+    if referentiel is not None:
+        source_client, profil = "REFERENTIEL", _profil_du_referentiel(referentiel)
+        if arbre.get("client_fingerprint") and \
+                empreinte_client(profil) != arbre.get("client_fingerprint"):
+            notes.append("CLIENT_MODIFIE")
+    elif arbre.get("client_identification"):
+        source_client = "AUDIT"
+        profil = {"client_type": audit.client_type, **arbre["client_identification"]}
+    else:
+        source_client = "AUDIT_NOM"
+        profil = {"client_type": audit.client_type if audit else "PP",
+                  "primary_name": (audit.client_name if audit else None) or alert.client_name}
+
+    tableau = comparer(profil, fiche, scoring_config_with_thresholds(db, canal), canal)
+    return {
+        "available": True,
+        "client_source": source_client,
+        "client_source_label": _SOURCES_DE_COMPARAISON[source_client],
+        "watchlist_source": source_fiche,
+        "watchlist_source_label": _SOURCES_DE_COMPARAISON[source_fiche],
+        "notes": [_NOTES_DE_COMPARAISON[n] for n in notes],
+        # Lien vers la fiche complete : la version rencontree quand la base la
+        # garde, sinon la version en production — jamais une autre en silence.
+        "watchlist_db_id": fiche_db_id or fiche_courante_db_id,
+        "watchlist_current_db_id": fiche_courante_db_id if fiche_db_id else None,
+        **tableau,
+    }
+
+
+def _mesures_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[str, Any]]:
+    mesures = db.query(MesureDeGel).filter(MesureDeGel.alert_id == alert_id) \
+                .order_by(MesureDeGel.id.asc()).all()
+    if not mesures:
+        return []
+    seuil = gel_declaration_delai_heures(db)
+    pieces = {att.id: att for att in attachments}
+    return [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in mesures]
 
 @app.post("/api/alerts/{alert_id}/assign")
 async def assign_alert(
@@ -12545,11 +13989,127 @@ async def escalate_alert(
     _notifier_les_suiveurs(db, alert, "Escaladée", current_user["username"])
     return {"message": "Alerte escaladée.", **_alert_summary(alert)}
 
-def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
+def _close_alert(db: Session, alert: Alert, decision: str, username: str,
+                 comment: str) -> Optional[MesureDeGel]:
+    """
+    Cloture d'une instruction — et, sur une liste de gel, ouverture de ce qui
+    la suit. Une alerte DGT se closait exactement comme une alerte PEP : en
+    production, deux vrais positifs OFAC n'ont produit ni piece ni projet de
+    declaration. Toute confirmation passe ici (proposition sans 4-yeux comme
+    validation) : la mesure « a declarer » ne peut donc pas etre oubliee par
+    un chemin, elle est ouverte dans la meme transaction que la cloture.
+    """
     alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
     alert.decided_by = username
     alert.decided_at = datetime.utcnow()
     alert.decision_comment = comment
+    return registre_des_gels.ouvrir_si_due(db, alert, username)
+
+
+_LIBELLES_DE_DECISION = {"CONFIRMED": "vrai positif", "FALSE_POSITIVE": "faux positif"}
+
+
+def _refuser_un_motif_de_l_autre_decision(db: Session, decision: str, *textes,
+                                          statut: int = 400, suite: str = "") -> None:
+    """Un faux positif motive par « Correspondance confirmee… » (ou l'inverse)
+    est une piece de conformite qui se contredit : refus franc, en nommant le
+    motif, plutot qu'une cloture que personne ne relira."""
+    contraires = motifs_d_une_autre_decision(db, decision, *textes)
+    if contraires:
+        autre = _LIBELLES_DE_DECISION["CONFIRMED" if decision == "FALSE_POSITIVE" else "FALSE_POSITIVE"]
+        raise HTTPException(status_code=statut, detail=(
+            f"Motif réservé à un {autre} : « {contraires[0]} ». Il ne peut pas motiver un "
+            f"{_LIBELLES_DE_DECISION.get(decision, decision)}.{suite}"))
+
+
+def _preparer_la_paire_de_l_alerte(db: Session, alert: Alert, utilisateur: Dict[str, Any],
+                                   decision: str, demande: AlertWhitelistOnClose,
+                                   motivation: str) -> WhitelistPair:
+    """« Memoriser en liste blanche » a la cloture d'un faux positif : le flux
+    de pose de l'ecran Liste blanche (`_preparer_une_paire`), appele AVANT la
+    cloture — une pose refusee ne laisse pas une alerte close que le prochain
+    re-criblage rouvrirait. Mesure : alerte n° 20 close en faux positif apres
+    4-yeux, n° 28 rouverte dix minutes plus tard sur la meme paire par
+    « Recribler ce client » ; la liste blanche ne se proposait qu'apres coup,
+    par un bouton separe."""
+    if decision != "FALSE_POSITIVE":
+        raise HTTPException(status_code=400, detail=(
+            "La liste blanche mémorise un faux positif : elle ne s'applique pas à un vrai positif."))
+    roles = set(parse_roles(utilisateur.get("role")))
+    if not roles & {"admin", "reviewer"}:
+        raise HTTPException(status_code=403, detail=(
+            "La mise en liste blanche est réservée aux réviseurs : validez la décision, "
+            "un réviseur posera la paire."))
+    if not alert.client_id:
+        raise HTTPException(status_code=400, detail=(
+            "Cette alerte ne porte pas d'identifiant client : aucune paire ne peut la mémoriser."))
+    return _preparer_une_paire(
+        db, utilisateur["username"], alert.client_id, alert.watchlist_entity_id,
+        justification=(demande.justification or "").strip() or motivation,
+        expires_at=demande.expires_at, client_name=alert.client_name,
+        watchlist_name=alert.watchlist_name)
+
+
+def _poser_la_paire_de_l_alerte(db: Session, alert: Alert, paire: Optional[WhitelistPair],
+                                username: str) -> str:
+    """Inscrit la paire preparee au journal de l'alerte, dans la transaction de
+    la cloture. Rend la phrase a ajouter au message."""
+    if paire is None:
+        return ""
+    db.flush()   # identifiant de la paire, pour le journal de l'alerte
+    _log_alert_event(db, alert.id, username, "WHITELISTED",
+                     f"Paire de liste blanche #{paire.id} posée à la validation : ce couple "
+                     f"client × fiche ne rouvrira pas d'alerte tant que la fiche et "
+                     f"l'identification du client restent celles de cette décision.")
+    return f" Paire de liste blanche #{paire.id} posée."
+
+
+def _valider_la_decision_proposee(db: Session, decision: Optional[str],
+                                  commentaire: Optional[str]) -> Tuple[str, str]:
+    """Decision et motif d'une proposition, verifies UNE fois pour l'action
+    unitaire comme pour l'action en masse : un seul chemin, une seule regle."""
+    decision = (decision or "").strip().upper()
+    if decision not in ("CONFIRMED", "FALSE_POSITIVE"):
+        raise HTTPException(status_code=400, detail="Décision invalide (CONFIRMED ou FALSE_POSITIVE).")
+    commentaire = (commentaire or "").strip()
+    if not commentaire:
+        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
+    _refuser_un_motif_de_l_autre_decision(db, decision, commentaire)
+    return decision, commentaire
+
+
+def _enregistrer_la_proposition(db: Session, alert: Alert, decision: str, comment: str,
+                                username: str, four_eyes: bool,
+                                precision: str = "") -> Tuple[str, str, Optional[MesureDeGel]]:
+    """Ecrit la proposition sur l'alerte et son evenement PROPOSED (plus la
+    cloture directe si le 4-yeux est desactive). Rend (libelle, message,
+    mesure de gel eventuelle). `precision` complete le journal (« proposition
+    en masse »). L'appelant valide la transaction."""
+    # Proposer une decision, c'est instruire : une mise en attente encore
+    # active n'a plus de sens et fausserait le classement de la file.
+    if alert.snoozed_until:
+        alert.snoozed_until = None
+    alert.proposed_decision = decision
+    alert.proposed_by = username
+    alert.proposed_at = datetime.utcnow()
+    alert.proposal_comment = comment
+    label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
+    if four_eyes:
+        alert.status = "PENDING_VALIDATION"
+        _log_alert_event(db, alert.id, username, "PROPOSED",
+                         f"Décision proposée : {label}. {comment}{precision}")
+        return label, "Décision proposée, en attente de validation 4-yeux.", None
+    mesure = _close_alert(db, alert, decision, username, comment)
+    _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}{precision}")
+    _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
+    return label, "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure), mesure
+
+
+def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
+    if mesure is None:
+        return ""
+    return (f" Mesure de gel #{mesure.id} ouverte : déclaration à la DG Trésor "
+            f"due immédiatement (Criblage → Registre des gels).")
 
 @app.post("/api/alerts/{alert_id}/propose")
 async def propose_alert_decision(
@@ -12566,35 +14126,24 @@ async def propose_alert_decision(
     alert = _get_open_alert(db, alert_id)
     if alert.status == "PENDING_VALIDATION":
         raise HTTPException(status_code=409, detail="Une décision est déjà en attente de validation.")
-    decision = (payload.decision or "").strip().upper()
-    if decision not in ("CONFIRMED", "FALSE_POSITIVE"):
-        raise HTTPException(status_code=400, detail="Décision invalide (CONFIRMED ou FALSE_POSITIVE).")
-    comment = (payload.comment or "").strip()
-    if not comment:
-        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
+    decision, comment = _valider_la_decision_proposee(db, payload.decision, payload.comment)
 
     username = current_user["username"]
-    # Proposer une decision, c'est instruire : une mise en attente encore
-    # active n'a plus de sens et fausserait le classement de la file.
-    if alert.snoozed_until:
-        alert.snoozed_until = None
-    alert.proposed_decision = decision
-    alert.proposed_by = username
-    alert.proposed_at = datetime.utcnow()
-    alert.proposal_comment = comment
-    label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
-
     four_eyes = alert_four_eyes_required(db)
-    if four_eyes:
-        alert.status = "PENDING_VALIDATION"
-        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
-        message = "Décision proposée, en attente de validation 4-yeux."
-    else:
-        _close_alert(alert, decision, username, comment)
-        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
-        _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
-        message = "Alerte clôturée (validation 4-yeux désactivée)."
+    paire = None
+    if payload.whitelist is not None:
+        if four_eyes:
+            raise HTTPException(status_code=400, detail=(
+                "La mise en liste blanche se décide à la validation 4-yeux, pas à la proposition."))
+        paire = _preparer_la_paire_de_l_alerte(db, alert, current_user, decision,
+                                               payload.whitelist, comment)
+    label, message, _mesure = _enregistrer_la_proposition(db, alert, decision, comment,
+                                                          username, four_eyes)
+    if not four_eyes:
+        message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
     db.commit()
+    if paire is not None:
+        _annoncer_la_paire(db, paire, username)
     common = {
         "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
         "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
@@ -12638,12 +14187,30 @@ async def validate_alert_decision(
         "Client": alert.client_name, "Fiche listée": alert.watchlist_name,
         "Proposée par": proposer,
     }
+    paire = None
+    if payload.whitelist is not None and not payload.approve:
+        raise HTTPException(status_code=400, detail=(
+            "Une décision renvoyée en analyse ne se mémorise pas en liste blanche."))
     if payload.approve:
-        _close_alert(alert, alert.proposed_decision, username, comment or alert.proposal_comment)
+        # La proposition a pu etre ecrite avant que les motifs ne portent leur
+        # decision : le valideur ne peut pas la modifier, il la renvoie.
+        _refuser_un_motif_de_l_autre_decision(
+            db, alert.proposed_decision, alert.proposal_comment, comment, statut=409,
+            suite=" Renvoyez la décision en analyse pour qu'elle soit motivée à nouveau.")
+        if payload.whitelist is not None:
+            paire = _preparer_la_paire_de_l_alerte(db, alert, reviewer, alert.proposed_decision,
+                                                   payload.whitelist,
+                                                   comment or alert.proposal_comment)
+        mesure = _close_alert(db, alert, alert.proposed_decision, username,
+                              comment or alert.proposal_comment)
         _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
-        message = f"Décision validée, alerte clôturée ({alert.status})."
+        # Le statut se dit par son libellé : le toast affichait
+        # « (CLOSED_FALSE_POSITIVE) » au milieu d'une phrase en français.
+        libelle = ALERT_STATUS_LABELS.get(alert.status, alert.status)
+        message = f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
+        message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
         event_key, extra = "alert_decision_validated", {
-            "Validée par": username, "Statut": alert.status,
+            "Validée par": username, "Statut": libelle,
             "Commentaire": comment or "—",
         }
     else:
@@ -12660,6 +14227,8 @@ async def validate_alert_decision(
             "Renvoyée par": username, "Motif": comment,
         }
     db.commit()
+    if paire is not None:
+        _annoncer_la_paire(db, paire, username)
     emit(db, event_key, {**common, **extra})
     _notifier_les_suiveurs(db, alert,
                            "Décision validée, dossier clos" if payload.approve
@@ -12668,6 +14237,19 @@ async def validate_alert_decision(
 
 class AlertPriorityRequest(BaseModel):
     priority: str
+
+
+def _refuser_sous_le_plancher(db: Session, alert: Alert, priorite: str) -> None:
+    """Le plancher du perimetre SANCTION vaut aussi pour la main de l'analyste :
+    sinon il suffirait d'un clic pour remettre un vrai positif OFAC a 120 h."""
+    from fiskr.alerts import plancher_de_priorite, sous_le_plancher
+    from fiskr.settings import perimeter_overrides
+    plancher = plancher_de_priorite(alert.list_type, perimeter_overrides(db))
+    if sous_le_plancher(priorite, plancher):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Priorité refusée : une correspondance sur une liste de gel (périmètre "
+                    f"SANCTION) ne descend pas sous {plancher}."))
 
 @app.post("/api/alerts/{alert_id}/priority")
 async def set_alert_priority(
@@ -12682,14 +14264,17 @@ async def set_alert_priority(
     new_priority = (payload.priority or "").strip().upper()
     if new_priority not in ALERT_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
+    _refuser_sous_le_plancher(db, alert, new_priority)
     old_priority = alert.priority or "—"
     alert.priority = new_priority
     alert.due_at = compute_due_at(db, new_priority, alert.created_at)
+    # Libellés, pas codes : la phrase s'affiche dans l'historique et le toast.
+    libelle = ALERT_PRIORITY_LABELS[new_priority]
     _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
-                     f"Priorité {old_priority} → {new_priority}.")
+                     f"Priorité {ALERT_PRIORITY_LABELS.get(old_priority, old_priority)} → {libelle}.")
     db.commit()
-    _notifier_les_suiveurs(db, alert, f"Priorité passée à {new_priority}", current_user["username"])
-    return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
+    _notifier_les_suiveurs(db, alert, f"Priorité passée à {libelle}", current_user["username"])
+    return {"message": f"Priorité passée à {libelle}.", **_alert_summary(alert)}
 
 class AlertSnoozeRequest(BaseModel):
     until: Optional[str] = None   # ISO 8601 ; None = réveiller maintenant
@@ -12759,11 +14344,34 @@ async def snooze_alert(
 
 class AlertBulkRequest(BaseModel):
     ids: List[int]
-    action: str  # "assign" | "priority"
+    action: str  # "assign" | "priority" | "propose"
     assignee: Optional[str] = None
     priority: Optional[str] = None
+    # Proposition en masse : une decision et un motif COMMUNS. `confirm_sanction`
+    # dit que l'analyste a lu l'avertissement « liste de gel » (voir plus bas).
+    decision: Optional[str] = None
+    comment: Optional[str] = None
+    confirm_sanction: bool = False
 
 _ALERT_BULK_MAX = 200
+
+# Pourquoi une alerte est ecartee d'une action en masse : un code stable et une
+# phrase SANS variable — le detail (assignee, statut) voyage a cote, et la
+# phrase se traduit telle quelle dans les six langues de l'interface. La liste
+# d'identifiants sans raison laissait deviner : close ? introuvable ? a un autre ?
+_ECARTS_EN_MASSE = {
+    "INTROUVABLE": "Alerte introuvable.",
+    "CLOSE": "Alerte déjà close.",
+    "SOUS_LE_PLANCHER": "Liste de gel (périmètre SANCTION) : priorité sous le plancher.",
+    "EN_ATTENTE_DE_VALIDATION": "Une décision est déjà en attente de validation.",
+    "ASSIGNEE_A_UN_AUTRE": "Assignée à un autre analyste : c'est à son assigné de la proposer.",
+    "SANCTION_SANS_QUATRE_YEUX": "Liste de gel (périmètre SANCTION) : sans validation 4-yeux, la proposer en masse la clôturerait sans second regard. À instruire à l'unité.",
+}
+
+
+def _ecart(alert_id: int, code: str, **detail) -> Dict[str, Any]:
+    return {"id": alert_id, "code": code, "reason": _ECARTS_EN_MASSE[code], **detail}
+
 
 @app.post("/api/alerts/bulk")
 async def bulk_alert_action(
@@ -12772,11 +14380,24 @@ async def bulk_alert_action(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Action en masse sur des alertes OUVERTES (≤ 200 a la fois) : assignation
-    ou changement de priorite. Memes regles que les actions unitaires
-    (assigner a un tiers = admin), meme journalisation : un AlertEvent par
-    alerte traitee — jamais d'action silencieuse. Les alertes cloturees ou
-    introuvables sont ignorees et restituees dans `skipped`.
+    Action en masse sur des alertes OUVERTES (≤ 200 a la fois) : assignation,
+    changement de priorite, ou proposition d'une meme decision. Memes regles
+    que les actions unitaires (assigner a un tiers = admin ; meme validation du
+    motif que la proposition unitaire), meme journalisation : un AlertEvent par
+    alerte traitee — jamais d'action silencieuse. Chaque alerte ecartee est
+    restituee dans `skipped` avec sa raison.
+
+    Proposer en masse, c'est instruire en serie, pas valider en serie : une
+    seule fiche listee a produit 10 des 26 alertes d'une file (mesure), et la
+    meme decision se motivait dix fois a la main. Chaque alerte recoit SON
+    evenement PROPOSED ; le 4-yeux reste unitaire — le proposeur ne valide
+    aucune de ses propositions, et la validation ne se fait pas en masse.
+    Ecartees : une alerte assignee a quelqu'un d'autre (c'est son dossier),
+    une decision deja en attente, et un faux positif sur une liste de gel quand
+    le 4-yeux est desactive — la proposition clorait alors l'alerte sans second
+    regard, et le perimetre SANCTION ne se clot pas en volume. Avec le 4-yeux,
+    ce faux positif exige `confirm_sanction` : sans lui, rien n'est ecrit et la
+    reponse (409) nomme les alertes concernees.
     """
     ids = list(dict.fromkeys(payload.ids or []))
     if not ids:
@@ -12784,52 +14405,183 @@ async def bulk_alert_action(
     if len(ids) > _ALERT_BULK_MAX:
         raise HTTPException(status_code=400, detail=f"Maximum {_ALERT_BULK_MAX} alertes par action en masse.")
     action = (payload.action or "").strip().lower()
-    if action not in ("assign", "priority"):
-        raise HTTPException(status_code=400, detail="Action en masse inconnue (assign ou priority).")
+    if action == "validate":
+        raise HTTPException(status_code=400, detail=(
+            "La validation 4-yeux reste unitaire : chaque décision proposée se valide une par "
+            "une, par un réviseur différent du proposeur."))
+    if action not in ("assign", "priority", "propose"):
+        raise HTTPException(status_code=400, detail="Action en masse inconnue (assign, priority ou propose).")
+    moi = current_user["username"]
 
     if action == "assign":
-        assignee = (payload.assignee or "").strip() or current_user["username"]
-        if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
+        assignee = (payload.assignee or "").strip() or moi
+        if assignee != moi and "admin" not in parse_roles(current_user.get("role")):
             raise HTTPException(status_code=403,
                                 detail="Seul un administrateur peut assigner des alertes à un autre analyste.")
         assignee, _redirected = resolve_delegate(db, assignee)
-    else:
+    elif action == "priority":
         new_priority = (payload.priority or "").strip().upper()
         if new_priority not in ALERT_PRIORITIES:
             raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
+    else:
+        decision, comment = _valider_la_decision_proposee(db, payload.decision, payload.comment)
+        four_eyes = alert_four_eyes_required(db)
 
     alerts = {a.id: a for a in db.query(Alert).filter(Alert.id.in_(ids)).all()}
-    updated, skipped = [], []
+    skipped, sous_plancher, a_confirmer = [], [], []
+    retenues: List[Alert] = []
+    from fiskr.alerts import plancher_de_priorite, sous_le_plancher
+    from fiskr.perimeters import est_sanction
+    surcharges = perimeter_overrides(db) if action != "assign" else None
     for alert_id in ids:
         alert = alerts.get(alert_id)
-        if alert is None or alert.status not in ALERT_OPEN_STATUSES:
-            skipped.append(alert_id)
+        if alert is None:
+            skipped.append(_ecart(alert_id, "INTROUVABLE"))
             continue
+        if alert.status not in ALERT_OPEN_STATUSES:
+            skipped.append(_ecart(alert_id, "CLOSE", status=alert.status))
+            continue
+        if action == "priority" and sous_le_plancher(
+                new_priority, plancher_de_priorite(alert.list_type, surcharges)):
+            # Meme regle que l'action unitaire : ignoree, et nommee
+            skipped.append(_ecart(alert_id, "SOUS_LE_PLANCHER"))
+            sous_plancher.append(alert_id)
+            continue
+        if action == "propose":
+            if alert.status == "PENDING_VALIDATION":
+                skipped.append(_ecart(alert_id, "EN_ATTENTE_DE_VALIDATION"))
+                continue
+            if alert.assigned_to and alert.assigned_to != moi:
+                skipped.append(_ecart(alert_id, "ASSIGNEE_A_UN_AUTRE", assigned_to=alert.assigned_to))
+                continue
+            if decision == "FALSE_POSITIVE" and est_sanction(alert.list_type, surcharges):
+                if not four_eyes:
+                    skipped.append(_ecart(alert_id, "SANCTION_SANS_QUATRE_YEUX"))
+                    continue
+                if not payload.confirm_sanction:
+                    a_confirmer.append(alert_id)
+        retenues.append(alert)
+
+    if a_confirmer:
+        # Rien n'est ecrit : la confirmation porte sur le lot entier, et une
+        # moitie de lot deja proposee laisserait l'ecran dans un etat que
+        # l'analyste n'a pas choisi.
+        raise HTTPException(status_code=409, detail={
+            "code": "CONFIRMATION_SANCTION",
+            "alert_ids": a_confirmer,
+            # Ce qui va se faire, puis pourquoi on demande : l'ecran affiche
+            # cette phrase telle quelle dans sa confirmation.
+            "message": (f"Vous proposez « faux positif » pour {len(a_confirmer)} alerte(s) d'une "
+                        f"liste de gel (périmètre SANCTION). Rien n'est clos : chaque proposition "
+                        f"attendra sa propre validation 4-yeux. Mais une correspondance de gel "
+                        f"manquée est constatable à l'audit et sanctionnable : confirmez que "
+                        f"chacune a été instruite individuellement."),
+        })
+
+    updated, mesures, label = [], [], None
+    for alert in retenues:
         if action == "assign":
             alert.assigned_to = assignee
             if alert.status == "OPEN":
                 alert.status = "IN_PROGRESS"
-            _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED",
+            _log_alert_event(db, alert.id, moi, "ASSIGNED",
                              f"Assignée à {assignee} (action en masse).")
-        else:
+        elif action == "priority":
             old_priority = alert.priority or "—"
             alert.priority = new_priority
             alert.due_at = compute_due_at(db, new_priority, alert.created_at)
-            _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
-                             f"Priorité {old_priority} → {new_priority} (action en masse).")
-        updated.append(alert_id)
+            _log_alert_event(db, alert.id, moi, "PRIORITY_CHANGED",
+                             f"Priorité {ALERT_PRIORITY_LABELS.get(old_priority, old_priority)} → "
+                             f"{ALERT_PRIORITY_LABELS[new_priority]} (action en masse).")
+        else:
+            label, _message, mesure = _enregistrer_la_proposition(
+                db, alert, decision, comment, moi, four_eyes,
+                precision=f" (proposition en masse : {len(retenues)} alerte(s), même motif)")
+            if mesure is not None:
+                mesures.append(mesure)
+        updated.append(alert.id)
     db.commit()
+    identifiants = (", ".join(str(i) for i in updated[:20])
+                    + (" …" if len(updated) > 20 else ""))
     if updated and action == "assign":
         # Une seule notification pour tout le lot (jamais N mails d'affilée)
         emit(db, "alert_assigned", {
             "_assignee": assignee,
             "Alertes assignées": len(updated), "Action": "assignation en masse",
-            "Identifiants": ", ".join(str(i) for i in updated[:20])
-                            + (" …" if len(updated) > 20 else ""),
-            "Assignées par": current_user["username"],
+            "Identifiants": identifiants,
+            "Assignées par": moi,
         })
-    return {"updated": updated, "skipped": skipped,
-            "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."}
+    if updated and action == "propose":
+        # Meme regle : une notification pour le lot ; les suiveurs, eux, sont
+        # prevenus dossier par dossier, puisqu'ils suivent chacun.
+        commun = {"Alertes": len(updated), "Action": "proposition en masse",
+                  "Identifiants": identifiants, "Décision": label, "Commentaire": comment}
+        if four_eyes:
+            emit(db, "alert_pending_validation", {**commun, "Proposée par": moi})
+        else:
+            emit(db, "alert_closed_direct", {**commun, "Clôturée par": moi})
+        for alert in retenues:
+            _notifier_les_suiveurs(db, alert, f"Décision proposée : {label}", moi)
+    if action == "propose":
+        if four_eyes:
+            message = (f"{len(updated)} décision(s) proposée(s), chacune en attente de sa "
+                       f"validation 4-yeux ; {len(skipped)} alerte(s) écartée(s).")
+        else:
+            message = (f"{len(updated)} alerte(s) clôturée(s) (validation 4-yeux désactivée) ; "
+                       f"{len(skipped)} alerte(s) écartée(s).")
+        if mesures:
+            message += (f" {len(mesures)} mesure(s) de gel ouverte(s) : déclaration à la DG "
+                        f"Trésor due immédiatement (Criblage → Registre des gels).")
+    else:
+        message = (f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."
+                   + (f" Dont {len(sous_plancher)} sur une liste de gel : priorité "
+                      f"minimale {PLANCHER_SANCTION} (périmètre SANCTION)."
+                      if sous_plancher else ""))
+    return {"updated": updated, "skipped": skipped, "below_floor": sous_plancher,
+            "message": message}
+
+
+@app.post("/api/alerts/claim-next")
+async def claim_next_alert(
+    channel: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    « Prendre la suivante » : s'assigner l'alerte non assignee la plus urgente
+    — echeance SLA, puis priorite (fiskr.alerts.ordre_de_prise) —, de facon
+    ATOMIQUE : deux analystes qui cliquent ensemble obtiennent deux alertes
+    differentes, jamais la meme (fiskr.alerts.prendre_la_suivante).
+
+    Mesure : une analyste ouvrait son accueil sur « Rien ne vous attend »
+    devant 26 alertes que personne n'avait prises, puis choisissait a la main
+    dans la file — et deux collegues pouvaient choisir la meme. Rien a prendre
+    n'est pas une erreur : la reponse le dit (`claimed: false`), avec le nombre
+    d'alertes non assignees qu'un report tient encore a l'ecart.
+    """
+    if channel and channel.strip().upper() not in ("SCREENING", "FILTERING"):
+        raise HTTPException(status_code=400, detail="Canal inconnu (SCREENING ou FILTERING).")
+    moi = current_user["username"]
+    alerte = prendre_la_suivante(db, moi, channel)
+    if alerte is None:
+        db.rollback()
+        en_attente = db.query(Alert).filter(
+            Alert.assigned_to.is_(None), Alert.status.in_(STATUTS_A_PRENDRE),
+            Alert.snoozed_until > datetime.utcnow())
+        canal = critere_de_canal(channel)
+        if canal is not None:
+            en_attente = en_attente.filter(canal)
+        return {"claimed": False, "alert": None, "snoozed_unassigned": en_attente.count(),
+                "message": "Aucune alerte à prendre : chaque alerte à instruire a déjà quelqu'un."}
+    _log_alert_event(db, alerte.id, moi, "ASSIGNED",
+                     f"Prise en charge par {moi} (« Prendre la suivante » : la plus urgente "
+                     f"des alertes non assignées).")
+    db.commit()
+    # Pas de courriel « alerte assignee » : on ne previent pas quelqu'un de ce
+    # qu'il vient de faire lui-meme. Les suiveurs du dossier, eux, l'apprennent.
+    _notifier_les_suiveurs(db, alerte, f"Prise en charge par @{moi}", moi)
+    return {"claimed": True, "alert": _alert_summary(alerte),
+            "message": f"Alerte #{alerte.id} prise en charge : la plus urgente des alertes non assignées."}
 
 # ------------------ VUES SAUVEGARDEES (filtres des files d'alertes) ------------------
 
@@ -12957,15 +14709,14 @@ async def get_ma_journee(
     pas. Le compte personnel ne retient donc que ce sur quoi ce lecteur peut
     reellement agir.
     """
-    from sqlalchemy import case, or_
+    from sqlalchemy import or_
     moi = current_user["username"]
     roles = parse_roles(current_user.get("role"))
     peut_valider = bool({"admin", "reviewer"} & set(roles))
     maintenant = datetime.utcnow()
 
     ouvertes = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
-    rang = case({"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
-                value=Alert.priority, else_=2)
+    rang = rang_de_priorite_sql()
 
     # 1. Mes alertes : celles qui me sont assignees, dans l'ordre de la file.
     miennes_q = ouvertes.filter(Alert.assigned_to == moi)
@@ -13000,6 +14751,19 @@ async def get_ma_journee(
     # 5. Les lots qui attendent une homologation, si j'y ai droit.
     lots = db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count() if peut_valider else 0
 
+    # 6. Ce qui n'est a personne. « Rien ne vous attend » s'affichait devant 26
+    # alertes non assignees : le compte ne retenait que `assigned_to == moi`, et
+    # l'accueil concluait a une journee vide. Ces alertes ne sont pas « a moi »
+    # — l'ecran le dit ainsi —, mais elles attendent quelqu'un. Memes criteres
+    # que « Prendre la suivante » : l'accueil n'annonce rien que le bouton ne
+    # puisse donner.
+    prenables = db.query(Alert).filter(*criteres_prenables(maintenant))
+    non_assignees = {
+        "total": prenables.count(),
+        "en_retard": prenables.filter(Alert.due_at.isnot(None), Alert.due_at < maintenant).count(),
+        "peut_prendre": "auditor" not in roles,
+    }
+
     def _resume(a: Alert) -> Dict[str, Any]:
         return {"id": a.id, "channel": a.channel or "SCREENING",
                 "client_name": a.client_name, "watchlist_name": a.watchlist_name,
@@ -13018,6 +14782,7 @@ async def get_ma_journee(
         "reveils_du_jour": reveils,
         "dossiers_suivis": suivis,
         "lots_a_homologuer": lots,
+        "non_assignees": non_assignees,
     }
 
 @app.get("/api/me/dashboard")
@@ -13080,20 +14845,36 @@ async def add_alert_attachment(
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alerte introuvable.")
-    safe_name = re.sub(r"[^\w.\-]", "_", file.filename or "piece_jointe")
-    ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    target_path = ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+    safe_name, target_path = _chemin_de_piece_d_alerte(alert_id, file.filename)
     copier_televersement_vers(target_path, file, "piece")
+    attachment = _enregistrer_piece_d_alerte(db, alert_id, safe_name, target_path, comment,
+                                             current_user["username"])
+    db.commit()
+    return {"message": "Pièce jointe ajoutée.", "attachment_id": attachment.id,
+            "file_name": attachment.file_name}
+
+
+def _chemin_de_piece_d_alerte(alert_id: int, nom_televerse: Optional[str]):
+    safe_name = re.sub(r"[^\w.\-]", "_", nom_televerse or "piece_jointe")
+    ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    return safe_name, ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+
+
+def _enregistrer_piece_d_alerte(db: Session, alert_id: int, safe_name: str, target_path,
+                                comment: Optional[str], username: str) -> AlertAttachment:
+    """Le seul chemin d'enregistrement d'une piece d'alerte (ligne + evenement),
+    apres la copie BORNEE faite par l'endpoint : la piece de declaration d'un
+    gel passe par lui aussi, donc par l'inventaire des pieces probantes
+    (fiskr/preuves.py). Commit a l'appelant."""
     attachment = AlertAttachment(
         alert_id=alert_id, file_name=safe_name, file_path=str(target_path),
-        comment=(comment or "").strip() or None, uploaded_by=current_user["username"],
+        comment=(comment or "").strip() or None, uploaded_by=username,
     )
     db.add(attachment)
     db.flush()
-    _log_alert_event(db, alert_id, current_user["username"], "ATTACHMENT",
+    _log_alert_event(db, alert_id, username, "ATTACHMENT",
                      f"Pièce jointe ajoutée : {safe_name}." + (f" {comment.strip()}" if comment and comment.strip() else ""))
-    db.commit()
-    return {"message": "Pièce jointe ajoutée.", "attachment_id": attachment.id, "file_name": safe_name}
+    return attachment
 
 @app.get("/api/alerts/attachments/{attachment_id}")
 async def download_alert_attachment(
@@ -13198,7 +14979,9 @@ document de travail issu du journal d'audit immuable (audit #{alert.audit_id}).<
 {field("Score de base", tree.get("base_score"))}
 {field("Hard match", "Oui — " + str(tree.get("hard_match_details", "")) if tree.get("hard_match_triggered") else "Non")}
 {field("Seuil appliqué", tree.get("cut_off_applied"))}
-{field("Version de watchlist", audit.watchlist_version if audit else None)}
+{field("Version de watchlist", univers.version_citee(audit.watchlist_version) if audit else None)}
+{field("Empreinte de l'univers criblé", audit.watchlist_hash if audit else None)}
+{field("Listes en production", univers.composition_citee(audit.watchlist_composition) if audit else None)}
 {adj_rows}
 {field("Règle anti-FP appliquée", f"{fp_rule.get('name')} (v{fp_rule.get('version')})" if fp_rule else None)}
 </table>
@@ -13250,12 +15033,22 @@ class WhitelistRevokeRequest(BaseModel):
 class RescreenRunRequest(BaseModel):
     file_type: Optional[str] = None
 
+class WhitelistReconductRequest(BaseModel):
+    comment: str
+
 def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
+    from fiskr.empreintes import MOTIFS_DE_REEXAMEN, motif_en_attente
     now = datetime.utcnow()
+    motif = motif_en_attente(pair)
     if pair.revoked_at:
         state = "REVOKED"
     elif pair.expires_at and pair.expires_at <= now:
         state = "EXPIRED"
+    elif motif is not None:
+        # Toujours en vigueur (ni revoquee ni expiree), mais elle n'absorbe
+        # plus : la fiche ou le client a change depuis sa decision, ou rien
+        # ne dit ce qu'elle couvrait. A reconduire ou a retirer.
+        state = "STALE"
     else:
         state = "ACTIVE"
     return {
@@ -13275,6 +15068,14 @@ def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
         "revoked_at": pair.revoked_at.isoformat() if pair.revoked_at else None,
         "revoke_comment": pair.revoke_comment,
         "state": state,
+        # Ce que la decision couvre, et d'ou on le sait : la ligne du journal
+        # d'audit lue, ou les donnees en base au moment de la pose (NULL des
+        # deux : paire anterieure au suivi, rien n'est etabli).
+        "stale_reason": motif,
+        "stale_reason_label": MOTIFS_DE_REEXAMEN.get(motif) if motif else None,
+        "stale_since": pair.stale_since.isoformat() if pair.stale_since else None,
+        "fingerprinted_at": pair.fingerprinted_at.isoformat() if pair.fingerprinted_at else None,
+        "fingerprint_audit_id": pair.fingerprint_audit_id,
     }
 
 @app.post("/api/whitelist")
@@ -13295,19 +15096,59 @@ async def create_whitelist_pair(
     WHITELISTED dans le journal d'audit). Justification et piece jointe
     exigees selon les reglages modulaires.
     """
-    client_id = client_id.strip()
-    watchlist_entity_id = watchlist_entity_id.strip()
+    piece_fournie = file is not None and bool(file.filename)
+    pair = _preparer_une_paire(db, reviewer["username"], client_id, watchlist_entity_id,
+                               justification=justification, expires_at=expires_at,
+                               client_name=client_name, watchlist_name=watchlist_name,
+                               piece_fournie=piece_fournie)
+    # La piece s'ecrit APRES tous les refus (aucun fichier orphelin sur le
+    # disque pour une pose refusee), et toujours bornee.
+    if piece_fournie:
+        safe_name = os.path.basename(file.filename).replace("..", "_")
+        WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        copier_televersement_vers(target_path, file, "piece")
+        pair.evidence_file_name = safe_name
+        pair.evidence_file_path = str(target_path)
+    db.commit()
+    db.refresh(pair)
+    _annoncer_la_paire(db, pair, reviewer["username"])
+    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+
+
+def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_entity_id: str, *,
+                        justification: Optional[str] = None, expires_at: Optional[str] = None,
+                        client_name: Optional[str] = None, watchlist_name: Optional[str] = None,
+                        piece_fournie: bool = False) -> WhitelistPair:
+    """
+    LE flux de pose d'une paire — justification, piece, echeance, empreintes
+    de ce que la decision couvre (fiskr.empreintes) —, partage par l'ecran
+    Liste blanche et par la validation d'un faux positif (« Memoriser en liste
+    blanche »). Tout refus est leve AVANT d'ecrire quoi que ce soit : la
+    validation qui l'appelle ne clot donc pas l'alerte sur une pose ratee. La
+    paire est ajoutee a la session, pas validee : l'appelant commit, et
+    joint la piece s'il en a une (`piece_fournie` ne decide que du refus quand
+    le reglage l'exige).
+    """
+    from fiskr.empreintes import empreintes_de_reference, motif_en_attente, poser_les_empreintes
+    client_id = (client_id or "").strip()
+    watchlist_entity_id = (watchlist_entity_id or "").strip()
     if not client_id or not watchlist_entity_id:
         raise HTTPException(status_code=400, detail="client_id et watchlist_entity_id sont requis.")
 
-    if is_whitelisted(db, client_id, watchlist_entity_id):
+    existante = is_whitelisted(db, client_id, watchlist_entity_id)
+    if existante:
+        if motif_en_attente(existante) is not None:
+            raise HTTPException(status_code=409, detail=(
+                "Une paire existe déjà pour ce couple client × listé, à réexaminer : "
+                "reconduisez-la ou retirez-la depuis l'écran Liste blanche."))
         raise HTTPException(status_code=409, detail="Une paire active existe déjà pour ce couple client × listé.")
 
     requirements = whitelist_requirements(db)
     justification = (justification or "").strip()
     if requirements["justification_required"] and not justification:
         raise HTTPException(status_code=400, detail="Une justification est obligatoire pour une mise en liste blanche (réglage actif).")
-    if requirements["file_required"] and (file is None or not file.filename):
+    if requirements["file_required"] and not piece_fournie:
         raise HTTPException(status_code=400, detail="Une pièce jointe justificative est obligatoire pour une mise en liste blanche (réglage actif).")
 
     expires_dt = None
@@ -13317,15 +15158,14 @@ async def create_whitelist_pair(
         except ValueError:
             raise HTTPException(status_code=400, detail="Format de date d'expiration invalide (attendu: YYYY-MM-DD).")
 
-    evidence_name = None
-    evidence_path = None
-    if file is not None and file.filename:
-        safe_name = os.path.basename(file.filename).replace("..", "_")
-        WHITELIST_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-        target_path = WHITELIST_EVIDENCE_DIR / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-        copier_televersement_vers(target_path, file, "piece")
-        evidence_name = safe_name
-        evidence_path = str(target_path)
+    # Ce que la decision couvre (fiskr.empreintes) : une paire qui ne le sait
+    # pas couvrirait toute version future de la fiche et du client — refus
+    # franc, AVANT d'ecrire la piece sur le disque.
+    reference = empreintes_de_reference(db, client_id, watchlist_entity_id)
+    if reference["manque"]:
+        raise HTTPException(status_code=409, detail=(
+            "Impossible d'établir ce que cette décision couvre : "
+            + " ; ".join(reference["manque"]) + "."))
 
     # Type de liste derive cote serveur (jamais fourni par le client) :
     # cache de production d'abord, sinon la derniere alerte de la paire
@@ -13345,22 +15185,23 @@ async def create_whitelist_pair(
         watchlist_name=(watchlist_name or "").strip() or None,
         list_type=list_type,
         justification=justification or None,
-        evidence_file_name=evidence_name,
-        evidence_file_path=evidence_path,
-        created_by=reviewer["username"],
+        created_by=username,
         expires_at=expires_dt,
     )
+    poser_les_empreintes(pair, reference)
     db.add(pair)
-    db.commit()
-    db.refresh(pair)
+    return pair
+
+
+def _annoncer_la_paire(db: Session, pair: WhitelistPair, username: str) -> None:
+    """Notification d'une paire posee, apres le commit."""
     emit(db, "whitelist_changed", {
         "Action": "paire créée", "Client": pair.client_name or pair.client_id,
         "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
-        "Liste": pair.list_type or "—", "Par": reviewer["username"],
+        "Liste": pair.list_type or "—", "Par": username,
         "Justification": pair.justification or "—",
         "Échéance de revue": pair.expires_at.strftime("%d/%m/%Y") if pair.expires_at else "—",
     })
-    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
 
 class WhitelistBulkPair(BaseModel):
     client_id: str
@@ -13385,6 +15226,7 @@ async def create_whitelist_pairs_bulk(
     Les paires deja actives sont sautees (pas d'echec global). La piece jointe
     eventuelle reste du ressort de la pose unitaire.
     """
+    from fiskr.empreintes import empreintes_de_reference, poser_les_empreintes
     if not payload.pairs:
         raise HTTPException(status_code=400, detail="Aucune paire fournie.")
     if len(payload.pairs) > 500:
@@ -13415,6 +15257,14 @@ async def create_whitelist_pairs_bulk(
         if is_whitelisted(db, client_id, entity_id):
             skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id, "reason": "paire déjà active"})
             continue
+        # Ce que la decision couvre : la version de la fiche et le pseudo-client
+        # que le cahier de tests a montres (fiskr.empreintes). Une paire qui ne
+        # peut pas l'etablir est sautee, motif a l'appui, sans faire echouer le lot.
+        reference = empreintes_de_reference(db, client_id, entity_id)
+        if reference["manque"]:
+            skipped.append({"client_id": client_id, "watchlist_entity_id": entity_id,
+                            "reason": " ; ".join(reference["manque"])})
+            continue
         # Type de liste : fourni par le rapport de backtest, sinon derive du cache
         list_type = (p.list_type or "").strip() or types_par_id.get(entity_id)
         pair = WhitelistPair(
@@ -13426,6 +15276,7 @@ async def create_whitelist_pairs_bulk(
             justification=justification or None,
             created_by=reviewer["username"],
         )
+        poser_les_empreintes(pair, reference)
         db.add(pair)
         created.append({"client_id": client_id, "watchlist_entity_id": entity_id})
     db.commit()
@@ -13443,25 +15294,99 @@ async def create_whitelist_pairs_bulk(
 async def list_whitelist_pairs(
     active_only: bool = Query(False),
     list_type: Optional[str] = Query(None),
+    state: Optional[str] = Query(None, description="STALE : paires à réexaminer seulement"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Liste des paires en liste blanche avec leur etat (active / expiree / revoquee)."""
+    """
+    Liste des paires en liste blanche avec leur etat (active / a reexaminer /
+    expiree / revoquee). `stale_total` compte les paires en vigueur qui
+    n'absorbent plus — la fiche ou le client a change depuis leur decision —,
+    quel que soit le filtre : c'est le chiffre qui demande une action.
+    """
+    from fiskr.empreintes import filtre_a_reexaminer
+    now = datetime.utcnow()
+    en_vigueur = (WhitelistPair.revoked_at.is_(None),
+                  (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now))
+    if state and state.strip().upper() not in ("STALE",):
+        raise HTTPException(status_code=400, detail="Filtre d'état inconnu (attendu : STALE).")
     query = db.query(WhitelistPair)
-    if active_only:
-        now = datetime.utcnow()
-        query = query.filter(
-            WhitelistPair.revoked_at.is_(None),
-            (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
-        )
+    if active_only or state:
+        query = query.filter(*en_vigueur)
+    if state:
+        query = query.filter(filtre_a_reexaminer(WhitelistPair))
     query = _apply_list_type_filter(query, WhitelistPair.list_type, list_type)
     total = query.count()
     rows = query.order_by(WhitelistPair.created_at.desc()) \
                 .offset((page - 1) * page_size).limit(page_size).all()
+    stale_total = db.query(WhitelistPair).filter(
+        *en_vigueur, filtre_a_reexaminer(WhitelistPair)).count()
     return {"total": total, "page": page, "page_size": page_size,
+            "stale_total": stale_total,
             "items": [_whitelist_summary(p) for p in rows]}
+
+@app.post("/api/whitelist/{pair_id}/reconduct")
+async def reconduct_whitelist_pair(
+    pair_id: int,
+    payload: WhitelistReconductRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Reconduit une paire a reexaminer : l'analyste a regarde ce qui a change
+    (evenement WHITELIST_STALE de l'alerte) et confirme le faux positif. Les
+    empreintes du DERNIER criblage journalise du couple remplacent celles de
+    la decision precedente ; l'ancienne et la nouvelle vont au journal
+    d'administration, avec le motif. La paire absorbe a nouveau.
+
+    Refusee sur une paire qui couvre deja ce qu'elle voit : reconduire sans
+    rien a reexaminer serait une signature sans objet.
+    """
+    from fiskr.empreintes import (MOTIFS_DE_REEXAMEN, empreintes_de_reference,
+                                  motif_en_attente, poser_les_empreintes)
+    pair = db.query(WhitelistPair).filter(WhitelistPair.id == pair_id).first()
+    if not pair:
+        raise HTTPException(status_code=404, detail="Paire introuvable.")
+    if pair.revoked_at:
+        raise HTTPException(status_code=409, detail="Paire révoquée : posez-en une nouvelle.")
+    if pair.expires_at and pair.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=409, detail="Paire expirée : posez-en une nouvelle.")
+    motif = motif_en_attente(pair)
+    if motif is None:
+        raise HTTPException(status_code=409, detail=(
+            "Rien à réexaminer : aucun criblage n'a vu la fiche ou le client changer "
+            "depuis la décision de cette paire."))
+    comment = (payload.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Un motif est requis pour reconduire une paire.")
+    reference = empreintes_de_reference(db, pair.client_id, pair.watchlist_entity_id)
+    if reference["manque"]:
+        raise HTTPException(status_code=409, detail=(
+            "Impossible d'établir ce que cette décision couvre : "
+            + " ; ".join(reference["manque"]) + "."))
+    avant = {"entity_checksum": pair.entity_checksum,
+             "client_fingerprint": pair.client_fingerprint,
+             "fingerprint_audit_id": pair.fingerprint_audit_id,
+             "stale_reason": motif}
+    poser_les_empreintes(pair, reference)
+    log_admin_action(db, reviewer["username"], "WHITELIST_RECONDUCTED",
+                     target=f"{pair.client_id} × {pair.watchlist_entity_id}",
+                     before=avant,
+                     after={"entity_checksum": pair.entity_checksum,
+                            "client_fingerprint": pair.client_fingerprint,
+                            "fingerprint_audit_id": pair.fingerprint_audit_id},
+                     detail=f"{MOTIFS_DE_REEXAMEN[motif]} — {comment}")
+    db.commit()
+    emit(db, "whitelist_changed", {
+        "Action": "paire reconduite", "Client": pair.client_name or pair.client_id,
+        "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
+        "Liste": pair.list_type or "—", "Par": reviewer["username"],
+        "Motif du réexamen": MOTIFS_DE_REEXAMEN[motif], "Commentaire": comment,
+    })
+    return {"message": "Paire reconduite : elle couvre de nouveau ce couple.",
+            **_whitelist_summary(pair)}
 
 @app.post("/api/whitelist/{pair_id}/revoke")
 async def revoke_whitelist_pair(
@@ -13514,14 +15439,13 @@ async def couverture_du_criblage_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Combien de clients du referentiel n'ont JAMAIS ete cribles.
+    Combien de clients du referentiel n'ont JAMAIS ete cribles, combien ne le
+    sont pas contre la version des listes en production, et le dernier passage.
 
     « Tous vos clients ont-ils ete cribles ? » est la premiere question d'un
-    controle, et le produit ne savait pas y repondre : importer un referentiel
-    clients declenche un controle de completude, pas un criblage, et le
-    re-criblage automatique se declenche quand une LISTE change — jamais quand
-    des CLIENTS arrivent. Un referentiel fraichement importe restait donc
-    entier hors du criblage sans que rien ne le signale.
+    controle. La mesure lit la trace que chaque passage de criblage laisse sur
+    chaque fiche (fiskr/couverture.py) : mesuree sur le journal d'audit, qui
+    n'ecrit que les correspondances, elle ne s'eteignait jamais.
 
     Lu en base a chaque appel : c'est un fait, pas un compteur a entretenir.
     """
@@ -13543,10 +15467,16 @@ async def run_manual_rescreen(
     C'etait la plus lourde operation du produit encore executee DANS la
     requete : elle part desormais dans la file de travaux (202 + jeton, suivi
     par la pastille), le refus d'un type inconnu restant synchrone (400).
+
+    Une restriction a une liste ABSENTE de la production est refusee (409), le
+    meme refus que tout autre criblage : le travail se terminait sur « Lookback
+    exécuté » apres n'avoir compare personne a rien.
     """
     file_type = (payload.file_type or "").strip().upper() or None
     if file_type and file_type not in WATCHLIST_FILE_TYPES:
         raise HTTPException(status_code=400, detail=f"Type de liste inconnu ({', '.join(WATCHLIST_FILE_TYPES)}).")
+    _ensure_watchlist_cache(db)
+    exiger_un_univers([file_type] if file_type else None)
     token = f"lookback-{uuid.uuid4().hex[:8]}"
     job = _submit_job("lookback", token=token,
                       label="Lookback du référentiel clients"

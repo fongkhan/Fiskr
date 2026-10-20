@@ -269,6 +269,14 @@ def _strip_accents_for_matching_cached(text, channel, _active):
         return text
     return _strip_combining(text)
 
+# Suffixes juridiques retires des raisons sociales. UNE liste : le texte libre
+# du filtrage (fiskr/transactions.py) la relit mot a mot plutot que de passer
+# une expression reguliere sur chacun des noms listes de l'univers.
+MOTS_BRUIT_JURIDIQUES = frozenset({"SA", "SARL", "LLC", "LTD", "GMBH", "SOCIETE"})
+_MOTIF_BRUIT_JURIDIQUE = re.compile(
+    r"\b(" + "|".join(sorted(MOTS_BRUIT_JURIDIQUES)) + r")\b", re.IGNORECASE)
+
+
 def clean_noise_words(text: str, channel: str = None) -> str:
     """Removes corporate noise suffixes (SA, SARL, LLC, LTD, GMBH, SOCIETE) for PMs.
 
@@ -280,8 +288,7 @@ def clean_noise_words(text: str, channel: str = None) -> str:
     """
     if channel is not None and not caps.is_active(caps.CAP_NOISE_WORDS, channel):
         return text
-    pattern = r"\b(SA|SARL|LLC|LTD|GMBH|SOCIETE)\b"
-    cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    cleaned = _MOTIF_BRUIT_JURIDIQUE.sub("", text)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 def validate_date(date_str: str) -> bool:
@@ -483,8 +490,6 @@ def evaluate_and_clean(entity: dict, channel: str = None) -> dict:
     if confidence is not None and float(confidence) < 85.0:
         warnings.append(f"Rule_M08: Échec d'Extraction de Confiance PDF (score de {confidence}%)")
 
-    status = "DEGRADED" if warnings else "OK"
-
     # ------------------ LEVEL 3: AUTO-CLEAN & Cleansing ------------------
     # Rule_I03: Incohérence de Genre Multi-valué (Fallback to U)
     resolved_gender = "U"
@@ -539,6 +544,11 @@ def evaluate_and_clean(entity: dict, channel: str = None) -> dict:
 
     # Clean maiden name
     cleansed_maiden_name = cleanse_text(maiden_name, False) if maiden_name else ""
+
+    # Le statut se decide une fois TOUS les avertissements connus. Il etait
+    # calcule avant Rule_I03 (genre multi-value, ci-dessus) : une fiche ressortait
+    # « OK » avec un avertissement dans sa propre liste.
+    status = "DEGRADED" if warnings else "OK"
 
     return {
         "is_valid": True,

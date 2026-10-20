@@ -1,7 +1,11 @@
 import json
 import hashlib
+import html
 import logging
+import re
+import unicodedata
 from datetime import datetime
+from typing import Any, Dict, Optional
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from fiskr.config import config
@@ -218,10 +222,82 @@ class ClientEntity(Base):
     client_activity_sector = Column(String(100), nullable=True) # code NAF / secteur
     client_activity_countries = Column(JSON, nullable=True)     # pays d'exposition operationnelle
     client_relationship_start = Column(String(20), nullable=True)
-    client_status = Column(String(20), nullable=True)           # actif / cloture / gele
+    # actif / cloture / gele — normalise en majuscules a l'import ; « GELE »
+    # est ecrit par le registre des mesures de gel (fiskr/gels.py)
+    client_status = Column(String(20), nullable=True)
 
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
+
+    # ---- Trace du dernier criblage (cf. ScreeningPass, fiskr/couverture.py) ----
+    # Un passage de criblage n'ecrivait au journal d'audit que les clients qui
+    # ont une correspondance : un lookback annoncait « 3 clients criblés » sans
+    # laisser une seule preuve, et la couverture, mesuree sur ce journal,
+    # restait « 3 jamais criblés » pour toujours. Une ligne NO_MATCH par client
+    # et par passage n'est pas tenable (mesure : 5,5 Ko la ligne, 4,2 Go par
+    # passage a 750 000 clients) — la trace vit donc ici, mise a jour en masse.
+    # Quand la fiche a ete criblee pour la derniere fois, et par quel passage
+    # (NULL : criblage unitaire, dont la piece est sa ligne d'audit).
+    screened_at = Column(DateTime, nullable=True)
+    screening_pass_id = Column(Integer, nullable=True)
+    # Empreinte des elements d'identification (fiskr/identification.py) au
+    # dernier criblage contre l'univers COMPLET : c'est elle qu'un nouvel import
+    # compare, pour ne recribler que les clients ajoutes ou modifies.
+    screened_identity_sha256 = Column(String(64), nullable=True)
+    # Empreinte de l'univers en production contre lequel la fiche est criblee
+    # EN ENTIER (passage complet, ou passage delta qui prolonge cette couverture).
+    covered_universe_hash = Column(String(64), nullable=True)
+
+# Colonnes de TRACE portees par la fiche client : elles disent quand et contre
+# quoi elle a ete criblee, elles ne font pas partie du profil. Aucun profil de
+# criblage ne doit les transporter — un datetime dans le profil finirait dans un
+# arbre de decision que la colonne JSON du journal refuse (cf. modified_at).
+CLIENT_SCREENING_TRACE_COLUMNS = ("screened_at", "screening_pass_id",
+                                  "screened_identity_sha256", "covered_universe_hash")
+
+
+class ScreeningPass(Base):
+    """
+    Un passage de criblage du referentiel clients : lookback, re-criblage apres
+    une mise a jour de liste, criblage des clients nouveaux ou modifies.
+
+    Il porte ce que les lignes d'audit ne portent que pour les correspondances :
+    CONTRE QUOI le referentiel a ete crible (la reference de l'univers, lue au
+    point unique `rescreen.reference_de_l_univers`, par le chemin du journal), sur quel
+    perimetre, combien de clients, quand. Chaque fiche criblee le designe
+    (`ClientEntity.screening_pass_id`). Une ligne par passage, quel que soit le
+    nombre de clients : c'est ce qui rend la trace tenable.
+    """
+    __tablename__ = "screening_passes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # LOOKBACK | MISE_A_JOUR_LISTE | REFERENTIEL_CLIENTS
+    nature = Column(String(30), nullable=False, index=True)
+    trigger_detail = Column(String(255), nullable=True)
+    # EN_COURS | TERMINE | ECHEC
+    status = Column(String(20), nullable=False, default="EN_COURS", index=True)
+    watchlist_version = Column(String(50), nullable=False)
+    watchlist_hash = Column(String(64), nullable=False)
+    # Lots en production au moment du passage, quand la reference les expose
+    # (cf. rescreen.reference_de_l_univers) ; NULL sinon, jamais inventee.
+    watchlist_composition = Column(JSON, nullable=True)
+    # Passage delta : reference de l'univers AVANT la mise a jour. Seuls les
+    # clients couverts contre elle deviennent couverts contre la nouvelle — un
+    # client que personne n'avait crible contre l'ancienne ne l'est pas plus
+    # parce qu'on l'a confronte aux seules fiches nouvelles.
+    previous_watchlist_hash = Column(String(64), nullable=True)
+    # {"listes": [...] | "TOUTES", "complet": bool, "snapshot_id": ...}
+    scope = Column(JSON, nullable=True)
+    entities_compared = Column(Integer, default=0)
+    clients_screened = Column(Integer, default=0)
+    # Fiches dont ce passage a etabli ou prolonge la couverture
+    clients_covered = Column(Integer, default=0)
+    counters = Column(JSON, nullable=True)
+    started_by = Column(String(100), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+
 
 class AuditTrail(Base):
     __tablename__ = "compliance_audit_trail"
@@ -240,6 +316,12 @@ class AuditTrail(Base):
     config_state = Column(JSON, nullable=False)
     watchlist_version = Column(String(50), nullable=False)
     watchlist_hash = Column(String(64), nullable=False)
+    # Composition de l'univers crible : [[type de liste, lot], ...] des lots en
+    # production au moment de la decision (fiskr/univers.py). L'empreinte dit
+    # SI deux decisions ont compare au meme univers ; la composition dit
+    # LEQUEL, sans avoir a reconstituer l'historique des homologations.
+    # NULL sur les lignes anterieures (journal immuable, jamais reecrit).
+    watchlist_composition = Column(JSON, nullable=True)
     # Type de liste d'origine du liste (WATCHLIST_OFAC, WATCHLIST_UN...) —
     # NULL sur les enregistrements anterieurs a l'ajout (journal immuable,
     # jamais reecrit) et sur les decisions sans candidat
@@ -286,6 +368,12 @@ class ReviewRecord(Base):
     backtest_report = Column(JSON, nullable=True)
     backtest_at = Column(DateTime, nullable=True)
     backtest_by = Column(String(100), nullable=True)
+    # Ce que valait ce cahier AU MOMENT de la decision (fiskr/backtest.py,
+    # `validite_du_cahier`) : perime ou non, pourquoi, et si un motif etait
+    # exige. Sans cette trace, le dossier disait « APPROVED, verdict OK » d'une
+    # liste dont les cinq fiches avaient ete exclues apres le cahier.
+    # NULL : dossier anterieur a ce suivi.
+    backtest_validity = Column(JSON, nullable=True)
 
 
 class SyncReport(Base):
@@ -301,6 +389,11 @@ class SyncReport(Base):
     previous_snapshot_id = Column(String(50), nullable=True)
     added_count = Column(Integer, default=0)
     modified_count = Column(Integer, default=0)
+    # Parmi les modifiees, celles qui touchent l'IDENTITE (champs lus par le
+    # moteur, programmes de sanction — cf. delta.champs_d_identite). Le reste
+    # est de l'information. NULL : rapport anterieur a la mesure, ou
+    # referentiel sans cette classification.
+    modified_identity_count = Column(Integer, nullable=True)
     removed_count = Column(Integer, default=0)
     delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
     email_sent = Column(Boolean, default=False)
@@ -327,19 +420,18 @@ WATCHLIST_FILE_TYPES = [
 
 def production_watchlist_reference(db) -> tuple:
     """
-    (version, empreinte) des listes EN PRODUCTION, derivees de la base.
+    (version, empreinte) de l'univers EN PRODUCTION, derivees de la base.
 
-    Miroir exact de ce que `load_watchlist_cache` pose dans le processus API
-    (version constante, empreinte = hash du snapshot READY le plus recent).
     Le re-criblage execute dans le demon travailleur trace cette reference au
     journal d'audit : il ne peut pas lire le cache memoire d'un autre
-    processus, et un audit portant « N/A » serait faux.
+    processus, et un audit portant « N/A » serait faux. La definition vit dans
+    fiskr/univers.py — elle etait recopiee ici, et la copie avait herite du
+    defaut de l'original : une version constante et le hash du seul lot le
+    plus recent.
     """
-    snap = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY",
-    ).order_by(Snapshot.uploaded_at.desc()).first()
-    return "Database Active Snapshot", (snap.file_hash if snap else "N/A")
+    from fiskr import univers
+    reference = univers.reference_en_production(db)
+    return reference.version, reference.empreinte
 
 
 JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "ERROR", "CANCELLED")
@@ -386,6 +478,13 @@ class Job(Base):
     # Execution
     claimed_by = Column(String(100), nullable=True)    # "host:pid"
     heartbeat_at = Column(DateTime, nullable=True)
+    # Dernier instant ou le TRAVAIL a avance (phase ou compteur changes). Le
+    # battement de coeur dit que le PROCESSUS vit ; il est rafraichi pour tous
+    # les jobs du demon par un fil independant, donc il ne dit rien d'un job
+    # dont le fil d'execution est bloque. Releve en production : une
+    # synchronisation PEP « en cours » 26 jours, phase HASH, 0 fiche traitee,
+    # battement vieux de 5 secondes. NULL : job anterieur a la mesure.
+    progress_at = Column(DateTime, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
@@ -439,8 +538,33 @@ class Alert(Base):
     snoozed_until = Column(DateTime, nullable=True)
     # Checklist d'instruction (dossier) : {"0": {done, by, at}, ...}
     checklist_state = Column(JSON, nullable=True)
+    # DERNIER criblage qui a re-rencontre ce couple (fiskr/alerts.py) : la
+    # ligne d'audit, son score, sa date. `audit_id` et `final_score` restent
+    # ceux de la creation. Constate dans un vrai navigateur : apres l'ajout
+    # d'une date de naissance a la liste, le valideur de l'alerte n° 20 lisait
+    # « 100 % · DOB : donnee manquante » pendant que l'historique disait
+    # « REDETECTED score 95 » — la modale lisait l'arbre fige a la creation.
+    # NULL : jamais re-rencontree depuis (ou anterieure au suivi).
+    latest_audit_id = Column(Integer, nullable=True)
+    latest_score = Column(Float, nullable=True)
+    latest_at = Column(DateTime, nullable=True)
+    # Caduque (fiskr/caducite.py) : la correspondance ne tient plus — le
+    # couple re-crible apres une mise en production ne franchit plus le seuil,
+    # ou la fiche a ete radiee de sa liste. L'alerte n'est PAS close : un
+    # humain la clot, avec le motif propose ici. Effacee si le couple
+    # franchit de nouveau le seuil.
+    lapsed_since = Column(DateTime, nullable=True)
+    lapsed_reason = Column(Text, nullable=True)
+    # Fiche radiee de sa liste a la mise en production d'une version
+    # (evenement DELISTED). Garde la date apres la cloture ; effacee seulement
+    # si la fiche est de nouveau rencontree au-dessus du seuil (reinscription)
+    # — l'evenement DELISTED, lui, reste a l'historique.
+    delisted_at = Column(DateTime, nullable=True)
 
 ALERT_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+# Libellés des messages serveur (« Priorité passée à haute. ») — le code brut
+# s'affichait tel quel dans un toast en français.
+ALERT_PRIORITY_LABELS = {"LOW": "basse", "MEDIUM": "moyenne", "HIGH": "haute", "CRITICAL": "critique"}
 
 class AlertAttachment(Base):
     """Piece jointe d'une alerte (justificatif d'instruction) : stockage
@@ -454,6 +578,68 @@ class AlertAttachment(Base):
     comment = Column(Text, nullable=True)
     uploaded_by = Column(String(100), nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
+
+class MesureDeGel(Base):
+    """
+    Registre des mesures de gel : ce qui SUIT un vrai positif sur une liste du
+    perimetre SANCTION (fiskr/gels.py). Releve en production le 19/10/2026 :
+    deux alertes OFAC confirmees, closes comme une alerte PEP — aucune piece,
+    aucun projet de declaration, rien ne suivait. Une confirmation ouvre
+    desormais une ligne ici, « a declarer », et la ligne ne se referme que par
+    une declaration a la DG Tresor appuyee d'une piece, puis une levee motivee.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "gel_mesures"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    # Action de mise en oeuvre (LD DGT/ACPR 2026, §181) — vocabulaire dans gels.py
+    type_action = Column(String(40), nullable=False, default="GEL")
+    statut = Column(String(20), nullable=False, default="A_DECLARER", index=True)
+    # Identite figee a l'ouverture : le registre se lit sans rejouer l'alerte
+    client_id = Column(String(100), nullable=True, index=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    list_type = Column(String(30), nullable=True)
+    programmes = Column(JSON, nullable=True)
+    reference_designation = Column(String(500), nullable=True)
+    # Point de depart du delai de declaration : la confirmation de l'alerte
+    ouverte_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    ouverte_par = Column(String(100), nullable=False)
+    # Gel effectif : date d'effet, comptes et montants (saisis par l'humain —
+    # Fiskr ne tient pas les comptes, il trace ce qu'on y a fait)
+    date_effet = Column(DateTime, nullable=True)
+    comptes = Column(JSON, nullable=True)
+    comptes_texte = Column(Text, nullable=True)
+    precisions = Column(Text, nullable=True)
+    # Statut du client AVANT le gel, rendu a la levee ; `client_gele_ecrit`
+    # dit si CETTE mesure a inscrit « GELE » au referentiel (une mesure qui
+    # n'a rien ecrit ne doit rien « rendre » a sa levee)
+    statut_client_avant = Column(String(20), nullable=True)
+    client_gele_ecrit = Column(Boolean, nullable=True)
+    # Declaration a la DG Tresor : date de transmission, auteur, reference,
+    # adresse, et la piece qui la prouve (piece jointe de l'alerte)
+    declaree_le = Column(DateTime, nullable=True)
+    declaree_par = Column(String(100), nullable=True)
+    reference_dgt = Column(String(255), nullable=True)
+    canal_dgt = Column(String(100), nullable=True)
+    piece_declaration_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    # Retard signale une fois (notification immediate, cf. detecter_retards)
+    retard_signale_le = Column(DateTime, nullable=True)
+    # Levee (LD §209-213) : date, auteur, motif code et justification
+    levee_le = Column(DateTime, nullable=True)
+    levee_par = Column(String(100), nullable=True)
+    motif_levee = Column(String(40), nullable=True)
+    justification_levee = Column(Text, nullable=True)
+    # Radiation constatee a la mise en production d'une version qui ne porte
+    # plus la fiche (fiskr/caducite.py) : la mesure est « radiation a
+    # examiner » — une levee a instruire (LD DGT/ACPR §87, §123), jamais une
+    # levee faite par le produit. Signalee une fois.
+    radiation_constatee_le = Column(DateTime, nullable=True)
+    radiation_detail = Column(Text, nullable=True)
 
 class AdminAuditLog(Base):
     """Journal append-only des actions d'administration (utilisateurs,
@@ -482,6 +668,9 @@ def log_admin_action(db, username, action, target=None,
 
 
 ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
+# CLOSED_CONFIRMED clot l'INSTRUCTION, pas l'affaire : sur une liste du
+# perimetre SANCTION, la suite (gel, declaration DG Tresor, levee) vit dans
+# le registre des mesures de gel (MesureDeGel, fiskr/gels.py).
 ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE", "CLOSED_BY_RULE")
 
 # Types de relations entre entites listees (schema pivot). Les types OFAC
@@ -1028,6 +1217,24 @@ class WhitelistPair(Base):
     revoked_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_comment = Column(Text, nullable=True)
+    # Ce que la decision a COUVERT (fiskr/empreintes.py) : la version de la
+    # fiche listee et les elements d'identification du client que le moteur
+    # lit. Une paire qui ne les gardait pas couvrait toute version future de
+    # la mesure — la v2 d'une fiche ajoutant le passeport du client retombait
+    # en WHITELISTED (lignes directrices DGT/ACPR du 18 mars 2026, §169).
+    # NULL : paire anterieure au suivi, traitee comme a reexaminer.
+    entity_checksum = Column(String(64), nullable=True)
+    client_fingerprint = Column(String(64), nullable=True)
+    # Ligne du journal d'audit d'ou viennent les empreintes ; NULL quand elles
+    # ont ete lues dans les donnees en base (cahier de tests, couple jamais
+    # crible en production). `fingerprinted_at` date la pose : creation ou
+    # derniere reconduction.
+    fingerprint_audit_id = Column(Integer, nullable=True)
+    fingerprinted_at = Column(DateTime, nullable=True)
+    # Pose par le criblage qui a vu une empreinte differente ; leve par la
+    # reconduction. Motif : fiskr.empreintes.MOTIFS_DE_REEXAMEN.
+    stale_since = Column(DateTime, nullable=True)
+    stale_reason = Column(String(30), nullable=True)
 
 class LearnedEquivalence(Base):
     """
@@ -1170,6 +1377,13 @@ class HookDelivery(Base):
     l'identique en cas de retransmission (retries reseau de l'appelant).
     Table auto-nettoyee : les livraisons de plus de 90 jours sont purgees
     opportunistement a chaque appel de webhook.
+
+    `idempotency_key` ne stocke plus la cle telle que l'appelant l'a choisie,
+    mais « sha256:<empreinte de (appelant, point d'entree, cle)> » : la cle
+    etait cherchee dans toute la table, si bien que la cle « 42 » d'un SI
+    rejouait a un AUTRE SI le criblage d'un autre client (cf.
+    api._hook_idempotency_replay). Les lignes anterieures gardent leur cle
+    brute : aucune recherche ne peut plus les atteindre.
     """
     __tablename__ = "hook_deliveries"
 
@@ -1180,6 +1394,14 @@ class HookDelivery(Base):
     status_code = Column(Integer, nullable=False, default=200)
     response_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Empreinte SHA-256 du corps de la requete d'origine. Une cle ne rejoue
+    # que SA requete : un autre corps sous la meme cle est refuse (422), il ne
+    # recoit pas la reponse d'une autre. NULL : livraison anterieure a la
+    # mesure, ou trace sans cle (`auto:`).
+    request_sha256 = Column(String(64), nullable=True)
+    # Rejeu : id de la livraison d'origine dont la reponse a ete renvoyee. Une
+    # retransmission est un appel recu, la supervision doit la compter.
+    replay_of = Column(Integer, nullable=True)
 
 
 import secrets
@@ -1221,7 +1443,36 @@ def verify_password(password: str, stored_hash: str, stored_salt: str) -> bool:
 
 # Setup Database Engine
 db_config = config.get("database", {})
-pg_url = db_config.get("url", "postgresql://postgres:postgres@localhost:5432/fiskr")
+
+
+def url_postgresql(url: str) -> str:
+    """
+    Le pilote PostgreSQL, nomme explicitement dans l'URL.
+
+    POURQUOI
+    --------
+    `postgresql://…` laisse SQLAlchemy choisir le pilote, et SQLAlchemy 2.1 a
+    change ce choix : psycopg2 jusqu'en 2.0, psycopg (v3) depuis. Le projet
+    declare psycopg2 (requirements.txt) et `sqlalchemy>=2.0` sans borne : une
+    reinstallation des dependances sur le serveur aurait donc fait echouer
+    l'import du pilote — et `init_db` attrapait l'echec pour se REPLIER SUR
+    SQLITE. Une production reinstallee aurait tourne sur une base locale vide,
+    avec pour seule trace un avertissement dans le journal. Constate dans un
+    environnement neuf : « Failed to connect to PostgreSQL: No module named
+    'psycopg'. Falling back to SQLite. »
+
+    Une URL qui nomme deja son pilote est laissee telle quelle ; l'ancien
+    schema `postgres://` (Heroku et d'autres) est accepte aussi.
+    """
+    url = (url or "").strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+pg_url = url_postgresql(db_config.get("url", "postgresql://postgres:postgres@localhost:5432/fiskr"))
 sqlite_path = db_config.get("sqlite_path", "fiskr.sqlite3")
 fallback = db_config.get("fallback_to_sqlite", True)
 
@@ -1265,18 +1516,60 @@ def _tune_sqlite(eng):
             cursor.close()
 
 
+def options_postgresql() -> dict:
+    """
+    Options du moteur PostgreSQL : une connexion coupee doit se VOIR, vite.
+
+    Le moteur etait cree avec le seul `connect_timeout`. Sur l'hebergement de
+    production, le serveur ferme les connexions restees inactives : la
+    synchronisation DFAT, dont le telechargement pend neuf minutes avant
+    d'echouer, finissait ainsi en « server closed the connection
+    unexpectedly » — l'erreur de base masquait la vraie (le portail qui ne
+    repond pas). Et une connexion coupee sans que le client en soit prevenu
+    (TCP a demi ouvert) laisse un appel bloque sans fin : c'est le profil
+    d'une synchronisation PEP restee « en cours » 26 jours.
+
+    - `pool_pre_ping` : une connexion reprise du pool est verifiee avant usage,
+      et remplacee si le serveur l'a fermee entre-temps ;
+    - `pool_recycle` : aucune connexion n'est gardee plus de 30 minutes ;
+    - keepalives TCP : une connexion morte est detectee en ~2 minutes au lieu
+      de jamais (ou de deux heures, le defaut du systeme).
+    """
+    return {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "connect_args": {
+            "connect_timeout": 3,
+            "keepalives": 1,
+            "keepalives_idle": 60,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+    }
+
+
 def init_db():
     global engine, SessionLocal
     try:
         if pg_url.startswith("postgresql"):
             logger.info("Attempting to connect to PostgreSQL database...")
-            engine = create_engine(pg_url, connect_args={"connect_timeout": 3})
+            engine = create_engine(pg_url, **options_postgresql())
             # Test connection
             with engine.connect() as conn:
                 pass
             logger.info("Successfully connected to PostgreSQL.")
         else:
             raise ValueError("Not a PostgreSQL URL")
+    except ImportError as e:
+        # Un pilote absent n'est pas une base injoignable : c'est une
+        # installation incomplete. S'en accommoder en basculant sur SQLite
+        # ferait tourner une production sur une base locale vide sans le dire
+        # (cf. url_postgresql). L'echec est franc.
+        logger.error(f"Pilote PostgreSQL introuvable ({e}) : installez les "
+                     f"dependances (pip install -r requirements.txt).")
+        raise RuntimeError(
+            f"Pilote PostgreSQL introuvable : {e}. Repli sur SQLite refusé — "
+            f"il ferait tourner l'application sur une base locale vide.") from e
     except Exception as e:
         if fallback:
             try:
@@ -1377,12 +1670,36 @@ def init_db():
                 ("priority", "VARCHAR(12)"),
                 ("due_at", "TIMESTAMP"),
                 ("checklist_state", "JSON"),
+                # Dernier criblage, caducite, radiation (fiskr/caducite.py)
+                ("latest_audit_id", "INTEGER"),
+                ("latest_score", "FLOAT"),
+                ("latest_at", "TIMESTAMP"),
+                ("lapsed_since", "TIMESTAMP"),
+                ("lapsed_reason", "TEXT"),
+                ("delisted_at", "TIMESTAMP"),
+            ],
+            "gel_mesures": [
+                ("radiation_constatee_le", "TIMESTAMP"),
+                ("radiation_detail", "TEXT"),
+            ],
+            "review_records": [
+                ("backtest_validity", "JSON"),
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),
+                ("watchlist_composition", "JSON"),
             ],
             "whitelist_pairs": [
                 ("list_type", "VARCHAR(30)"),
+                # Empreintes de la decision : NULL sur les paires existantes,
+                # JAMAIS remplies par la migration — une empreinte posee ici
+                # serait celle du jour de la mise a jour, pas de la decision.
+                ("entity_checksum", "VARCHAR(64)"),
+                ("client_fingerprint", "VARCHAR(64)"),
+                ("fingerprint_audit_id", "INTEGER"),
+                ("fingerprinted_at", "TIMESTAMP"),
+                ("stale_since", "TIMESTAMP"),
+                ("stale_reason", "VARCHAR(30)"),
             ],
             "users": [
                 ("failed_login_count", "INTEGER"),
@@ -1509,6 +1826,30 @@ def get_db():
     finally:
         db.close()
 
+def _composition_de(wl_hash: str):
+    """
+    Composition de l'univers d'empreinte `wl_hash`, relue depuis l'empreinte
+    meme qui va etre ecrite — jamais transportee a cote par l'appelant : deux
+    valeurs passees separement finissent par decrire deux univers. None quand
+    ce processus ne connait pas cette empreinte (appelant qui ne crible pas
+    contre l'univers en production : la composition n'est pas inventee).
+    """
+    from fiskr import univers
+    reference = univers.connue(wl_hash)
+    return reference.composition_journal() if reference is not None else None
+
+
+def _arbre_journalise(scoring_result: dict, identite: dict) -> dict:
+    """Arbre de decision tel qu'il est journalise : le resultat du moteur et
+    l'identification du client que ce criblage a comparee
+    (`empreintes.identification_client`). Copie : le resultat lui-meme
+    retourne a l'appelant, et la reponse de criblage ne doit pas grossir d'une
+    identification par correspondance."""
+    if not identite:
+        return scoring_result
+    return {**scoring_result, "client_identification": identite}
+
+
 def log_compliance_decision(
     db,
     client: dict,
@@ -1529,7 +1870,8 @@ def log_compliance_decision(
         cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
         
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
-    
+    from fiskr.empreintes import identification_client
+
     db_entry = AuditTrail(
         client_id=client.get("entity_id") or client.get("client_id"),
         client_name=cname or "Inconnu",
@@ -1539,10 +1881,11 @@ def log_compliance_decision(
         base_score=scoring_result.get("base_score", 0.0),
         final_score=scoring_result.get("final_score", 0.0),
         status=scoring_result.get("status", "NO_MATCH"),
-        decision_tree=scoring_result,
+        decision_tree=_arbre_journalise(scoring_result, identification_client(client)),
         config_state=config_audit,
         watchlist_version=wl_version,
         watchlist_hash=wl_hash,
+        watchlist_composition=_composition_de(wl_hash),
         list_type=watchlist_entry.get("_list_type")
     )
     db.add(db_entry)
@@ -1574,6 +1917,11 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
         cname = f"{fname} {lname}".strip() or client.get("client_company_name", "")
     ctype = client.get("entity_type") or client.get("client_type") or "PP"
     client_ref = client.get("entity_id") or client.get("client_id")
+    composition = _composition_de(wl_hash)
+    # Une seule lecture du client pour tout le lot : elle est la meme sur
+    # chaque correspondance d'un criblage.
+    from fiskr.empreintes import identification_client
+    identite = identification_client(client)
 
     lignes = []
     for watchlist_entry, scoring_result in decisions:
@@ -1586,10 +1934,11 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
             base_score=scoring_result.get("base_score", 0.0),
             final_score=scoring_result.get("final_score", 0.0),
             status=scoring_result.get("status", "NO_MATCH"),
-            decision_tree=scoring_result,
+            decision_tree=_arbre_journalise(scoring_result, identite),
             config_state=config_audit,
             watchlist_version=wl_version,
             watchlist_hash=wl_hash,
+            watchlist_composition=composition,
             list_type=watchlist_entry.get("_list_type"),
         ))
     db.add_all(lignes)
@@ -1604,10 +1953,135 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
         db.flush()
     return lignes
 
-# Helper function to compute entity checksums
+# ------------------ EMPREINTE DES FICHES (entity_checksum) ------------------
+#
+# POURQUOI UNE NORMALISATION
+# Releve en production (19 octobre 2026, lecture seule) : environ 23 lots par
+# jour a homologuer, et une file que plus personne ne lisait. Le delta y criait
+# au loup. BETERROR annoncait 875 fiches « modifiees » — compte variant de 604
+# a 875 d'un jour a l'autre contre une base figee — et les cent detaillees ne
+# changeaient que l'ORDRE de leurs references (« A - B » devenu « B - A »).
+# GBFCDO : 85 fiches sur 100 ne differaient que par leurs guillemets ou leur
+# echappement, et 15 n'avaient AUCUN champ different. L'empreinte hachait le
+# texte tel que lu, ordre et echappement compris : elle changeait chaque nuit
+# sans que la liste change.
+#
+# Ici, et nulle part ailleurs, une fiche est mise sous une forme STABLE avant
+# d'etre hachee : valeurs multiples triees et dedoublonnees, guillemets et
+# echappements ramenes a une seule forme, blancs reduits, valeurs vides et
+# valeurs par defaut de colonne confondues avec l'absence. Le delta compare
+# les champs sous cette meme forme (`normaliser_fiche`) : « empreintes
+# differentes » et « un champ compare differe » parlent de la meme chose.
+# Les valeurs STOCKEES ne sont pas touchees — le reviseur lit la source.
+
+# Ce qui n'est pas le contenu d'une fiche : identifiants techniques, et traces
+# de gouvernance posees pendant l'homologation (patch, exclusion). Une
+# exclusion n'est pas une modification de la liste par sa source. Lue par
+# l'empreinte, le delta, la correction manuelle (fiskr.api) et le champ-a-champ
+# de la liste blanche (fiskr.empreintes) : une seule definition.
+CLES_HORS_EMPREINTE = frozenset({
+    "id", "snapshot_id", "entity_checksum",
+    "modified_by", "modified_at", "excluded", "exclusion_justification",
+    "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
+})
+
+# Toutes les formes de guillemet et d'apostrophe rencontrees dans les sources
+# (typographiques, accents graves employes en translitteration, pleine
+# chasse) se lisent comme UN guillemet : « 'involved person' » et
+# « ""involved person"" » disent la meme chose.
+_GUILLEMETS = str.maketrans({c: '"' for c in "'`´‘’‚‛′ʼ“”„‟″«»〝〞＂"})
+_ECHAPPEMENT = re.compile(r"\\+(?=\")")
+_GUILLEMETS_REPETES = re.compile(r'"{2,}')
+
+
+def _texte_normalise(texte: str) -> Optional[str]:
+    if "&" in texte:
+        texte = html.unescape(texte)
+    if not unicodedata.is_normalized("NFC", texte):
+        texte = unicodedata.normalize("NFC", texte)
+    texte = texte.translate(_GUILLEMETS)
+    if "\\" in texte:
+        texte = _ECHAPPEMENT.sub("", texte)
+    if '""' in texte:
+        texte = _GUILLEMETS_REPETES.sub('"', texte)
+    # Guillemets englobants : l'artefact d'un double echappement CSV
+    texte = " ".join(texte.split()).strip('" ')
+    return texte or None
+
+
+def _cle_de_tri(valeur: Any) -> str:
+    return json.dumps(valeur, sort_keys=True, default=str, ensure_ascii=False)
+
+
+def valeur_normalisee(valeur: Any) -> Any:
+    """Forme stable d'une valeur ; None pour une valeur vide."""
+    if valeur is None:
+        return None
+    if isinstance(valeur, str):
+        return _texte_normalise(valeur)
+    if isinstance(valeur, dict):
+        sortie = {}
+        for cle, sous_valeur in valeur.items():
+            sous_valeur = valeur_normalisee(sous_valeur)
+            if sous_valeur is not None:
+                sortie[str(cle)] = sous_valeur
+        return sortie or None
+    if isinstance(valeur, (list, tuple, set)):
+        # Aucune colonne multi-valuee d'une fiche ne porte de sens dans son
+        # ordre (alias, dates, pays, documents, programmes) : les sources, si.
+        elements = {}
+        for element in valeur:
+            element = valeur_normalisee(element)
+            if element is not None:
+                elements[_cle_de_tri(element)] = element
+        return [elements[k] for k in sorted(elements)] or None
+    return valeur
+
+
+def _defauts_de_colonnes() -> Dict[str, Any]:
+    """Valeurs par defaut scalaires des colonnes de fiche (« U » pour le
+    genre, False pour le deces). Derivees du schema : une fiche construite
+    sans le champ et la meme relue en base, qui le porte, sont la meme fiche."""
+    defauts = {}
+    for modele in (WatchlistEntity, ClientEntity):
+        for colonne in modele.__table__.columns:
+            defaut = colonne.default
+            if (colonne.name not in CLES_HORS_EMPREINTE and defaut is not None
+                    and defaut.is_scalar):
+                defauts[colonne.name] = defaut.arg
+    return defauts
+
+
+_DEFAUTS_DE_COLONNES: Dict[str, Any] = {}
+
+
+def normaliser_fiche(data: dict) -> Dict[str, Any]:
+    """
+    Forme STABLE du contenu d'une fiche : ce que l'empreinte hache et ce que
+    le delta compare. Les cles vides ou egales au defaut de leur colonne
+    disparaissent ; les cles hors contenu (`CLES_HORS_EMPREINTE`) aussi.
+    """
+    if not _DEFAUTS_DE_COLONNES:
+        _DEFAUTS_DE_COLONNES.update(_defauts_de_colonnes())
+    sortie = {}
+    for cle, valeur in data.items():
+        if cle in CLES_HORS_EMPREINTE:
+            continue
+        valeur = valeur_normalisee(valeur)
+        if valeur is None:
+            continue
+        if cle in _DEFAUTS_DE_COLONNES and valeur == valeur_normalisee(_DEFAUTS_DE_COLONNES[cle]):
+            continue
+        sortie[cle] = valeur
+    return sortie
+
+
 def compute_checksum(data: dict) -> str:
-    """Computes a SHA-256 checksum of normalized fields in a dictionary."""
-    # Serialize sorted keys, filtering out metadata keys like id, snapshot_id, entity_checksum
-    filtered_data = {k: v for k, v in data.items() if k not in ["id", "snapshot_id", "entity_checksum"]}
-    dumped = json.dumps(filtered_data, sort_keys=True, default=str)
+    """Empreinte SHA-256 du contenu NORMALISE d'une fiche (cf. ci-dessus).
+
+    Elle n'a de valeur de comparaison que calculee sur ce qui est STOCKE :
+    calculee sur l'enregistrement lu, elle voyait des champs que la base
+    tronque ou ne garde pas (15 fiches GBFCDO « modifiees » sans aucun champ
+    different). Le delta ne s'y fie donc jamais seule (cf. fiskr/delta.py)."""
+    dumped = json.dumps(normaliser_fiche(data), sort_keys=True, default=str)
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()

@@ -140,17 +140,29 @@ def test_le_compte_rendu_porte_toujours_les_memes_cles(db):
     tranché, et le retour à vide de `rescreen_lookback` ne le portait pas du
     tout. Un destinataire ne pouvait pas distinguer « aucune règle n'a joué »
     de « personne ne me l'a dit ».
+
+    Réécrit avec la trace des passages (fiskr/rescreen.py) : ce test épinglait
+    aussi, comme « chemin de retour à vide », le lookback restreint à une liste
+    ABSENTE de la production — qui rendait des compteurs à zéro, et le travail
+    « Lookback exécuté ». C'était le défaut : un compte rendu pour une
+    comparaison qui n'a pas eu lieu. Ce chemin est désormais un refus
+    (UniversAbsent) ; le retour à vide qui reste, c'est le lookback sans client.
     """
+    from fiskr.rescreen import UniversAbsent
+
     attendues = set(compteurs_de_recriblage())
     assert attendues >= {"new_alerts", "redetected_alerts", "closed_by_rule",
                          "rule_suppressed", "whitelisted_suppressed",
-                         "clients_screened", "changed_entities"}
+                         "clients_screened", "changed_entities",
+                         "screening_pass_id", "clients_covered"}
 
-    _client(db)
     _liste(db, "dgt-v1", [_fiche("dgt-v1", "DGT-1")])
+    # Aucun client : le chemin de retour a vide
     assert set(rescreen_lookback(db, "WATCHLIST_DGT")) == attendues
-    # Aucune liste en production de ce type : le chemin de retour a vide
-    assert set(rescreen_lookback(db, "WATCHLIST_OFAC")) == attendues
+    _client(db)
+    assert set(rescreen_lookback(db, "WATCHLIST_DGT")) == attendues
+    with pytest.raises(UniversAbsent):
+        rescreen_lookback(db, "WATCHLIST_OFAC")
     assert set(rescreen_after_snapshot_change(db, "WATCHLIST_DGT", "dgt-v1")) == attendues
 
 

@@ -53,6 +53,52 @@ def post_and_wait(client, url, timeout=60.0, **kwargs):
     return response
 
 
+# ------------------ JEU DE DEMONSTRATION ------------------
+
+@pytest.fixture(scope="module")
+def listes_de_demonstration():
+    """
+    Le jeu de demonstration (watchlist.json : Putin, Rosneft, Gaddafi,
+    Lukashenko, Almaz-Antey) en production, sous WATCHLIST_OFAC, pour le module
+    qui le demande — puis retire.
+
+    Ces modules le recevaient d'un SEMIS IMPLICITE : le chargement du cache le
+    versait en production des qu'aucune liste n'etait READY. Sur une
+    installation neuve, ce semis faisait mentir la mise en service (« 1 liste
+    en production ») et rendait « aucune correspondance » la ou le criblage
+    devait etre refuse. Il est supprime ; la demonstration passe par l'outil
+    explicite, tools/charger_demo.py, que cette fixture appelle telle quelle.
+    """
+    import importlib
+    from fiskr import database
+    from fiskr.database import Snapshot, WatchlistEntity
+    from fiskr.settings import bump_watchlist_epoch
+
+    demo = importlib.import_module("tools.charger_demo")
+    session = next(database.get_db())
+    try:
+        # force=True : la base partagee de la suite porte deja les lots des
+        # autres tests ; le refus de l'outil protege une production, pas elle.
+        snapshot_id = demo.charger(session, force=True).snapshot_id
+        from fiskr.api import load_watchlist_cache
+        load_watchlist_cache(session)
+    finally:
+        session.close()
+    yield snapshot_id
+    session = next(database.get_db())
+    try:
+        session.query(WatchlistEntity).filter(
+            WatchlistEntity.snapshot_id == snapshot_id).delete(synchronize_session=False)
+        session.query(Snapshot).filter(
+            Snapshot.snapshot_id == snapshot_id).delete(synchronize_session=False)
+        session.commit()
+        bump_watchlist_epoch(session)
+        from fiskr.api import load_watchlist_cache
+        load_watchlist_cache(session)
+    finally:
+        session.close()
+
+
 # ------------------ ISOLATION DE LA BASE DE DEVELOPPEMENT ------------------
 
 # La suite tourne contre la base de developpement reelle (pas de base dediee).
@@ -77,13 +123,13 @@ def post_and_wait(client, url, timeout=60.0, **kwargs):
 
 # Ordre de suppression : les tables porteuses de cles etrangeres d'abord.
 _INT_PK_TABLES = (
-    "AlertEvent", "AlertAttachment", "Alert", "AuditTrail",
+    "MesureDeGel", "AlertEvent", "AlertAttachment", "Alert", "AuditTrail",
     "FpRuleTest", "FpRuleChange", "FpRule",
     "WatchlistEntityChange", "EntityRelationship",
     "BatchResult", "BatchCampaign",
     "NotificationDelivery", "HookDelivery", "LearnedEquivalence",
     "WhitelistPair", "SavedView", "UserDashboard", "ApiKey", "SyncReport", "AdminAuditLog",
-    "ClientEntity", "WatchlistEntity", "Job",
+    "ScreeningPass", "ClientEntity", "WatchlistEntity", "Job",
 )
 
 

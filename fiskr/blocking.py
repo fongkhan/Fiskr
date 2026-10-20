@@ -133,7 +133,7 @@ BLOCKING_FIELDS = {
     ),
     "IMO": (
         "Numéro IMO (navire)",
-        lambda e: _alphanum(e.get("client_imo_number")),
+        lambda e: _alphanum(e.get("transaction_vessel_imo")),
         lambda e: _alphanum(e.get("imo_number")),
     ),
     "NATIONAL_REGISTRY": (

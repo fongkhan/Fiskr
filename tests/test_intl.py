@@ -26,6 +26,11 @@ from fiskr.settings import (
 )
 from fiskr.scoring import resolve_cut_off
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 STRONG_PW = "InternationalFort1"
 STATIC = Path(__file__).resolve().parent.parent / "fiskr" / "static"
 

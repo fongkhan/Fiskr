@@ -45,7 +45,27 @@ def _fiche(n: int) -> dict:
             "gender": "U",
             "countries": {"citizenship": [], "residence": [], "birth_country": [],
                           "jurisdiction_country": []},
+            # Version de la fiche, comme toute fiche en production (colonne
+            # NOT NULL) : c'est ce qu'une paire de liste blanche couvre
+            "entity_checksum": f"chk-TH-{TAG}-{n:03d}",
             "_list_type": "WATCHLIST_OFAC"}
+
+
+def _paire(client_id: str, fiche: dict) -> WhitelistPair:
+    """
+    Paire posée sur ce que le criblage va voir : la fiche telle qu'en cache et
+    le profil tel que /api/screen le reçoit (fiskr.empreintes). Une paire sans
+    empreinte n'absorbe plus — rien ne dirait ce que sa décision couvrait.
+    """
+    from fiskr.api import ScreenClientRequest
+    from fiskr.empreintes import empreinte_client
+    profil = ScreenClientRequest(client_id=client_id, client_type="PP",
+                                 client_first_name="MOHAMMED",
+                                 client_last_name="ALI").model_dump()
+    return WhitelistPair(client_id=client_id, watchlist_entity_id=fiche["entity_id"],
+                         entity_checksum=fiche["entity_checksum"],
+                         client_fingerprint=empreinte_client(profil),
+                         created_by="test", justification="test")
 
 
 @pytest.fixture()
@@ -250,8 +270,7 @@ def test_le_contexte_de_corroboration_est_complet():
 def test_une_paire_en_liste_blanche_est_journalisee_sans_alerte(contexte):
     db, client, fiches = contexte
     cible = fiches[0]["entity_id"]
-    db.add(WhitelistPair(client_id=f"C-{TAG}", watchlist_entity_id=cible,
-                         created_by="test", justification="test"))
+    db.add(_paire(f"C-{TAG}", fiches[0]))
     db.commit()
 
     corps = _crible(client)
@@ -353,9 +372,7 @@ def test_le_journal_est_valide_meme_sans_alerte_a_ouvrir(contexte, monkeypatch):
     Un criblage sans alerte n'aurait plus laissé AUCUNE trace."""
     db, client, fiches = contexte
     for fiche in fiches:
-        db.add(WhitelistPair(client_id=f"C-{TAG}-wl", justification="test",
-                             watchlist_entity_id=fiche["entity_id"],
-                             created_by="test"))
+        db.add(_paire(f"C-{TAG}-wl", fiche))
     db.commit()
 
     corps = _crible(client, client_id=f"C-{TAG}-wl")

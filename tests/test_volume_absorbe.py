@@ -28,7 +28,12 @@ from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.database import get_db, Alert, BatchCampaign, ClientEntity, WhitelistPair
 
-PUTIN_ENTITY_ID = "WL-001"  # seed watchlist.json
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
+PUTIN_ENTITY_ID = "WL-001"  # jeu de démonstration watchlist.json
 CSV = ("client_id,client_type,client_first_name,client_last_name,"
        "client_dob,client_gender,nationality\n"
        "{cid},PP,Vladimir,Putin,1952-10-07,M,RU\n")
@@ -90,6 +95,19 @@ def test_une_paire_en_liste_blanche_est_trouvee_mais_pas_ouverte(client):
         assert reference["opened_count"] == reference["hits_count"], (
             "sans liste blanche, tout ce qui est trouvé est ouvert", reference)
 
+        # Le parcours réel : le second client est criblé, l'analyste clôt ses
+        # alertes en faux positif et pose la paire. Une paire porte ce que sa
+        # décision couvre (fiskr.empreintes) ; posée sur un couple jamais
+        # criblé, elle est refusée. Les alertes closes ne dédupliquent pas : la
+        # campagne suivante part donc du même point que la référence.
+        _campagne(client, avec, f"vabs_avant_{tag}")
+        session = next(get_db())
+        try:
+            for alerte in session.query(Alert).filter(Alert.client_id == avec).all():
+                alerte.status = "CLOSED_FALSE_POSITIVE"
+            session.commit()
+        finally:
+            session.close()
         pose = client.post("/api/whitelist", data={
             "client_id": avec, "watchlist_entity_id": PUTIN_ENTITY_ID,
             "justification": "Homonyme avéré (test du volume absorbé).",

@@ -24,6 +24,11 @@ from fiskr.database import (
 from fiskr.retention import preview_retention, run_retention
 from fiskr.settings import retention_policy, SETTING_RETENTION, RETENTION_MIN_DAYS
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 
 def _override_user(username: str, role: str = "user"):
     app.dependency_overrides[get_current_user] = lambda: {

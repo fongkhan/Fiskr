@@ -79,6 +79,18 @@ EVENT_CATALOG: Dict[str, Event] = {
         urgency=IMMEDIATE, default_enabled=False,   # defaut historique conserve
         link="#watchlists/watchlists-review",
     ),
+    "fraicheur_depassee": Event(
+        # IMMEDIAT et ACTIF par defaut, contrairement au lot en attente : il ne
+        # part pas a chaque lot depose, mais quand des listes franchissent un
+        # seuil (48 h, puis 7 jours — ceux de la mise en service) — UN
+        # evenement par passage, qui les nomme toutes (cf. fiskr/fraicheur.py).
+        # Releve en production le 19/10/2026 : 47 jours sans homologation, et
+        # personne prevenu — la notification de lot en attente etait coupee, et
+        # rien d'autre ne parlait du retard.
+        label="Listes en production dépassées : seuil de fraîcheur franchi",
+        category=CATEGORY_LISTS, audience=("admin",),
+        urgency=IMMEDIATE, link="#watchlists/watchlists-review",
+    ),
     "snapshot_approved": Event(
         label="Liste approuvée et mise en production",
         category=CATEGORY_LISTS, audience=("reviewer", "admin"),
@@ -110,6 +122,15 @@ EVENT_CATALOG: Dict[str, Event] = {
         label="Synchronisation de source terminée",
         category=CATEGORY_LISTS, audience=("admin",),
         urgency=DIGEST, link="#watchlists/watchlists-sources",
+    ),
+    "job_fige": Event(
+        # IMMEDIAT : un travail fige bloque sa file pour toujours (sa cle
+        # d'exclusivite interdit toute relance) et rien d'autre ne le dit —
+        # son battement de coeur reste parfait. Le demon le declare et se
+        # recycle ; l'exploitant doit savoir que ca s'est produit, et quoi.
+        label="Travail figé arrêté par le démon",
+        category=CATEGORY_LISTS, audience=("admin",),
+        urgency=IMMEDIATE, link="#settings/settings-integrations",
     ),
     "sync_error": Event(
         label="Échec de synchronisation d'une source",
@@ -145,6 +166,16 @@ EVENT_CATALOG: Dict[str, Event] = {
     ),
 
     # ------------------ CRIBLAGE CLIENTS ------------------
+    "client_screening_completed": Event(
+        # IMMEDIAT, et seulement quand des correspondances sont tombees : des
+        # clients qui arrivent et qui ressemblent a une personne designee
+        # demandent une instruction AVANT l'entree en relation (lignes
+        # directrices DGT/ACPR, §122). Un import sans correspondance ne
+        # notifie rien — il n'appelle aucune action.
+        label="Clients nouveaux ou modifiés : correspondances au criblage",
+        category=CATEGORY_SCREENING, audience=("user", "reviewer"),
+        urgency=IMMEDIATE, link="#alerts/alerts-screening",
+    ),
     "alert_created": Event(
         label="Nouvelle alerte créée",
         category=CATEGORY_SCREENING, audience=("user", "reviewer"),
@@ -197,6 +228,26 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=(AUDIENCE_ASSIGNEE,),
         urgency=DIGEST, link="#alerts/alerts-screening",
     ),
+    "gel_declaration_en_retard": Event(
+        # IMMEDIAT, et c'est tout l'objet : la declaration d'une mesure de gel
+        # a la DG Tresor est due « immediatement » (CMF L.562-4 ; LD DGT/ACPR
+        # 2026, §182). Un recapitulatif du lendemain la ferait arriver en
+        # retard par construction. Une seule fois par mesure.
+        label="Mesure de gel non déclarée à la DG Trésor dans le délai",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-gels",
+    ),
+    "gel_radiation_a_examiner": Event(
+        # IMMEDIAT : la fiche d'une mesure de gel en vigueur a disparu de sa
+        # liste a la mise en production d'une version (fiskr/caducite.py). Un
+        # client gele sur une designation abrogee subit une atteinte qui court
+        # chaque jour ; il faut « filtrer sans delai » a l'abrogation (LD
+        # DGT/ACPR 2026, §123) et instruire la levee (§87). Rien n'est leve par
+        # le produit : la notification demande une decision humaine.
+        label="Mesure de gel : fiche radiée de sa liste, levée à examiner",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-gels",
+    ),
     "alert_mentioned": Event(
         label="Vous êtes cité dans un commentaire d'alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_MENTIONED,),
@@ -210,7 +261,16 @@ EVENT_CATALOG: Dict[str, Event] = {
         urgency=DIGEST, link="#alerts/alerts-screening",
     ),
     "whitelist_changed": Event(
-        label="Liste blanche : paire créée ou révoquée",
+        label="Liste blanche : paire créée, reconduite ou révoquée",
+        category=CATEGORY_SCREENING, audience=("reviewer",),
+        urgency=DIGEST, link="#alerts/alerts-whitelist",
+    ),
+    "whitelist_stale": Event(
+        # La fiche listee ou le client a change depuis la decision d'une paire
+        # (DGT/ACPR, 18 mars 2026, §169) : elle n'absorbe plus, l'alerte est
+        # deja ouverte. Le reviseur doit la reconduire ou la retirer — une
+        # action, pas une urgence : rien n'est plus supprime en silence.
+        label="Liste blanche : paire à réexaminer (fiche ou client modifié)",
         category=CATEGORY_SCREENING, audience=("reviewer",),
         urgency=DIGEST, link="#alerts/alerts-whitelist",
     ),

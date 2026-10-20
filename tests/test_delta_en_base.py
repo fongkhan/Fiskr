@@ -16,10 +16,15 @@ Extrapolé à la plus grosse liste de la production — WATCHLIST_PEP,
 requête HTTP synchrone, sur un hébergement mutualisé : l'écran d'examen d'un
 import manuel de cette liste ne pouvait pas s'ouvrir.
 
-L'équivalence des empreintes n'est pas une approximation : `compute_checksum`
-et `find_differences` excluent **exactement** les mêmes trois clés (`id`,
-`snapshot_id`, `entity_checksum`), donc « empreintes différentes » et « au
-moins un champ comparé diffère » sont la même chose.
+Ce module affirmait aussi que « empreintes différentes » et « au moins un
+champ comparé diffère » étaient la même chose, parce que `compute_checksum` et
+`find_differences` excluaient les mêmes trois clés. La production l'a démenti
+(15 fiches GBFCDO sur 100 « modifiées » sans aucun champ différent : l'empreinte
+était calculée sur l'enregistrement lu, pas sur ce que la base garde). Depuis,
+l'empreinte ne fait que DÉSIGNER les candidates et le champ à champ tranche —
+cf. tests/test_delta_qui_dit_vrai.py. Les compteurs portent en outre
+`modified_identity_count` : les attendus ci-dessous ont été complétés de cette
+clé, sans rien changer à ce qu'ils vérifient.
 """
 import uuid
 
@@ -82,7 +87,8 @@ def test_les_compteurs_sont_identiques(deux_lots):
     db, ancien, nouveau = deux_lots
     attendu = _reference(db, ancien, nouveau)["summary"]
     assert calculate_delta_db(db, ancien, nouveau)["summary"] == attendu
-    assert attendu == {"added_count": 4, "removed_count": 3, "modified_count": 3}
+    assert attendu == {"added_count": 4, "removed_count": 3, "modified_count": 3,
+                       "modified_identity_count": 3}   # le pays est identitaire
 
 
 @pytest.mark.parametrize("categorie", ["added", "removed", "modified"])
@@ -141,14 +147,14 @@ def test_un_premier_import_est_entierement_un_ajout(deux_lots):
     db, _, nouveau = deux_lots
     rapport = calculate_delta_db(db, None, nouveau)
     assert rapport["summary"] == {"added_count": 12, "removed_count": 0,
-                                  "modified_count": 0}
+                                  "modified_count": 0, "modified_identity_count": 0}
 
 
 def test_deux_lots_identiques_ne_produisent_aucun_delta(deux_lots):
     db, ancien, _ = deux_lots
     rapport = calculate_delta_db(db, ancien, ancien)
     assert rapport["summary"] == {"added_count": 0, "removed_count": 0,
-                                  "modified_count": 0}
+                                  "modified_count": 0, "modified_identity_count": 0}
     assert rapport["details"] == {"added": [], "removed": [], "modified": []}
 
 

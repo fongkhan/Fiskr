@@ -109,6 +109,94 @@ def mesurer(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
     }
 
 
+# Niveau deja signale pour chaque liste en retard : {type: "ATTENTION"|"BLOQUANT"}.
+# C'est ce qui fait de l'evenement un FRANCHISSEMENT plutot qu'un etat : sans
+# memoire, chaque passage renverrait le meme courriel, et un signal repete a
+# chaque passage se filtre — il ne dit plus rien le jour ou il compte.
+SETTING_NIVEAUX_SIGNALES = "fraicheur.niveaux_signales"
+
+# Listes nommees dans le corps de l'evenement ; au-dela, « … et N autres ».
+# Dix noms tiennent dans l'apercu d'un courriel ou d'une notification sans
+# defiler ; au-dela, un nom de plus ne change pas le geste attendu — une
+# homologation groupee, sur l'ecran d'homologation, qui les liste toutes. Les
+# dix nommes sont les plus en retard : ceux qu'on lirait en premier de toute
+# facon.
+LISTES_NOMMEES = 10
+
+
+def signaler_les_franchissements(db, maintenant: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """
+    Emet UN evenement `fraicheur_depassee` par passage qui constate des
+    franchissements de seuil (48 h, puis 7 jours — ceux de la mise en
+    service), nommant les listes concernees par retard decroissant, avec le
+    niveau de chacune. Retourne tous les franchissements, tries de meme.
+
+    Releve en production le 19 octobre 2026 : 47 jours sans homologation, et
+    personne prevenu. La mesure existait, l'ecran la montrait — a qui
+    l'ouvrait. Rien ne la portait vers quelqu'un.
+
+    Groupe, et non une emission par liste : au premier passage apres le
+    deploiement, les 29 listes en retard de la production auraient envoye 29
+    courriels identiques d'un coup — exactement le signal qu'on apprend a
+    filtrer. La MEMOIRE, elle, reste par liste : c'est elle qui fait qu'une
+    liste deja signalee ne revient pas, et qu'une liste qui passe ensuite de
+    48 h a 7 jours se signale seule.
+
+    Les seuils ne sont pas recopies : `niveau_de_retard` est la regle meme du
+    controle « Fraîcheur des listes ». Ce qui ne s'aggrave pas se tait : une
+    liste qui redescend (homologuee) sort de la memoire sans un mot, et
+    re-franchira le seuil — donc se signalera de nouveau — si elle reprend du
+    retard.
+    """
+    from fiskr.mise_en_service import (ATTENTION, BLOQUANT, OK, SEUILS_DE_RETARD_H,
+                                       niveau_de_retard)
+    from fiskr.notifier import emit
+    from fiskr.settings import get_setting, set_setting
+
+    rang = {OK: 0, ATTENTION: 1, BLOQUANT: 2}
+    etat = mesurer(db, maintenant)
+    memoire = get_setting(db, SETTING_NIVEAUX_SIGNALES, {}) or {}
+    if not isinstance(memoire, dict):
+        memoire = {}
+
+    signales, nouvelle_memoire = [], {}
+    for liste in etat["listes"]:
+        # Sans version en attente, retard_heures vaut 0 : niveau OK.
+        niveau = niveau_de_retard(liste["retard_heures"])
+        if niveau == OK:
+            continue
+        nouvelle_memoire[liste["type"]] = niveau
+        if rang[niveau] <= rang.get(memoire.get(liste["type"]), 0):
+            continue
+        signales.append({"type": liste["type"], "niveau": niveau,
+                         "retard_heures": liste["retard_heures"]})
+    signales.sort(key=lambda s: -s["retard_heures"])
+
+    if signales:
+        nommees = " ; ".join(
+            f"{s['type'].replace('WATCHLIST_', '')} ({s['niveau']}, "
+            f"{phrase_de_retard(s['retard_heures'])})" for s in signales[:LISTES_NOMMEES])
+        reste = len(signales) - LISTES_NOMMEES
+        if reste > 0:
+            nommees += f" … et {reste} autre{'s' if reste > 1 else ''}"
+        par_niveau = {
+            f"{niveau} — plus de {phrase_de_retard(SEUILS_DE_RETARD_H[niveau])} de retard":
+                sum(1 for s in signales if s["niveau"] == niveau)
+            for niveau in (BLOQUANT, ATTENTION)
+            if any(s["niveau"] == niveau for s in signales)}
+        emit(db, "fraicheur_depassee", {
+            "Listes": f"{len(signales)} liste(s) viennent de franchir un seuil de fraîcheur",
+            **par_niveau,
+            "Listes concernées": nommees,
+            "À faire": "Homologuez la dernière version de chaque liste (homologation "
+                       "groupée) : les plus anciennes quittent alors la file d'elles-"
+                       "mêmes. L'écran d'homologation les liste toutes.",
+        })
+    if nouvelle_memoire != memoire:
+        set_setting(db, SETTING_NIVEAUX_SIGNALES, nouvelle_memoire, updated_by="système")
+    return signales
+
+
 def est_une_regression(db, snapshot) -> bool:
     """
     Vrai si promouvoir ce snapshot remplacerait une production PLUS RECENTE.

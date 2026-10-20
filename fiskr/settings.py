@@ -5,6 +5,7 @@ La ligne AppSetting en base gagne toujours sur la valeur de config.yaml, qui ne
 sert que de valeur par defaut tant qu'aucun admin n'a modifie le reglage.
 """
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from fiskr.config import config
@@ -130,32 +131,151 @@ DEFAULT_CHECKLIST = [
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
 
+# Delai (heures) au-dela duquel une mesure de gel non declaree a la DG Tresor
+# leve une notification immediate et un controle de mise en service BLOQUANT.
+#
+# Le texte ne donne pas de chiffre : il dit « immediatement » (CMF L.562-4 ;
+# lignes directrices DGT/ACPR du 18 mars 2026, §182 : « dans les plus brefs
+# delais, et en tout etat de cause, des que l'analyse de l'alerte a permis de
+# s'assurer » de l'identite). Quatre heures, parce que la declaration demande
+# une chose que Fiskr n'a pas : les montants geles « a la date du gel », lus
+# dans le systeme teneur de comptes (formulaire DG Tresor, rubrique
+# « Identification des fonds geles »). Le temps de les obtenir se compte en
+# heures ; au-dela d'une demi-journee, « immediatement » ne decrit plus ce qui
+# s'est passe. Releve en production : la seule trace ecrite apres deux
+# confirmations OFAC est arrivee 17 jours plus tard.
+SETTING_GEL_DELAI = "gel.declaration_delai_heures"
+DEFAULT_GEL_DELAI_HEURES = 4
+# Bornes : en dessous d'une heure, chaque confirmation sonnerait avant qu'on
+# ait pu ouvrir le formulaire ; au-dessus de trois jours, le reglage ne dirait
+# plus « immediatement » sous aucune lecture.
+GEL_DELAI_BORNES_HEURES = (1, 72)
+
+
+def gel_declaration_delai_heures(db) -> int:
+    """Delai de declaration d'une mesure de gel (heures), borne. Une valeur
+    illisible retombe sur le defaut : jamais sur « aucun delai »."""
+    valeur = get_setting_with_source(db, SETTING_GEL_DELAI, DEFAULT_GEL_DELAI_HEURES)["value"]
+    try:
+        heures = int(valeur)
+    except (TypeError, ValueError):
+        return DEFAULT_GEL_DELAI_HEURES
+    bas, haut = GEL_DELAI_BORNES_HEURES
+    return heures if bas <= heures <= haut else DEFAULT_GEL_DELAI_HEURES
+
 # Motifs de cloture proposes a la saisie d'une decision d'alerte. Une
 # bibliotheque, pas un carcan : le motif choisi s'insere dans le commentaire
 # et reste editable — la motivation reglementaire finale appartient a
 # l'analyste. L'interet est double : moins de re-frappe, et des statistiques
 # de cloture qui parlent le meme vocabulaire d'un analyste a l'autre.
+#
+# CHAQUE MOTIF PORTE LA DECISION QU'IL MOTIVE. La bibliotheque etait une liste
+# plate, proposee telle quelle aux deux decisions : le dialogue « Proposer faux
+# positif » offrait « Correspondance confirmee : identite alignee… », et
+# « vrai positif » offrait les motifs d'homonymie. Un clic distrait produisait
+# un faux positif justifie par une confirmation — et le serveur l'acceptait.
+# Le dialogue ne propose plus que les motifs de la decision, et le serveur
+# refuse un commentaire qui cite un motif reserve a l'autre.
 SETTING_ALERT_CLOSE_REASONS = "alerts.close_reasons"
+DECISION_FAUX_POSITIF = "FALSE_POSITIVE"
+DECISION_VRAI_POSITIF = "CONFIRMED"
+DECISIONS_DE_CLOTURE = (DECISION_FAUX_POSITIF, DECISION_VRAI_POSITIF)
 DEFAULT_ALERT_CLOSE_REASONS = [
-    "Homonymie : date de naissance incompatible avec la fiche listée.",
-    "Homonymie : nationalité et pays de résidence incompatibles.",
-    "Personne morale distincte : n° d'immatriculation différent.",
-    "Client déjà instruit : correspondance couverte par la liste blanche.",
-    "Correspondance confirmée : identité alignée sur la fiche listée (pièces au dossier).",
+    {"motif": "Homonymie : date de naissance incompatible avec la fiche listée.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    {"motif": "Homonymie : nationalité et pays de résidence incompatibles.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    {"motif": "Personne morale distincte : n° d'immatriculation différent.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    # Une paire de liste blanche memorise un faux positif deja instruit.
+    {"motif": "Client déjà instruit : correspondance couverte par la liste blanche.",
+     "decisions": [DECISION_FAUX_POSITIF]},
+    {"motif": "Correspondance confirmée : identité alignée sur la fiche listée (pièces au dossier).",
+     "decisions": [DECISION_VRAI_POSITIF]},
 ]
 _MAX_MOTIFS = 50
 _MAX_MOTIF_LONGUEUR = 300
+
+
+def _forme_du_motif(texte: str) -> str:
+    """Forme de comparaison d'un motif : casse, blancs (insecables compris) et
+    ponctuation finale ne le distinguent pas."""
+    return " ".join(str(texte).split()).casefold().rstrip(" .;")
+
+
+def motifs_de_cloture(valeur) -> list:
+    """
+    Motifs sous leur forme canonique : [{"motif", "decisions"[, "a_classer"]}].
+
+    Migration des motifs anterieurs, simples chaines sans decision : un motif
+    de la bibliotheque livree reprend son classement ; un motif ecrit par
+    l'administrateur ne peut pas etre classe sans deviner — il s'applique aux
+    DEUX decisions et le dit (`a_classer`), jusqu'a ce qu'on le classe. Deux
+    entrees du meme motif se fondent (decisions reunies).
+    """
+    livres = {_forme_du_motif(m["motif"]): m["decisions"] for m in DEFAULT_ALERT_CLOSE_REASONS}
+    sortie, rangs = [], {}
+    for brut in (valeur or [])[:_MAX_MOTIFS]:
+        a_classer = False
+        if isinstance(brut, dict):
+            texte = str(brut.get("motif") or "").strip()
+            decisions = [d for d in DECISIONS_DE_CLOTURE if d in (brut.get("decisions") or [])]
+            a_classer = bool(brut.get("a_classer")) or not decisions
+        else:
+            texte = str(brut or "").strip()
+            decisions = list(livres.get(_forme_du_motif(texte), ()))
+            a_classer = not decisions
+        if not texte:
+            continue
+        if a_classer and not decisions:
+            decisions = list(DECISIONS_DE_CLOTURE)
+        texte = texte[:_MAX_MOTIF_LONGUEUR]
+        cle = _forme_du_motif(texte)
+        if cle in rangs:
+            deja = sortie[rangs[cle]]
+            deja["decisions"] = [d for d in DECISIONS_DE_CLOTURE
+                                 if d in deja["decisions"] or d in decisions]
+            continue
+        entree = {"motif": texte, "decisions": decisions}
+        if a_classer:
+            entree["a_classer"] = True
+        rangs[cle] = len(sortie)
+        sortie.append(entree)
+    return sortie
 
 
 def alert_close_reasons(db) -> list:
     """Motifs actifs, nettoyes et bornes. Le defaut sert tant que l'admin n'a
     rien ecrit ; une liste VIDE enregistree signifie « pas de suggestions »."""
     value = get_setting_with_source(db, SETTING_ALERT_CLOSE_REASONS, None)["value"]
-    if value is None:
-        return list(DEFAULT_ALERT_CLOSE_REASONS)
-    if not isinstance(value, list):
-        return list(DEFAULT_ALERT_CLOSE_REASONS)
-    return [str(m).strip()[:_MAX_MOTIF_LONGUEUR] for m in value[:_MAX_MOTIFS] if str(m).strip()]
+    if value is None or not isinstance(value, list):
+        return [dict(m) for m in DEFAULT_ALERT_CLOSE_REASONS]
+    return motifs_de_cloture(value)
+
+
+def motifs_d_une_autre_decision(db, decision: str, *textes: Optional[str]) -> list:
+    """
+    Les motifs de la bibliotheque, reserves a une AUTRE decision que
+    `decision`, que ces textes citent. Le motif choisi s'insere tel quel dans
+    le commentaire (le dialogue remplit le champ) : c'est donc le commentaire
+    qui porte la motivation, quel que soit le chemin — dialogue, API, ancien
+    onglet reste ouvert. Un motif cite entre deux bornes de mot, pour qu'un
+    motif court ne se trouve pas au milieu d'un autre mot.
+    """
+    corpus = [_forme_du_motif(t) for t in textes if t and str(t).strip()]
+    if not corpus:
+        return []
+    trouves = []
+    for entree in alert_close_reasons(db):
+        if decision in entree["decisions"]:
+            continue
+        forme = _forme_du_motif(entree["motif"])
+        if not forme:
+            continue
+        motif = re.compile(r"(?<!\w)" + re.escape(forme) + r"(?!\w)")
+        if any(motif.search(texte) for texte in corpus):
+            trouves.append(entree["motif"])
+    return trouves
 DEFAULT_DIGEST = {"enabled": False, "cron": "0 8 * * 1-5"}
 RETENTION_FAMILIES = ("audit_trail", "closed_alerts", "sync_reports", "batch_campaigns")
 RETENTION_MIN_DAYS = 30  # garde-fou TECHNIQUE : jamais moins de 30 jours quand une purge est activee
@@ -316,9 +436,23 @@ def bump_watchlist_epoch(db) -> int:
     return epoch
 
 
+def require_approval_setting(db) -> Dict[str, Any]:
+    """
+    Mode homologation, valeur et provenance : base d'abord, sinon config.yaml,
+    sinon NON. C'est la seule lecture du réglage, et le seul endroit où son
+    défaut est écrit.
+
+    La mise en service le relisait avec son propre défaut (oui) : sur une
+    installation neuve, sans ligne en base et avec `require_approval: false`
+    dans config.yaml, l'écran affichait « Homologation des lots — Vérifié »
+    pendant que le premier import passait directement en production.
+    """
+    return get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
+
+
 def require_approval_enabled(db) -> bool:
-    """True si le mode homologation est actif (base d'abord, sinon config.yaml)."""
-    return bool(get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)["value"])
+    """True si le mode homologation est actif — ce que l'import applique."""
+    return bool(require_approval_setting(db)["value"])
 
 
 def alert_four_eyes_required(db) -> bool:

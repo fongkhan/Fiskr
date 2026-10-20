@@ -405,12 +405,16 @@ def test_bulk_approve_refuses_individually_without_stopping_the_batch(client):
 
     # Le cahier de tests devient obligatoire : aucune des deux n'en a...
     assert client.put("/api/settings/ingestion", json={"backtest_required": True}).status_code == 200
-    # ...on en fabrique un, au verdict OK, pour la seule liste conforme
+    # ...on en fabrique un, au verdict OK, pour la seule liste conforme. Il
+    # porte l'empreinte de ce qu'il a teste (fiskr/backtest.py) : un rapport
+    # reduit a son verdict est perime, et ce test ne porte pas la-dessus.
+    from fiskr.backtest import empreinte_testee
     db = next(get_db())
     try:
         snap = db.query(Snapshot).filter(
             Snapshot.snapshot_id == conforme["snapshot_id"]).first()
-        snap.backtest_report = {"verdict": "OK", "gap_pct": 0.0}
+        snap.backtest_report = {"verdict": "OK", "gap_pct": 0.0,
+                                "tested_scope": empreinte_testee(db, [snap])}
         db.commit()
     finally:
         db.close()

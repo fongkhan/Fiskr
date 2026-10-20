@@ -16,6 +16,11 @@ from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.database import get_db, init_db, Alert, AlertEvent, AuditTrail
 
+# Ce module crible les noms du jeu de démonstration (watchlist.json). Un semis
+# implicite les versait autrefois en production dès qu'aucune liste n'était
+# READY ; ils sont désormais posés explicitement (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("listes_de_demonstration")
+
 
 def _override_user():
     app.dependency_overrides[get_current_user] = lambda: {
@@ -162,7 +167,9 @@ def test_alerts_queue_pagination(client):
 
 def test_whitelist_pagination_shape(client):
     data = client.get("/api/whitelist", params={"page": 1, "page_size": 1}).json()
-    assert set(data.keys()) == {"total", "page", "page_size", "items"}
+    # `stale_total` (paires a reexaminer, tous filtres confondus) s'ajoute a la
+    # forme paginee : c'est le compteur de l'ecran (tests/test_liste_blanche_suivie.py)
+    assert set(data.keys()) == {"total", "page", "page_size", "items", "stale_total"}
     assert data["page"] == 1 and data["page_size"] == 1
     assert len(data["items"]) <= 1
     assert client.get("/api/whitelist", params={"page_size": 500}).status_code == 422

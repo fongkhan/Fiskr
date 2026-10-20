@@ -89,21 +89,30 @@ def test_summary_reads_the_database_not_the_process_memory(ctx, cache_vide):
     assert data["count"] > 0, "le referentiel n'est pas vide en base"
 
 
-def test_summary_hash_is_the_latest_ready_snapshot(ctx, cache_vide):
-    """Meme regle que le cache moteur : le snapshot READY le plus recent."""
+def test_summary_hash_is_the_universe_fingerprint(ctx, cache_vide):
+    """
+    Meme definition que le cache moteur et le journal d'audit : l'empreinte de
+    l'univers en production (fiskr/univers.py).
+
+    Reecrit : ce test exigeait le hash du snapshot READY le plus recent —
+    « meme regle que le cache moteur », qui avait le meme defaut. Une empreinte
+    pour toutes les listes, qui ne bougeait ni a l'homologation d'un autre lot,
+    ni a une exclusion, ni a une correction de fiche.
+    """
+    from fiskr import univers
     db = ctx["db"]
-    attendu = db.query(Snapshot).filter(
-        Snapshot.file_type.in_(api.WATCHLIST_FILE_TYPES),
-        Snapshot.status == "READY",
-    ).order_by(Snapshot.uploaded_at.desc()).first()
+    attendu = univers.calculer(db)
     data = ctx["client"].get("/api/watchlist/summary").json()
-    assert data["hash"] == attendu.file_hash
+    assert data["hash"] == attendu.empreinte
+    assert {"file_type": "WATCHLIST_DGT", "snapshot_id": SNAP} in data["composition"]
 
 
 def test_summary_never_invents_a_hash_without_production(ctx, cache_vide, monkeypatch):
     """Sans referentiel en production, le badge affiche son etat vide (le
     frontal rend « NONE ») — jamais un hash fabrique."""
-    monkeypatch.setattr(api, "WATCHLIST_FILE_TYPES", ["WATCHLIST_TYPE_INEXISTANT"])
+    from fiskr import univers
+    # Le perimetre des lots en production se lit dans fiskr/univers.py.
+    monkeypatch.setattr(univers, "_types_de_listes", lambda: ["WATCHLIST_TYPE_INEXISTANT"])
     data = ctx["client"].get("/api/watchlist/summary").json()
     assert data["hash"] is None and data["count"] == 0
 
@@ -161,15 +170,26 @@ def test_screening_never_clears_a_listed_party_on_an_empty_cache(ctx, cache_vide
 def test_screening_endpoints_all_guarantee_their_cache():
     """Garde-fou de regression : tout endpoint qui crible doit s'assurer du
     cache. Controle sur l'arbre syntaxique — une mention en commentaire ne
-    compte pas, seul un APPEL compte."""
+    compte pas, seul un APPEL compte.
+
+    Reecrit avec le partage du chemin de fraicheur : la garantie vit
+    desormais dans `cribler_un_profil` / `cribler_la_requete`, que les routes
+    appellent. Un appel compte donc s'il atteint `_ensure_watchlist_cache`
+    directement OU par une fonction qui y mene (fermeture calculee sur le
+    module, pas une liste de noms). Les webhooks entrent dans la liste des
+    routes criblantes : le criblage temps reel par webhook n'y figurait pas, et
+    c'est precisement lui qui criblait sans garantir son cache."""
     import ast
     import inspect as _inspect
 
     arbre = ast.parse(_inspect.getsource(api).lstrip())
     routes = {}
+    appels_de = {}
     for noeud in ast.walk(arbre):
         if not isinstance(noeud, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        appels_de[noeud.name] = {n.func.id for n in ast.walk(noeud)
+                                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         chemins = [
             d.args[0].value for d in noeud.decorator_list
             if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
@@ -179,12 +199,19 @@ def test_screening_endpoints_all_guarantee_their_cache():
         for chemin in chemins:
             routes[chemin] = noeud
 
-    criblants = ["/api/screen", "/api/screen/preview", "/api/transactions/screen"]
+    garants = {"_ensure_watchlist_cache"}
+    while True:
+        plus = {nom for nom, appels in appels_de.items() if appels & garants} - garants
+        if not plus:
+            break
+        garants |= plus
+
+    criblants = ["/api/screen", "/api/screen/preview", "/api/transactions/screen",
+                 "/api/hooks/screening", "/api/hooks/client-upsert",
+                 "/api/clients/{client_id}/screen"]
     for chemin in criblants:
         noeud = routes.get(chemin)
         assert noeud is not None, f"route {chemin} introuvable"
-        appels = {n.func.id for n in ast.walk(noeud)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "_ensure_watchlist_cache" in appels, (
+        assert noeud.name in garants, (
             f"{chemin} crible sans garantir son cache : sur un index vide il "
             f"rend NO_MATCH silencieusement")

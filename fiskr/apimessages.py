@@ -104,11 +104,27 @@ MESSAGES: Dict[str, Dict[str, str]] = {
     "Aucune alerte sélectionnée.": {
         "en": "No alert selected.", "de": "Kein Alarm ausgewählt.",
         "es": "Ninguna alerta seleccionada.", "zh": "未选择警报。", "ar": "لم يُحدد أي تنبيه."},
-    "Action en masse inconnue (assign ou priority).": {
-        "en": "Unknown bulk action (assign or priority).",
-        "de": "Unbekannte Massenaktion (assign oder priority).",
-        "es": "Acción masiva desconocida (assign o priority).",
-        "zh": "未知的批量操作（assign 或 priority）。", "ar": "إجراء جماعي غير معروف (assign أو priority)."},
+    "Action en masse inconnue (assign, priority ou propose).": {
+        "en": "Unknown bulk action (assign, priority or propose).",
+        "de": "Unbekannte Massenaktion (assign, priority oder propose).",
+        "es": "Acción masiva desconocida (assign, priority o propose).",
+        "zh": "未知的批量操作（assign、priority 或 propose）。", "ar": "إجراء جماعي غير معروف (assign أو priority أو propose)."},
+    "La validation 4-yeux reste unitaire : chaque décision proposée se valide une par une, par un réviseur différent du proposeur.": {
+        "en": "Four-eyes validation stays one at a time: each proposed decision is validated individually, by a reviewer other than the proposer.",
+        "de": "Die Vier-Augen-Freigabe bleibt einzeln: jede vorgeschlagene Entscheidung wird einzeln freigegeben, von einem anderen Prüfer als dem Vorschlagenden.",
+        "es": "La validación a cuatro ojos sigue siendo unitaria: cada decisión propuesta se valida una a una, por un revisor distinto del proponente.",
+        "zh": "四眼复核仍须逐条进行：每项提议的决定都要单独复核，且复核人不得是提议人。",
+        "ar": "يبقى تحقق الأربع أعين فرديًا: يُعتمد كل قرار مقترح على حدة، من قِبل مراجع غير صاحب الاقتراح."},
+    "Aucune alerte à prendre : chaque alerte à instruire a déjà quelqu'un.": {
+        "en": "No alert to take: every alert to be investigated already has someone.",
+        "de": "Kein Alarm zu übernehmen: jeder zu bearbeitende Alarm hat bereits jemanden.",
+        "es": "Ninguna alerta que tomar: cada alerta por instruir ya tiene a alguien.",
+        "zh": "没有可领取的警报：每条待处理的警报都已有人负责。",
+        "ar": "لا يوجد تنبيه لأخذه: لكل تنبيه قيد التحقيق شخص مسؤول بالفعل."},
+    "Canal inconnu (SCREENING ou FILTERING).": {
+        "en": "Unknown channel (SCREENING or FILTERING).", "de": "Unbekannter Kanal (SCREENING oder FILTERING).",
+        "es": "Canal desconocido (SCREENING o FILTERING).", "zh": "未知通道（SCREENING 或 FILTERING）。",
+        "ar": "قناة غير معروفة (SCREENING أو FILTERING)."},
     # Réglages & gouvernance
     "Aucun réglage fourni.": {
         "en": "No setting provided.", "de": "Keine Einstellung übermittelt.",
@@ -172,6 +188,48 @@ MESSAGES: Dict[str, Dict[str, str]] = {
     "Configuration importée.": {
         "en": "Configuration imported.", "de": "Konfiguration importiert.",
         "es": "Configuración importada.", "zh": "配置已导入。", "ar": "تم استيراد الإعدادات."},
+    "Fichier déjà importé (même empreinte SHA-256) : rien n'a été réimporté.": {
+        "en": "File already imported (same SHA-256 fingerprint): nothing was re-imported.",
+        "de": "Datei bereits importiert (gleicher SHA-256-Fingerabdruck): nichts wurde erneut importiert.",
+        "es": "Archivo ya importado (misma huella SHA-256): no se ha vuelto a importar nada.",
+        "zh": "文件已导入过（SHA-256 指纹相同）：未重新导入任何内容。",
+        "ar": "الملف مستورد مسبقاً (البصمة SHA-256 نفسها): لم يُعَد استيراد أي شيء."},
+    "Compte utilisateur mis à jour.": {
+        "en": "User account updated.", "de": "Benutzerkonto aktualisiert.",
+        "es": "Cuenta de usuario actualizada.", "zh": "用户账户已更新。", "ar": "تم تحديث حساب المستخدم."},
+    # Décision et priorité d'alerte : le statut et la priorité se disent par
+    # leur libellé (narrative.ALERT_STATUS_LABELS, database.ALERT_PRIORITY_LABELS).
+    "Décision validée, alerte close — faux positif.": {
+        "en": "Decision validated, alert closed — false positive.",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — Fehlalarm.",
+        "es": "Decisión validada, alerta cerrada — falso positivo.",
+        "zh": "决定已确认，警报已关闭——误报。", "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي كاذب."},
+    "Décision validée, alerte close — vrai positif confirmé.": {
+        "en": "Decision validated, alert closed — confirmed true positive.",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — bestätigter echter Treffer.",
+        "es": "Decisión validada, alerta cerrada — verdadero positivo confirmado.",
+        "zh": "决定已确认，警报已关闭——确认真阳性。", "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد."},
+    "Alerte déjà close — faux positif.": {
+        "en": "Alert already closed — false positive.", "de": "Alarm bereits geschlossen — Fehlalarm.",
+        "es": "Alerta ya cerrada — falso positivo.", "zh": "警报已关闭——误报。", "ar": "التنبيه مغلق مسبقاً — إيجابي كاذب."},
+    "Alerte déjà close — vrai positif confirmé.": {
+        "en": "Alert already closed — confirmed true positive.", "de": "Alarm bereits geschlossen — bestätigter echter Treffer.",
+        "es": "Alerta ya cerrada — verdadero positivo confirmado.", "zh": "警报已关闭——确认真阳性。", "ar": "التنبيه مغلق مسبقاً — إيجابي حقيقي مؤكد."},
+    "Alerte déjà close par règle anti-faux positif.": {
+        "en": "Alert already closed by an anti-false-positive rule.", "de": "Alarm bereits durch eine Anti-Fehlalarm-Regel geschlossen.",
+        "es": "Alerta ya cerrada por una regla anti falsos positivos.", "zh": "警报已被防误报规则关闭。", "ar": "التنبيه مغلق مسبقاً بقاعدة مكافحة الإنذارات الكاذبة."},
+    "Priorité passée à basse.": {
+        "en": "Priority set to low.", "de": "Priorität auf niedrig gesetzt.",
+        "es": "Prioridad cambiada a baja.", "zh": "优先级已改为低。", "ar": "غُيّرت الأولوية إلى منخفضة."},
+    "Priorité passée à moyenne.": {
+        "en": "Priority set to medium.", "de": "Priorität auf mittel gesetzt.",
+        "es": "Prioridad cambiada a media.", "zh": "优先级已改为中。", "ar": "غُيّرت الأولوية إلى متوسطة."},
+    "Priorité passée à haute.": {
+        "en": "Priority set to high.", "de": "Priorität auf hoch gesetzt.",
+        "es": "Prioridad cambiada a alta.", "zh": "优先级已改为高。", "ar": "غُيّرت الأولوية إلى عالية."},
+    "Priorité passée à critique.": {
+        "en": "Priority set to critical.", "de": "Priorität auf kritisch gesetzt.",
+        "es": "Prioridad cambiada a crítica.", "zh": "优先级已改为紧急。", "ar": "غُيّرت الأولوية إلى حرجة."},
     # Transmission du projet de declaration de soupcon (TRACFIN)
     "Alerte introuvable.": {
         "en": "Alert not found.", "de": "Alarm nicht gefunden.",
@@ -199,6 +257,19 @@ MESSAGES: Dict[str, Dict[str, str]] = {
 
 # ---- Gabarits regex pour les messages a variables ----
 TEMPLATES = [
+    # Vrai positif sur une liste de gel : la validation annonce la mesure
+    # ouverte au registre (api._message_de_mesure).
+    (re.compile(r"^Décision validée, alerte close — vrai positif confirmé\. Mesure de gel #(\d+) ouverte : "
+                r"déclaration à la DG Trésor due immédiatement \(Criblage → Registre des gels\)\.$"), {
+        "en": "Decision validated, alert closed — confirmed true positive. Freeze measure #{0} opened: "
+              "the declaration to the DG Trésor is due immediately (Screening → Freeze register).",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — bestätigter echter Treffer. Einfrierungsmaßnahme #{0} "
+              "eröffnet: die Meldung an die DG Trésor ist sofort fällig (Screening → Register der Einfrierungen).",
+        "es": "Decisión validada, alerta cerrada — verdadero positivo confirmado. Medida de congelación #{0} "
+              "abierta: la declaración a la DG Trésor es exigible de inmediato (Cribado → Registro de congelaciones).",
+        "zh": "决定已确认，警报已关闭——确认真阳性。已开立冻结措施 #{0}：须立即向 DG Trésor 申报（筛查 → 冻结登记册）。",
+        "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد. فُتح تدبير التجميد رقم {0}: "
+              "التصريح للمديرية العامة للخزينة واجب فوراً (الفحص ← سجل التجميد)."}),
     (re.compile(r"^Compte temporairement verrouillé après trop d'échecs\. Réessayez dans (\d+) minute\(s\)\.$"), {
         "en": "Account temporarily locked after too many failures. Try again in {0} minute(s).",
         "de": "Konto nach zu vielen Fehlversuchen vorübergehend gesperrt. Erneut versuchen in {0} Minute(n).",
@@ -219,6 +290,59 @@ TEMPLATES = [
         "de": "{0} Alarm(e) aktualisiert, {1} übersprungen.",
         "es": "{0} alerta(s) actualizada(s), {1} ignorada(s).",
         "zh": "已更新 {0} 条警报，跳过 {1} 条。", "ar": "حُدّث {0} تنبيه وتم تجاهل {1}."}),
+    # File de l'analyste : proposition en masse et « Prendre la suivante »
+    (re.compile(r"^(\d+) décision\(s\) proposée\(s\), chacune en attente de sa validation 4-yeux ; "
+                r"(\d+) alerte\(s\) écartée\(s\)\.$"), {
+        "en": "{0} decision(s) proposed, each awaiting its own four-eyes validation; {1} alert(s) set aside.",
+        "de": "{0} Entscheidung(en) vorgeschlagen, jede wartet auf ihre eigene Vier-Augen-Freigabe; {1} Alarm(e) ausgelassen.",
+        "es": "{0} decisión(es) propuesta(s), cada una pendiente de su validación a cuatro ojos; {1} alerta(s) descartada(s).",
+        "zh": "已提议 {0} 项决定，每项都等待各自的四眼复核；{1} 条警报被排除。",
+        "ar": "اقتُرح {0} قرار، كل منها بانتظار تحقق الأربع أعين الخاص به؛ استُبعد {1} تنبيه."}),
+    (re.compile(r"^(\d+) alerte\(s\) clôturée\(s\) \(validation 4-yeux désactivée\) ; "
+                r"(\d+) alerte\(s\) écartée\(s\)\.$"), {
+        "en": "{0} alert(s) closed (four-eyes validation disabled); {1} alert(s) set aside.",
+        "de": "{0} Alarm(e) geschlossen (Vier-Augen-Freigabe deaktiviert); {1} Alarm(e) ausgelassen.",
+        "es": "{0} alerta(s) cerrada(s) (validación a cuatro ojos desactivada); {1} alerta(s) descartada(s).",
+        "zh": "已关闭 {0} 条警报（四眼复核已停用）；{1} 条警报被排除。",
+        "ar": "أُغلق {0} تنبيه (تحقق الأربع أعين معطّل)؛ استُبعد {1} تنبيه."}),
+    (re.compile(r"^Vous proposez « faux positif » pour (\d+) alerte\(s\) d'une liste de gel \(périmètre "
+                r"SANCTION\)\. Rien n'est clos : chaque proposition attendra sa propre validation 4-yeux\. "
+                r"Mais une correspondance de gel manquée est constatable à l'audit et sanctionnable : "
+                r"confirmez que chacune a été instruite individuellement\.$"), {
+        "en": "You are proposing “false positive” for {0} alert(s) on a freeze list (SANCTION perimeter). "
+              "Nothing is closed: each proposal will await its own four-eyes validation. But a missed freeze "
+              "match is visible at audit and sanctionable: confirm that each one was investigated individually.",
+        "de": "Sie schlagen „Fehlalarm“ für {0} Alarm(e) einer Einfrierungsliste vor (Perimeter SANCTION). "
+              "Nichts wird geschlossen: jeder Vorschlag wartet auf seine eigene Vier-Augen-Freigabe. Ein "
+              "übersehener Treffer ist jedoch bei der Prüfung feststellbar und sanktionierbar: bestätigen Sie, "
+              "dass jeder einzeln bearbeitet wurde.",
+        "es": "Propone «falso positivo» para {0} alerta(s) de una lista de congelación (perímetro SANCTION). "
+              "Nada se cierra: cada propuesta esperará su propia validación a cuatro ojos. Pero una "
+              "coincidencia de congelación omitida es constatable en auditoría y sancionable: confirme que "
+              "cada una se instruyó individualmente.",
+        "zh": "您正在为冻结名单（SANCTION 范围）上的 {0} 条警报提议“误报”。不会关闭任何警报："
+              "每项提议都将等待各自的四眼复核。但漏掉冻结命中会在审计中被发现并可能受罚：请确认每条都已单独调查。",
+        "ar": "أنت تقترح «إيجابي كاذب» لـ {0} تنبيه على قائمة تجميد (نطاق SANCTION). لا يُغلق شيء: "
+              "سينتظر كل اقتراح تحقق الأربع أعين الخاص به. لكن التطابق الفائت مع قائمة تجميد يُكتشف عند "
+              "التدقيق ويُعاقب عليه: أكّد أن كل تنبيه قد حُقق فيه على حدة."}),
+    (re.compile(r"^Alerte #(\d+) prise en charge : la plus urgente des alertes non assignées\.$"), {
+        "en": "Alert #{0} taken: the most urgent of the unassigned alerts.",
+        "de": "Alarm #{0} übernommen: der dringendste der nicht zugewiesenen Alarme.",
+        "es": "Alerta #{0} asumida: la más urgente de las alertas sin asignar.",
+        "zh": "已领取警报 #{0}：未指派警报中最紧急的一条。",
+        "ar": "أُخذ التنبيه رقم {0}: الأكثر إلحاحًا بين التنبيهات غير المسندة."}),
+    (re.compile(r"^Motif réservé à un vrai positif : « (.+) »\. Il ne peut pas motiver un faux positif\.$"), {
+        "en": "Reason reserved for a true positive: “{0}”. It cannot justify a false positive.",
+        "de": "Begründung für einen echten Treffer reserviert: „{0}“. Sie kann keinen Fehlalarm begründen.",
+        "es": "Motivo reservado a un verdadero positivo: «{0}». No puede motivar un falso positivo.",
+        "zh": "该理由仅适用于真阳性：“{0}”。不能用于说明误报。",
+        "ar": "سبب مخصص لإيجابي حقيقي: «{0}». لا يمكن أن يبرر إيجابيًا كاذبًا."}),
+    (re.compile(r"^Motif réservé à un faux positif : « (.+) »\. Il ne peut pas motiver un vrai positif\.$"), {
+        "en": "Reason reserved for a false positive: “{0}”. It cannot justify a true positive.",
+        "de": "Begründung für einen Fehlalarm reserviert: „{0}“. Sie kann keinen echten Treffer begründen.",
+        "es": "Motivo reservado a un falso positivo: «{0}». No puede motivar un verdadero positivo.",
+        "zh": "该理由仅适用于误报：“{0}”。不能用于说明真阳性。",
+        "ar": "سبب مخصص لإيجابي كاذب: «{0}». لا يمكن أن يبرر إيجابيًا حقيقيًا."}),
     (re.compile(r"^Vue « (.+) » sauvegardée\.$"), {
         "en": "View “{0}” saved.", "de": "Ansicht „{0}“ gespeichert.",
         "es": "Vista «{0}» guardada.", "zh": "视图“{0}”已保存。", "ar": "حُفظت طريقة العرض «{0}»."}),
@@ -228,9 +352,12 @@ TEMPLATES = [
     (re.compile(r"^Vue « (.+) » supprimée\.$"), {
         "en": "View “{0}” deleted.", "de": "Ansicht „{0}“ gelöscht.",
         "es": "Vista «{0}» eliminada.", "zh": "视图“{0}”已删除。", "ar": "حُذفت طريقة العرض «{0}»."}),
-    (re.compile(r"^Priorité passée à (\S+)\.$"), {
-        "en": "Priority set to {0}.", "de": "Priorität gesetzt auf {0}.",
-        "es": "Prioridad cambiada a {0}.", "zh": "优先级已改为 {0}。", "ar": "غُيّرت الأولوية إلى {0}."}),
+    (re.compile(r"^Utilisateur '(.+)' créé avec succès\.$"), {
+        "en": "User '{0}' created successfully.", "de": "Benutzer '{0}' erfolgreich angelegt.",
+        "es": "Usuario '{0}' creado con éxito.", "zh": "用户“{0}”创建成功。", "ar": "تم إنشاء المستخدم '{0}' بنجاح."}),
+    (re.compile(r"^Utilisateur '(.+)' supprimé avec succès\.$"), {
+        "en": "User '{0}' deleted successfully.", "de": "Benutzer '{0}' erfolgreich gelöscht.",
+        "es": "Usuario '{0}' eliminado con éxito.", "zh": "用户“{0}”删除成功。", "ar": "تم حذف المستخدم '{0}' بنجاح."}),
 ]
 
 
