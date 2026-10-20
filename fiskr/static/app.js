@@ -1950,6 +1950,15 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-10-21-parties-et-ppe", date: "2026-10-21",
+ titre: "Les bénéficiaires effectifs criblés, et la suite d'une PPE",
+ points: [
+ "Les bénéficiaires effectifs, mandataires et dirigeants d'un client sont criblés avec lui ; l'alerte dit par qui la correspondance arrive.",
+ "Une PPE confirmée ouvre un dossier : origine des fonds, décision d'une personne habilitée autre que l'analyste.",
+ "Une fiche listée corrigée à la main recrible aussitôt les clients concernés.",
+ ],
+ },
+ {
  id: "2026-10-20-gel-et-criblage", date: "2026-10-20",
  titre: "Ce que le criblage a vraiment fait, et la suite d'un gel",
  points: [
