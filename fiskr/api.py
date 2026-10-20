@@ -4883,9 +4883,10 @@ def _touch_official_reference_date(reference: Optional[str]):
 
 
 # Colonnes exclues du recalcul de checksum (traces de gouvernance, pas des
-# donnees de la fiche) : definies a cote de compute_checksum, la liste blanche
-# les lit aussi pour son champ-a-champ.
-from fiskr.database import CHECKSUM_EXCLUDED_COLS as _CHECKSUM_EXCLUDED_COLS
+# donnees de la fiche). Une seule definition, celle de l'empreinte : le delta
+# compare les champs en excluant exactement les memes, et le champ-a-champ
+# de la liste blanche aussi.
+from fiskr.database import CLES_HORS_EMPREINTE as _CHECKSUM_EXCLUDED_COLS
 
 
 class WatchlistEntityPatch(BaseModel):
@@ -10799,10 +10800,18 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                 detail="Le cahier de tests est obligatoire avant la mise en production (réglage actif). Exécutez-le depuis l'étape « Cahier de tests »."
             )
         if snap.backtest_report.get("verdict") != "OK":
-            raise HTTPException(
-                status_code=400,
-                detail="Le dernier cahier de tests signale un écart de taux d'interception au-delà du seuil toléré. Posez des Good Guys (liste blanche) ou des exclusions, puis relancez le cahier de tests."
-            )
+            # Le conseil suit le SENS de l'ecart : devant une perte
+            # d'interception, des Good Guys ou des exclusions la creuseraient.
+            from fiskr.backtest import GAP_INTERCEPTION_LOSS
+            if snap.backtest_report.get("gap_direction") == GAP_INTERCEPTION_LOSS:
+                detail = ("Le dernier cahier de tests signale un écart au-delà du seuil toléré : "
+                          "la liste candidate perd des interceptions. Examinez les fiches retirées "
+                          "ou modifiées ; si la perte n'est pas justifiée, rejetez le lot.")
+            else:
+                detail = ("Le dernier cahier de tests signale un écart de taux d'interception au-delà "
+                          "du seuil toléré. Posez des Good Guys (liste blanche) ou des exclusions, "
+                          "puis relancez le cahier de tests.")
+            raise HTTPException(status_code=400, detail=detail)
 
     # Snapshot de production remplace (pour cibler le re-criblage post-delta)
     previous_prod = _latest_ready_snapshot(db, snap.file_type)

@@ -6375,9 +6375,13 @@ function pendingDeltaCell(snap) {
  if (zero) {
  return `<span style="color: var(--text-muted);" title="Contenu identique à la liste en production">aucun changement</span>`;
  }
+ // Parmi les modifiées, celles qui touchent l'identité : c'est elles qui
+ // décident d'une homologation, le reste se lit.
+ const identite = typeof d.modified_identity_count === "number"
+  ? ` title="dont ${d.modified_identity_count} d'identité"` : "";
  return `<span style="white-space: nowrap;">`
  + `<strong style="color: var(--success-soft-text);">+${d.added_count}</strong> / `
- + `<strong style="color: var(--color-warning);">~${d.modified_count}</strong> / `
+ + `<strong style="color: var(--color-warning);"${identite}>~${d.modified_count}</strong> / `
  + `<strong style="color: var(--color-danger);">−${d.removed_count}</strong></span>`;
 }
 
@@ -6525,6 +6529,7 @@ async function openReviewDetail(snapshotId) {
  document.getElementById("review-delta-added").textContent = summary.added_count ?? 0;
  document.getElementById("review-delta-removed").textContent = summary.removed_count ?? 0;
  document.getElementById("review-delta-modified").textContent = summary.modified_count ?? 0;
+ renderReviewDeltaNature(summary);
  renderReviewDeltaDetails(data.delta_details);
  // Cahier de tests : panels disponibles + dernier rapport archivé
  showReviewStep(1);
@@ -6646,14 +6651,47 @@ function ouvrirDiffDeFiche(contexte, index) {
 // d'homologation et le dossier figé montrent exactement la même chose.
 function _lignesModifiees(items, contexte) {
  _diffsDeFiches[contexte] = items || [];
- return `<thead><tr><th>ID</th><th>Nom</th><th>Champs modifiés</th><th></th></tr></thead><tbody>`
+ return `<thead><tr><th>ID</th><th>Nom</th><th>Nature</th><th>Champs modifiés</th><th></th></tr></thead><tbody>`
   + (items || []).map((e, i) => `<tr>
    <td><code>${escapeHtml(e.id || "")}</code></td>
    <td><strong>${escapeHtml(e.primary_name || "")}</strong></td>
+   <td>${_badgeDeNature(e.nature)}</td>
    <td><small>${escapeHtml((e.changes_detected || []).join(", "))}</small></td>
    <td><button type="button" class="btn btn-sm btn-secondary" onclick="ouvrirDiffDeFiche('${escapeHtml(contexte)}', ${i})">Comparer</button></td>
   </tr>`).join("")
   + `</tbody>`;
+}
+
+// Nature d'une modification, classée par le serveur (fiskr/delta.py) :
+// IDENTITÉ = un champ que le moteur lit pour intercepter (noms, alias, date de
+// naissance, pays, identifiants) ou un programme de sanction ; INFORMATION =
+// le reste. Les dossiers antérieurs à la classification n'en portent pas.
+function _badgeDeNature(nature) {
+ if (nature === "IDENTITE") return '<span class="status-badge alert">Identité</span>';
+ if (nature === "INFORMATION") return '<span class="status-badge no_match">Information</span>';
+ return '<span style="color: var(--text-muted);">—</span>';
+}
+
+// Sous le compteur « Modifications » : combien touchent l'identité. C'est ce
+// qui change qui est intercepté — le reste se lit, il ne se décide pas.
+function renderReviewDeltaNature(summary) {
+ const el = document.getElementById("review-delta-modified-nature");
+ if (!el) return;
+ const identite = summary && summary.modified_identity_count;
+ if (typeof identite !== "number") {
+  el.innerHTML = "";
+  return;
+ }
+ const information = Math.max(0, (summary.modified_count || 0) - identite);
+ el.innerHTML = `<span>Identité</span> <strong>${identite}</strong> · <span>Information</span> <strong>${information}</strong>`;
+}
+
+// Ce que la liste ne montre pas, dit en clair : le détail est borné, les
+// compteurs non. Sans cette ligne, l'écran affichait « Modifications 24 » au
+// -dessus d'une liste de 19, et rien sur les 5 autres.
+function _ligneNonDetaillee(restant) {
+ if (!restant) return "";
+ return `<p class="section-desc" style="margin: 0.4rem 0 0; font-style: italic;"><span>${Number(restant)} autre(s) non détaillée(s) ici : le compteur reste exact.</span></p>`;
 }
 
 // Delta détaillé (étape 1) : listes des ajouts / modifications / suppressions
@@ -6664,8 +6702,23 @@ function renderReviewDeltaDetails(deltaDetails) {
  const added = details.added || [];
  const removed = details.removed || [];
  const modified = details.modified || [];
+ // Empreinte seule différente, aucun champ comparé changé : écartée du
+ // compte par le serveur, et dite ici — un compteur qui baisse sans raison
+ // visible ne se croit pas.
+ const empreinteSeule = details.checksum_only_count
+  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${Number(details.checksum_only_count)} fiche(s) dont seule l'empreinte différait (aucun champ comparé ne change) : non comptée(s) comme modifiée(s).</span></p>`
+  : "";
+ // Correction du lecteur OpenSanctions (fiskr/ingest.py) : une fiche dont
+ // seule la FORME change n'est pas une modification de la source, mais le
+ // lot reste à homologuer une fois — c'est ce que la production gardera.
+ const forme = details.reader_form_count
+  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${Number(details.reader_form_count)} fiche(s) ne changent que de forme : les programmes de sanction passent de pep_role à sanction_programs (lecteur corrigé), sans modification de la source.</span>`
+    + (details.reader_form_unverified_count
+     ? ` <span>Dont ${Number(details.reader_form_unverified_count)} comparée(s) en partie seulement : l'ancienne version tronquait ce texte à 500 caractères.</span>` : "")
+    + `</p>`
+  : "";
  if (!added.length && !removed.length && !modified.length) {
- container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>';
+ container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>' + forme + empreinteSeule;
  return;
  }
 
@@ -6673,16 +6726,19 @@ function renderReviewDeltaDetails(deltaDetails) {
  <tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td>
  <td><span class="status-badge ${cls}">${escapeHtml(e.primary_name || "")}</span></td></tr>`).join("");
 
- const section = (title, count, inner) => count ? `
+ // Le titre porte le TOTAL (celui des compteurs), pas le nombre de lignes
+ // reçues : le détail est borné à cent par catégorie.
+ const section = (title, items, restant, inner) => (items.length || restant) ? `
  <details style="margin-bottom: 0.6rem;">
- <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${count})</summary>
+ <summary style="cursor: pointer; font-weight: 600; padding: 0.4rem 0;">${title} (${items.length + Number(restant || 0)})</summary>
  <div class="table-container" style="max-height: 260px; overflow-y: auto;"><table>${inner}</table></div>
+ ${_ligneNonDetaillee(restant)}
  </details>` : "";
 
- container.innerHTML =
- section(" Ajouts", added.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
- section(" Modifications (avant → après)", modified.length, _lignesModifiees(modified, "review")) +
- section(" Suppressions", removed.length, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
+ container.innerHTML = forme + empreinteSeule +
+ section(" Ajouts", added, details.added_truncated, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(added, "no_match")}</tbody>`) +
+ section(" Modifications (avant → après)", modified, details.modified_truncated, _lignesModifiees(modified, "review")) +
+ section(" Suppressions", removed, details.removed_truncated, `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>${rows3(removed, "alert")}</tbody>`);
 }
 
 // ------------------ HISTORIQUE DES HOMOLOGATIONS ------------------
@@ -6797,10 +6853,13 @@ async function openReviewHistoryDetail(recordId) {
    <td>${valeur}</td></tr>`;
 
   const details = (d.delta_details && d.delta_details.details) || d.delta_details || {};
-  const bloc = (titre, items, rendu) => (items && items.length) ? `
+  // Même franchise que l'écran d'homologation : le titre porte le total, et
+  // ce qui n'est pas détaillé est dit.
+  const bloc = (titre, items, rendu, restant) => ((items && items.length) || restant) ? `
    <details style="margin-bottom:0.6rem;">
-    <summary style="cursor:pointer; font-weight:600; padding:0.4rem 0;">${titre} (${items.length})</summary>
-    <div class="table-container" style="max-height:240px; overflow-y:auto;"><table>${rendu(items)}</table></div>
+    <summary style="cursor:pointer; font-weight:600; padding:0.4rem 0;">${titre} (${(items || []).length + Number(restant || 0)})</summary>
+    <div class="table-container" style="max-height:240px; overflow-y:auto;"><table>${rendu(items || [])}</table></div>
+    ${_ligneNonDetaillee(restant)}
    </details>` : "";
   const lignesSimples = items => `<thead><tr><th>ID</th><th>Type</th><th>Nom</th></tr></thead><tbody>`
    + items.map(e => `<tr><td><code>${escapeHtml(e.id || "")}</code></td><td>${escapeHtml(e.type || "")}</td><td>${escapeHtml(e.primary_name || "")}</td></tr>`).join("")
@@ -6814,6 +6873,7 @@ async function openReviewHistoryDetail(recordId) {
    <table style="width:100%; margin-bottom:0.8rem;"><tbody>
     ${ligne("Verdict", `<span class="status-badge ${report.verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(report.verdict || "-")}</span>`)}
     ${ligne("Écart", `${report.gap_pct} % (seuil ${report.threshold_pct} %)`)}
+    ${SENS_DE_L_ECART[report.gap_direction] ? ligne("Sens de l'écart", `<span>${SENS_DE_L_ECART[report.gap_direction]}</span>`) : ""}
     ${ligne("Clients interceptés — production", (report.current || {}).alerts)}
     ${ligne("Clients interceptés — candidate", (report.candidate || {}).alerts)}
     ${ligne("Alertes ouvertes — production", (report.current || {}).hits,
@@ -6844,9 +6904,9 @@ async function openReviewHistoryDetail(recordId) {
 
    <h3 style="margin:1rem 0 0.5rem;">Delta au moment de la décision</h3>
    <p class="section-desc">${escapeHtml(deltaSummaryLabel(d.delta_summary))}</p>
-   ${bloc("Ajouts", details.added, lignesSimples)}
-   ${bloc("Modifications", details.modified, lignesModifiees)}
-   ${bloc("Suppressions", details.removed, lignesSimples)}
+   ${bloc("Ajouts", details.added, lignesSimples, details.added_truncated)}
+   ${bloc("Modifications", details.modified, lignesModifiees, details.modified_truncated)}
+   ${bloc("Suppressions", details.removed, lignesSimples, details.removed_truncated)}
 
    <h3 style="margin:1rem 0 0.5rem;">Cahier de tests</h3>
    ${cahier}
@@ -6997,7 +7057,9 @@ async function loadBacktestReportFor(snapshotId) {
  if (reviewCurrentSnapshotId === snapshotId) renderBacktestReport(report);
  showToast(report.verdict === "OK"
  ? "Cahier de tests terminé : écart dans le seuil toléré."
- : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes.",
+ : (report.gap_direction === "INTERCEPTION_LOSS"
+  ? "Cahier de tests terminé : des interceptions sont perdues — examinez les alertes disparues."
+  : "Cahier de tests terminé : écart élevé — examinez les nouvelles alertes."),
  report.verdict === "OK" ? "success" : "warning", 7000);
  } catch (e) {
  console.error("Error loading backtest report:", e);
@@ -7006,9 +7068,34 @@ async function loadBacktestReportFor(snapshotId) {
 
 function backtestVerdictBadge(report) {
  if (!report) return "";
- return report.verdict === "OK"
- ? '<span class="status-badge no_match">ÉCART OK</span>'
+ if (report.verdict === "OK") return '<span class="status-badge no_match">ÉCART OK</span>';
+ // Le badge nomme le SENS de l'écart : une perte d'interception ne se
+ // corrige pas comme un surplus d'alertes.
+ return report.gap_direction === "INTERCEPTION_LOSS"
+ ? `<span class="status-badge alert">PERTE D'INTERCEPTION</span>`
  : '<span class="status-badge warning">ÉCART ÉLEVÉ</span>';
+}
+
+// Libellé du sens de l'écart (fiskr/backtest.py, GAP_*). Absent des rapports
+// antérieurs à l'écart orienté : rien n'est alors affiché.
+const SENS_DE_L_ECART = {
+ INTERCEPTION_LOSS: "Perte d'interception",
+ INCREASE: "Hausse des alertes",
+ FEWER_FALSE_POSITIVES: "Moins de faux positifs",
+ NONE: "Aucun écart",
+};
+
+// Issue d'une alerte de production que la candidate ne produit plus.
+const ISSUES_DES_RESOLUES = {
+ INTERCEPTION_LOST: ["alert", "Interception perdue"],
+ FALSE_POSITIVE_REMOVED: ["no_match", "Faux positif écarté"],
+ STILL_INTERCEPTED: ["warning", "Toujours intercepté"],
+};
+
+function _badgeDIssue(p) {
+ const issue = ISSUES_DES_RESOLUES[p.outcome];
+ if (!issue) return '<span style="color: var(--text-muted);">—</span>';
+ return `<span class="status-badge ${issue[0]}" title="${escapeHtml(p.outcome_reason || "")}">${issue[1]}</span>`;
 }
 
 // État du DERNIER job de cahier de tests du snapshot, rendu DANS l'étape 3
@@ -7133,18 +7220,37 @@ function renderBacktestReport(report) {
  <small style="color: var(--text-muted);">${typeof side.hits === "number" ? `${side.hits} alerte(s) ouverte(s) · ` : ""}taux d'interception : ${side.interception_rate_pct} % · ${side.whitelisted_suppressed} supprimée(s) par liste blanche</small>
  </div>`;
 
- const pairRow = (p, withCheckbox) => `
+ const pairRow = (p, withCheckbox, withOutcome) => `
  <tr>
  ${withCheckbox ? `<td><input type="checkbox" class="goodguy-cb" data-client-id="${escapeHtml(p.client_id)}" data-entity-id="${escapeHtml(p.entity_id)}" data-client-name="${escapeHtml(p.client_name || "")}" data-entity-name="${escapeHtml(p.entity_name || "")}" data-list-type="${escapeHtml(p.list_type || "")}"></td>` : ""}
  <td><code>${escapeHtml(p.client_id)}</code><br><small>${escapeHtml(p.client_name || "")}</small></td>
  <td><code>${escapeHtml(p.entity_id)}</code><br><small><strong>${escapeHtml(p.entity_name || "")}</strong></small></td>
  <td>${listTypeBadge(p.list_type)}</td>
  <td><span class="status-badge alert">${p.score}</span></td>
+ ${withOutcome ? `<td>${_badgeDIssue(p)}</td>` : ""}
  </tr>`;
 
  const newPairs = report.new_pairs || [];
  const resolvedPairs = report.resolved_pairs || [];
  const executedStr = report.executed_at ? new Date(report.executed_at).toLocaleString(uiLocale()) : "";
+ // Écart ORIENTÉ (rapports postérieurs à fiskr/backtest.py « SENS DE
+ // L'ÉCART ») : le mouvement signé, puis ce qui reste à examiner. Un rapport
+ // plus ancien garde son affichage d'origine.
+ const oriente = typeof report.net_gap_pct === "number";
+ const signe = v => (v > 0 ? "+" : (v < 0 ? "−" : "")) + Math.abs(v);
+ const sens = oriente ? SENS_DE_L_ECART[report.gap_direction] : null;
+ const perte = report.gap_direction === "INTERCEPTION_LOSS";
+ // Lignes EMPILÉES : le sens, l'écart à examiner et la lecture des alertes
+ // disparues ne tiennent pas sur une ligne à côté du chiffre.
+ const ecartCard = `
+ <div class="metric" style="flex: 1; ${oriente ? "flex-direction: column; align-items: flex-start; gap: 0.2rem; " : ""}background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+ <span class="metric-label" style="font-weight: 600; color: var(--color-warning);">Écart</span>
+ <span class="metric-value" style="font-size: 1.4rem;">${oriente ? signe(report.net_gap_pct) : report.gap_pct} %</span>
+ ${sens ? `<small style="font-weight: 600; color: ${perte ? "var(--color-danger)" : "var(--text-secondary)"};"><span>${sens}</span></small>` : ""}
+ ${oriente ? `<small style="color: var(--text-muted);"><span>Écart à examiner</span> <strong>${report.gap_pct} %</strong></small>` : ""}
+ <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
+ ${oriente ? `<small style="color: var(--text-muted);"><span>Faux positifs écartés</span> <strong>${report.false_positives_removed_count}</strong> · <span>Interceptions perdues</span> <strong>${report.lost_interceptions_count}</strong></small>` : ""}
+ </div>`;
 
  container.classList.remove("hidden");
  container.innerHTML = `
@@ -7156,11 +7262,7 @@ function renderBacktestReport(report) {
  <div class="score-metrics" style="flex-direction: row; gap: 1.5rem; margin-bottom: 1rem;">
  ${rateCard("Liste actuelle (production)", report.current, "var(--text-secondary)")}
  ${rateCard("Liste candidate", report.candidate, "var(--color-accent)")}
- <div class="metric" style="flex: 1; background: rgba(245, 158, 11, 0.08); padding: 1rem; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
- <span class="metric-label" style="font-weight: 600; color: var(--color-warning);">Écart</span>
- <span class="metric-value" style="font-size: 1.4rem;">${report.gap_pct} %</span>
- <small style="color: var(--text-muted);">seuil toléré : ${report.threshold_pct} %</small>
- </div>
+ ${ecartCard}
  </div>
  ${attributionParListe(report)}
  ${newPairs.length ? `
@@ -7177,12 +7279,12 @@ function renderBacktestReport(report) {
  </table>
  </div>` : '<p class="section-desc"> Aucune nouvelle alerte par rapport à la liste actuelle.</p>'}
  ${resolvedPairs.length ? `
- <details style="margin-top: 0.75rem;">
+ <details style="margin-top: 0.75rem;"${report.lost_interceptions_count ? " open" : ""}>
  <summary style="cursor: pointer; font-weight: 600;">Alertes résolues par la liste candidate (${report.resolved_pairs_count})</summary>
  <div class="table-container" style="max-height: 240px; overflow-y: auto;">
  <table>
- <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th></tr></thead>
- <tbody>${resolvedPairs.map(p => pairRow(p, false)).join("")}</tbody>
+ <thead><tr><th>Pseudo-client</th><th>Listé</th><th>Liste</th><th>Score</th>${oriente ? "<th>Issue</th>" : ""}</tr></thead>
+ <tbody>${resolvedPairs.map(p => pairRow(p, false, oriente)).join("")}</tbody>
  </table>
  </div>
  </details>` : ""}
@@ -7190,9 +7292,17 @@ function renderBacktestReport(report) {
  `;
 
  if (reminder) {
- reminder.innerHTML = report.verdict === "OK"
- ? `<p class="section-desc" style="color: var(--color-safe);"> Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).</p>`
- : `<p class="section-desc" style="color: var(--color-warning);"> Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+ // Le conseil suit le sens de l'écart. Devant une perte d'interception,
+ // « posez des Good Guys » creuserait la perte : il n'est plus donné.
+ if (report.verdict === "OK") {
+  const ecartes = report.gap_direction === "FEWER_FALSE_POSITIVES"
+   ? ` <span>La liste candidate écarte ${report.false_positives_removed_count} faux positif(s) sans perte d'interception.</span>` : "";
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-safe);"> Cahier de tests exécuté le ${escapeHtml(executedStr)} — écart ${report.gap_pct} % dans le seuil toléré (${report.threshold_pct} %).${ecartes}</p>`;
+ } else if (perte) {
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-danger);"><span>La liste candidate perd ${report.lost_interceptions_count} interception(s) : examinez les fiches retirées ou modifiées.</span> <span>Des Good Guys ou des exclusions creuseraient la perte ; si elle n'est pas justifiée, rejetez le lot.</span></p>`;
+ } else {
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-warning);"> Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+ }
  }
 }
 
@@ -7225,7 +7335,7 @@ function backtestRulesBlockHtml(report) {
  <span>Supprimées par règles — production : <strong>${rules.current_suppressed}</strong></span>
  <span>candidat : <strong>${rules.candidate_suppressed}</strong></span>
  <span>${cand ? `Effet : <strong>${deltaTxt}</strong>` : ""}</span>
- <span>Écart avant règles : <strong>${rules.gap_pct_before_rules} %</strong> (vs ${report.gap_pct} % après)</span>
+ <span>Écart avant règles : <strong>${rules.gap_pct_before_rules} %</strong> (vs ${typeof report.net_gap_pct === "number" ? Math.abs(report.net_gap_pct) : report.gap_pct} % après)</span>
  </div>
  ${suppressedPairs.length ? `
  <details style="margin-top: 0.5rem;">

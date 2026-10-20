@@ -1998,6 +1998,33 @@ def _csv_multi(value: str) -> List[str]:
     return [v.strip() for v in (value or "").split(";") if v and v.strip()]
 
 
+_DATE_DE_SANCTION = re.compile(r"\d{4}(?:-\d{2}){0,2}")
+
+
+def _sanction_stable(entree: str) -> str:
+    """
+    Une entree de la colonne `sanctions` sous une forme qui ne change que si
+    la sanction change.
+
+    Le format plat d'OpenSanctions joint par « - » les valeurs multiples d'une
+    sanction (programmes, references d'actes, motifs, dates) dans un ordre
+    qu'il ne garantit pas. Mesure sur deux publications reelles a deux jours
+    d'intervalle : 750 fiches belges, 598 japonaises et 1 576 britanniques ne
+    differaient QUE par cet ordre (« 2022/1529 (OJ L239) - 2022/353 (OJ L66) »
+    devenu « 2022/353 (OJ L66) - 2022/1529 (OJ L239) »). Les fragments sont
+    donc dedoublonnes et ranges — textes d'abord, dates ensuite, pour que
+    l'entree reste lisible. Les guillemets qui l'englobent (artefact d'un
+    double echappement CSV), les guillemets redoubles et les retours a la
+    ligne tombent.
+    """
+    texte = entree.strip()
+    while len(texte) >= 2 and texte[0] == texte[-1] == '"':
+        texte = texte[1:-1].strip()
+    texte = re.sub(r'"{2,}', '"', texte)
+    fragments = {" ".join(f.split()) for f in texte.split(" - ") if f.strip()}
+    return " - ".join(sorted(fragments, key=lambda f: (bool(_DATE_DE_SANCTION.fullmatch(f)), f)))
+
+
 def _normalize_partial_date(raw: str) -> Optional[str]:
     """'1952' -> 1952-01-01 ; '1952-10' -> 1952-10-01 ; '1952-10-07' inchange."""
     raw = (raw or "").strip()
@@ -2013,6 +2040,7 @@ def parse_opensanctions_simple_csv(
     id_prefix: str = "PEP",
     origin: str = "OpenSanctions PEP",
     designation_reasons: str = "Personne Politiquement Exposée (PEP)",
+    pep: bool = False,
 ) -> Generator[Dict[str, Any], None, None]:
     """
     Parse un dataset OpenSanctions au format `targets.simple.csv`.
@@ -2021,6 +2049,18 @@ def parse_opensanctions_simple_csv(
     changent le prefixe d'identifiant, la provenance affichee et le motif de
     designation. C'est ce qui permet de brancher une seconde source (SECO) sur
     le meme lecteur sans le dupliquer.
+
+    `pep` : la colonne `sanctions` n'a pas le meme sens partout. Sur la liste
+    PEP elle tient lieu de fonction (`pep_role`) ; sur une liste de sanctions
+    — GBFCDO, BETERROR, JAPANMOF et les autres sources du registre — ce sont
+    les PROGRAMMES de sanction, qui vont dans `sanction_programs`. Releve en
+    production : `pep_role` portait des regimes de gel sur des listes qui
+    n'ont rien de PEP, la ou les regles anti-faux positifs et l'ecran de fiche
+    lisent une fonction politique.
+
+    Les sanctions sont rangees (`_sanction_stable`) : le fournisseur ne
+    garantit pas leur ordre, et `designation` — la premiere — changeait chaque
+    nuit sans que rien change.
     """
     with open(file_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -2040,7 +2080,12 @@ def parse_opensanctions_simple_csv(
             countries = [c.upper() for c in _csv_multi(row.get("countries")) if c]
             addresses = _csv_multi(row.get("addresses"))
             identifiers = _csv_multi(row.get("identifiers"))
-            positions = _csv_multi(row.get("sanctions")) or _csv_multi(row.get("position"))
+            # Seules les sanctions sont rangees ici : leur ordre change d'une
+            # publication a l'autre (mesure ci-dessous), celui des adresses et
+            # identifiants non, et les colonnes de type liste sont rangees par
+            # l'empreinte elle-meme (database.normaliser_fiche).
+            sanctions = sorted({_sanction_stable(s) for s in _csv_multi(row.get("sanctions"))} - {""})
+            positions = sanctions or _csv_multi(row.get("position"))
             # Champs etendus : contacts + fonction PEP + premiere apparition
             pep_phones = _csv_multi(row.get("phones"))
             pep_emails = _csv_multi(row.get("emails"))
@@ -2069,7 +2114,8 @@ def parse_opensanctions_simple_csv(
                 "designation": positions[0] if positions else None,
                 "designation_reasons": designation_reasons,
                 "additional_informations": "; ".join(identifiers) or None,
-                "pep_role": "; ".join(positions) or None,
+                "pep_role": ("; ".join(positions) or None) if pep else None,
+                "sanction_programs": sanctions if not pep else [],
                 "listed_on": pep_first_seen,
                 "phone_numbers": pep_phones,
                 "email_addresses": pep_emails,
@@ -2085,6 +2131,62 @@ def parse_opensanctions_simple_csv(
             }
 
 
+# Champs que la correction de `pep_role` (lecteur ci-dessus) deplace ou
+# recalcule sur une liste de sanctions — et eux seuls.
+CHAMPS_DE_LA_CORRECTION = frozenset({"pep_role", "sanction_programs", "designation"})
+
+
+def forme_corrigee_du_lecteur(avant: Dict[str, Any], apres: Dict[str, Any],
+                              changements: List[str]) -> Optional[bool]:
+    """
+    Deux versions d'une fiche qui ne different QUE par la correction de ce
+    lecteur. Avant : les entrees de sanction dans `pep_role`, dans l'ordre du
+    jour, et `sanction_programs` vide. Apres : rangees, et sur une liste de
+    sanctions deplacees dans `sanction_programs`. C'est un changement de
+    forme, pas une modification de la source. Sans cette reconnaissance, le
+    premier passage apres le deploiement aurait annonce toute liste
+    OpenSanctions de sanctions comme « modifiee » — mesure sur les
+    publications reelles : 6 126 fiches belges sur 6 264, 2 810 japonaises
+    sur 2 838 —, exactement le bruit que ce lot supprime.
+
+    Rend True si l'equivalence est VERIFIEE (memes entrees une fois rangees et
+    normalisees), False si elle ne l'est qu'en partie : `pep_role` tronque le
+    texte a la longueur de sa colonne (4 007 fiches britanniques sur 6 352),
+    et ce qui depasse n'a jamais ete en base — les entrees completes sont
+    comparees, la derniere, coupee, ne peut pas l'etre. None : ce n'est pas
+    ce cas, c'est une vraie modification, comptee comme telle.
+    """
+    if not changements or not {c.split(".")[0] for c in changements} <= CHAMPS_DE_LA_CORRECTION:
+        return None
+    ancien_role = avant.get("pep_role") or ""
+    if not ancien_role or avant.get("sanction_programs"):
+        return None  # l'ancienne version n'a pas la forme d'avant la correction
+    from fiskr.database import WatchlistEntity, valeur_normalisee
+    longueur = WatchlistEntity.__table__.c.pep_role.type.length
+    if apres.get("sanction_programs") and not apres.get("pep_role"):
+        nouvelles, nouveau_tronque = list(apres["sanction_programs"]), False
+    elif apres.get("pep_role") and not apres.get("sanction_programs"):
+        # Liste PEP : meme champ, entrees desormais rangees
+        nouvelles = _csv_multi(apres["pep_role"])
+        nouveau_tronque = len(apres["pep_role"]) >= longueur
+    else:
+        return None
+    anciennes = [_sanction_stable(e) for e in _csv_multi(ancien_role)]
+    ancien_tronque = len(ancien_role) >= longueur
+
+    def _norme(entrees):
+        return {valeur_normalisee(e) for e in entrees} - {None}
+
+    if not ancien_tronque and not nouveau_tronque:
+        return True if _norme(anciennes) == _norme(nouvelles) else None
+    # Un cote tronque : ses entrees COMPLETES doivent se retrouver de l'autre
+    if ancien_tronque and not _norme(anciennes[:-1]) <= _norme(nouvelles):
+        return None
+    if nouveau_tronque and not _norme(nouvelles[:-1]) <= _norme(anciennes):
+        return None
+    return False
+
+
 def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, None]:
     """Parse le dataset PEP OpenSanctions (targets.simple.csv) vers le schema pivot."""
     return parse_opensanctions_simple_csv(
@@ -2092,6 +2194,7 @@ def parse_pep_targets_csv(file_path: str) -> Generator[Dict[str, Any], None, Non
         id_prefix="PEP",
         origin="OpenSanctions PEP",
         designation_reasons="Personne Politiquement Exposée (PEP)",
+        pep=True,
     )
 
 

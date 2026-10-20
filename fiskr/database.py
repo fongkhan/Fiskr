@@ -1,7 +1,11 @@
 import json
 import hashlib
+import html
 import logging
+import re
+import unicodedata
 from datetime import datetime
+from typing import Any, Dict, Optional
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, JSON, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from fiskr.config import config
@@ -309,6 +313,11 @@ class SyncReport(Base):
     previous_snapshot_id = Column(String(50), nullable=True)
     added_count = Column(Integer, default=0)
     modified_count = Column(Integer, default=0)
+    # Parmi les modifiees, celles qui touchent l'IDENTITE (champs lus par le
+    # moteur, programmes de sanction — cf. delta.champs_d_identite). Le reste
+    # est de l'information. NULL : rapport anterieur a la mesure, ou
+    # referentiel sans cette classification.
+    modified_identity_count = Column(Integer, nullable=True)
     removed_count = Column(Integer, default=0)
     delta_report = Column(JSON, nullable=True)              # truncated delta details for the UI
     email_sent = Column(Boolean, default=False)
@@ -1807,20 +1816,135 @@ def log_compliance_decisions(db, client: dict, decisions, wl_version: str,
         db.flush()
     return lignes
 
-# Colonnes exclues du recalcul de checksum d'une fiche listee (traces de
-# gouvernance, pas des donnees de la fiche) — s'ajoutent aux cles deja filtrees
-# par compute_checksum. Lue par la correction manuelle (fiskr.api) ET par le
-# champ-a-champ de la liste blanche (fiskr.empreintes) : une seule definition.
-CHECKSUM_EXCLUDED_COLS = frozenset({
+# ------------------ EMPREINTE DES FICHES (entity_checksum) ------------------
+#
+# POURQUOI UNE NORMALISATION
+# Releve en production (19 octobre 2026, lecture seule) : environ 23 lots par
+# jour a homologuer, et une file que plus personne ne lisait. Le delta y criait
+# au loup. BETERROR annoncait 875 fiches « modifiees » — compte variant de 604
+# a 875 d'un jour a l'autre contre une base figee — et les cent detaillees ne
+# changeaient que l'ORDRE de leurs references (« A - B » devenu « B - A »).
+# GBFCDO : 85 fiches sur 100 ne differaient que par leurs guillemets ou leur
+# echappement, et 15 n'avaient AUCUN champ different. L'empreinte hachait le
+# texte tel que lu, ordre et echappement compris : elle changeait chaque nuit
+# sans que la liste change.
+#
+# Ici, et nulle part ailleurs, une fiche est mise sous une forme STABLE avant
+# d'etre hachee : valeurs multiples triees et dedoublonnees, guillemets et
+# echappements ramenes a une seule forme, blancs reduits, valeurs vides et
+# valeurs par defaut de colonne confondues avec l'absence. Le delta compare
+# les champs sous cette meme forme (`normaliser_fiche`) : « empreintes
+# differentes » et « un champ compare differe » parlent de la meme chose.
+# Les valeurs STOCKEES ne sont pas touchees — le reviseur lit la source.
+
+# Ce qui n'est pas le contenu d'une fiche : identifiants techniques, et traces
+# de gouvernance posees pendant l'homologation (patch, exclusion). Une
+# exclusion n'est pas une modification de la liste par sa source. Lue par
+# l'empreinte, le delta, la correction manuelle (fiskr.api) et le champ-a-champ
+# de la liste blanche (fiskr.empreintes) : une seule definition.
+CLES_HORS_EMPREINTE = frozenset({
+    "id", "snapshot_id", "entity_checksum",
     "modified_by", "modified_at", "excluded", "exclusion_justification",
     "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
 })
 
+# Toutes les formes de guillemet et d'apostrophe rencontrees dans les sources
+# (typographiques, accents graves employes en translitteration, pleine
+# chasse) se lisent comme UN guillemet : « 'involved person' » et
+# « ""involved person"" » disent la meme chose.
+_GUILLEMETS = str.maketrans({c: '"' for c in "'`´‘’‚‛′ʼ“”„‟″«»〝〞＂"})
+_ECHAPPEMENT = re.compile(r"\\+(?=\")")
+_GUILLEMETS_REPETES = re.compile(r'"{2,}')
 
-# Helper function to compute entity checksums
+
+def _texte_normalise(texte: str) -> Optional[str]:
+    if "&" in texte:
+        texte = html.unescape(texte)
+    if not unicodedata.is_normalized("NFC", texte):
+        texte = unicodedata.normalize("NFC", texte)
+    texte = texte.translate(_GUILLEMETS)
+    if "\\" in texte:
+        texte = _ECHAPPEMENT.sub("", texte)
+    if '""' in texte:
+        texte = _GUILLEMETS_REPETES.sub('"', texte)
+    # Guillemets englobants : l'artefact d'un double echappement CSV
+    texte = " ".join(texte.split()).strip('" ')
+    return texte or None
+
+
+def _cle_de_tri(valeur: Any) -> str:
+    return json.dumps(valeur, sort_keys=True, default=str, ensure_ascii=False)
+
+
+def valeur_normalisee(valeur: Any) -> Any:
+    """Forme stable d'une valeur ; None pour une valeur vide."""
+    if valeur is None:
+        return None
+    if isinstance(valeur, str):
+        return _texte_normalise(valeur)
+    if isinstance(valeur, dict):
+        sortie = {}
+        for cle, sous_valeur in valeur.items():
+            sous_valeur = valeur_normalisee(sous_valeur)
+            if sous_valeur is not None:
+                sortie[str(cle)] = sous_valeur
+        return sortie or None
+    if isinstance(valeur, (list, tuple, set)):
+        # Aucune colonne multi-valuee d'une fiche ne porte de sens dans son
+        # ordre (alias, dates, pays, documents, programmes) : les sources, si.
+        elements = {}
+        for element in valeur:
+            element = valeur_normalisee(element)
+            if element is not None:
+                elements[_cle_de_tri(element)] = element
+        return [elements[k] for k in sorted(elements)] or None
+    return valeur
+
+
+def _defauts_de_colonnes() -> Dict[str, Any]:
+    """Valeurs par defaut scalaires des colonnes de fiche (« U » pour le
+    genre, False pour le deces). Derivees du schema : une fiche construite
+    sans le champ et la meme relue en base, qui le porte, sont la meme fiche."""
+    defauts = {}
+    for modele in (WatchlistEntity, ClientEntity):
+        for colonne in modele.__table__.columns:
+            defaut = colonne.default
+            if (colonne.name not in CLES_HORS_EMPREINTE and defaut is not None
+                    and defaut.is_scalar):
+                defauts[colonne.name] = defaut.arg
+    return defauts
+
+
+_DEFAUTS_DE_COLONNES: Dict[str, Any] = {}
+
+
+def normaliser_fiche(data: dict) -> Dict[str, Any]:
+    """
+    Forme STABLE du contenu d'une fiche : ce que l'empreinte hache et ce que
+    le delta compare. Les cles vides ou egales au defaut de leur colonne
+    disparaissent ; les cles hors contenu (`CLES_HORS_EMPREINTE`) aussi.
+    """
+    if not _DEFAUTS_DE_COLONNES:
+        _DEFAUTS_DE_COLONNES.update(_defauts_de_colonnes())
+    sortie = {}
+    for cle, valeur in data.items():
+        if cle in CLES_HORS_EMPREINTE:
+            continue
+        valeur = valeur_normalisee(valeur)
+        if valeur is None:
+            continue
+        if cle in _DEFAUTS_DE_COLONNES and valeur == valeur_normalisee(_DEFAUTS_DE_COLONNES[cle]):
+            continue
+        sortie[cle] = valeur
+    return sortie
+
+
 def compute_checksum(data: dict) -> str:
-    """Computes a SHA-256 checksum of normalized fields in a dictionary."""
-    # Serialize sorted keys, filtering out metadata keys like id, snapshot_id, entity_checksum
-    filtered_data = {k: v for k, v in data.items() if k not in ["id", "snapshot_id", "entity_checksum"]}
-    dumped = json.dumps(filtered_data, sort_keys=True, default=str)
+    """Empreinte SHA-256 du contenu NORMALISE d'une fiche (cf. ci-dessus).
+
+    Elle n'a de valeur de comparaison que calculee sur ce qui est STOCKE :
+    calculee sur l'enregistrement lu, elle voyait des champs que la base
+    tronque ou ne garde pas (15 fiches GBFCDO « modifiees » sans aucun champ
+    different). Le delta ne s'y fie donc jamais seule (cf. fiskr/delta.py)."""
+    dumped = json.dumps(normaliser_fiche(data), sort_keys=True, default=str)
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()

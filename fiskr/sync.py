@@ -36,7 +36,7 @@ from urllib.parse import urljoin
 from fiskr.config import config, PROJECT_ROOT
 from fiskr.limites import TAILLE_MAX_TELECHARGEMENT, TAILLE_MAX_PAGE
 from fiskr.quality import evaluate_and_clean
-from fiskr.delta import calculate_delta_db
+from fiskr.delta import CLES_ECARTEES_DU_COMPTE, calculate_delta_db
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_dgt_gels_json, parse_eu_fsf_xml, parse_un_consolidated_xml,
     parse_pep_targets_csv, parse_ofsi_conlist_csv, parse_seco_xml, parse_seco_opensanctions_csv, parse_canada_opensanctions_csv,
@@ -975,7 +975,7 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
     alt_addrs = item.get("alternative_addresses")
     if isinstance(alt_addrs, str):
         alt_addrs = [a.strip() for a in alt_addrs.split(";")]
-    return WatchlistEntity(**_clamp_to_column_lengths(dict(
+    valeurs = _clamp_to_column_lengths(dict(
         snapshot_id=snap_id,
         entity_id=item.get("entity_id"),
         entity_type=item.get("entity_type"),
@@ -1010,9 +1010,14 @@ def build_watchlist_entity(snap_id: str, item: Dict[str, Any], report: Dict[str,
         passport_documents=item.get("passport_documents"),
         national_id_documents=item.get("national_id_documents"),
         other_id_documents=item.get("other_id_documents"),
-        entity_checksum=item.get("entity_checksum") or compute_checksum(item),
         **extended_entity_kwargs(item)
-    )))
+    ))
+    # L'empreinte se calcule sur ce que la base va GARDER, apres troncature :
+    # calculee sur l'enregistrement lu, elle changeait quand un texte variait
+    # au-dela des 500 caracteres conserves — 15 fiches GBFCDO sur 100
+    # « modifiees » n'avaient aucun champ different.
+    valeurs["entity_checksum"] = compute_checksum(valeurs)
+    return WatchlistEntity(**valeurs)
 
 
 class SyncProgress:
@@ -1243,7 +1248,21 @@ def _truncate_delta_details(delta: Dict[str, Any]) -> Dict[str, Any]:
                 len(rows) - MAX_REPORT_DETAILS + int(reste or 0))
         elif reste:
             truncated[f"{key}_truncated"] = int(reste)
+    for cle in CLES_ECARTEES_DU_COMPTE:
+        if details.get(cle):
+            truncated[cle] = int(details[cle])
     return {"summary": delta.get("summary", {}), "details": truncated}
+
+
+def _delta_vide(delta: Dict[str, Any]) -> bool:
+    """Rien a homologuer : ni ajout, ni retrait, ni modification — ni fiche
+    qui change de FORME (correction du lecteur). Celle-la n'est pas une
+    modification de la source, mais elle change ce que la production garde :
+    elle merite une homologation, une fois."""
+    summary = delta["summary"]
+    return not (summary["added_count"] or summary["removed_count"]
+                or summary["modified_count"]
+                or (delta.get("details") or {}).get("reader_form_count"))
 
 
 class LectureVide(RuntimeError):
@@ -1338,9 +1357,7 @@ def _discard_content_identical(db, *, source: str, trigger: str, snap_id: str,
     rapport, ou None si le delta n'est pas vide — ou s'il n'y a pas de base
     de comparaison (premier import : l'homologation doit avoir lieu).
     """
-    summary = delta["summary"]
-    if not previous_id or summary["added_count"] or summary["removed_count"] \
-            or summary["modified_count"]:
+    if not previous_id or not _delta_vide(delta):
         return None
     snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
     if snap is not None:
@@ -1361,6 +1378,73 @@ def _discard_content_identical(db, *, source: str, trigger: str, snap_id: str,
     )
 
 
+def _dernier_lot_en_attente(db, file_type: str, sauf: str) -> Optional[Snapshot]:
+    """Le lot le plus recent de cette liste qui attend l'homologation — s'il
+    est encore approuvable. Un lot plus ancien que la production est perime
+    (fiskr/fraicheur.py) : s'aligner sur lui garderait en file un lot
+    qu'aucun reviseur ne peut plus approuver, et jetterait le bon."""
+    from fiskr.fraicheur import est_une_regression
+    lot = db.query(Snapshot).filter(
+        Snapshot.file_type == file_type,
+        Snapshot.status == "PENDING_REVIEW",
+        Snapshot.snapshot_id != sauf,
+        Snapshot.snapshot_id.notlike(MANUAL_SNAPSHOT_LIKE),
+    ).order_by(Snapshot.uploaded_at.desc()).first()
+    if lot is None or est_une_regression(db, lot):
+        return None
+    return lot
+
+
+def _discard_identical_to_pending(db, *, source: str, trigger: str, snap_id: str,
+                                  file_type: str, record_count: int,
+                                  octets: Optional[int]) -> Optional[SyncReport]:
+    """
+    Le contenu est IDENTIQUE au dernier lot deja en attente de la meme liste :
+    pas de nouveau lot.
+
+    La deduplication ne regardait que la production. Releve en production sur
+    cinq jours : vingt sources deposaient un lot chaque jour, et dans 52 cas
+    sur 89 le delta etait identique, compteur par compteur, a celui de la
+    veille — un lot de plus a examiner pour rien, chaque nuit, dans une file
+    que plus personne n'homologuait. Des compteurs egaux ne prouvent rien ;
+    c'est le CONTENU qui est compare ici, fiche par fiche, avec la meme
+    normalisation que le delta : le moindre champ different et le lot est
+    empile comme avant. Les exclusions et patchs poses sur le lot en attente
+    sont de la gouvernance : un patch (valeur changee) le rend different, une
+    exclusion non.
+
+    Le lot archive passe en SUPERSEDED, le lot en attente reste celui a
+    examiner, le rapport dit NO_CHANGE et nomme ce lot.
+    """
+    lot = _dernier_lot_en_attente(db, file_type, sauf=snap_id)
+    if lot is None:
+        return None
+    ecart = calculate_delta_db(db, lot.snapshot_id, snap_id)
+    if not _delta_vide(ecart):
+        return None
+    snap = db.query(Snapshot).filter(Snapshot.snapshot_id == snap_id).first()
+    if snap is not None:
+        snap.status = "SUPERSEDED"
+        snap.phase = "DONE"
+        db.commit()
+    depose = f" (déposé le {lot.uploaded_at:%d/%m/%Y %H:%M})" if lot.uploaded_at else ""
+    logger.info(f"Sync {source}: contenu identique au lot en attente {lot.snapshot_id} "
+                f"— aucun nouveau lot empilé.")
+    message = (f"{record_count} fiches lues : contenu identique au lot "
+               f"{lot.snapshot_id} déjà en attente d'homologation{depose}. "
+               "Aucun nouveau lot n'est empilé : c'est celui-là qu'il reste à examiner.")
+    if octets:
+        message += f" {_volume_lisible(octets)} retéléchargés pour rien."
+    return _finalize_report(
+        db, source=source, trigger=trigger, status="NO_CHANGE",
+        message=message,
+        snapshot_id=snap_id,
+        previous_snapshot_id=lot.snapshot_id,
+        delta_report=_truncate_delta_details(ecart),
+        bytes_downloaded=octets,
+    )
+
+
 def _finalize_report(db, **kwargs) -> SyncReport:
     """Persiste le rapport, tente l'envoi email et memorise le resultat."""
     report = _save_report(db, **kwargs)
@@ -1371,8 +1455,10 @@ def _finalize_report(db, **kwargs) -> SyncReport:
     # notifiee — panne reseau et snapshot a homologuer immediatement, fins
     # nominales dans le recapitulatif periodique.
     from fiskr.notifier import emit
-    delta = {"Ajouts": report.added_count, "Modifications": report.modified_count,
-             "Suppressions": report.removed_count}
+    delta = {"Ajouts": report.added_count, "Modifications": report.modified_count}
+    if report.modified_identity_count is not None:
+        delta["dont identité"] = report.modified_identity_count
+    delta["Suppressions"] = report.removed_count
     if report.status == "ERROR":
         emit(db, "sync_error", {
             "Source": report.source, "Message": report.message or "—",
@@ -1606,6 +1692,12 @@ def _run_list_replacement_sync(
             previous_id=previous_id, record_count=record_count, delta=delta)
         if no_change is not None:
             return no_change
+        if staging:
+            deja_en_attente = _discard_identical_to_pending(
+                db, source=source, trigger=trigger, snap_id=snap_id,
+                file_type=file_type, record_count=record_count, octets=octets)
+            if deja_en_attente is not None:
+                return deja_en_attente
 
         if not staging:
             _supersede_previous_snapshots(db, file_type, snap_id)
@@ -1629,6 +1721,7 @@ def _run_list_replacement_sync(
             previous_snapshot_id=previous_id,
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
+            modified_identity_count=summary.get("modified_identity_count"),
             removed_count=summary["removed_count"],
             delta_report=_truncate_delta_details(delta),
             bytes_downloaded=octets
@@ -2888,6 +2981,7 @@ def run_eurlex_sync(
             previous_snapshot_id=previous_id,
             added_count=summary["added_count"],
             modified_count=summary["modified_count"],
+            modified_identity_count=summary.get("modified_identity_count"),
             removed_count=summary["removed_count"],
             delta_report=delta_stored
         )

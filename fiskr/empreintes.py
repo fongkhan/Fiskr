@@ -215,7 +215,7 @@ def champs_modifies_de_la_fiche(db, paire, fiche: Dict[str, Any]) -> Optional[Li
     des mises a jour de listes. None : la version couverte n'est plus en base
     (purgee par la retention), la difference n'est pas restituable.
     """
-    from fiskr.database import CHECKSUM_EXCLUDED_COLS, WatchlistEntity
+    from fiskr.database import CLES_HORS_EMPREINTE, WatchlistEntity
     from fiskr.delta import find_differences
 
     ancienne = db.query(WatchlistEntity).filter(
@@ -225,7 +225,7 @@ def champs_modifies_de_la_fiche(db, paire, fiche: Dict[str, Any]) -> Optional[Li
     if ancienne is None:
         return None
     colonnes = [c.name for c in WatchlistEntity.__table__.columns
-                if c.name not in CHECKSUM_EXCLUDED_COLS and c.name in (fiche or {})]
+                if c.name not in CLES_HORS_EMPREINTE and c.name in (fiche or {})]
     avant = {c: getattr(ancienne, c) for c in colonnes}
     apres = {c: fiche.get(c) for c in colonnes}
     changements, _avant, _apres = find_differences(avant, apres)
