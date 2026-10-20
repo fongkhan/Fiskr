@@ -1004,6 +1004,9 @@
  <button id="sub-btn-alerts-screening" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-screening')">
  Alertes <span id="alerts-screening-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
  </button>
+ <button id="sub-btn-alerts-gels" class="sub-tab-btn" title="Mesures de gel et déclarations à la DG Trésor" onclick="switchSubTab('screening', 'alerts-gels')">
+ Registre des gels
+ </button>
  <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-whitelist')">
  Liste Blanche
  </button>
@@ -1483,6 +1486,41 @@
  </table>
  </div>
  <div id="screening-alerts-pagination" class="pagination-container hidden"></div>
+ </div>
+ </div>
+ </div>
+
+ <!-- REGISTRE DES MESURES DE GEL (déclarations à la DG Trésor) -->
+ <div id="sub-sec-alerts-gels" class="sub-tab-content hidden">
+ <div class="grid-layout" style="grid-template-columns: minmax(0, 1fr);">
+ <div class="card result-card">
+ <h2>Registre des mesures de gel</h2>
+ <p class="section-desc">Ce qui suit un vrai positif sur une liste de gel (périmètre SANCTION). Chaque action — gel d'un compte, crédit sur un compte gelé, refus d'entrée en relation, contournement — se déclare « immédiatement » à la DG Trésor (CMF L.562-4, R.562-3). Fiskr prépare le projet de déclaration, trace et date ; la transmission reste humaine, et une mesure ne passe « déclarée » qu'avec la pièce de transmission.</p>
+ <div id="gels-synthese" style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;"></div>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <select id="gels-statut-filter" onchange="fetchGels()" aria-label="Filtrer le registre par statut" style="width: auto; min-width: 200px;">
+ <option value="">Tous les statuts</option>
+ <option value="A_DECLARER">À déclarer</option>
+ <option value="EN_RETARD">En retard de déclaration</option>
+ <option value="DECLAREE">Déclarée</option>
+ <option value="LEVEE">Levée</option>
+ </select>
+ <select id="gels-action-filter" onchange="fetchGels()" aria-label="Filtrer le registre par action" style="width: auto; max-width: 340px;"><option value="">Toutes les actions</option></select>
+ <input type="text" id="gels-recherche" onchange="fetchGels()" placeholder="Client ou fiche listée…" aria-label="Rechercher un client ou une fiche listée" style="width: auto; min-width: 220px;">
+ <button class="btn btn-sm btn-secondary" onclick="exportGelsCsv()" title="Exporter le registre filtré en CSV" style="margin-left: auto;">⬇ CSV</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="gels-table">
+ <thead>
+ <tr>
+ <th>Mesure</th><th>Confirmée le</th><th>Client</th><th>Listé</th><th>Liste</th>
+ <th>Action</th><th>Gel effectif</th><th>Statut</th><th>Déclarée le</th><th>Délai</th><th>Dossier</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <p id="gels-total" class="section-desc" style="margin-top: 0.5rem;"></p>
  </div>
  </div>
  </div>
@@ -2550,6 +2588,11 @@
  <div class="form-group"><label for="setting-sla-high">Haute</label><input type="number" id="setting-sla-high" min="0" step="1"></div>
  <div class="form-group"><label for="setting-sla-medium">Moyenne</label><input type="number" id="setting-sla-medium" min="0" step="1"></div>
  <div class="form-group"><label for="setting-sla-low">Basse</label><input type="number" id="setting-sla-low" min="0" step="1"></div>
+ </div>
+ <div class="form-group" style="margin-top: 0.75rem; max-width: 640px;">
+ <label for="setting-gel-delay">Délai de déclaration d'un gel à la DG Trésor (heures)</label>
+ <input type="number" id="setting-gel-delay" min="1" max="72" step="1" style="max-width: 120px;">
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La déclaration est due « immédiatement » après la confirmation (CMF L.562-4). Au-delà de ce délai, une mesure non déclarée déclenche une notification immédiate et bloque la mise en service. De 1 à 72 heures.</small>
  </div>
  <div class="form-group" style="margin-top: 0.75rem;">
  <label for="setting-close-reasons">Motifs de clôture proposés aux analystes</label>

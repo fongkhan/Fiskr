@@ -2714,6 +2714,8 @@ function switchSubTab(sectionId, subTabId) {
  fetchAlerts("SCREENING");
  populateAssigneeFilters();
  fetchSavedViews("SCREENING");
+ } else if (subTabId === "alerts-gels") {
+ fetchGels();
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
  populateAssigneeFilters();
@@ -5908,6 +5910,8 @@ async function fetchIngestionSettings() {
  const el = document.getElementById(id);
  if (el) el.value = sla[prio] ?? 0;
  }
+ const gelDelayEl = document.getElementById("setting-gel-delay");
+ if (gelDelayEl) gelDelayEl.value = ingestionSettings.gel_declaration_delay_hours ?? "";
  // Notifications : l'écran est généré depuis le catalogue du serveur
  fetchNotificationsCatalog();
  // Digest KPI périodique
@@ -6032,6 +6036,11 @@ async function saveIngestionSettings() {
  MEDIUM: parseInt(document.getElementById("setting-sla-medium")?.value, 10) || 0,
  LOW: parseInt(document.getElementById("setting-sla-low")?.value, 10) || 0,
  },
+ // Pas de repli silencieux : un champ vide n'envoie rien, une valeur hors
+ // bornes est refusée par le serveur avec la raison.
+ ...(document.getElementById("setting-gel-delay")?.value
+   ? { gel_declaration_delay_hours: parseInt(document.getElementById("setting-gel-delay").value, 10) }
+   : {}),
  // Activation étape par étape : cases générées depuis le catalogue serveur
  notification_events: collectNotificationEvents(),
  digest: {
@@ -7828,6 +7837,7 @@ async function openAlertModal(alertId) {
  <button class="btn btn-sm btn-secondary" onclick="uploadAlertAttachment()"> Joindre</button>
  </div>
  ${actionsHtml}
+ ${blocMesuresDeGel(a, isReviewer)}
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
  <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()"> Générer un narratif</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchAlertAdverseMedia('client')"> Presse : client</button>
@@ -7950,6 +7960,281 @@ async function suivreAlerte(alertId) {
  refreshAlertQueues();
  } catch (e) {
  showToast("Erreur réseau pendant le changement de suivi.", "error");
+ }
+}
+
+// ------------------ MESURES DE GEL (registre et étapes dans l'alerte) ------------------
+// Un vrai positif sur une liste de gel ouvre une mesure « à déclarer »
+// (fiskr/gels.py) : gel effectif, déclaration à la DG Trésor, levée. Rien ne
+// part tout seul vers la DG Trésor — l'écran prépare, l'humain transmet puis
+// enregistre la pièce qui le prouve. Le vocabulaire (actions, motifs,
+// adresses) vient du serveur : une seule définition.
+
+// Horodatage serveur (UTC naïf) -> valeur d'un champ datetime-local (heure locale)
+function _versSaisieLocale(iso) {
+ if (!iso) return "";
+ const d = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+ if (isNaN(d.getTime())) return "";
+ const p = (n) => String(n).padStart(2, "0");
+ return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function badgeStatutGel(m) {
+ // nowrap : un statut coupé sur trois lignes dans une colonne étroite se lit mal
+ if (m.en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">En retard de déclaration</span>`;
+ const classe = { A_DECLARER: "warning", DECLAREE: "no_match" }[m.statut] || "";
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(m.statut_label)}</span>`;
+}
+
+function _options(liste, valeur, cle = "code", libelle = "label") {
+ return (liste || []).map(o =>
+  `<option value="${escapeHtml(o[cle])}" ${o[cle] === valeur ? "selected" : ""}>${escapeHtml(o[libelle])}</option>`).join("");
+}
+
+function _etapeDeclaration(m, vocab, isReviewer, auditeur) {
+ if (m.statut !== "A_DECLARER") {
+  const piece = m.piece_declaration;
+  const lienPiece = !piece ? "—" : piece.file_present === false
+   ? `<span style="text-decoration: line-through; color: var(--text-muted);">${escapeHtml(piece.file_name)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`
+   : `<a href="/api/alerts/attachments/${piece.id}" target="_blank" style="color: var(--color-accent);">${escapeHtml(piece.file_name)}</a>`;
+  return `<p style="font-size: 0.85rem;"><span>Déclarée le</span> <strong>${formatDateTime(m.declaree_le)}</strong> · @${escapeHtml(m.declaree_par || "")}
+   ${m.reference_dgt ? ` · <span>réf.</span> ${escapeHtml(m.reference_dgt)}` : ""}${m.canal_dgt ? ` · ${escapeHtml(m.canal_dgt)}` : ""}
+   · <span>délai depuis la confirmation</span> : <strong>${formatDuree(m.delai_declaration_secondes)}</strong><br>
+   <span>Pièce de transmission</span> : ${lienPiece}</p>`;
+ }
+ const projet = isReviewer
+  ? `<a class="btn btn-sm btn-secondary" href="/api/gels/${m.id}/draft/print" target="_blank" title="Projet pré-rempli aux rubriques du formulaire de la DG Trésor — à relire, compléter et transmettre">Projet de déclaration de gel</a>`
+  : "";
+ const retard = m.en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;">Délai de déclaration dépassé : <span>${formatDuree(m.delai_declaration_secondes)}</span> (<span>seuil</span> ${m.seuil_heures} h).</p>`
+  : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>Due immédiatement — délai écoulé</span> : ${formatDuree(m.delai_declaration_secondes)} (<span>seuil</span> ${m.seuil_heures} h).</p>`;
+ if (!isReviewer || auditeur) {
+  return `${retard}<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">${projet}</div>
+   <p style="font-size: 0.82rem; color: var(--text-muted);">L'enregistrement de la déclaration est réservé aux réviseurs.</p>`;
+ }
+ return `${retard}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   ${projet}
+   <div class="form-group" style="margin: 0;"><label for="gel-declaree-${m.id}">Transmise le</label>
+    <input type="datetime-local" id="gel-declaree-${m.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-reference-${m.id}">Référence DG Trésor</label>
+    <input type="text" id="gel-reference-${m.id}" maxlength="255" placeholder="Référence ou objet du courriel"></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-canal-${m.id}">Adresse</label>
+    <select id="gel-canal-${m.id}"><option value="">—</option>${_options(vocab.adresses_dgt, "", "adresse", "adresse")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-piece-${m.id}">Pièce de transmission</label>
+    <input type="file" id="gel-piece-${m.id}" title="Accusé de réception de la DG Trésor, ou copie du courriel envoyé"></div>
+   <button class="btn btn-sm btn-primary" onclick="enregistrerDeclarationGel(${m.id}, ${m.alert_id})">Enregistrer la déclaration</button>
+  </div>`;
+}
+
+function _etapeLevee(m, vocab, isReviewer, auditeur) {
+ if (m.statut === "LEVEE") {
+  return `<p style="font-size: 0.85rem;"><span>Levée le</span> <strong>${formatDateTime(m.levee_le)}</strong> · @${escapeHtml(m.levee_par || "")}
+   · <span>${escapeHtml(m.motif_levee_label || m.motif_levee || "")}</span> — ${escapeHtml(m.justification_levee || "")}</p>`;
+ }
+ if (m.statut !== "DECLAREE") {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">Possible une fois la mesure déclarée.</p>`;
+ }
+ if (!isReviewer || auditeur) {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">La levée est réservée aux réviseurs.</p>`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+  <div class="form-group" style="margin: 0;"><label for="gel-levee-le-${m.id}">Levée le</label>
+   <input type="datetime-local" id="gel-levee-le-${m.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+  <div class="form-group" style="margin: 0;"><label for="gel-motif-${m.id}">Motif</label>
+   <select id="gel-motif-${m.id}">${_options(vocab.motifs_de_levee, "")}</select></div>
+  <div class="form-group" style="margin: 0; flex: 1 1 260px;"><label for="gel-justif-${m.id}">Acte de levée</label>
+   <input type="text" id="gel-justif-${m.id}" maxlength="4000" placeholder="Règlement, arrêté ou décision, avec sa date"></div>
+  <button class="btn btn-sm btn-secondary" onclick="leverMesureDeGel(${m.id}, ${m.alert_id})">Lever la mesure</button>
+ </div>`;
+}
+
+function _blocMesure(m, vocab, isReviewer, auditeur) {
+ const saisie = !auditeur && m.statut === "A_DECLARER";
+ const comptes = (m.comptes || []).map(c =>
+  `<tr><td>${escapeHtml(c.numero)}</td><td>${escapeHtml(c.nature || "—")}</td><td>${escapeHtml(c.devise || "—")}</td><td>${escapeHtml(c.montant_gel || "—")}</td><td>${escapeHtml(c.montant_declaration || "—")}</td></tr>`).join("");
+ const etapeGel = saisie ? `
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="gel-action-${m.id}">Action</label>
+    <select id="gel-action-${m.id}">${_options(vocab.actions, m.type_action)}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="gel-effet-${m.id}">Date d'effet</label>
+    <input type="datetime-local" id="gel-effet-${m.id}" value="${_versSaisieLocale(m.date_effet)}"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="gel-comptes-${m.id}">Comptes et montants gelés</label>
+   <textarea id="gel-comptes-${m.id}" rows="3" placeholder="numéro ; nature ; devise ; montant à la date du gel ; montant à la date de la déclaration">${escapeHtml(m.comptes_texte || "")}</textarea>
+   <small style="color: var(--text-muted);">Une ligne par compte, dans l'ordre du formulaire de la DG Trésor.</small></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="gel-precisions-${m.id}">Précisions</label>
+   <textarea id="gel-precisions-${m.id}" rows="2" placeholder="Co-titulaires, mandataires, prélèvements, ressources économiques…">${escapeHtml(m.precisions || "")}</textarea></div>
+  <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="enregistrerGelEffectif(${m.id}, ${m.alert_id})">Enregistrer le gel effectif</button>`
+  : `<p style="font-size: 0.85rem;"><span>Action</span> : <span>${escapeHtml(m.type_action_label)}</span> · <span>Date d'effet</span> : <strong>${formatDateTime(m.date_effet)}</strong>${m.client_gele ? ` · <strong style="color: var(--color-alert);">Client gelé</strong>` : ""}</p>
+   ${comptes ? `<div class="table-container" style="max-height: 160px;"><table><thead><tr><th>Compte</th><th>Nature</th><th>Devise</th><th>Montant à la date du gel</th><th>Montant déclaré</th></tr></thead><tbody>${comptes}</tbody></table></div>` : ""}
+   ${m.precisions ? `<p style="font-size: 0.82rem;">${escapeHtml(m.precisions)}</p>` : ""}`;
+ return `<div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem;">
+  <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+   <strong><span>Mesure de gel</span> #${m.id}</strong> ${badgeStatutGel(m)}
+   <small style="color: var(--text-muted);"><span>ouverte à la confirmation</span> · ${formatDateTime(m.ouverte_le)} · @${escapeHtml(m.ouverte_par || "")}</small>
+  </div>
+  <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${_etapeLevee(m, vocab, isReviewer, auditeur)}
+ </div>`;
+}
+
+function blocMesuresDeGel(a, isReviewer) {
+ const mesures = a.gel_mesures || [];
+ if (!mesures.length && !a.gel_du) return "";
+ const vocab = a.gel_vocabulaire || {};
+ const auditeur = userRoles(currentUser).includes("auditor");
+ // Vrai positif confirmé AVANT le registre (cas de production) : rien ne
+ // l'y fera entrer tout seul — le bouton le dit, et le délai courra depuis
+ // la confirmation.
+ const manquante = !mesures.length && !auditeur
+  ? `<p style="color: var(--color-alert); font-size: 0.85rem; font-weight: 600;">Vrai positif sur une liste de gel sans mesure au registre : aucune déclaration à la DG Trésor n'est tracée.</p>
+   <button class="btn btn-sm btn-primary" onclick="ouvrirMesureDeGel(${a.id}, 'GEL')">Ouvrir la mesure de gel</button>`
+  : "";
+ const ajout = mesures.length && !auditeur
+  ? `<div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+   <select id="gel-nouvelle-action-${a.id}" aria-label="Action de la nouvelle mesure">${_options(vocab.actions, "CREDIT_COMPTE_GELE")}</select>
+   <button class="btn btn-sm btn-secondary" onclick="ouvrirMesureDeGel(${a.id})">Ajouter une mesure</button>
+  </div>`
+  : "";
+ return `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Mesures de gel (DG Trésor)</h3>
+  ${mesures.map(m => _blocMesure(m, vocab, isReviewer, auditeur)).join("")}
+  ${manquante}${ajout}
+ </div>`;
+}
+
+async function _gelRequete(url, options, alertId) {
+ try {
+  const response = await apiFetch(url, options);
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  showToast(data.message, "success");
+  (data.warnings || []).forEach(w => showToast(w, "warning", 9000));
+  if (alertId) openAlertModal(alertId);
+  rafraichirSiAffichee("screening", "alerts-gels", fetchGels);
+  return data;
+ } catch (e) {
+  showToast("Erreur réseau de communication.", "error");
+  return null;
+ }
+}
+
+async function ouvrirMesureDeGel(alertId, action) {
+ const type = action || document.getElementById(`gel-nouvelle-action-${alertId}`)?.value;
+ if (!type) return;
+ await _gelRequete(`/api/alerts/${alertId}/gels`, {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ type_action: type }),
+ }, alertId);
+}
+
+async function enregistrerGelEffectif(mesureId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${mesureId}`)?.value ?? "";
+ const payload = { type_action: valeur("gel-action"), comptes: valeur("gel-comptes"),
+  precisions: valeur("gel-precisions") };
+ if (valeur("gel-effet")) payload.date_effet = new Date(valeur("gel-effet")).toISOString();
+ await _gelRequete(`/api/gels/${mesureId}`, {
+  method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
+async function enregistrerDeclarationGel(mesureId, alertId) {
+ const fichier = document.getElementById(`gel-piece-${mesureId}`)?.files?.[0];
+ if (!fichier) {
+  showToast("Joignez la pièce de transmission : accusé de réception de la DG Trésor, ou copie du courriel envoyé.", "error");
+  return;
+ }
+ const quand = document.getElementById(`gel-declaree-${mesureId}`)?.value;
+ const form = new FormData();
+ form.append("file", fichier);
+ if (quand) form.append("declaree_le", new Date(quand).toISOString());
+ form.append("reference", document.getElementById(`gel-reference-${mesureId}`)?.value || "");
+ form.append("canal", document.getElementById(`gel-canal-${mesureId}`)?.value || "");
+ await _gelRequete(`/api/gels/${mesureId}/declaration`, { method: "POST", body: form }, alertId);
+}
+
+async function leverMesureDeGel(mesureId, alertId) {
+ const quand = document.getElementById(`gel-levee-le-${mesureId}`)?.value;
+ const payload = {
+  motif: document.getElementById(`gel-motif-${mesureId}`)?.value || "",
+  justification: document.getElementById(`gel-justif-${mesureId}`)?.value || "",
+ };
+ if (quand) payload.levee_le = new Date(quand).toISOString();
+ if (!await confirmDialog("Lever cette mesure de gel ? Le client retrouvera son statut d'avant le gel, sauf si une autre mesure le tient encore.")) return;
+ await _gelRequete(`/api/gels/${mesureId}/levee`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
+function _parametresDuRegistre() {
+ const params = new URLSearchParams();
+ const statut = document.getElementById("gels-statut-filter")?.value;
+ const action = document.getElementById("gels-action-filter")?.value;
+ const recherche = (document.getElementById("gels-recherche")?.value || "").trim();
+ if (statut) params.set("statut", statut);
+ if (action) params.set("type_action", action);
+ if (recherche) params.set("q", recherche);
+ return params;
+}
+
+function exportGelsCsv() {
+ // Tout le registre filtré, côté serveur : la pièce qu'un contrôle demande entière
+ window.open(`/api/export/gels.csv?${_parametresDuRegistre().toString()}`, "_blank");
+}
+
+function _afficherSyntheseDesGels(s) {
+ const el = document.getElementById("gels-synthese");
+ if (!el || !s) return;
+ el.innerHTML = `
+  <span><strong>${s.to_declare}</strong> <span>à déclarer</span></span>
+  <span style="${s.overdue ? "color: var(--color-alert); font-weight: 600;" : ""}"><strong>${s.overdue}</strong> <span>en retard</span> (<span>seuil</span> ${s.threshold_hours} h)</span>
+  <span><strong>${s.declared}</strong> <span>déclarée(s)</span></span>
+  <span><strong>${s.lifted}</strong> <span>levée(s)</span></span>
+  <span><span>Délai moyen confirmation → déclaration</span> : <strong>${formatDuree(s.avg_declaration_delay_seconds)}</strong></span>
+  ${s.declared_late ? `<span style="color: var(--color-warning);"><strong>${s.declared_late}</strong> <span>déclarée(s) hors délai</span></span>` : ""}`;
+}
+
+async function fetchGels() {
+ const tbody = document.querySelector("#gels-table tbody");
+ if (!tbody) return;
+ tableLoading("#gels-table", 11);
+ const params = _parametresDuRegistre();
+ const filtre = params.toString() !== "";
+ params.set("page_size", "200");
+ try {
+  const response = await apiFetch(`/api/gels?${params.toString()}`);
+  if (!response.ok) { tableError("#gels-table", 11); return; }
+  const data = await response.json();
+  const select = document.getElementById("gels-action-filter");
+  if (select && select.options.length <= 1) {
+   select.insertAdjacentHTML("beforeend", _options((data.vocabulaire || {}).actions, ""));
+  }
+  _afficherSyntheseDesGels(data.synthese);
+  const total = document.getElementById("gels-total");
+  if (total) total.textContent = data.total > data.items.length ? `${data.items.length} / ${data.total}` : "";
+  if (!data.items.length) {
+   tableEmpty("#gels-table", 11, filtre ? "Aucune mesure pour ces filtres." : "Aucune mesure de gel au registre.", "",
+    filtre ? "" : "Une mesure s'ouvre à la confirmation d'une alerte sur une liste de gel (périmètre SANCTION).");
+   return;
+  }
+  tbody.innerHTML = data.items.map(m => `
+   <tr>
+    <td>#${m.id}</td>
+    <td>${formatDateTime(m.ouverte_le)}</td>
+    <td>${escapeHtml(m.client_name)}</td>
+    <td>${escapeHtml(m.watchlist_name)}</td>
+    <td>${m.list_type ? listTypeBadge(m.list_type) : "—"}</td>
+    <td>${escapeHtml(m.type_action_label)}</td>
+    <td>${m.date_effet ? formatDateTime(m.date_effet) : "—"}</td>
+    <td>${badgeStatutGel(m)}</td>
+    <td>${m.declaree_le ? formatDateTime(m.declaree_le) : "—"}</td>
+    <td>${formatDuree(m.delai_declaration_secondes)}</td>
+    <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${m.alert_id})" title="Ouvrir l'alerte et les étapes de la mesure">Ouvrir</button></td>
+   </tr>`).join("");
+ } catch (e) {
+  tableError("#gels-table", 11);
  }
 }
 

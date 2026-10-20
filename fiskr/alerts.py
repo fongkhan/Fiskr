@@ -8,27 +8,65 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
-from fiskr.database import Alert, AlertEvent, ALERT_OPEN_STATUSES, AuditTrail, WhitelistPair
-from fiskr.settings import alert_sla_hours
+from fiskr.database import (Alert, AlertEvent, ALERT_OPEN_STATUSES, ALERT_PRIORITIES,
+                            AuditTrail, WhitelistPair)
+from fiskr.settings import alert_sla_hours, perimeter_overrides
 
 logger = logging.getLogger("fiskr.alerts")
 
+# Plancher de priorite d'une correspondance sur une liste du perimetre
+# SANCTION (gel des avoirs). Releve en production : deux vrais positifs OFAC
+# etaient en MEDIUM, echeance 120 h — la priorite ne dependait que du score, et
+# un nom identique a 90 % sur la liste SDN pesait autant qu'un PEP local.
+#
+# HIGH, et pas CRITICAL. CRITICAL reste ce qu'il est deja : la concordance
+# d'un IDENTIFIANT officiel (hard match), sur tout perimetre — un fait etabli.
+# Une correspondance de NOM sur une liste de gel est le plus souvent une
+# homonymie ; la mettre au rang d'un identifiant prouve ferait de CRITICAL le
+# niveau de presque toutes les alertes sanctions, et il ne distinguerait plus
+# rien. HIGH ramene l'echeance de 120 h a 72 h (SLA par defaut) sans faire
+# crier au loup : les listes HORS_SANCTION (PEP, regulateurs, exclusions —
+# 79 % des fiches en production) gardent leur priorite au score.
+PLANCHER_SANCTION = "HIGH"
 
-def compute_alert_priority(best_match: Dict[str, Any]) -> str:
+
+def plancher_de_priorite(list_type: Optional[str],
+                         surcharges: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Priorite minimale d'une alerte sur ce type de liste, ou None. Derivee du
+    perimetre (fiskr/perimeters.py) — un type inconnu est SANCTION, donc
+    plancher : le doute penche vers ce qui ne fait rien perdre."""
+    from fiskr.perimeters import est_sanction
+    return PLANCHER_SANCTION if est_sanction(list_type, surcharges) else None
+
+
+def sous_le_plancher(priorite: Optional[str], plancher: Optional[str]) -> bool:
+    if plancher is None:
+        return False
+    rang = {p: i for i, p in enumerate(ALERT_PRIORITIES)}
+    return rang.get(priorite or "MEDIUM", 1) < rang[plancher]
+
+
+def compute_alert_priority(best_match: Dict[str, Any],
+                           surcharges: Optional[Dict[str, str]] = None) -> str:
     """
-    Priorite calculee a la creation (modifiable ensuite par l'analyste) :
-    hard match (identifiant officiel identique) -> CRITICAL ; score tres
-    eleve -> HIGH ; alerte standard -> MEDIUM ; proche du seuil -> LOW.
+    Priorite calculee a la creation (modifiable ensuite par l'analyste, jamais
+    sous le plancher) : hard match (identifiant officiel identique) ->
+    CRITICAL ; score tres eleve -> HIGH ; alerte standard -> MEDIUM ; proche
+    du seuil -> LOW. Puis le plancher du perimetre SANCTION s'applique.
     """
     if best_match.get("hard_match_triggered"):
         return "CRITICAL"
     score = float(best_match.get("final_score") or 0.0)
     cut_off = float(best_match.get("cut_off_applied") or 75.0)
     if score >= 95.0:
-        return "HIGH"
-    if score >= cut_off + 5.0:
-        return "MEDIUM"
-    return "LOW"
+        priorite = "HIGH"
+    elif score >= cut_off + 5.0:
+        priorite = "MEDIUM"
+    else:
+        priorite = "LOW"
+    plancher = plancher_de_priorite(
+        (best_match.get("watchlist_entity") or {}).get("_list_type"), surcharges)
+    return plancher if sous_le_plancher(priorite, plancher) else priorite
 
 
 def _echeance(sla: Dict[str, Any], priority: str,
@@ -147,6 +185,9 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
     # Reglage SLA lu UNE fois pour tout le lot : `compute_due_at` le relisait
     # par alerte, soit une requete de reglages par correspondance.
     sla = alert_sla_hours(db)
+    # Classement des listes, lu une fois aussi : il porte le plancher de
+    # priorite du perimetre SANCTION.
+    surcharges = perimeter_overrides(db)
     evenements: List[AlertEvent] = []
     a_notifier: List[Alert] = []
 
@@ -166,6 +207,17 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
                 deja.final_score = match["final_score"]
             if deja.list_type is None and fiche.get("_list_type"):
                 deja.list_type = fiche.get("_list_type")
+            # Une alerte encore ouverte, creee AVANT le plancher, y remonte au
+            # premier re-criblage : chaque mise en production de liste repasse
+            # tout le referentiel, l'ecart se resorbe sans migration a la main.
+            plancher = plancher_de_priorite(deja.list_type, surcharges)
+            if deja.status in ALERT_OPEN_STATUSES and sous_le_plancher(deja.priority, plancher):
+                evenements.append(AlertEvent(
+                    alert_id=deja.id, username=username, action="PRIORITY_CHANGED",
+                    detail=(f"Priorité {deja.priority or '—'} → {plancher} : plancher des "
+                            f"listes de gel (périmètre SANCTION).")))
+                deja.priority = plancher
+                deja.due_at = _echeance(sla, plancher, deja.created_at)
             # Evenement de re-detection : ecrit pour les alertes que
             # quelqu'un doit encore traiter. Une alerte deja tranchee par une
             # regle n'en recoit pas a chaque passage — le re-criblage repasse
@@ -194,7 +246,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
             resultat["redetected"] += 1
             continue
 
-        priorite = compute_alert_priority(match)
+        priorite = compute_alert_priority(match, surcharges)
         alerte = Alert(
             audit_id=audit.id, channel=channel, client_id=client_id,
             client_name=audit.client_name, watchlist_entity_id=wl_id,

@@ -217,6 +217,15 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=(AUDIENCE_ASSIGNEE,),
         urgency=DIGEST, link="#alerts/alerts-screening",
     ),
+    "gel_declaration_en_retard": Event(
+        # IMMEDIAT, et c'est tout l'objet : la declaration d'une mesure de gel
+        # a la DG Tresor est due « immediatement » (CMF L.562-4 ; LD DGT/ACPR
+        # 2026, §182). Un recapitulatif du lendemain la ferait arriver en
+        # retard par construction. Une seule fois par mesure.
+        label="Mesure de gel non déclarée à la DG Trésor dans le délai",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-gels",
+    ),
     "alert_mentioned": Event(
         label="Vous êtes cité dans un commentaire d'alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_MENTIONED,),

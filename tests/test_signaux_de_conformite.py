@@ -401,6 +401,10 @@ def test_aucun_get_ne_reste_ferme_a_l_auditeur_sans_raison():
         # l'ouvrir ferait d'une lecture de contrôleur une ligne au dossier.
         "/api/alerts/{alert_id}/str-draft",
         "/api/alerts/{alert_id}/str-draft/print",
+        # Meme raison pour le projet de declaration de gel a la DG Tresor
+        # (GEL_DRAFT_GENERATED dans l'historique de l'alerte).
+        "/api/gels/{mesure_id}/draft",
+        "/api/gels/{mesure_id}/draft/print",
     }
 
     def _gardes(dependant, vus=None):

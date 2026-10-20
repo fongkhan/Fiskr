@@ -198,6 +198,14 @@ def test_totp_admin_reset(client):
 # ------------------ ACTIONS EN MASSE SUR LES ALERTES ------------------
 
 def test_bulk_assign_and_priority(client):
+    """
+    Réécrit (registre des gels, octobre 2026) : le troisième passage
+    descendait les alertes à LOW. Or Putin est sur une liste de gel (périmètre
+    SANCTION), dont le plancher de priorité est désormais HIGH — l'ancienne
+    valeur épinglait précisément ce que le plancher interdit (le refus est
+    tenu par tests/test_gel_des_avoirs.py). L'intention du test — une alerte
+    clôturée est ignorée au passage suivant — est gardée, avec HIGH.
+    """
     alert_ids = [_screen_putin(client, _new_client_id())["alert_id"] for _ in range(3)]
 
     # Assignation en masse a soi-meme
@@ -231,7 +239,7 @@ def test_bulk_assign_and_priority(client):
     finally:
         db.close()
     again = client.post("/api/alerts/bulk", json={
-        "ids": alert_ids, "action": "priority", "priority": "LOW"})
+        "ids": alert_ids, "action": "priority", "priority": "HIGH"})
     assert again.status_code == 200
     assert alert_ids[0] in again.json()["skipped"]
     assert sorted(again.json()["updated"]) == sorted(alert_ids[1:])

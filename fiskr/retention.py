@@ -127,12 +127,22 @@ def _purgeable_alert_ids(db, cutoff: datetime):
     # Date de reference : la decision quand elle existe, sinon la creation
     # (les clotures automatiques CLOSED_BY_RULE n'ont pas de decided_at)
     from sqlalchemy import or_, and_
+    from fiskr.database import MesureDeGel
+    # Une alerte qui porte une mesure de gel est le DOSSIER de cette mesure :
+    # la piece de declaration a la DG Tresor est une piece jointe de l'alerte,
+    # et le registre la reference (cle etrangere). La purger effacerait la
+    # preuve d'une declaration — pendant que le gel court, ou apres sa levee —
+    # et casserait la cle sur PostgreSQL. Le registre des gels n'est pas une
+    # famille de retention (comme le journal d'administration, il n'est jamais
+    # purge) ; les alertes qu'il porte ne le sont donc pas non plus.
+    tenues = db.query(MesureDeGel.alert_id)
     rows = db.query(Alert.id).filter(
         Alert.status.in_(ALERT_CLOSED_STATUSES),
         or_(
             and_(Alert.decided_at.isnot(None), Alert.decided_at < cutoff),
             and_(Alert.decided_at.is_(None), Alert.created_at < cutoff),
         ),
+        ~Alert.id.in_(tenues),
     ).all()
     return [r[0] for r in rows]
 

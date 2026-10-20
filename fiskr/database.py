@@ -218,7 +218,9 @@ class ClientEntity(Base):
     client_activity_sector = Column(String(100), nullable=True) # code NAF / secteur
     client_activity_countries = Column(JSON, nullable=True)     # pays d'exposition operationnelle
     client_relationship_start = Column(String(20), nullable=True)
-    client_status = Column(String(20), nullable=True)           # actif / cloture / gele
+    # actif / cloture / gele — normalise en majuscules a l'import ; « GELE »
+    # est ecrit par le registre des mesures de gel (fiskr/gels.py)
+    client_status = Column(String(20), nullable=True)
 
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
@@ -467,6 +469,62 @@ class AlertAttachment(Base):
     uploaded_by = Column(String(100), nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
+class MesureDeGel(Base):
+    """
+    Registre des mesures de gel : ce qui SUIT un vrai positif sur une liste du
+    perimetre SANCTION (fiskr/gels.py). Releve en production le 19/10/2026 :
+    deux alertes OFAC confirmees, closes comme une alerte PEP — aucune piece,
+    aucun projet de declaration, rien ne suivait. Une confirmation ouvre
+    desormais une ligne ici, « a declarer », et la ligne ne se referme que par
+    une declaration a la DG Tresor appuyee d'une piece, puis une levee motivee.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "gel_mesures"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    # Action de mise en oeuvre (LD DGT/ACPR 2026, §181) — vocabulaire dans gels.py
+    type_action = Column(String(40), nullable=False, default="GEL")
+    statut = Column(String(20), nullable=False, default="A_DECLARER", index=True)
+    # Identite figee a l'ouverture : le registre se lit sans rejouer l'alerte
+    client_id = Column(String(100), nullable=True, index=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    list_type = Column(String(30), nullable=True)
+    programmes = Column(JSON, nullable=True)
+    reference_designation = Column(String(500), nullable=True)
+    # Point de depart du delai de declaration : la confirmation de l'alerte
+    ouverte_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    ouverte_par = Column(String(100), nullable=False)
+    # Gel effectif : date d'effet, comptes et montants (saisis par l'humain —
+    # Fiskr ne tient pas les comptes, il trace ce qu'on y a fait)
+    date_effet = Column(DateTime, nullable=True)
+    comptes = Column(JSON, nullable=True)
+    comptes_texte = Column(Text, nullable=True)
+    precisions = Column(Text, nullable=True)
+    # Statut du client AVANT le gel, rendu a la levee ; `client_gele_ecrit`
+    # dit si CETTE mesure a inscrit « GELE » au referentiel (une mesure qui
+    # n'a rien ecrit ne doit rien « rendre » a sa levee)
+    statut_client_avant = Column(String(20), nullable=True)
+    client_gele_ecrit = Column(Boolean, nullable=True)
+    # Declaration a la DG Tresor : date de transmission, auteur, reference,
+    # adresse, et la piece qui la prouve (piece jointe de l'alerte)
+    declaree_le = Column(DateTime, nullable=True)
+    declaree_par = Column(String(100), nullable=True)
+    reference_dgt = Column(String(255), nullable=True)
+    canal_dgt = Column(String(100), nullable=True)
+    piece_declaration_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    # Retard signale une fois (notification immediate, cf. detecter_retards)
+    retard_signale_le = Column(DateTime, nullable=True)
+    # Levee (LD §209-213) : date, auteur, motif code et justification
+    levee_le = Column(DateTime, nullable=True)
+    levee_par = Column(String(100), nullable=True)
+    motif_levee = Column(String(40), nullable=True)
+    justification_levee = Column(Text, nullable=True)
+
 class AdminAuditLog(Base):
     """Journal append-only des actions d'administration (utilisateurs,
     reglages, purges, revocations) : qui, quand, quoi, avant -> apres.
@@ -494,6 +552,9 @@ def log_admin_action(db, username, action, target=None,
 
 
 ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
+# CLOSED_CONFIRMED clot l'INSTRUCTION, pas l'affaire : sur une liste du
+# perimetre SANCTION, la suite (gel, declaration DG Tresor, levee) vit dans
+# le registre des mesures de gel (MesureDeGel, fiskr/gels.py).
 ALERT_CLOSED_STATUSES = ("CLOSED_CONFIRMED", "CLOSED_FALSE_POSITIVE", "CLOSED_BY_RULE")
 
 # Types de relations entre entites listees (schema pivot). Les types OFAC

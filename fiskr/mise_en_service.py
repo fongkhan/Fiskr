@@ -42,9 +42,17 @@ OK = "OK"
 FAMILLES = ("Socle", "Listes", "Criblage", "Exploitation")
 
 
-def _controle(cle, famille, titre, etat, constat, remede="", lien="") -> Dict[str, Any]:
+def _controle(cle, famille, titre, etat, constat, remede="", lien="",
+              constat_public=None) -> Dict[str, Any]:
+    """
+    `constat_public` : la version du constat que la sonde de conformite peut
+    rendre a un outil de supervision externe, quand le constat de l'ecran
+    nomme des personnes. Une supervision tierce n'a pas a recevoir le nom d'un
+    client sous mesure de gel.
+    """
     return {"cle": cle, "famille": famille, "titre": titre, "etat": etat,
-            "constat": constat, "remede": remede, "lien": lien}
+            "constat": constat, "remede": remede, "lien": lien,
+            "constat_public": constat_public}
 
 
 # ------------------------------------------------------------------ Socle
@@ -788,6 +796,62 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
         "#screening/screening-batch")
 
 
+def _declarations_de_gel(db) -> Dict[str, Any]:
+    """
+    Les gels confirmes ont-ils ete declares a la DG Tresor ?
+
+    La declaration est due « immediatement » (CMF L.562-4 ; LD DGT/ACPR du
+    18 mars 2026, §182), et les « delais de declaration » sont un point de
+    controle interne nomme (§99). Releve en production : deux vrais positifs
+    OFAC, aucune declaration preparee, rien ne le disait. Ce controle lit le
+    registre des mesures de gel — la meme definition du retard que la
+    notification et l'indicateur (fiskr/kpi.py).
+    """
+    from fiskr.database import MesureDeGel
+    from fiskr.gels import STATUT_A_DECLARER, alertes_confirmees_sans_mesure, mesures_en_retard
+    from fiskr.settings import gel_declaration_delai_heures
+    seuil = gel_declaration_delai_heures(db)
+    en_retard = mesures_en_retard(db)
+    lien = "#screening/alerts-gels"
+    orphelines = alertes_confirmees_sans_mesure(db)
+    if orphelines:
+        # Le cas de production : des vrais positifs confirmes AVANT que le
+        # registre n'existe. Rien ne les y fera entrer tout seuls.
+        noms = ", ".join(f"alerte #{a.id} {a.client_name} × {a.watchlist_name}"
+                         for a in orphelines[:5])
+        return _controle(
+            "gels", "Criblage", "Déclarations de gel à la DG Trésor", BLOQUANT,
+            f"{len(orphelines)} vrai(s) positif(s) sur une liste de gel sans mesure au "
+            f"registre : {noms}{' …' if len(orphelines) > 5 else ''}. Aucune déclaration "
+            f"à la DG Trésor n'y est tracée.",
+            "Ouvrez chaque alerte et créez sa mesure de gel (bouton « Ouvrir la mesure de "
+            "gel ») : son délai courra depuis la confirmation, puis déclarez-la.", lien,
+            constat_public=f"{len(orphelines)} vrai(s) positif(s) sur une liste de gel "
+                           f"sans mesure au registre ni déclaration tracée.")
+    if en_retard:
+        noms = ", ".join(f"#{m.id} {m.client_name} × {m.watchlist_name}" for m in en_retard[:5])
+        return _controle(
+            "gels", "Criblage", "Déclarations de gel à la DG Trésor", BLOQUANT,
+            f"{len(en_retard)} mesure(s) de gel non déclarée(s) plus de {seuil} h après la "
+            f"confirmation : {noms}{' …' if len(en_retard) > 5 else ''}. La déclaration est "
+            f"due immédiatement (CMF L.562-4, R.562-3).",
+            "Préparez le projet de déclaration depuis le registre des gels, transmettez-le "
+            "à la DG Trésor, puis enregistrez la déclaration avec la pièce de transmission "
+            "(accusé de réception ou copie du courriel).", lien,
+            constat_public=f"{len(en_retard)} mesure(s) de gel non déclarée(s) plus de "
+                           f"{seuil} h après la confirmation.")
+    a_declarer = db.query(MesureDeGel).filter(MesureDeGel.statut == STATUT_A_DECLARER).count()
+    if a_declarer:
+        return _controle(
+            "gels", "Criblage", "Déclarations de gel à la DG Trésor", ATTENTION,
+            f"{a_declarer} mesure(s) de gel à déclarer, encore dans le délai de {seuil} h.",
+            "Déclarez-les à la DG Trésor maintenant : le délai est un plafond d'alarme, "
+            "pas un délai accordé.", lien)
+    return _controle(
+        "gels", "Criblage", "Déclarations de gel à la DG Trésor", OK,
+        "Aucune mesure de gel en attente de déclaration au registre.", lien=lien)
+
+
 # Fenetre d'observation des echecs de synchronisation : assez large pour
 # distinguer un incident d'une panne installee, assez courte pour qu'une
 # source reparee sorte vite du constat.
@@ -842,7 +906,7 @@ _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production, _sources_de_
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
-                   _pieces_probantes, _smtp)
+                   _declarations_de_gel, _pieces_probantes, _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
 
 
@@ -898,7 +962,7 @@ def _premier_demarrage(db) -> bool:
 # bloque. Un test verifie qu'aucun controle capable de BLOQUANT n'en manque.
 _CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
 _CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
-                          _fraicheur_des_listes)
+                          _fraicheur_des_listes, _declarations_de_gel)
 
 
 def etat_de_conformite(db) -> Dict[str, Any]:
@@ -933,7 +997,9 @@ def etat_de_conformite(db) -> Dict[str, Any]:
             continue
         portee.append(controle["cle"])
         if controle["etat"] == BLOQUANT:
-            bloquants.append({cle: controle[cle] for cle in ("cle", "titre", "constat", "remede")})
+            bloquants.append({"cle": controle["cle"], "titre": controle["titre"],
+                              "constat": controle.get("constat_public") or controle["constat"],
+                              "remede": controle["remede"]})
     return {"conforme": not bloquants, "bloquants": bloquants, "portee": portee}
 
 

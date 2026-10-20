@@ -130,6 +130,38 @@ DEFAULT_CHECKLIST = [
 
 DEFAULT_ALERT_SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "MEDIUM": 120, "LOW": 240}
 
+# Delai (heures) au-dela duquel une mesure de gel non declaree a la DG Tresor
+# leve une notification immediate et un controle de mise en service BLOQUANT.
+#
+# Le texte ne donne pas de chiffre : il dit « immediatement » (CMF L.562-4 ;
+# lignes directrices DGT/ACPR du 18 mars 2026, §182 : « dans les plus brefs
+# delais, et en tout etat de cause, des que l'analyse de l'alerte a permis de
+# s'assurer » de l'identite). Quatre heures, parce que la declaration demande
+# une chose que Fiskr n'a pas : les montants geles « a la date du gel », lus
+# dans le systeme teneur de comptes (formulaire DG Tresor, rubrique
+# « Identification des fonds geles »). Le temps de les obtenir se compte en
+# heures ; au-dela d'une demi-journee, « immediatement » ne decrit plus ce qui
+# s'est passe. Releve en production : la seule trace ecrite apres deux
+# confirmations OFAC est arrivee 17 jours plus tard.
+SETTING_GEL_DELAI = "gel.declaration_delai_heures"
+DEFAULT_GEL_DELAI_HEURES = 4
+# Bornes : en dessous d'une heure, chaque confirmation sonnerait avant qu'on
+# ait pu ouvrir le formulaire ; au-dessus de trois jours, le reglage ne dirait
+# plus « immediatement » sous aucune lecture.
+GEL_DELAI_BORNES_HEURES = (1, 72)
+
+
+def gel_declaration_delai_heures(db) -> int:
+    """Delai de declaration d'une mesure de gel (heures), borne. Une valeur
+    illisible retombe sur le defaut : jamais sur « aucun delai »."""
+    valeur = get_setting_with_source(db, SETTING_GEL_DELAI, DEFAULT_GEL_DELAI_HEURES)["value"]
+    try:
+        heures = int(valeur)
+    except (TypeError, ValueError):
+        return DEFAULT_GEL_DELAI_HEURES
+    bas, haut = GEL_DELAI_BORNES_HEURES
+    return heures if bas <= heures <= haut else DEFAULT_GEL_DELAI_HEURES
+
 # Motifs de cloture proposes a la saisie d'une decision d'alerte. Une
 # bibliotheque, pas un carcan : le motif choisi s'insere dans le commentaire
 # et reste editable — la motivation reglementaire finale appartient a

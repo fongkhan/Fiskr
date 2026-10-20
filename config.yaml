@@ -92,6 +92,12 @@ review:
   whitelist_justification_required: true   # justification obligatoire pour une mise en liste blanche
   whitelist_file_required: false           # piece jointe obligatoire pour une mise en liste blanche
 
+# Gel des avoirs : toute confirmation sur une liste du perimetre SANCTION ouvre
+# une mesure « a declarer » a la DG Tresor (CMF L.562-4, R.562-3 ; lignes
+# directrices DGT/ACPR du 18 mars 2026, §180-182 : declaration « immediate »).
+gel:
+  declaration_delai_heures: 4   # au-dela : notification immediate + controle de mise en service (1 a 72)
+
 # Synchronisation automatique des sources officielles (OFAC / EUR-Lex)
 sync:
   # Valeurs par DEFAUT au premier demarrage. La synchronisation automatique

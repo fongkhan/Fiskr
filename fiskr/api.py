@@ -56,7 +56,8 @@ from fiskr.database import (
     NotificationDelivery, LearnedEquivalence
 )
 from fiskr.alerts import (open_or_redetect_alerts,
-                          is_whitelisted, whitelisted_pairs, compute_due_at)
+                          is_whitelisted, whitelisted_pairs, compute_due_at,
+                          PLANCHER_SANCTION)
 from fiskr.notify import (
     smtp_configured as notify_smtp_configured,
     public_url as notify_public_url,
@@ -143,6 +144,10 @@ from fiskr.settings import (
 )
 from fiskr import resources as resource_tables
 from fiskr import country_risk
+from fiskr import gels as registre_des_gels
+from fiskr.database import MesureDeGel
+from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
+                            gel_declaration_delai_heures, perimeter_overrides)
 from fiskr.retention import preview_retention, run_retention
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
@@ -669,6 +674,15 @@ def _notification_batch_tick(tick=None) -> None:
     tick = tick or datetime.now()
     db = next(get_db())
     try:
+        # Mesures de gel non declarees au-dela du seuil : AVANT le reglage du
+        # recapitulatif, et a chaque minute. Le recapitulatif peut etre coupe
+        # ou ne passer qu'une fois l'heure ; une declaration due
+        # « immediatement » (LD DGT/ACPR §182) n'attend ni l'un ni l'autre.
+        try:
+            registre_des_gels.detecter_retards(db)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Détection des déclarations de gel en retard impossible : {e}")
         batch_cfg = notification_batch_settings(db)
         if not batch_cfg["enabled"]:
             return
@@ -2446,6 +2460,7 @@ _PORTABLE_SETTINGS = {
     SETTING_AUTO_BACKTEST_ENABLED,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
+    SETTING_GEL_DELAI,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
     # Synchronisation automatique : les cles de source sont universelles,
@@ -4252,6 +4267,10 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         snap.record_count = record_count
         snap.processed_count = record_count
         snap.phase = "RELOAD" if (file_type in WATCHLIST_FILE_TYPES and not staging) else "DONE"
+        if file_type == "CLIENT_BASE":
+            # Le SI amont ignore le registre des gels : sans cela, l'import
+            # nocturne rendrait « ACTIF » un client dont les avoirs sont geles.
+            registre_des_gels.reappliquer_aux_clients(db, snap_id)
         db.commit()
 
         # Reload cache to integrate newly loaded watchlists
@@ -8293,6 +8312,8 @@ class IngestionSettingsUpdate(BaseModel):
     quality_min_score_pct: Optional[float] = None
     # SLA d'alertes (heures par priorite, 0 = pas d'echeance) et notifications
     alert_sla_hours: Optional[Dict[str, int]] = None
+    # Delai de declaration d'une mesure de gel a la DG Tresor (heures)
+    gel_declaration_delay_hours: Optional[int] = None
     # Motifs de cloture proposes aux analystes ([] = aucune suggestion)
     alert_close_reasons: Optional[List[str]] = None
     notification_events: Optional[Dict[str, bool]] = None
@@ -8350,6 +8371,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "auto_backtest_panel": str(auto_bt_panel["value"]) if auto_bt_panel["value"] else None,
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
+        "gel_declaration_delay_hours": gel_declaration_delai_heures(db),
         "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
@@ -8408,6 +8430,7 @@ async def update_ingestion_settings(
     changed = {k: v for k, v in updates.items() if v is not None}
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
+              payload.gel_declaration_delay_hours,
               payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
@@ -8457,6 +8480,16 @@ async def update_ingestion_settings(
         merged = dict(alert_sla_hours(db))
         merged.update(sla)
         set_setting(db, SETTING_ALERT_SLA_HOURS, merged, updated_by=admin_user["username"])
+    if payload.gel_declaration_delay_hours is not None:
+        bas, haut = GEL_DELAI_BORNES_HEURES
+        if not (bas <= payload.gel_declaration_delay_hours <= haut):
+            # Refus franc : un reglage hors bornes retomberait en silence sur
+            # le defaut a la lecture, et l'ecran afficherait autre chose que
+            # ce que l'administrateur a cru enregistrer.
+            raise HTTPException(status_code=400,
+                                detail=f"Délai de déclaration d'un gel : entre {bas} et {haut} heures.")
+        set_setting(db, SETTING_GEL_DELAI, int(payload.gel_declaration_delay_hours),
+                    updated_by=admin_user["username"])
     if payload.alert_close_reasons is not None:
         motifs = [str(m).strip() for m in payload.alert_close_reasons if str(m).strip()]
         if len(motifs) > 50:
@@ -11712,35 +11745,7 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
     events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert.id) \
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
 
-    # Personne concernee : fiche KYC du dernier referentiel en production
-    # (criblage clients) ou partie du message (filtrage transactionnel)
-    person: Dict[str, Any] = {"nom_complet": alert.client_name, "reference_interne": alert.client_id}
-    kyc_row = None
-    if alert.client_id and not str(alert.client_id).startswith("TXN:"):
-        kyc_row = (
-            db.query(ClientEntity, Snapshot)
-              .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
-              .filter(ClientEntity.client_id == alert.client_id, Snapshot.status == "READY")
-              .order_by(Snapshot.uploaded_at.desc()).first()
-        )
-    if kyc_row:
-        entity, _snap = kyc_row
-        person.update({
-            "type": "Personne physique" if entity.client_type == "PP" else "Personne morale",
-            "prenom": entity.client_first_name, "nom": entity.client_last_name,
-            "raison_sociale": entity.client_company_name,
-            "date_naissance": entity.client_dob,
-            "lieu_naissance": entity.client_place_of_birth,
-            "adresse": entity.client_address, "ville": entity.client_city,
-            "pays": entity.client_country, "nationalites": (entity.client_countries or {}).get("nationality"),
-            "iban": entity.client_iban, "bic": entity.client_bic,
-            "identifiant_fiscal": entity.client_tax_id,
-            "telephone": entity.client_phone, "email": entity.client_email,
-            "segment": entity.client_segment, "secteur_activite": entity.client_activity_sector,
-            "notation_risque": entity.client_risk_rating,
-            "ppe_declare": bool(entity.client_pep_flag),
-            "entree_en_relation": entity.client_relationship_start,
-        })
+    person = _personne_concernee(db, alert)
 
     # Operation concernee (filtrage transactionnel) : donnees du message
     operation = None
@@ -11808,6 +11813,41 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
             for e in events
         ],
     }
+
+
+def _personne_concernee(db: Session, alert: Alert) -> Dict[str, Any]:
+    """Personne concernee d'une declaration (TRACFIN comme DG Tresor) : fiche
+    KYC du dernier referentiel en production (criblage clients) ou partie du
+    message (filtrage transactionnel). Une seule definition pour les deux
+    projets — deux copies finiraient par ne plus decrire le meme client."""
+    person: Dict[str, Any] = {"nom_complet": alert.client_name, "reference_interne": alert.client_id}
+    kyc_row = None
+    if alert.client_id and not str(alert.client_id).startswith("TXN:"):
+        kyc_row = (
+            db.query(ClientEntity, Snapshot)
+              .join(Snapshot, ClientEntity.snapshot_id == Snapshot.snapshot_id)
+              .filter(ClientEntity.client_id == alert.client_id, Snapshot.status == "READY")
+              .order_by(Snapshot.uploaded_at.desc()).first()
+        )
+    if kyc_row:
+        entity, _snap = kyc_row
+        person.update({
+            "type": "Personne physique" if entity.client_type == "PP" else "Personne morale",
+            "prenom": entity.client_first_name, "nom": entity.client_last_name,
+            "raison_sociale": entity.client_company_name,
+            "date_naissance": entity.client_dob,
+            "lieu_naissance": entity.client_place_of_birth,
+            "adresse": entity.client_address, "ville": entity.client_city,
+            "pays": entity.client_country, "nationalites": (entity.client_countries or {}).get("nationality"),
+            "iban": entity.client_iban, "bic": entity.client_bic,
+            "identifiant_fiscal": entity.client_tax_id,
+            "telephone": entity.client_phone, "email": entity.client_email,
+            "segment": entity.client_segment, "secteur_activite": entity.client_activity_sector,
+            "notation_risque": entity.client_risk_rating,
+            "ppe_declare": bool(entity.client_pep_flag),
+            "entree_en_relation": entity.client_relationship_start,
+        })
+    return person
 
 
 # Ferme a l'auditeur A DESSEIN, bien que ce soit un GET : il ECRIT dans
@@ -12000,6 +12040,534 @@ def send_alert_str_draft(
     db.commit()
     return {"message": f"Projet de déclaration envoyé à {correspondent}.",
             "recipient": correspondent, "alert_id": alert.id}
+
+
+# ------------------ REGISTRE DES MESURES DE GEL (DG TRESOR) ------------------
+# Ce qui suit un vrai positif sur une liste de gel : la mesure, sa declaration
+# a la DG Tresor, sa levee (fiskr/gels.py). Les endpoints suivent le motif du
+# projet de declaration TRACFIN ci-dessus : JSON structure, version imprimable,
+# aucune transmission automatique — l'humain transmet et joint la piece.
+
+GEL_DISCLAIMER = (
+    "PROJET généré par Fiskr à partir du registre des mesures de gel et du journal "
+    "d'audit. Il doit être relu, complété et transmis par un humain à la DG Trésor — "
+    "aucune transmission automatique n'est effectuée. La mesure ne passe « déclarée » "
+    "qu'à l'enregistrement de la pièce de transmission (accusé de réception ou copie "
+    "du courriel envoyé)."
+)
+
+_GEL_TYPES_DE_NATURE = {"I": "Personne physique", "E": "Personne morale / entité",
+                        "V": "Navire", "O": "Autre"}
+
+
+def _mesure_ou_404(db: Session, mesure_id: int) -> MesureDeGel:
+    mesure = db.query(MesureDeGel).filter(MesureDeGel.id == mesure_id).first()
+    if mesure is None:
+        raise HTTPException(status_code=404, detail="Mesure de gel introuvable.")
+    return mesure
+
+
+def _refus_de_gel(refus: "registre_des_gels.RefusDeGel") -> HTTPException:
+    return HTTPException(status_code=refus.status_code, detail=str(refus))
+
+
+class GelOuvertureRequest(BaseModel):
+    type_action: str
+
+
+class GelMiseAJourRequest(BaseModel):
+    type_action: Optional[str] = None
+    date_effet: Optional[str] = None
+    # Texte libre structure : une ligne par compte (cf. gels.lire_comptes)
+    comptes: Optional[str] = Field(None, max_length=20000)
+    precisions: Optional[str] = Field(None, max_length=4000)
+
+
+class GelLeveeRequest(BaseModel):
+    motif: str
+    justification: str = Field(..., max_length=4000)
+    levee_le: Optional[str] = None
+
+
+def _registre_filtre(db: Session, statut: Optional[str], type_action: Optional[str],
+                     list_type: Optional[str], q: Optional[str]):
+    """Filtres du registre, partages par l'ecran et l'export CSV."""
+    query = db.query(MesureDeGel)
+    if statut:
+        code = statut.strip().upper()
+        if code == "EN_RETARD":
+            # La definition du retard est celle de fiskr/kpi.py, lue telle quelle
+            ids = [m.id for m in registre_des_gels.mesures_en_retard(db)]
+            query = query.filter(MesureDeGel.id.in_(ids or [-1]))
+        elif code in registre_des_gels.STATUTS:
+            query = query.filter(MesureDeGel.statut == code)
+        else:
+            raise HTTPException(status_code=400, detail="Statut de mesure inconnu.")
+    if type_action:
+        code = type_action.strip().upper()
+        if code not in registre_des_gels.ACTIONS:
+            raise HTTPException(status_code=400, detail="Action de gel inconnue.")
+        query = query.filter(MesureDeGel.type_action == code)
+    query = _apply_list_type_filter(query, MesureDeGel.list_type, list_type)
+    if q and q.strip():
+        motif = f"%{q.strip()[:100]}%"
+        query = query.filter(MesureDeGel.client_name.ilike(motif)
+                             | MesureDeGel.watchlist_name.ilike(motif)
+                             | MesureDeGel.client_id.ilike(motif))
+    return query
+
+
+@app.get("/api/gels")
+async def list_gel_measures(
+    statut: Optional[str] = Query(None),
+    type_action: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    alert_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Registre des mesures de gel (lecture, auditeur compris) : filtrable par
+    statut (A_DECLARER, DECLAREE, LEVEE, ou EN_RETARD), action, liste et
+    client. Porte la synthese du pilotage (delai confirmation -> declaration,
+    fiskr/kpi.py) et le vocabulaire de l'ecran.
+    """
+    from fiskr.kpi import synthese_des_gels
+    query = _registre_filtre(db, statut, type_action, list_type, q)
+    if alert_id is not None:
+        query = query.filter(MesureDeGel.alert_id == alert_id)
+    total = query.count()
+    lignes = query.order_by(MesureDeGel.ouverte_le.desc(), MesureDeGel.id.desc()) \
+                  .offset((page - 1) * page_size).limit(page_size).all()
+    seuil = gel_declaration_delai_heures(db)
+    ids_pieces = [m.piece_declaration_id for m in lignes if m.piece_declaration_id]
+    pieces = {p.id: p for p in db.query(AlertAttachment).filter(
+        AlertAttachment.id.in_(ids_pieces)).all()} if ids_pieces else {}
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in lignes],
+        "synthese": synthese_des_gels(db),
+        "vocabulaire": registre_des_gels.vocabulaire(),
+    }
+
+
+@app.get("/api/gels/{mesure_id}")
+async def get_gel_measure(
+    mesure_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Une mesure de gel, avec les etapes tracees au journal de son alerte."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    evenements = db.query(AlertEvent).filter(
+        AlertEvent.alert_id == mesure.alert_id, AlertEvent.action.like("GEL_%")) \
+        .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    return {
+        **registre_des_gels.serialiser(db, mesure),
+        "evenements": [
+            {"timestamp": e.timestamp.isoformat() if e.timestamp else None,
+             "username": e.username, "action": e.action, "detail": e.detail}
+            for e in evenements if re.search(rf"#{mesure.id}\b", e.detail or "")
+        ],
+    }
+
+
+@app.post("/api/alerts/{alert_id}/gels")
+async def open_gel_measure(
+    alert_id: int,
+    payload: GelOuvertureRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Mesure SUPPLEMENTAIRE sur une alerte confirmee (credit recu sur un compte
+    gele, tentative de contournement...) : chacune se declare (LD §181)."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    try:
+        mesure = registre_des_gels.ouvrir(db, alert, payload.type_action, current_user["username"])
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Mesure de gel #{mesure.id} ouverte : déclaration à la DG Trésor due immédiatement.",
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+@app.put("/api/gels/{mesure_id}")
+async def update_gel_measure(
+    mesure_id: int,
+    payload: GelMiseAJourRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Gel effectif : action, date d'effet, comptes et montants, precisions.
+    La date d'effet posee sur un gel passe le client en « GELE »."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    try:
+        avertissements = registre_des_gels.enregistrer_gel(
+            db, mesure, username=current_user["username"], type_action=payload.type_action,
+            date_effet=payload.date_effet, comptes=payload.comptes, precisions=payload.precisions)
+    except registre_des_gels.RefusDeGel as refus:
+        db.rollback()
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Mesure de gel #{mesure.id} enregistrée.", "warnings": avertissements,
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[str, Any]:
+    """Projet de declaration de mise en oeuvre d'une mesure de gel, aux
+    rubriques du formulaire de la DG Tresor (« Formulaire de declaration de gel
+    d'avoirs ») — exclusivement depuis le registre et le journal d'audit."""
+    alert = db.query(Alert).filter(Alert.id == mesure.alert_id).first()
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first() if alert else None
+    tree = (audit.decision_tree if audit else {}) or {}
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == mesure.alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    fiche = registre_des_gels.fiche_en_production(db, mesure.watchlist_entity_id)
+    nom_parse = (fiche.individual_name_parsed if fiche is not None else None) or {}
+    alias = []
+    if fiche is not None:
+        for groupe in ("high_priority", "low_priority"):
+            alias += list(((fiche.aliases or {}).get(groupe)) or [])
+    declarant = _institution_config(db)
+    gelante = mesure.type_action in registre_des_gels.ACTIONS_QUI_GELENT
+
+    # Le formulaire de la DG Tresor nomme son minimum : « le nom de la
+    # personne/entite gelee, le n° de compte et les montants ». Un projet qui
+    # se tairait sur leur absence passerait pour complet.
+    manquants = []
+    if mesure.date_effet is None:
+        manquants.append("date du gel (date d'effet de l'action)")
+    if gelante and not mesure.comptes:
+        manquants.append("numéro(s) de compte gelé(s)")
+    if gelante and mesure.comptes and any(not c.get("montant_gel") for c in mesure.comptes):
+        manquants.append("montant des fonds gelés à la date du gel")
+    if not (declarant.get("correspondent_name") and (declarant.get("correspondent_email")
+                                                    or declarant.get("correspondent_phone"))):
+        manquants.append("point de contact du déclarant (Paramètres → Établissement déclarant)")
+
+    def iso(d):
+        return d.isoformat() if d else None
+
+    operation = None
+    if alert is not None and (alert.channel or "SCREENING") == "FILTERING":
+        operation = {"reference_message": alert.client_id,
+                     "type_message": tree.get("message_type"),
+                     "partie_en_cause": alert.client_name,
+                     "role_partie": tree.get("party_role")}
+
+    return {
+        "type": "PROJET_DECLARATION_GEL",
+        "avertissement": GEL_DISCLAIMER,
+        "fondement": ("CMF L.562-4 et R.562-3 ; lignes directrices conjointes DGT/ACPR "
+                      "sur le gel des avoirs du 18 mars 2026, §180-182."),
+        "genere_le": datetime.utcnow().isoformat() + "Z",
+        "genere_par": username,
+        "mesure": {
+            "id": mesure.id, "alerte_id": mesure.alert_id,
+            "action": mesure.type_action,
+            "action_libelle": registre_des_gels.ACTIONS.get(mesure.type_action),
+            "statut": mesure.statut, "ouverte_le": iso(mesure.ouverte_le),
+            "date_effet": iso(mesure.date_effet),
+        },
+        "declarant": declarant,
+        "destinataires": registre_des_gels.vocabulaire()["adresses_dgt"],
+        "regime": {
+            "liste": mesure.list_type,
+            "programmes": mesure.programmes or (fiche.sanction_programs if fiche is not None else None),
+            "reference_designation": mesure.reference_designation
+                                     or (fiche.official_reference if fiche is not None else None),
+            "inscrite_le": fiche.listed_on if fiche is not None else None,
+            "liste_en_vigueur_du": (fiche.snapshot.uploaded_at.strftime("%d/%m/%Y")
+                                    if fiche is not None and fiche.snapshot is not None
+                                    and fiche.snapshot.uploaded_at else None),
+        },
+        "personne_listee": {
+            "identifiant": mesure.watchlist_entity_id,
+            "nom_complet": mesure.watchlist_name,
+            "nom": nom_parse.get("last_name"), "prenom": nom_parse.get("first_name"),
+            "type_nature": _GEL_TYPES_DE_NATURE.get(fiche.entity_type) if fiche is not None else None,
+            "alias": alias[:15],
+            "dates_naissance": (fiche.dates_of_birth if fiche is not None else None),
+            "presente_dans_les_listes_en_production": fiche is not None,
+        },
+        "fonds_geles": {
+            "etablissement": declarant.get("name"),
+            "comptes": mesure.comptes or [],
+            "date_du_gel": iso(mesure.date_effet),
+            "precisions": mesure.precisions,
+        },
+        "personne_concernee": _personne_concernee(db, alert) if alert is not None
+                              else {"nom_complet": mesure.client_name},
+        "operation_concernee": operation,
+        "traitement_alerte": {
+            "score_final": alert.final_score if alert else None,
+            "correspondance_exacte": bool(tree.get("hard_match_triggered", False)),
+            "propose_par": alert.proposed_by if alert else None,
+            "propose_le": iso(alert.proposed_at) if alert else None,
+            "decide_par": alert.decided_by if alert else None,
+            "decide_le": iso(alert.decided_at) if alert else None,
+            "commentaire": alert.decision_comment if alert else None,
+        },
+        "informations_minimales_manquantes": manquants,
+        "chronologie": [
+            {"date": iso(e.timestamp), "par": e.username, "action": e.action, "detail": e.detail}
+            for e in events
+        ],
+    }
+
+
+def _render_gel_draft_html(mesure: MesureDeGel, draft: Dict[str, Any], generated_by: str) -> str:
+    """Projet de declaration de gel en HTML autonome (impression -> PDF) :
+    aucune ressource externe, bandeau « projet a transmettre par un humain »,
+    et bandeau rouge des informations minimales manquantes."""
+    from html import escape
+
+    def esc(value):
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value) if value else None
+        return escape(str(value)) if value not in (None, "", []) else "—"
+
+    def rows(mapping: Dict[str, Any], labels: Dict[str, str]) -> str:
+        return "\n".join(f"<tr><th>{escape(label)}</th><td>{esc(mapping.get(key))}</td></tr>"
+                         for key, label in labels.items() if not isinstance(mapping.get(key), dict))
+
+    def date(value):
+        return esc((value or "")[:16].replace("T", " ") + (" UTC" if value else ""))
+
+    m = draft["mesure"]
+    comptes_html = "\n".join(
+        f"<tr><td>{esc(c.get('numero'))}</td><td>{esc(c.get('nature'))}</td>"
+        f"<td>{esc(c.get('devise'))}</td><td>{esc(c.get('montant_gel'))}</td>"
+        f"<td>{esc(c.get('montant_declaration'))}</td></tr>"
+        for c in draft["fonds_geles"]["comptes"]) or (
+        '<tr><td colspan="5">Aucun compte renseigné.</td></tr>')
+    destinataires_html = "".join(
+        f"<li>☐ <strong>{escape(d['adresse'])}</strong> — {escape(d['regimes'])}</li>"
+        for d in draft["destinataires"])
+    chrono_html = "\n".join(
+        f"<tr><td>{date(e['date'])}</td><td>@{esc(e['par'])}</td>"
+        f"<td>{esc(e['action'])}</td><td>{esc(e['detail'])}</td></tr>"
+        for e in draft["chronologie"])
+    manquants = draft["informations_minimales_manquantes"]
+    manquants_html = (
+        '<div class="banner missing">⚠ Informations minimales manquantes — à compléter '
+        "avant transmission : " + escape(" ; ".join(manquants)) + ".</div>") if manquants else ""
+    operation = draft.get("operation_concernee")
+    operation_html = (
+        "<h2>Identification d'un paiement gelé</h2><table><tbody>"
+        + rows(operation, {"reference_message": "Référence du message",
+                           "type_message": "Type de message", "partie_en_cause": "Partie en cause",
+                           "role_partie": "Rôle de la partie"})
+        + "</tbody></table>") if operation else ""
+    listee = draft["personne_listee"]
+    absente = ("" if listee["presente_dans_les_listes_en_production"] else
+               "<p class=\"sub\">⚠ La fiche n'est plus présente dans les listes en production : "
+               "vérifiez le registre national des gels avant de déclarer.</p>")
+
+    return f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Fiskr — Projet de déclaration de gel — Mesure #{mesure.id}</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #111; margin: 2rem auto; max-width: 860px; }}
+h1 {{ font-size: 1.3rem; }} h2 {{ font-size: 1.02rem; margin-top: 1.4rem; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }}
+th, td {{ border: 1px solid #ccc; padding: 5px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #f0f0f0; width: 240px; }}
+.banner {{ border: 2px solid #b45309; background: #fef3c7; color: #7c2d12; padding: 0.7rem 1rem; border-radius: 6px; font-size: 0.9rem; margin: 1rem 0; }}
+.banner.missing {{ border-color: #b91c1c; background: #fee2e2; color: #7f1d1d; }}
+.sub {{ color: #555; }} ul {{ margin: 0.4rem 0 0 1.2rem; list-style: none; padding-left: 0; }}
+@media print {{ .no-print {{ display: none; }} body {{ margin: 0; }} }}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
+<h1>Projet de déclaration de gel d'avoirs (DG Trésor) — Mesure #{mesure.id}</h1>
+<p class="sub">Généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC par @{esc(generated_by)} —
+{esc(m['action_libelle'])} — alerte #{m['alerte_id']} — fondement : {esc(draft['fondement'])}</p>
+<div class="banner">⚠ {escape(GEL_DISCLAIMER)}</div>
+{manquants_html}
+<h2>Destinataire (à cocher par le déclarant, selon le régime)</h2>
+<ul>{destinataires_html}</ul>
+<h2>1. Déclarant</h2>
+<table><tbody>{rows(draft['declarant'], {"name": "Institution concernée", "siren": "SIREN",
+    "correspondent_name": "Point de contact", "correspondent_email": "Courriel",
+    "correspondent_phone": "Téléphone"})}</tbody></table>
+<h2>2. Régime de sanction &amp; personne concernés</h2>
+<table><tbody>{rows(draft['regime'], {"liste": "Liste d'origine", "programmes": "Régime concerné",
+    "reference_designation": "Référence et date du règlement UE ou de l'arrêté",
+    "inscrite_le": "Date d'inscription", "liste_en_vigueur_du": "Selon la liste en vigueur du"})}
+{rows(listee, {"identifiant": "Id", "type_nature": "Type de nature", "nom": "Nom",
+    "prenom": "Prénom", "nom_complet": "Nom sur la liste", "alias": "Alias",
+    "dates_naissance": "Date(s) de naissance"})}</tbody></table>
+{absente}
+<h2>3. Identification des fonds gelés</h2>
+<table><tbody>{rows(draft['fonds_geles'], {"etablissement": "Institution tenant les fonds gelés",
+    "date_du_gel": "Date du gel des fonds", "precisions": "Co-titulaires, mandataires, prélèvements, autres"})}</tbody></table>
+<table><thead><tr><th>Numéro du compte</th><th>Nature du compte / produit</th><th>Devise</th>
+<th>Montant à la date du gel</th><th>Montant à la date de la déclaration</th></tr></thead>
+<tbody>{comptes_html}</tbody></table>
+<h2>4. Client concerné</h2>
+<table><tbody>{rows(draft['personne_concernee'], {"type": "Type", "nom_complet": "Nom complet",
+    "prenom": "Prénom", "nom": "Nom", "raison_sociale": "Raison sociale",
+    "date_naissance": "Date de naissance", "lieu_naissance": "Lieu de naissance",
+    "adresse": "Adresse", "ville": "Ville", "pays": "Pays", "nationalites": "Nationalité(s)",
+    "iban": "IBAN", "bic": "BIC", "entree_en_relation": "Entrée en relation",
+    "reference_interne": "Référence interne"})}</tbody></table>
+{operation_html}
+<h2>5. Traitement de l'alerte</h2>
+<table><tbody>{rows(draft['traitement_alerte'], {"score_final": "Score final (%)",
+    "correspondance_exacte": "Concordance d'identifiant (hard match)",
+    "propose_par": "Proposée par", "propose_le": "Proposée le",
+    "decide_par": "Confirmée par", "decide_le": "Confirmée le", "commentaire": "Motivation"})}</tbody></table>
+<h2>6. Chronologie (append-only)</h2>
+<table><thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
+<tbody>{chrono_html}</tbody></table>
+</body></html>"""
+
+
+@app.get("/api/gels/{mesure_id}/draft")
+async def get_gel_draft(
+    mesure_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Projet de declaration de mise en oeuvre d'une mesure de gel (JSON
+    structure aux rubriques du formulaire de la DG Tresor). AUCUNE
+    transmission automatique : la DG Tresor n'a pas d'API publique, l'humain
+    transmet. Generation tracee GEL_DRAFT_GENERATED dans l'historique de
+    l'alerte.
+    """
+    mesure = _mesure_ou_404(db, mesure_id)
+    draft = _build_gel_draft(db, mesure, reviewer["username"])
+    _log_alert_event(db, mesure.alert_id, reviewer["username"], "GEL_DRAFT_GENERATED",
+                     f"Projet de déclaration de la mesure de gel #{mesure.id} généré (format JSON).")
+    db.commit()
+    return draft
+
+
+@app.get("/api/gels/{mesure_id}/draft/print")
+async def print_gel_draft(
+    mesure_id: int,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Projet de declaration de gel en HTML autonome imprimable."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    draft = _build_gel_draft(db, mesure, reviewer["username"])
+    _log_alert_event(db, mesure.alert_id, reviewer["username"], "GEL_DRAFT_GENERATED",
+                     f"Projet de déclaration de la mesure de gel #{mesure.id} généré (format imprimable).")
+    db.commit()
+    return HTMLResponse(content=_render_gel_draft_html(mesure, draft, reviewer["username"]))
+
+
+@app.post("/api/gels/{mesure_id}/declaration")
+async def record_gel_declaration(
+    mesure_id: int,
+    file: Optional[UploadFile] = File(None),
+    declaree_le: Optional[str] = Form(None),
+    reference: Optional[str] = Form(None),
+    canal: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Enregistre la declaration faite a la DG Tresor (hors de Fiskr) : date et
+    heure de transmission, reference, adresse, et la PIECE qui la prouve —
+    obligatoire, conservee comme piece jointe de l'alerte (inventaire des
+    pieces probantes). Statut DECLAREE ; le delai confirmation -> declaration
+    est trace.
+    """
+    mesure = _mesure_ou_404(db, mesure_id)
+    try:
+        verifiee = registre_des_gels.verifier_declaration(db, mesure, declaree_le=declaree_le,
+                                                         canal=canal)
+        if file is None or not (file.filename or "").strip():
+            raise registre_des_gels.RefusDeGel(
+                "La pièce de transmission est obligatoire (accusé de réception de la DG "
+                "Trésor, ou copie du courriel envoyé).")
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    safe_name, target_path = _chemin_de_piece_d_alerte(mesure.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, mesure.alert_id, safe_name, target_path,
+        f"Transmission à la DG Trésor de la mesure de gel #{mesure.id}.", reviewer["username"])
+    registre_des_gels.enregistrer_declaration(db, mesure, username=reviewer["username"],
+                                              piece=piece, verifiee=verifiee, reference=reference)
+    db.commit()
+    return {"message": f"Déclaration de la mesure de gel #{mesure.id} enregistrée.",
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+@app.post("/api/gels/{mesure_id}/levee")
+async def lift_gel_measure(
+    mesure_id: int,
+    payload: GelLeveeRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """Levee d'une mesure declaree (LD §209-213) : motif, justification (acte
+    de levee), date. Le client retrouve son statut d'avant le gel, sauf si une
+    autre mesure le tient encore — ce qui est dit dans `warnings`."""
+    mesure = _mesure_ou_404(db, mesure_id)
+    try:
+        avertissements = registre_des_gels.lever(
+            db, mesure, username=reviewer["username"], motif=payload.motif,
+            justification=payload.justification, levee_le=payload.levee_le)
+    except registre_des_gels.RefusDeGel as refus:
+        db.rollback()
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Mesure de gel #{mesure.id} levée.", "warnings": avertissements,
+            **registre_des_gels.serialiser(db, mesure)}
+
+
+@app.get("/api/export/gels.csv")
+async def export_gels_csv(
+    statut: Optional[str] = Query(None),
+    type_action: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV du registre des mesures de gel (memes filtres que l'ecran) :
+    la piece que le controle demande entiere, pas la page affichee."""
+    from fiskr.kpi import delai_de_declaration_secondes
+    rows = _registre_filtre(db, statut, type_action, list_type, q) \
+        .order_by(MesureDeGel.ouverte_le.desc(), MesureDeGel.id.desc()).limit(_EXPORT_MAX_ROWS).all()
+    retard = {m.id for m in registre_des_gels.mesures_en_retard(db)}
+
+    def iso(d):
+        return d.isoformat() if d else ""
+
+    header = ["mesure", "alerte", "action", "statut", "en_retard", "client_id", "client",
+              "fiche_listee_id", "fiche_listee", "liste", "programmes", "reference_designation",
+              "confirmee_le", "confirmee_par", "date_effet", "comptes", "declaree_le",
+              "declaree_par", "reference_dgt", "adresse_dgt", "delai_declaration_heures",
+              "levee_le", "levee_par", "motif_levee", "justification_levee"]
+    data = []
+    for m in rows:
+        delai = delai_de_declaration_secondes(m.ouverte_le, m.declaree_le)
+        data.append([
+            m.id, m.alert_id, m.type_action, m.statut, "oui" if m.id in retard else "non",
+            m.client_id or "", m.client_name, m.watchlist_entity_id, m.watchlist_name,
+            m.list_type or "", ", ".join(str(p) for p in (m.programmes or [])),
+            m.reference_designation or "",
+            iso(m.ouverte_le), m.ouverte_par or "", iso(m.date_effet),
+            " | ".join(" ; ".join(c.get(k, "") for k in ("numero", "nature", "devise",
+                                                         "montant_gel", "montant_declaration"))
+                       for c in (m.comptes or [])),
+            iso(m.declaree_le), m.declaree_par or "", m.reference_dgt or "", m.canal_dgt or "",
+            f"{delai / 3600:.1f}" if (delai is not None and m.declaree_le) else "",
+            iso(m.levee_le), m.levee_par or "", m.motif_levee or "", m.justification_levee or "",
+        ])
+    return _csv_response(f"fiskr_registre_gels_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+                         header, data)
 
 
 # ------------------ QUALITE DES DONNEES CLIENTS ------------------
@@ -12854,7 +13422,23 @@ async def get_alert_detail(
             }
             for e in events
         ],
+        # La suite d'un vrai positif sur une liste de gel : mesures et etapes.
+        # `gel_du` dit si cette alerte en impose une (perimetre SANCTION,
+        # confirmee) — l'ecran propose de l'ouvrir quand elle manque.
+        "gel_mesures": _mesures_de_l_alerte(db, alert.id, attachments),
+        "gel_du": registre_des_gels.est_due(alert, perimeter_overrides(db)),
+        "gel_vocabulaire": registre_des_gels.vocabulaire(),
     }
+
+
+def _mesures_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[str, Any]]:
+    mesures = db.query(MesureDeGel).filter(MesureDeGel.alert_id == alert_id) \
+                .order_by(MesureDeGel.id.asc()).all()
+    if not mesures:
+        return []
+    seuil = gel_declaration_delai_heures(db)
+    pieces = {att.id: att for att in attachments}
+    return [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in mesures]
 
 @app.post("/api/alerts/{alert_id}/assign")
 async def assign_alert(
@@ -12933,11 +13517,28 @@ async def escalate_alert(
     _notifier_les_suiveurs(db, alert, "Escaladée", current_user["username"])
     return {"message": "Alerte escaladée.", **_alert_summary(alert)}
 
-def _close_alert(alert: Alert, decision: str, username: str, comment: str) -> None:
+def _close_alert(db: Session, alert: Alert, decision: str, username: str,
+                 comment: str) -> Optional[MesureDeGel]:
+    """
+    Cloture d'une instruction — et, sur une liste de gel, ouverture de ce qui
+    la suit. Une alerte DGT se closait exactement comme une alerte PEP : en
+    production, deux vrais positifs OFAC n'ont produit ni piece ni projet de
+    declaration. Toute confirmation passe ici (proposition sans 4-yeux comme
+    validation) : la mesure « a declarer » ne peut donc pas etre oubliee par
+    un chemin, elle est ouverte dans la meme transaction que la cloture.
+    """
     alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
     alert.decided_by = username
     alert.decided_at = datetime.utcnow()
     alert.decision_comment = comment
+    return registre_des_gels.ouvrir_si_due(db, alert, username)
+
+
+def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
+    if mesure is None:
+        return ""
+    return (f" Mesure de gel #{mesure.id} ouverte : déclaration à la DG Trésor "
+            f"due immédiatement (Criblage → Registre des gels).")
 
 @app.post("/api/alerts/{alert_id}/propose")
 async def propose_alert_decision(
@@ -12978,10 +13579,10 @@ async def propose_alert_decision(
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
         message = "Décision proposée, en attente de validation 4-yeux."
     else:
-        _close_alert(alert, decision, username, comment)
+        mesure = _close_alert(db, alert, decision, username, comment)
         _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
         _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
-        message = "Alerte clôturée (validation 4-yeux désactivée)."
+        message = "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure)
     db.commit()
     common = {
         "Alerte": alert.id, "Canal": alert.channel or "SCREENING",
@@ -13027,9 +13628,10 @@ async def validate_alert_decision(
         "Proposée par": proposer,
     }
     if payload.approve:
-        _close_alert(alert, alert.proposed_decision, username, comment or alert.proposal_comment)
+        mesure = _close_alert(db, alert, alert.proposed_decision, username,
+                              comment or alert.proposal_comment)
         _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
-        message = f"Décision validée, alerte clôturée ({alert.status})."
+        message = f"Décision validée, alerte clôturée ({alert.status})." + _message_de_mesure(mesure)
         event_key, extra = "alert_decision_validated", {
             "Validée par": username, "Statut": alert.status,
             "Commentaire": comment or "—",
@@ -13057,6 +13659,19 @@ async def validate_alert_decision(
 class AlertPriorityRequest(BaseModel):
     priority: str
 
+
+def _refuser_sous_le_plancher(db: Session, alert: Alert, priorite: str) -> None:
+    """Le plancher du perimetre SANCTION vaut aussi pour la main de l'analyste :
+    sinon il suffirait d'un clic pour remettre un vrai positif OFAC a 120 h."""
+    from fiskr.alerts import plancher_de_priorite, sous_le_plancher
+    from fiskr.settings import perimeter_overrides
+    plancher = plancher_de_priorite(alert.list_type, perimeter_overrides(db))
+    if sous_le_plancher(priorite, plancher):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Priorité refusée : une correspondance sur une liste de gel (périmètre "
+                    f"SANCTION) ne descend pas sous {plancher}."))
+
 @app.post("/api/alerts/{alert_id}/priority")
 async def set_alert_priority(
     alert_id: int,
@@ -13070,6 +13685,7 @@ async def set_alert_priority(
     new_priority = (payload.priority or "").strip().upper()
     if new_priority not in ALERT_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
+    _refuser_sous_le_plancher(db, alert, new_priority)
     old_priority = alert.priority or "—"
     alert.priority = new_priority
     alert.due_at = compute_due_at(db, new_priority, alert.created_at)
@@ -13187,11 +13803,21 @@ async def bulk_alert_action(
             raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
 
     alerts = {a.id: a for a in db.query(Alert).filter(Alert.id.in_(ids)).all()}
-    updated, skipped = [], []
+    updated, skipped, sous_plancher = [], [], []
+    if action == "priority":
+        from fiskr.alerts import plancher_de_priorite, sous_le_plancher
+        from fiskr.settings import perimeter_overrides
+        surcharges = perimeter_overrides(db)
     for alert_id in ids:
         alert = alerts.get(alert_id)
         if alert is None or alert.status not in ALERT_OPEN_STATUSES:
             skipped.append(alert_id)
+            continue
+        if action == "priority" and sous_le_plancher(
+                new_priority, plancher_de_priorite(alert.list_type, surcharges)):
+            # Meme regle que l'action unitaire : ignoree, et nommee
+            skipped.append(alert_id)
+            sous_plancher.append(alert_id)
             continue
         if action == "assign":
             alert.assigned_to = assignee
@@ -13216,8 +13842,11 @@ async def bulk_alert_action(
                             + (" …" if len(updated) > 20 else ""),
             "Assignées par": current_user["username"],
         })
-    return {"updated": updated, "skipped": skipped,
-            "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."}
+    return {"updated": updated, "skipped": skipped, "below_floor": sous_plancher,
+            "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."
+                       + (f" Dont {len(sous_plancher)} sur une liste de gel : priorité "
+                          f"minimale {PLANCHER_SANCTION} (périmètre SANCTION)."
+                          if sous_plancher else "")}
 
 # ------------------ VUES SAUVEGARDEES (filtres des files d'alertes) ------------------
 
@@ -13468,20 +14097,36 @@ async def add_alert_attachment(
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alerte introuvable.")
-    safe_name = re.sub(r"[^\w.\-]", "_", file.filename or "piece_jointe")
-    ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    target_path = ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+    safe_name, target_path = _chemin_de_piece_d_alerte(alert_id, file.filename)
     copier_televersement_vers(target_path, file, "piece")
+    attachment = _enregistrer_piece_d_alerte(db, alert_id, safe_name, target_path, comment,
+                                             current_user["username"])
+    db.commit()
+    return {"message": "Pièce jointe ajoutée.", "attachment_id": attachment.id,
+            "file_name": attachment.file_name}
+
+
+def _chemin_de_piece_d_alerte(alert_id: int, nom_televerse: Optional[str]):
+    safe_name = re.sub(r"[^\w.\-]", "_", nom_televerse or "piece_jointe")
+    ALERT_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    return safe_name, ALERT_EVIDENCE_DIR / f"{alert_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+
+
+def _enregistrer_piece_d_alerte(db: Session, alert_id: int, safe_name: str, target_path,
+                                comment: Optional[str], username: str) -> AlertAttachment:
+    """Le seul chemin d'enregistrement d'une piece d'alerte (ligne + evenement),
+    apres la copie BORNEE faite par l'endpoint : la piece de declaration d'un
+    gel passe par lui aussi, donc par l'inventaire des pieces probantes
+    (fiskr/preuves.py). Commit a l'appelant."""
     attachment = AlertAttachment(
         alert_id=alert_id, file_name=safe_name, file_path=str(target_path),
-        comment=(comment or "").strip() or None, uploaded_by=current_user["username"],
+        comment=(comment or "").strip() or None, uploaded_by=username,
     )
     db.add(attachment)
     db.flush()
-    _log_alert_event(db, alert_id, current_user["username"], "ATTACHMENT",
+    _log_alert_event(db, alert_id, username, "ATTACHMENT",
                      f"Pièce jointe ajoutée : {safe_name}." + (f" {comment.strip()}" if comment and comment.strip() else ""))
-    db.commit()
-    return {"message": "Pièce jointe ajoutée.", "attachment_id": attachment.id, "file_name": safe_name}
+    return attachment
 
 @app.get("/api/alerts/attachments/{attachment_id}")
 async def download_alert_attachment(
