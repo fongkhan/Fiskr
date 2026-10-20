@@ -910,7 +910,7 @@ const STATUS_LABELS = {
  DRAFT: "Brouillon", ACTIVE: "Active",
  // Divers
  ADDED: "Ajouté", REMOVED: "Supprimé", MODIFIED: "Modifié",
- NO_MATCH: "Aucun match", ALERT: "Alerte", WHITELISTED: "Liste blanche",
+ NO_MATCH: "Aucun match", ALERT: "Alerte", WHITELISTED: "Liste blanche", NOT_SCREENED: "Non criblée",
  SUCCESS: "Succès", NO_CHANGE: "Sans changement",
 };
 
@@ -4934,7 +4934,7 @@ function renderAuditHistoryTable(logs) {
  <td><code>${escapeHtml(log.watchlist_id)}</code> - <strong>${escapeHtml(log.watchlist_name)}</strong></td>
  <td>${listTypeBadge(log.list_type)}</td>
  <td style="font-weight: 700; color: ${log.status === "ALERT" ? "var(--color-alert)" : "var(--color-safe)"}">${log.final_score.toFixed(1)}%</td>
- <td><span class="status-badge ${log.status === "ALERT" ? "alert" : "no_match"}">${log.status}</span></td>
+ <td><span class="status-badge ${log.status === "ALERT" ? "alert" : (log.status === "NOT_SCREENED" ? "warning" : "no_match")}">${log.status}</span></td>
  <td><button class="btn btn-secondary" style="font-size:0.75rem; padding: 0.25rem 0.5rem;" onclick="viewAuditLogDetail(${log.id})">Inspecter</button></td>
  `;
  tbody.appendChild(tr);
@@ -9061,25 +9061,55 @@ function renderTransactionResult(data) {
  const verdictLine = document.getElementById("txn-verdict-line");
  if (data.verdict === "HIT") {
  verdictLine.innerHTML = `Verdict : <span class="status-badge alert">HIT — ${data.hits_count} partie(s) en alerte</span>`;
+ } else if (data.verdict === "INCOMPLETE") {
+ // Ni HIT ni PASS : le filtrage n'a pas pu établir le PASS. Le libellé est
+ // celui du serveur (fiskr/transactions.py VERDICTS), jamais recopié ici.
+ verdictLine.innerHTML = `Verdict : <span class="status-badge warning">INCOMPLETE</span> <small>${escapeHtml(data.verdict_label || "")}</small>`;
  } else {
  verdictLine.innerHTML = `Verdict : <span class="status-badge safe">PASS — aucune correspondance</span>`;
  }
  const m = data.message || {};
- document.getElementById("txn-message-info").textContent =
- `Message ${m.message_type || "?"} · MsgId ${m.msg_id || "—"} · ${data.transactions_count} transaction(s) · ` +
- `${(data.parties || []).length} partie(s) distincte(s) criblée(s).`;
+ const parties = data.parties || [];
+ const nonCriblees = data.not_screened_count || 0;
+ const remises = (data.free_text || {}).screened || 0;
+ // Chaque compteur dans son propre nœud : c'est ce qui le rend traduisible.
+ document.getElementById("txn-message-info").innerHTML =
+ escapeHtml(`Message ${m.message_type || "?"} · MsgId ${m.msg_id || "—"} · ${data.transactions_count} transaction(s) · ` +
+ `${parties.length - nonCriblees} partie(s) distincte(s) criblée(s).`) +
+ (nonCriblees ? ` <strong style="color:var(--color-warning)">${nonCriblees} partie(s) non criblée(s)</strong>` : "") +
+ (remises ? ` <span>${remises} information(s) de remise criblée(s)</span>` : "");
+
+ // Informations obligatoires absentes (règlement (UE) 2023/1113, art. 4) :
+ // on ne nomme que ce qui manque — un message complet n'affiche rien.
+ const manques = data.missing_information || [];
+ document.getElementById("txn-missing-info").innerHTML = manques.length ? `
+ <div class="card" style="border-left: 3px solid var(--color-warning); margin: 0.5rem 0; padding: 0.75rem 1rem;">
+ <strong>Informations obligatoires manquantes</strong> <small style="color:var(--text-muted)">Règlement (UE) 2023/1113, art. 4</small>
+ <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${manques.map(x => `
+ <li><span>${escapeHtml(x.label)}</span> <small style="color:var(--text-muted)">${escapeHtml(x.reference)}</small>
+ <small><code>${escapeHtml((x.transactions || []).join(", "))}${x.transactions_count > (x.transactions || []).length ? " …" : ""}</code></small></li>`).join("")}
+ </ul>
+ </div>` : "";
 
  const tbody = document.querySelector("#txn-results-table tbody");
- tbody.innerHTML = (data.parties || []).map(p => {
+ tbody.innerHTML = parties.map(p => {
  let badge;
  if (p.status === "ALERT") badge = '<span class="status-badge alert">ALERT</span>';
  else if (p.status === "WHITELISTED") badge = '<span class="status-badge warning">WHITELISTED</span>';
+ else if (p.status === "NOT_SCREENED") badge = `<span class="status-badge warning" style="white-space:nowrap">Non criblée</span><br><small>${escapeHtml(p.not_screened_label || "")}</small>`;
  else badge = '<span class="status-badge safe">NO_MATCH</span>';
+ // Rapprochée sur son seul identifiant : le nom n'a pas été comparé, il
+ // n'était pas fourni. L'écran le dit plutôt que de laisser croire l'inverse.
+ const surIdentifiant = (p.screened_on || []).length && !(p.screened_on || []).includes("NOM") && !p.free_text;
+ // Partie non criblée : ce qu'elle porte d'autre que ce qui la nomme déjà.
+ const autres = (p.identifiers || []).filter(i => i !== p.label);
+ const detail = p.free_text ? `<br><small style="color:var(--text-muted)">« ${escapeHtml(p.free_text.excerpt || "")} »</small>`
+ : (p.status === "NOT_SCREENED" && autres.length ? `<br><small style="color:var(--text-muted)">${escapeHtml(autres.join(", "))}</small>` : "");
  return `<tr>
- <td>${escapeHtml(p.name)}${p.is_agent ? ' <small style="color:var(--text-muted)">(banque)</small>' : ""}</td>
+ <td>${escapeHtml(p.label || p.name)}${p.is_agent ? ' <small style="color:var(--text-muted)">(banque)</small>' : ""}${detail}</td>
  <td><small>${escapeHtml((p.roles || []).join(", "))}</small></td>
  <td>${escapeHtml(p.country || "—")}</td>
- <td><small>${escapeHtml(p.bic || "—")}</small></td>
+ <td><small>${escapeHtml(p.bic || p.lei || "—")}</small>${surIdentifiant ? '<br><small style="color:var(--text-muted)">sur identifiant seul</small>' : ""}</td>
  <td>${p.best_watchlist_name ? p.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${p.best_watchlist_name ? escapeHtml(p.best_watchlist_name) + (p.list_type ? ` <small style="color:var(--text-muted)">${escapeHtml(p.list_type)}</small>` : "") : "—"}</td>
  <td>${badge}${p.hard_match ? ' <small style="color:var(--color-alert)">hard match</small>' : ""}</td>

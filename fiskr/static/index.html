@@ -1713,7 +1713,7 @@
 <div id="sub-sec-screening-transactions" class="sub-tab-content active">
  <div class="card">
  <h2>Filtrage Transactionnel ISO 20022</h2>
- <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques — sont criblées contre les listes en production. Verdict <strong>PASS</strong> ou <strong>HIT</strong> ; chaque partie criblée est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+ <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques et intermédiaires — sont criblées contre les listes en production, sur leur nom ou leur identifiant exact (BIC, LEI), ainsi que le texte libre des informations de remise. Verdict <strong>HIT</strong>, <strong>INCOMPLETE</strong> (une partie n'a pu être criblée, ou une information obligatoire du règlement (UE) 2023/1113 manque) ou <strong>PASS</strong> ; chaque partie, criblée ou non, est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
  <div class="form-row" style="align-items: flex-end;">
  <div class="form-group" style="flex: 1;">
  <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
@@ -1727,6 +1727,7 @@
  <hr>
  <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
  <p class="section-desc" id="txn-message-info"></p>
+ <div id="txn-missing-info"></div>
  <div class="table-container max-height-table">
  <table id="txn-results-table">
  <thead>
@@ -1734,7 +1735,7 @@
  <th>Partie</th>
  <th>Rôle(s)</th>
  <th>Pays</th>
- <th>BIC</th>
+ <th>BIC / LEI</th>
  <th>Score</th>
  <th>Meilleur match</th>
  <th>Statut</th>
@@ -1972,6 +1973,7 @@
  <option value="ALERT">Alerte</option>
  <option value="NO_MATCH">Aucun match</option>
  <option value="WHITELISTED">Liste blanche</option>
+ <option value="NOT_SCREENED">Non criblée</option>
  </select>
  <label for="audit-date-from" style="align-self: center;">Du</label>
  <input type="date" id="audit-date-from" onchange="fetchAuditHistory(1)" title="Date de début (incluse)">

@@ -90,7 +90,8 @@ from fiskr.names import ensure_parsed_name
 from fiskr.identification import elements_d_identification
 from fiskr.sources import OPENSANCTIONS_BY_KEY, OPENSANCTIONS_BY_FILE_TYPE
 from fiskr.transactions import (parse_iso20022_payment, screen_payment_message,
-                                MessageTropVolumineux, MAX_PARTIES_PAR_MESSAGE)
+                                MessageTropVolumineux, MessageSansPartieCriblable,
+                                MAX_PARTIES_PAR_MESSAGE)
 from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
@@ -3346,8 +3347,22 @@ async def screen_transaction_message(
     ou pacs.008, crible chaque partie (donneur d'ordre, bénéficiaire, ultimes,
     agents bancaires) contre les listes en production — ou le sous-ensemble
     `screening_lists` (CSV de types WATCHLIST_*, restriction tracée dans
-    l'audit) — et rend un verdict global PASS / HIT. Chaque partie criblée
-    est tracée dans le journal d'audit ; chaque hit ouvre une alerte.
+    l'audit) — ainsi que ses informations de remise (`RmtInf/Ustrd`), et rend
+    un verdict global :
+
+    - `HIT` : au moins une correspondance en alerte (partie ou texte libre) ;
+      chaque hit ouvre une alerte adjudicable ;
+    - `INCOMPLETE` : rien n'est en alerte, mais le filtrage ne peut pas établir
+      un PASS — une partie n'a pu être comparée à rien (statut
+      `NOT_SCREENED`, motif dans `not_screened_label`), ou une information
+      obligatoire du règlement (UE) 2023/1113, art. 4, manque
+      (`missing_information`, liste nommée avec les transactions concernées) ;
+    - `PASS` : toutes les parties criblées sans correspondance, message complet.
+
+    Chaque partie, criblée ou non, est tracée dans le journal d'audit. Une
+    partie sans nom est rapprochée sur son identifiant exact (BIC, LEI). Un
+    message dont aucune partie ne porte de nom ni d'identifiant exact est
+    refusé (422) : un verdict n'y porterait sur rien.
     """
     requested_lists = None
     if screening_lists and screening_lists.strip():
@@ -3385,13 +3400,17 @@ async def screen_transaction_message(
         # d'attente : le message dit combien de parties il porte et quoi faire.
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
+    except MessageSansPartieCriblable as e:
+        # Bien forme, mais rien a comparer : ni PASS ni HIT n'auraient de sens.
+        raise HTTPException(
+            status_code=422, detail=str(e))
     if result.get("verdict") == "HIT":
         hits = [p for p in (result.get("parties") or []) if p.get("status") == "ALERT"]
         emit(db, "filtering_hit", {
             "Fichier": file.filename, "Type de message": parsed.get("message_type"),
             "Identifiant du message": parsed.get("msg_id"),
             "Parties en alerte": result.get("hits_count"),
-            "Parties criblées": len(result.get("parties") or []),
+            "Parties criblées": len(result.get("parties") or []) - result.get("not_screened_count", 0),
             "Détail": ", ".join(
                 f"{h.get('name')} → {h.get('best_watchlist_name')} ({h.get('final_score')})"
                 for h in hits[:5]

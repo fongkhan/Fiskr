@@ -296,8 +296,10 @@ PACS_XML = """<?xml version="1.0" encoding="UTF-8"?>
   <CdtTrfTxInf>
    <PmtId><EndToEndId>E2E-1</EndToEndId></PmtId>
    <IntrBkSttlmAmt Ccy="EUR">100</IntrBkSttlmAmt>
-   <Dbtr><Nm>Vladimir PUTIN</Nm><PstlAdr><Ctry>RU</Ctry></PstlAdr></Dbtr>
+   <Dbtr><Nm>Vladimir PUTIN</Nm><PstlAdr><TwnNm>Moscow</TwnNm><Ctry>RU</Ctry></PstlAdr></Dbtr>
+   <DbtrAcct><Id><Othr><Id>40817810099910004312</Id></Othr></Id></DbtrAcct>
    <Cdtr><Nm>John Doe</Nm><PstlAdr><Ctry>US</Ctry></PstlAdr></Cdtr>
+   <CdtrAcct><Id><Othr><Id>021000021-7766554433</Id></Othr></Id></CdtrAcct>
   </CdtTrfTxInf>
  </FIToFICstmrCdtTrf>
 </Document>
@@ -331,6 +333,14 @@ def _index_of(entities):
 
 
 def test_transaction_screening_restriction(isolated_db):
+    """
+    Reecrit (filtrage qui ne rend PASS que sur ce qu'il a crible) : la
+    fixture ne portait ni comptes ni ville du donneur d'ordre — informations
+    obligatoires du reglement (UE) 2023/1113, art. 4 — et la branche restreinte
+    epinglait un PASS sur ce message incomplet. Comptes et ville ont ete
+    ajoutes a la fixture ; l'intention du test (la restriction exclut bien les
+    autres listes, et elle est tracee) est inchangee.
+    """
     parsed = parse_iso20022_payment(PACS_XML.encode("utf-8"))
     index = _index_of([PUTIN_ENTITY])
 

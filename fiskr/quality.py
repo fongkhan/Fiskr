@@ -269,6 +269,14 @@ def _strip_accents_for_matching_cached(text, channel, _active):
         return text
     return _strip_combining(text)
 
+# Suffixes juridiques retires des raisons sociales. UNE liste : le texte libre
+# du filtrage (fiskr/transactions.py) la relit mot a mot plutot que de passer
+# une expression reguliere sur chacun des noms listes de l'univers.
+MOTS_BRUIT_JURIDIQUES = frozenset({"SA", "SARL", "LLC", "LTD", "GMBH", "SOCIETE"})
+_MOTIF_BRUIT_JURIDIQUE = re.compile(
+    r"\b(" + "|".join(sorted(MOTS_BRUIT_JURIDIQUES)) + r")\b", re.IGNORECASE)
+
+
 def clean_noise_words(text: str, channel: str = None) -> str:
     """Removes corporate noise suffixes (SA, SARL, LLC, LTD, GMBH, SOCIETE) for PMs.
 
@@ -280,8 +288,7 @@ def clean_noise_words(text: str, channel: str = None) -> str:
     """
     if channel is not None and not caps.is_active(caps.CAP_NOISE_WORDS, channel):
         return text
-    pattern = r"\b(SA|SARL|LLC|LTD|GMBH|SOCIETE)\b"
-    cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    cleaned = _MOTIF_BRUIT_JURIDIQUE.sub("", text)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 def validate_date(date_str: str) -> bool:

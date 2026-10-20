@@ -40,6 +40,7 @@ PAIN_001_XML = """<?xml version="1.0" encoding="UTF-8"?>
     <Amt><InstdAmt Ccy="EUR">1000.00</InstdAmt></Amt>
     <CdtrAgt><FinInstnId><BICFI>DEUTDEFF</BICFI></FinInstnId></CdtrAgt>
     <Cdtr><Nm>Igor PETROV</Nm><PstlAdr><Ctry>RU</Ctry></PstlAdr></Cdtr>
+    <CdtrAcct><Id><IBAN>DE89370400440532013000</IBAN></Id></CdtrAcct>
     <UltmtCdtr><Nm>Volga Shipping LLC</Nm></UltmtCdtr>
     <RmtInf><Ustrd>Invoice 42</Ustrd></RmtInf>
    </CdtTrfTxInf>
@@ -183,6 +184,15 @@ def test_transaction_screening_hit_opens_alert(db):
 
 
 def test_transaction_screening_pass(db):
+    """
+    Message COMPLET et sans correspondance -> PASS.
+
+    Reecrit (filtrage qui ne rend PASS que sur ce qu'il a crible) : la
+    fixture ne portait pas le compte du beneficiaire (CdtrAcct), information
+    obligatoire du reglement (UE) 2023/1113, art. 4 §2 b), et ce test
+    epinglait un PASS sur un message incomplet. Le compte a ete ajoute a la
+    fixture ; le cas incomplet est desormais tenu par tests/test_filtrage_complet.py.
+    """
     parsed = parse_iso20022_payment(PAIN_001_XML.encode("utf-8"))
     # Index sur une entite sans rapport phonetique avec les parties du message
     other = dict(PUTIN_ENTITY, entity_id="TEST-X", primary_name="XYLOPHONE ZZYZX",
@@ -343,6 +353,8 @@ def test_transaction_endpoint_rejects_bad_xml(client):
 # watchlist.json fournissait quand le fichier tournait seul.
 @pytest.mark.usefixtures("listes_de_demonstration")
 def test_transaction_endpoint_pass(client):
+    """PASS de bout en bout sur un message complet (fixture completee du
+    compte du beneficiaire, cf. test_transaction_screening_pass)."""
     xml = PAIN_001_XML.replace("Igor PETROV", "Zzyzx Qwortan") \
                       .replace("ACME Corp", "Blorptech Vexatron") \
                       .replace("Volga Shipping LLC", "Qwyjibo Holdings")

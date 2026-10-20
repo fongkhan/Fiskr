@@ -169,7 +169,7 @@ La guidance du Wolfsberg Group structure un programme de criblage autour de : l'
 
 | Item | Statut |
 |---|---|
-| Filtrage transactionnel ISO 20022 | ✅ parseur pain.001/pacs.008 + criblage de toutes les parties, verdict PASS/HIT, audit + alertes (`POST /api/transactions/screen`) |
+| Filtrage transactionnel ISO 20022 | ✅ parseur pain.001/pacs.008 + criblage de toutes les parties (nom ou identifiant exact BIC/LEI) et du texte libre, contrôle de complétude 2023/1113, verdict PASS/INCOMPLETE/HIT, audit + alertes (`POST /api/transactions/screen`) |
 | Adverse media | ✅ connecteur Google News RSS gratuit (mots-clés LCB-FT, fournisseur remplaçable) — informatif uniquement ; un partenariat données (Dow Jones/Factiva) reste supérieur en couverture |
 | Narratifs d'alertes IA human-in-the-loop | ✅ projet de narratif déterministe fondé sur le `decision_tree` (+ reformulation Claude opt-in), décision humaine 4-yeux inchangée |
 
