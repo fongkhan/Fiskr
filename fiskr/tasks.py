@@ -173,6 +173,14 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
         ctx.update(phase="RELOAD", snapshot_id=snapshot_id)
         _refresh_production_cache(session)
 
+        # Les fiches RETIREES par cette version : alertes ouvertes signalees
+        # radiees, mesures de gel en vigueur « radiation a examiner ». Hors du
+        # reglage de re-criblage automatique : ce n'est pas un re-criblage,
+        # c'est la consequence du delta qu'on vient d'approuver.
+        from fiskr.caducite import constater_les_radiations
+        radiations = constater_les_radiations(session, snap.file_type, snap.snapshot_id,
+                                              previous_snapshot_id)
+
         rescreen_result = None
         if auto_rescreen_enabled(session):
             rescreen_result = rescreen_after_snapshot_change(
@@ -184,16 +192,29 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
             )
         # Étape structurante de la production des listes : mail immédiat
         report = snap.backtest_report or {}
+        # Le verdict tel que le dossier l'a fige : « OK » d'un rapport perime
+        # ne se recopie pas sans le dire.
+        from fiskr.database import ReviewRecord
+        dossier = session.query(ReviewRecord).filter(
+            ReviewRecord.snapshot_id == snapshot_id, ReviewRecord.decision == "APPROVED"
+        ).order_by(ReviewRecord.id.desc()).first()
+        perime = bool(dossier and (dossier.backtest_validity or {}).get("stale"))
         emit(session, "snapshot_approved", {
             "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
             "Fiches": snap.record_count, "Exclusions": excluded_count,
             "Approuvé par": username,
             "Commentaire": snap.review_comment or "—",
-            "Cahier de tests": f"{report.get('verdict')} (écart {report.get('gap_pct')} %)" if report else "non exécuté",
+            "Cahier de tests": (f"{report.get('verdict')} (écart {report.get('gap_pct')} %)"
+                                + (" — périmé à la décision" if perime else "")) if report else "non exécuté",
             "Nouvelles alertes (re-criblage)": (rescreen_result or {}).get("new_alerts", 0),
             "Alertes re-détectées (re-criblage)": (rescreen_result or {}).get("redetected_alerts", 0),
+            "Alertes devenues caduques": (rescreen_result or {}).get("lapsed_alerts", 0),
+            "Fiches radiées": radiations["delisted"],
+            "Alertes ouvertes sur une fiche radiée": radiations["open_alerts_delisted"],
+            "Mesures de gel : radiation à examiner": radiations["gel_measures_flagged"],
         })
-        ctx.set_result({"snapshot_id": snapshot_id, "rescreen": rescreen_result})
+        ctx.set_result({"snapshot_id": snapshot_id, "rescreen": rescreen_result,
+                        "radiations": radiations})
     finally:
         session.close()
 
@@ -326,6 +347,16 @@ def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
         session.commit()
         report = _SYNC_RUNNERS[run_key](session, **kwargs)
         result = _serialize_sync_report(report)
+        # Version appliquee directement (homologation inactive) : ses fiches
+        # retirees ont les memes suites qu'a l'approbation (fiskr/caducite.py)
+        if report.status == "SUCCESS" and report.snapshot_id and report.previous_snapshot_id:
+            appliquee = session.query(Snapshot).filter(
+                Snapshot.snapshot_id == report.snapshot_id).first()
+            if appliquee is not None and appliquee.status == "READY":
+                from fiskr.caducite import constater_les_radiations
+                result["radiations"] = constater_les_radiations(
+                    session, appliquee.file_type, appliquee.snapshot_id,
+                    report.previous_snapshot_id)
         # Surveillance continue : re-criblage du referentiel clients contre
         # les entites nouvelles/modifiees du snapshot applique
         if report.status == "SUCCESS" and report.snapshot_id and auto_rescreen_enabled(session):

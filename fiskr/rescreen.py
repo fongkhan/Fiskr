@@ -167,6 +167,10 @@ def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
     Et la trace du passage : `screening_pass_id` (None : aucun passage n'a eu
     lieu, faute de clients) et `clients_covered`, les fiches dont il a etabli
     ou prolonge la couverture contre l'univers en production.
+
+    `lapsed_alerts` : alertes ouvertes dont la fiche vient d'etre re-criblee et
+    dont le couple ne franchit plus le seuil, rendues caduques
+    (fiskr.caducite). Zero hors d'une mise en production de liste.
     """
     return {
         "changed_entities": int(changed_entities),
@@ -179,6 +183,7 @@ def compteurs_de_recriblage(changed_entities: int = 0) -> Dict[str, int]:
         "whitelist_stale": 0,
         "screening_pass_id": None,
         "clients_covered": 0,
+        "lapsed_alerts": 0,
     }
 
 
@@ -186,7 +191,8 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
                             trigger_detail: str,
                             progress: Optional[Callable[[int, int], None]] = None,
                             clients: Optional[List[Dict[str, Any]]] = None,
-                            reference: Optional[tuple] = None) -> Dict[str, int]:
+                            reference: Optional[tuple] = None,
+                            paires_franchies: Optional[Set] = None) -> Dict[str, int]:
     """
     Crible le referentiel clients (ou les seuls `clients` donnes) contre un
     ensemble borne d'entites (index de blocking local). Retourne les compteurs
@@ -195,6 +201,11 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
     `reference` : (version, empreinte) de l'univers, celle que le passage a lue
     en s'ouvrant — les lignes d'audit des correspondances et la ligne du
     passage portent ainsi la MEME valeur, lue une seule fois.
+
+    `paires_franchies` : s'il est fourni, recoit chaque couple (client, fiche)
+    trouve au-dessus du seuil — liste blanche et regles comprises, puisqu'ils
+    le franchissent. C'est ce qui permet de dire, ensuite, quelles alertes
+    ouvertes ne le franchissent plus (fiskr.caducite).
 
     `progress(traites, total)` est appele tous les 500 clients : le re-criblage
     qui suit une approbation d'homologation peut durer plusieurs minutes sur un
@@ -249,6 +260,9 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
 
         client_ref = client.get("client_id")
         hits = sorted(hits, key=lambda h: -h["final_score"])
+        if paires_franchies is not None:
+            paires_franchies.update(
+                (client_ref, (h.get("watchlist_entity") or {}).get("entity_id")) for h in hits)
         paires = whitelisted_pairs(
             db, client_ref,
             [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits])
@@ -434,14 +448,22 @@ def rescreen_after_snapshot_change(db, file_type: str, new_snapshot_id: str,
     # clients, confrontes a tout, resteraient « non criblés contre la version
     # en production » faute d'avoir ete couverts contre l'univers vide d'avant.
     complet = previous_snapshot_id is None and lots_en_production(db) == [new_snapshot_id]
-    return _executer_le_passage(
+    franchies: Set = set()
+    result = _executer_le_passage(
         db, NATURE_MISE_A_JOUR, changed, clients,
         trigger_detail=f"[Re-criblage automatique après mise à jour {file_type}]",
         progress=progress, complet=complet, reference_avant=reference_avant,
         scope={"listes": [file_type], "complet": complet, "snapshot_id": new_snapshot_id,
                "snapshot_precedent": previous_snapshot_id},
-        started_by=started_by,
+        started_by=started_by, paires_franchies=franchies,
     )
+    # Les alertes ouvertes sur ces fiches que ce passage n'a PAS retrouvees
+    # au-dessus du seuil : le cahier de tests les annoncait « resolues par la
+    # liste candidate », et elles restaient en file comme si de rien n'etait.
+    from fiskr.caducite import examiner_les_caduques
+    result["lapsed_alerts"] = examiner_les_caduques(
+        db, file_type, changed, franchies, version=new_snapshot_id)
+    return result
 
 
 class UniversAbsent(RuntimeError):
@@ -645,7 +667,8 @@ def _executer_le_passage(db, nature: str, entites: List[Dict[str, Any]],
                          progress: Optional[Callable[[int, int], None]] = None, *,
                          complet: bool, reference_avant: Optional[str] = None,
                          scope: Optional[Dict[str, Any]] = None,
-                         started_by: Optional[str] = None) -> Dict[str, Any]:
+                         started_by: Optional[str] = None,
+                         paires_franchies: Optional[Set] = None) -> Dict[str, Any]:
     """
     Un passage, de bout en bout : la ligne qui le decrit, le criblage, la
     trace sur chaque fiche. Un echec laisse le passage en ECHEC avec sa cause,
@@ -668,7 +691,8 @@ def _executer_le_passage(db, nature: str, entites: List[Dict[str, Any]],
     passage_id = passage.id
     try:
         resultat = _screen_clients_against(db, entites, trigger_detail, progress,
-                                           clients=clients, reference=(version, empreinte))
+                                           clients=clients, reference=(version, empreinte),
+                                           paires_franchies=paires_franchies)
         couverts = _dater_les_fiches(db, passage_id, empreinte,
                                      clients if entites else [], clients,
                                      complet=complet, reference_avant=reference_avant)

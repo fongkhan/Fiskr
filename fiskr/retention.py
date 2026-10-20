@@ -117,9 +117,13 @@ def _cutoffs(policy: Dict) -> Dict[str, Optional[datetime]]:
 def _purgeable_audit_query(db, cutoff: datetime):
     """Lignes d'audit expirees ET orphelines (plus referencees par une alerte)."""
     referenced = db.query(Alert.audit_id)
+    # Le DERNIER criblage d'une alerte est l'arbre que son valideur lit
+    # (fiskr/alerts.py, `latest_audit_id`) : il est reference au meme titre.
+    derniers = db.query(Alert.latest_audit_id).filter(Alert.latest_audit_id.isnot(None))
     return db.query(AuditTrail).filter(
         AuditTrail.timestamp < cutoff,
         ~AuditTrail.id.in_(referenced),
+        ~AuditTrail.id.in_(derniers),
     )
 
 

@@ -1456,6 +1456,7 @@
  <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
  <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
  <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
+ <button class="btn btn-sm" data-filter="LAPSED" onclick="setAlertFilter('SCREENING','LAPSED')" style="background: var(--surface-3);" title="Alertes ouvertes dont la correspondance ne tient plus : fiche radiée, ou couple re-criblé sous le seuil">Caduques</button>
  <select id="screening-priority-filter" onchange="fetchAlerts('SCREENING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
  <option value="">Toutes priorités</option>
  <option value="CRITICAL">Critique</option>
@@ -1511,6 +1512,7 @@
  <option value="">Tous les statuts</option>
  <option value="A_DECLARER">À déclarer</option>
  <option value="EN_RETARD">En retard de déclaration</option>
+ <option value="RADIATION_A_EXAMINER">Radiation à examiner</option>
  <option value="DECLAREE">Déclarée</option>
  <option value="LEVEE">Levée</option>
  </select>

@@ -258,7 +258,7 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
     Rend la structure DEJA tronquee (`{summary, details}` avec les compteurs
     `*_truncated`), celle que les rapports stockent.
     """
-    from sqlalchemy import and_, exists, func, select
+    from sqlalchemy import and_, func, select
     from sqlalchemy.orm import aliased
 
     modele, colonne_cle, colonnes_nom, colonne_type = _descripteur(cle)
@@ -270,10 +270,8 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
     ancien = aliased(WatchlistEntity)
 
     def _sans_homologue(cote, cote_snapshot, autre, autre_snapshot):
-        sous_requete = select(1).where(and_(
-            autre.snapshot_id == autre_snapshot,
-            getattr(autre, colonne_cle) == getattr(cote, colonne_cle)))
-        return and_(cote.snapshot_id == cote_snapshot, ~exists(sous_requete))
+        return _condition_sans_homologue(colonne_cle, cote, cote_snapshot,
+                                         autre, autre_snapshot)
 
     def _nom(cote):
         colonnes = [getattr(cote, c) for c in colonnes_nom]
@@ -323,6 +321,41 @@ def calculate_delta_db(db, old_snapshot_id, new_snapshot_id,
     return _rapport(ajouts, nb_ajouts, retraits, nb_retraits,
                     verifie["lignes"], verifie["nombre"], limite,
                     nb_identite=verifie["identite"], issues=verifie["issues"])
+
+
+def _condition_sans_homologue(colonne_cle: str, cote, cote_snapshot, autre, autre_snapshot):
+    """Les fiches de `cote_snapshot` dont l'identifiant est absent de
+    `autre_snapshot` : l'anti-jointure qui fait les ajouts et les retraits du
+    delta. Une seule definition, que lisent le delta et les radiations."""
+    from sqlalchemy import and_, exists, select
+    sous_requete = select(1).where(and_(
+        autre.snapshot_id == autre_snapshot,
+        getattr(autre, colonne_cle) == getattr(cote, colonne_cle)))
+    return and_(cote.snapshot_id == cote_snapshot, ~exists(sous_requete))
+
+
+def fiches_sans_homologue(db, snapshot_id: str, autre_snapshot_id: str,
+                          colonnes: Tuple[str, ...]) -> List[Dict[str, Any]]:
+    """
+    TOUTES les fiches de `snapshot_id` dont l'`entity_id` est absent de
+    `autre_snapshot_id`, sans plafond, reduites aux `colonnes` demandees.
+
+    (precedent, nouveau) rend les RETRAITS du delta ; (nouveau, precedent) ses
+    AJOUTS — la meme anti-jointure que `calculate_delta_db`, qui ne publie que
+    cent lignes par categorie. Les radiations (fiskr/caducite.py) ont besoin de
+    toutes, et d'aucune verification champ a champ : un retrait n'a pas
+    d'homologue a comparer.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import aliased
+    from fiskr.database import WatchlistEntity
+
+    cote, autre = aliased(WatchlistEntity), aliased(WatchlistEntity)
+    condition = _condition_sans_homologue("entity_id", cote, snapshot_id,
+                                          autre, autre_snapshot_id)
+    requete = select(*[getattr(cote, c) for c in colonnes]).where(condition) \
+        .order_by(cote.entity_id)
+    return [dict(zip(colonnes, ligne)) for ligne in db.execute(requete).all()]
 
 
 # Fiches comparees par aller-retour en base : borne la memoire (deux tranches

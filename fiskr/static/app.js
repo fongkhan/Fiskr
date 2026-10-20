@@ -1020,6 +1020,8 @@ const ALERT_EVENT_LABELS = {
  GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
  GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
  WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
+ DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
+ LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
 };
 
 function alertEventLabel(action) {
@@ -6142,6 +6144,8 @@ let pendingReviews = [];
 let reviewCurrentSnapshotId = null;
 let reviewCurrentPage = 1;
 let reviewExcludedSelection = new Set();
+// Approuver le lot examiné exige un motif écrit (cahier WARN ou périmé)
+let reviewMotifExige = false;
 
 // Roles empilables : "user,reviewer" -> ["user", "reviewer"]
 function userRoles(user) {
@@ -6700,11 +6704,16 @@ function pendingBacktestCell(snap) {
  if (!snap.backtest_verdict) {
  return `<span style="color: var(--text-muted);">—</span>`;
  }
- const ok = snap.backtest_verdict === "OK";
+ const ok = snap.backtest_verdict === "OK" && !snap.backtest_stale;
  const gap = (snap.backtest_gap_pct !== null && snap.backtest_gap_pct !== undefined)
  ? ` (écart ${snap.backtest_gap_pct} %)` : "";
+ // Un verdict ne vaut que pour ce qu'il a testé : un rapport périmé
+ // (exclusions posées ou levées, production changée depuis) n'affiche plus
+ // de coche verte — la raison est au survol.
+ const perime = snap.backtest_stale
+ ? ` <span class="status-badge warning" style="white-space: nowrap;" title="${escapeHtml((snap.backtest_stale_reasons || []).join(" "))}">Périmé</span>` : "";
  return `<span style="color: ${ok ? "var(--success-soft-text)" : "var(--color-warning)"}; font-weight: 600;"
- title="Verdict du cahier de tests${gap}">${ok ? "✓ OK" : " " + escapeHtml(snap.backtest_verdict)}</span>`;
+ title="Verdict du cahier de tests${gap}">${ok ? "✓ OK" : " " + escapeHtml(snap.backtest_verdict)}</span>${perime}`;
 }
 
 // Delta d'une ligne de la file d'attente : le delta mémorisé à la
@@ -6805,14 +6814,29 @@ async function approveSelectedSnapshots() {
  { title: "Homologation groupée", confirmLabel: "Mettre en production" }
  );
  if (!ok) return;
+ // Lots dont le cahier est WARN ou périmé : un motif est exigé. Un motif
+ // COMMUN est accepté s'il est explicite — on nomme ces lots avant de le
+ // demander, et la requête les désigne (`comment_covers`) : un lot devenu
+ // WARN entre l'affichage et le clic n'est pas couvert, il est refusé seul.
+ const aMotiver = pendingReviews.filter(s => ids.includes(s.snapshot_id) && s.approval_comment_required);
+ let comment = (document.getElementById("review-comment") || {}).value || "";
+ if (aMotiver.length) {
+ const motif = await promptDialog("Motif commun d'approbation", {
+  message: `${aMotiver.length} liste(s) au cahier de tests WARN ou périmé : `
+  + `${aMotiver.map(s => listTypeLabel(s.file_type)).join(", ")}. `
+  + "Le motif saisi sera tracé au dossier d'homologation de chacune.",
+  textarea: true, required: true, placeholder: "Pourquoi l'écart ou la péremption est accepté…" });
+ if (motif === null) return;
+ comment = motif;
+ }
  const btn = document.getElementById("review-bulk-approve-btn");
  if (btn) { btn.disabled = true; btn.textContent = "Mise en production…"; }
  try {
- const comment = (document.getElementById("review-comment") || {}).value || "";
  const response = await apiFetch("/api/review/snapshots/approve-bulk", {
  method: "POST",
  headers: { "Content-Type": "application/json" },
- body: JSON.stringify({ snapshot_ids: ids, comment })
+ body: JSON.stringify({ snapshot_ids: ids, comment,
+  comment_covers: aMotiver.map(s => s.snapshot_id) })
  });
  const data = await response.json();
  if (!response.ok) { showToast(data.detail || "Homologation groupée impossible.", "error"); return; }
@@ -6882,8 +6906,9 @@ async function openReviewDetail(snapshotId) {
  showReviewStep(1);
  fetchTestPanels();
  fetchBacktestCandidateRules();
- renderBacktestReport(data.backtest_report);
+ renderBacktestReport(data.backtest_report, data);
  renderBacktestJobState(data.backtest_job, snapshotId);
+ libelleDuCommentaireDeRevue(data);
  // Reprise d'état : un cahier de tests lancé avant un rechargement de
  // page (ou depuis un autre poste) reverrouille le bouton et se
  // reconnecte à sa fin — la progression ne se perd jamais
@@ -7138,6 +7163,8 @@ async function fetchReviewHistory(page = 1) {
      ? `<span class="status-badge ${r.backtest_verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(r.backtest_verdict)}</span>`
        + (r.backtest_gap_pct !== null && r.backtest_gap_pct !== undefined
           ? ` <small style="color:var(--text-muted)">écart ${r.backtest_gap_pct} %</small>` : "")
+       // Le verdict tel qu'il valait À LA DÉCISION : un OK périmé le dit
+       + (r.backtest_stale ? ` <span class="status-badge warning">Périmé à la décision</span>` : "")
      : '<small style="color:var(--text-muted)">aucun</small>';
     return `
     <tr>
@@ -7219,6 +7246,12 @@ async function openReviewHistoryDetail(recordId) {
   const cahier = report ? `
    <table style="width:100%; margin-bottom:0.8rem;"><tbody>
     ${ligne("Verdict", `<span class="status-badge ${report.verdict === "OK" ? "no_match" : "alert"}">${escapeHtml(report.verdict || "-")}</span>`)}
+    ${d.backtest_validity && d.backtest_validity.stale
+      ? ligne("Validité à la décision", `<span class="status-badge warning">Périmé à la décision</span> <small>${escapeHtml((d.backtest_validity.reasons || []).join(" "))}</small>`)
+      : ""}
+    ${d.backtest_validity && d.backtest_validity.comment_required
+      ? ligne("Motif exigé", `<span>${escapeHtml(d.backtest_validity.comment_required)}</span>${d.backtest_validity.comment_shared_by ? ` · <span>motif commun à une homologation groupée</span> (${d.backtest_validity.comment_shared_by})` : ""}`)
+      : ""}
     ${ligne("Écart", `${report.gap_pct} % (seuil ${report.threshold_pct} %)`)}
     ${SENS_DE_L_ECART[report.gap_direction] ? ligne("Sens de l'écart", `<span>${SENS_DE_L_ECART[report.gap_direction]}</span>`) : ""}
     ${ligne("Clients interceptés — production", (report.current || {}).alerts)}
@@ -7401,7 +7434,10 @@ async function loadBacktestReportFor(snapshotId) {
  const detail = await response.json();
  const report = detail.backtest_report;
  if (!report) return;
- if (reviewCurrentSnapshotId === snapshotId) renderBacktestReport(report);
+ if (reviewCurrentSnapshotId === snapshotId) {
+ renderBacktestReport(report, detail);
+ libelleDuCommentaireDeRevue(detail);
+ }
  showToast(report.verdict === "OK"
  ? "Cahier de tests terminé : écart dans le seuil toléré."
  : (report.gap_direction === "INTERCEPTION_LOSS"
@@ -7543,10 +7579,56 @@ function attributionParListe(report) {
   </div>`;
 }
 
-function renderBacktestReport(report) {
+// Le libellé du commentaire dit quand un motif est EXIGÉ pour approuver
+// (cahier WARN ou périmé) : l'apprendre au refus, c'est l'apprendre trop tard.
+function libelleDuCommentaireDeRevue(detail) {
+ reviewMotifExige = !!(detail && detail.approval_comment_required);
+ const commentLabel = document.querySelector('label[for="review-comment"]');
+ if (commentLabel) commentLabel.textContent = reviewMotifExige
+ ? "Motif de l'approbation (obligatoire : cahier de tests WARN ou périmé)"
+ : "Commentaire de revue (obligatoire pour un rejet)";
+}
+
+// Une exclusion posée ou levée peut rendre le cahier périmé : l'écran le
+// redit tout de suite (bandeau, rappel, libellé du commentaire), sans
+// changer d'étape.
+async function rafraichirValiditeDuCahier(snapshotId) {
+ try {
+ const response = await apiFetch(`/api/review/snapshots/${encodeURIComponent(snapshotId)}`);
+ if (!response.ok || reviewCurrentSnapshotId !== snapshotId) return;
+ const detail = await response.json();
+ renderBacktestReport(detail.backtest_report, detail);
+ libelleDuCommentaireDeRevue(detail);
+ } catch (e) {
+ console.error("Error refreshing backtest validity:", e);
+ }
+}
+
+// Le cahier de tests a perdu sa validité : on relance d'un geste, depuis
+// l'étape 3 (même panel, même règle candidate que le formulaire).
+function relancerCahierPerime() {
+ showReviewStep(3);
+ runReviewBacktest();
+}
+
+// `detail` : le détail du snapshot (GET /api/review/snapshots/{id}), qui dit si
+// le rapport est PÉRIMÉ et pourquoi, et ce que le réglage exige.
+function renderBacktestReport(report, detail = null) {
  const container = document.getElementById("backtest-results");
  const reminder = document.getElementById("review-backtest-reminder");
  if (!container) return;
+ // Un verdict ne vaut que pour ce qu'il a testé (fiskr/backtest.py) : un
+ // rapport périmé reste affiché tel qu'il était, sous un bandeau qui dit
+ // pourquoi il ne vaut plus OK — et propose de le relancer.
+ const perime = !!(report && detail && detail.backtest_stale);
+ const obligatoire = !!(detail && detail.backtest_required);
+ const bandeauPerime = perime ? `
+ <div class="job-row warn" style="display:block; padding: 0.6rem 0.8rem; margin-bottom: 0.75rem;">
+ <strong>Rapport périmé : il ne vaut pas OK.</strong>
+ <div style="font-size: 0.85rem;"><span>Ce rapport ne décrit plus ce qui serait mis en production :</span></div>
+ <ul style="margin: 0.3rem 0 0.5rem 1.1rem; font-size: 0.85rem;">${(detail.backtest_stale_reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ul>
+ <button class="btn btn-sm btn-secondary" onclick="relancerCahierPerime()">↻ Relancer le cahier de tests</button>
+ </div>` : "";
  if (!report) {
  container.classList.add("hidden");
  container.innerHTML = "";
@@ -7601,9 +7683,10 @@ function renderBacktestReport(report) {
 
  container.classList.remove("hidden");
  container.innerHTML = `
+ ${bandeauPerime}
  <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">
  <h3 style="margin: 0;">Résultats du cahier de tests</h3>
- ${backtestVerdictBadge(report)}
+ ${backtestVerdictBadge(report)}${perime ? ' <span class="status-badge warning">Périmé</span>' : ""}
  <small style="color: var(--text-muted);">panel de ${report.panel_size} pseudo-clients · exécuté par @${escapeHtml(report.executed_by || "")} le ${escapeHtml(executedStr)}</small>
  </div>
  <div class="score-metrics" style="flex-direction: row; gap: 1.5rem; margin-bottom: 1rem;">
@@ -7649,6 +7732,17 @@ function renderBacktestReport(report) {
   reminder.innerHTML = `<p class="section-desc" style="color: var(--color-danger);"><span>La liste candidate perd ${report.lost_interceptions_count} interception(s) : examinez les fiches retirées ou modifiées.</span> <span>Des Good Guys ou des exclusions creuseraient la perte ; si elle n'est pas justifiée, rejetez le lot.</span></p>`;
  } else {
   reminder.innerHTML = `<p class="section-desc" style="color: var(--color-warning);"> Le dernier cahier de tests signale un écart de ${report.gap_pct} % (seuil : ${report.threshold_pct} %). Posez des Good Guys ou des exclusions puis relancez-le avant d'approuver.</p>`;
+ }
+ // Sans cahier obligatoire, un WARN s'approuvait sans un mot : le motif est
+ // désormais exigé, et l'écran le dit avant le clic.
+ if (report.verdict !== "OK" && !obligatoire) {
+  reminder.innerHTML += `<p class="section-desc" style="color: var(--color-warning);">Un commentaire motivé est exigé pour approuver malgré l'écart ; il est tracé au dossier d'homologation.</p>`;
+ }
+ // Périmé : ce qui précède décrit un état qui n'est plus celui du lot.
+ if (perime) {
+  reminder.innerHTML = `<p class="section-desc" style="color: var(--color-warning);"><span>Rapport périmé : il ne vaut pas OK.</span> <span>${obligatoire
+   ? "L'approbation est refusée tant qu'il n'est pas relancé (cahier de tests obligatoire)."
+   : "Pour approuver malgré tout, un commentaire motivé est exigé ; il est tracé au dossier d'homologation."}</span></p>`;
  }
  }
 }
@@ -7853,6 +7947,7 @@ async function submitExclusions(event) {
  showToast(data.message, "success");
  loadReviewEntitiesPage(reviewCurrentPage);
  fetchPendingReviews();
+ rafraichirValiditeDuCahier(reviewCurrentSnapshotId);
  } catch (e) {
  console.error("Error submitting exclusions:", e);
  showToast("Erreur réseau de communication.", "error");
@@ -7879,6 +7974,7 @@ async function removeExclusions() {
  showToast(data.message, "success");
  loadReviewEntitiesPage(reviewCurrentPage);
  fetchPendingReviews();
+ rafraichirValiditeDuCahier(reviewCurrentSnapshotId);
  } catch (e) {
  console.error("Error removing exclusions:", e);
  showToast("Erreur réseau de communication.", "error");
@@ -7887,6 +7983,10 @@ async function removeExclusions() {
 
 async function approvePendingSnapshot() {
  if (!reviewCurrentSnapshotId) return;
+ if (reviewMotifExige && !document.getElementById("review-comment").value.trim()) {
+ showToast("Un commentaire motivé est exigé : le cahier de tests de ce lot est WARN ou périmé.", "error");
+ return;
+ }
  if (!await confirmDialog("Approuver ce snapshot ?\nIl sera mis en production et remplacera les listes antérieures du même type (hors entités exclues).", { title: "Approbation d'homologation", confirmLabel: "Approuver" })) return;
  const comment = document.getElementById("review-comment").value.trim();
  try {
@@ -7958,6 +8058,9 @@ let currentAlertId = null;
 // ce que les dialogues de décision offrent (case « liste blanche »).
 let currentAlertData = null;
 
+// Motif de clôture proposé par la caducité de l'alerte ouverte (vide sinon)
+let currentAlertLapsedReason = "";
+
 const ALERT_CHANNEL_CONF = {
  SCREENING: { table: "screening-alerts-table", listFilter: "screening-list-filter",
  priorityFilter: "screening-priority-filter", assigneeFilter: "screening-assignee-filter",
@@ -8003,12 +8106,75 @@ function alertSnoozeChip(a) {
  return `<br><span title="Mise en attente — reprend sa place dans la file à cette échéance" style="color: var(--text-muted); font-size: 0.7rem; font-weight: 700;"><span>EN ATTENTE</span><span> → ${escapeHtml(quand)}</span></span>`;
 }
 
+// Pastille d'une alerte CADUQUE (fiskr/caducite.py) : la correspondance ne
+// tient plus — fiche radiée, ou couple re-criblé sous le seuil. L'alerte reste
+// ouverte (un humain la clôt) ; le motif proposé est au survol.
+function alertLapsedChip(a) {
+ if (!a.lapsed) return "";
+ const libelle = a.delisted_at ? "RADIÉE" : "CADUQUE";
+ return `<br><span title="${escapeHtml(a.lapsed_reason || "")}" style="color: var(--color-warning); font-size: 0.7rem; font-weight: 700;">${libelle}</span>`;
+}
+
+// Modale : le dernier criblage du couple, quand un criblage l'a re-rencontré.
+// L'arbre affiché est le sien (`decision_tree`, servi par l'API) ; celui de la
+// création reste consultable juste en dessous.
+function dernierScoreHtml(a) {
+ if (!a.decision_tree_origin || typeof a.latest_score !== "number") return "";
+ return ` · <span>dernier criblage</span> <strong>${a.latest_score.toFixed(1)}%</strong> (<span>Audit</span> #${a.decision_tree_audit_id})`;
+}
+
+function bandeauCaduciteHtml(a) {
+ if (!a.lapsed) return "";
+ return `<div class="job-row warn" style="display:block; padding: 0.6rem 0.8rem; margin: 0.5rem 0;">
+ <strong>${a.delisted_at ? "Fiche radiée" : "Caduque"}</strong> — ${escapeHtml(a.lapsed_reason || "")}
+ <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.25rem;">L'alerte reste ouverte : un humain la clôt. Le motif ci-dessus est proposé à la décision.</div>
+ </div>`;
+}
+
+function arbreDOrigineHtml(a) {
+ const origine = a.decision_tree_origin;
+ if (!origine) return "";
+ // Même table de libellés que l'arbre courant quand elle existe (branche
+ // intégrée : `adjustmentLabel`) — sinon la clé, comme l'arbre courant ici.
+ const libelle = (k) => (typeof adjustmentLabel === "function" ? adjustmentLabel(k) : k);
+ const lignes = Object.entries(origine.adjustments || {}).map(([k, v]) =>
+ `<tr><td>${escapeHtml(libelle(k))}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`).join("");
+ return `<details style="margin-top: 0.5rem;">
+ <summary style="cursor: pointer; font-size: 0.85rem;"><span>Arbre de décision à la création</span> (<span>Audit</span> #${a.audit_id}, ${a.final_score.toFixed(1)}%)</summary>
+ <div class="table-container" style="max-height: 160px;"><table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${lignes || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table></div>
+ </details>`;
+}
+
+// Score de la file : le DERNIER criblage du couple quand il diffère de la
+// création — c'est lui qui dit si la correspondance tient encore.
+function alertScoreCell(a) {
+ const dernier = (typeof a.latest_score === "number") ? a.latest_score : a.final_score;
+ const couleur = dernier >= 90 ? "var(--color-alert)" : "var(--color-warning)";
+ const origine = (typeof a.latest_score === "number" && a.latest_score !== a.final_score)
+ ? `<br><small style="color: var(--text-muted);"><span>à la création</span> ${a.final_score.toFixed(1)}%</small>` : "";
+ return `<strong style="color: ${couleur};">${dernier.toFixed(1)}%</strong>${origine}`;
+}
+
+// Filtre « Caduques » : les alertes OUVERTES dont la correspondance ne tient
+// plus. Ce n'est pas un statut (l'alerte reste ouverte) : il se traduit en
+// statuts ouverts + `lapsed=true`.
+const LAPSED_FILTER = "LAPSED";
+
+function _parametresDeStatut(params, filter) {
+ if (filter === LAPSED_FILTER) {
+ params.set("status", DEFAULT_ALERT_FILTER);
+ params.set("lapsed", "true");
+ } else if (filter) {
+ params.set("status", filter);
+ }
+}
+
 // Export CSV de la file d'alertes avec les filtres actifs de l'écran
 function exportAlertsCsv(channel) {
  const conf = ALERT_CHANNEL_CONF[channel];
  const params = new URLSearchParams({ channel });
  const filter = alertsFilterByChannel[channel];
- if (filter) params.set("status", filter);
+ _parametresDeStatut(params, filter);
  const listFilterEl = document.getElementById(conf.listFilter);
  if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
  const prioEl = document.getElementById(conf.priorityFilter);
@@ -8054,7 +8220,7 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  try {
  const params = new URLSearchParams({ page: String(currentPage), page_size: String(ALERTS_PAGE_SIZE), channel });
  const filter = alertsFilterByChannel[channel];
- if (filter) params.set("status", filter);
+ _parametresDeStatut(params, filter);
  const listFilterEl = document.getElementById(conf.listFilter);
  if (listFilterEl && listFilterEl.value) params.set("list_type", listFilterEl.value);
  const prioFilterEl = document.getElementById(conf.priorityFilter);
@@ -8170,8 +8336,8 @@ function renderAlertsTable(channel, items) {
  <td>${etoile}${subject}</td>
  <td>${escapeHtml(a.watchlist_name)}<br><small style="color:var(--text-muted)">${escapeHtml(a.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(a.list_type)}</td>
- <td><strong style="color: ${a.final_score >= 90 ? 'var(--color-alert)' : 'var(--color-warning)'};">${a.final_score.toFixed(1)}%</strong></td>
- <td>${alertStatusBadge(a.status)}${alertSnoozeChip(a)}</td>
+ <td>${alertScoreCell(a)}</td>
+ <td>${alertStatusBadge(a.status)}${alertSnoozeChip(a)}${alertLapsedChip(a)}</td>
  <td>${escapeHtml(a.assigned_to || "—")}</td>
  <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})"> Instruire</button></td>
  </tr>`;
@@ -8273,7 +8439,7 @@ async function openAlertModal(alertId) {
 
  document.getElementById("alert-modal-body").innerHTML = `
  <p class="section-desc" style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
- Score final <strong>${a.final_score.toFixed(1)}%</strong> · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong>
+ Score final <strong>${a.final_score.toFixed(1)}%</strong>${dernierScoreHtml(a)} · assignée à <strong>${escapeHtml(a.assigned_to || "personne")}</strong>
  · journal d'audit #${a.audit_id} (${escapeHtml(a.watchlist_version || "")})
  · Priorité : ${prioritySelector}
  ${a.due_at ? `· Échéance SLA : <strong style="${a.overdue ? "color: var(--color-alert);" : ""}">${formatDateTime(a.due_at)}${a.overdue ? " " : ""}</strong>` : ""}
@@ -8283,11 +8449,13 @@ async function openAlertModal(alertId) {
  <a class="btn btn-sm btn-secondary" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)"> Rapport</a>
  </span>
  </p>
+ ${bandeauCaduciteHtml(a)}
  ${blocComparaison(a)}
  <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
  <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
  </div>
+ ${arbreDOrigineHtml(a)}
  ${resourceEquivalencesHtml(a.decision_tree)}
  ${nameRarityHtml(a.decision_tree)}
  ${blocNotesDeFiche(a.watchlist_entity_id, a.watchlist_notes)}
@@ -8310,6 +8478,7 @@ async function openAlertModal(alertId) {
  <div id="alert-adverse-container" class="hidden" style="margin-top: 0.75rem;"></div>
  `;
  currentAlertNames = { client: a.client_name || "", watchlist: a.watchlist_name || "" };
+ currentAlertLapsedReason = a.lapsed ? (a.lapsed_reason || "") : "";
  document.getElementById("alert-modal").classList.remove("hidden");
  } catch (e) {
  console.error("Error opening alert:", e);
@@ -8522,10 +8691,14 @@ function _versSaisieLocale(iso) {
 }
 
 function badgeStatutGel(m) {
+ // La fiche a été radiée de sa liste : la mesure reste en vigueur, la levée
+ // est à instruire (fiskr/caducite.py). Dit À CÔTÉ du statut, qui ne change pas.
+ const radiation = m.radiation_a_examiner
+ ? ` <span class="status-badge alert" style="white-space: nowrap;" title="${escapeHtml(m.radiation_detail || "")}">Radiation à examiner</span>` : "";
  // nowrap : un statut coupé sur trois lignes dans une colonne étroite se lit mal
- if (m.en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">En retard de déclaration</span>`;
+ if (m.en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">En retard de déclaration</span>${radiation}`;
  const classe = { A_DECLARER: "warning", DECLAREE: "no_match" }[m.statut] || "";
- return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(m.statut_label)}</span>`;
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(m.statut_label)}</span>${radiation}`;
 }
 
 function _options(liste, valeur, cle = "code", libelle = "label") {
@@ -8618,7 +8791,9 @@ function _blocMesure(m, vocab, isReviewer, auditeur) {
   </div>
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
-  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${_etapeLevee(m, vocab, isReviewer, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${m.radiation_a_examiner ? `
+   <p style="font-size: 0.85rem; color: var(--color-alert);"><strong>Radiation à examiner</strong> — ${escapeHtml(m.radiation_detail || "")}<br>
+   <span>Levée à instruire : rien n'est levé automatiquement. Vérifiez l'acte d'abrogation et qu'aucun autre régime ne désigne encore la personne.</span></p>` : ""}${_etapeLevee(m, vocab, isReviewer, auditeur)}
  </div>`;
 }
 
@@ -8971,10 +9146,15 @@ async function proposeAlertDecision(decision) {
  // 4-yeux coupé : la proposition CLÔT le faux positif, c'est le moment de valider
  const clotureDirecte = ingestionSettings && ingestionSettings.alert_four_eyes_required === false;
  const offrirListeBlanche = decision === "FALSE_POSITIVE" && clotureDirecte && _estReviseur() && !!a.client_id;
+ const motifs = motifsDeLaDecision(await chargerMotifsDeCloture(), decision);
+ // Alerte caduque (fiskr/caducite.py) : le motif constaté vient en tête des
+ // suggestions d'un faux positif — proposé, jamais imposé.
+ const suggestions = currentAlertLapsedReason && decision === "FALSE_POSITIVE"
+  ? [currentAlertLapsedReason, ...motifs] : motifs;
  const reponse = await promptDialog(`Proposer « ${label} »`, {
  message: "Commentaire obligatoire motivant la décision proposée (validation 4-yeux ensuite).",
  textarea: true, placeholder: "Motivation réglementaire de la décision...",
- suggestions: motifsDeLaDecision(await chargerMotifsDeCloture(), decision),
+ suggestions,
  checkbox: offrirListeBlanche ? caseListeBlanche() : null,
  });
  if (reponse === null) return;

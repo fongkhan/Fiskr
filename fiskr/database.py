@@ -368,6 +368,12 @@ class ReviewRecord(Base):
     backtest_report = Column(JSON, nullable=True)
     backtest_at = Column(DateTime, nullable=True)
     backtest_by = Column(String(100), nullable=True)
+    # Ce que valait ce cahier AU MOMENT de la decision (fiskr/backtest.py,
+    # `validite_du_cahier`) : perime ou non, pourquoi, et si un motif etait
+    # exige. Sans cette trace, le dossier disait « APPROVED, verdict OK » d'une
+    # liste dont les cinq fiches avaient ete exclues apres le cahier.
+    # NULL : dossier anterieur a ce suivi.
+    backtest_validity = Column(JSON, nullable=True)
 
 
 class SyncReport(Base):
@@ -532,6 +538,28 @@ class Alert(Base):
     snoozed_until = Column(DateTime, nullable=True)
     # Checklist d'instruction (dossier) : {"0": {done, by, at}, ...}
     checklist_state = Column(JSON, nullable=True)
+    # DERNIER criblage qui a re-rencontre ce couple (fiskr/alerts.py) : la
+    # ligne d'audit, son score, sa date. `audit_id` et `final_score` restent
+    # ceux de la creation. Constate dans un vrai navigateur : apres l'ajout
+    # d'une date de naissance a la liste, le valideur de l'alerte n° 20 lisait
+    # « 100 % · DOB : donnee manquante » pendant que l'historique disait
+    # « REDETECTED score 95 » — la modale lisait l'arbre fige a la creation.
+    # NULL : jamais re-rencontree depuis (ou anterieure au suivi).
+    latest_audit_id = Column(Integer, nullable=True)
+    latest_score = Column(Float, nullable=True)
+    latest_at = Column(DateTime, nullable=True)
+    # Caduque (fiskr/caducite.py) : la correspondance ne tient plus — le
+    # couple re-crible apres une mise en production ne franchit plus le seuil,
+    # ou la fiche a ete radiee de sa liste. L'alerte n'est PAS close : un
+    # humain la clot, avec le motif propose ici. Effacee si le couple
+    # franchit de nouveau le seuil.
+    lapsed_since = Column(DateTime, nullable=True)
+    lapsed_reason = Column(Text, nullable=True)
+    # Fiche radiee de sa liste a la mise en production d'une version
+    # (evenement DELISTED). Garde la date apres la cloture ; effacee seulement
+    # si la fiche est de nouveau rencontree au-dessus du seuil (reinscription)
+    # — l'evenement DELISTED, lui, reste a l'historique.
+    delisted_at = Column(DateTime, nullable=True)
 
 ALERT_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 # Libellés des messages serveur (« Priorité passée à haute. ») — le code brut
@@ -606,6 +634,12 @@ class MesureDeGel(Base):
     levee_par = Column(String(100), nullable=True)
     motif_levee = Column(String(40), nullable=True)
     justification_levee = Column(Text, nullable=True)
+    # Radiation constatee a la mise en production d'une version qui ne porte
+    # plus la fiche (fiskr/caducite.py) : la mesure est « radiation a
+    # examiner » — une levee a instruire (LD DGT/ACPR §87, §123), jamais une
+    # levee faite par le produit. Signalee une fois.
+    radiation_constatee_le = Column(DateTime, nullable=True)
+    radiation_detail = Column(Text, nullable=True)
 
 class AdminAuditLog(Base):
     """Journal append-only des actions d'administration (utilisateurs,
@@ -1636,6 +1670,20 @@ def init_db():
                 ("priority", "VARCHAR(12)"),
                 ("due_at", "TIMESTAMP"),
                 ("checklist_state", "JSON"),
+                # Dernier criblage, caducite, radiation (fiskr/caducite.py)
+                ("latest_audit_id", "INTEGER"),
+                ("latest_score", "FLOAT"),
+                ("latest_at", "TIMESTAMP"),
+                ("lapsed_since", "TIMESTAMP"),
+                ("lapsed_reason", "TEXT"),
+                ("delisted_at", "TIMESTAMP"),
+            ],
+            "gel_mesures": [
+                ("radiation_constatee_le", "TIMESTAMP"),
+                ("radiation_detail", "TEXT"),
+            ],
+            "review_records": [
+                ("backtest_validity", "JSON"),
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),

@@ -75,7 +75,9 @@ from fiskr.fprules import (
 from fiskr.rescreen import rescreen_after_snapshot_change, rescreen_lookback
 from fiskr.backtest import (
     run_backtest, validate_candidate_rule, generate_test_panel,
-    TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES
+    TEST_PANEL_FILE_TYPE, PANEL_FILE_TYPES,
+    MOTIF_D_APPROBATION_MIN, motif_d_approbation_exige, validite_du_cahier,
+    validites_des_cahiers,
 )
 from fiskr.sync import (
     run_ofac_sync, run_eurlex_sync, run_dgt_sync, run_eu_fsf_sync, run_un_sync,
@@ -7032,11 +7034,16 @@ async def export_alerts_csv(
     list_type: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     assigned_to: Optional[str] = Query(None),
+    lapsed: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Export CSV de la file d'alertes (les filtres de l'ecran s'appliquent)."""
     query = db.query(Alert)
+    if lapsed is not None:
+        # Meme filtre « Caduques » que la file (fiskr/caducite.py)
+        query = query.filter(Alert.lapsed_since.isnot(None) if lapsed
+                             else Alert.lapsed_since.is_(None))
     if channel:
         ch = channel.strip().upper()
         if ch == "SCREENING":
@@ -7055,13 +7062,16 @@ async def export_alerts_csv(
     rows = query.order_by(Alert.created_at.desc()).limit(_EXPORT_MAX_ROWS).all()
     header = ["id", "cree_le", "canal", "priorite", "echeance_sla", "client_id", "client",
               "fiche_listee_id", "fiche_listee", "liste", "score", "statut", "assignee_a",
-              "decide_par", "decide_le", "commentaire_decision"]
+              "decide_par", "decide_le", "commentaire_decision",
+              "dernier_score", "caduque_depuis", "motif_de_caducite"]
     data = [
         [a.id, a.created_at.isoformat() if a.created_at else "", a.channel or "SCREENING",
          a.priority or "", a.due_at.isoformat() if a.due_at else "", a.client_id or "",
          a.client_name, a.watchlist_entity_id, a.watchlist_name, a.list_type or "",
          f"{a.final_score:.1f}", a.status, a.assigned_to or "", a.decided_by or "",
-         a.decided_at.isoformat() if a.decided_at else "", a.decision_comment or ""]
+         a.decided_at.isoformat() if a.decided_at else "", a.decision_comment or "",
+         f"{a.latest_score:.1f}" if a.latest_score is not None else "",
+         a.lapsed_since.isoformat() if a.lapsed_since else "", a.lapsed_reason or ""]
         for a in rows
     ]
     return _csv_response(f"fiskr_alertes_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv", header, data)
@@ -10235,14 +10245,19 @@ def _get_pending_snapshot(db: Session, snapshot_id: str) -> Snapshot:
     return snap
 
 def _snapshot_summary(db: Session, snap: Snapshot,
-                      excluded_count: Optional[int] = None) -> Dict[str, Any]:
+                      excluded_count: Optional[int] = None,
+                      validites: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     # `excluded_count` fourni : l'appelant l'a deja compte pour tout un lot
-    # (voir _excluded_counts). Sinon on compte pour ce seul snapshot.
+    # (voir _excluded_counts). Sinon on compte pour ce seul snapshot. Meme
+    # regle pour `validites` (fiskr/backtest.validites_des_cahiers).
     if excluded_count is None:
         excluded_count = db.query(WatchlistEntity).filter(
             WatchlistEntity.snapshot_id == snap.snapshot_id,
             WatchlistEntity.excluded.is_(True)
         ).count()
+    if validites is None:
+        validites = validites_des_cahiers(db, [snap])
+    validite = validites.get(snap.snapshot_id)
     return {
         "snapshot_id": snap.snapshot_id,
         "file_type": snap.file_type,
@@ -10260,10 +10275,19 @@ def _snapshot_summary(db: Session, snap: Snapshot,
         "backtest_verdict": (snap.backtest_report or {}).get("verdict"),
         "backtest_gap_pct": (snap.backtest_report or {}).get("gap_pct"),
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
+        # Un verdict ne vaut que pour ce qu'il a teste : un rapport PERIME
+        # (exclusions posees ou levees, production changee depuis) ne vaut
+        # pas OK, et la file le dit sur la ligne.
+        "backtest_stale": bool(validite and validite["stale"]),
+        "backtest_stale_reasons": (validite or {}).get("reasons") or [],
+        # Approuver ce lot exige un motif ecrit (cahier WARN ou perime)
+        "approval_comment_required": motif_d_approbation_exige(
+            snap.backtest_report, validite) is not None,
     }
 
 def _capture_review_record(db: Session, snap: Snapshot, decision: str,
-                           reviewer: str, comment: Optional[str]) -> "ReviewRecord":
+                           reviewer: str, comment: Optional[str],
+                           validite: Optional[Dict[str, Any]] = None) -> "ReviewRecord":
     """
     Constitue le dossier d'homologation, A APPELER AVANT de changer le statut.
 
@@ -10303,6 +10327,10 @@ def _capture_review_record(db: Session, snap: Snapshot, decision: str,
         delta_summary=delta_summary, delta_details=delta_details,
         backtest_report=snap.backtest_report, backtest_at=snap.backtest_at,
         backtest_by=snap.backtest_by,
+        # Ce que valait le cahier a l'instant de la decision : un dossier qui
+        # recopie « verdict OK » d'un rapport perime affirme un controle qui
+        # n'a pas porte sur ce qui a ete mis en production.
+        backtest_validity=validite,
     )
     db.add(record)
     return record
@@ -10327,6 +10355,9 @@ def _review_record_row(record) -> Dict[str, Any]:
         "backtest_verdict": report.get("verdict"),
         "backtest_gap_pct": report.get("gap_pct"),
         "has_backtest": bool(report),
+        # Etat du cahier A LA DECISION (NULL : dossier anterieur au suivi)
+        "backtest_stale": bool((record.backtest_validity or {}).get("stale")),
+        "backtest_validity": record.backtest_validity,
     }
 
 
@@ -10424,10 +10455,12 @@ async def list_pending_reviews(
     exclus = _excluded_counts(db, ids)
     productions = _latest_ready_by_type(db, types)
     rapports = _stored_sync_deltas(db, ids)
+    validites = validites_des_cahiers(db, snaps)
 
     pending = []
     for snap in snaps:
-        row = _snapshot_summary(db, snap, excluded_count=exclus.get(snap.snapshot_id, 0))
+        row = _snapshot_summary(db, snap, excluded_count=exclus.get(snap.snapshot_id, 0),
+                                validites=validites)
         production = productions.get(snap.file_type)
         production_id = production.snapshot_id if production else None
         rapport = rapports.get(snap.snapshot_id)
@@ -10572,6 +10605,9 @@ async def get_review_detail(
         "backtest_at": snap.backtest_at.isoformat() if snap.backtest_at else None,
         "backtest_by": snap.backtest_by,
         "backtest_job": backtest_job,
+        # Ce que le reglage exige, pour que l'ecran annonce un refus AVANT le clic
+        "backtest_required": backtest_required(db),
+        "approval_comment_min": MOTIF_D_APPROBATION_MIN,
     }
 
 class BacktestRequest(BaseModel):
@@ -10823,10 +10859,21 @@ async def set_review_exclusions(
         "Pièce jointe": evidence_name or "—",
     })
     return {
-        "message": f"{len(rows)} entité(s) exclue(s) du snapshot.",
+        "message": f"{len(rows)} entité(s) exclue(s) du snapshot." + _cahier_perime_par(db, snap),
         "snapshot_id": snapshot_id,
         "excluded_ids": sorted(r.id for r in rows),
     }
+
+
+def _cahier_perime_par(db: Session, snap: Snapshot) -> str:
+    """La phrase a ajouter au retour d'une exclusion posee ou levee quand elle
+    vient de rendre le cahier de tests du lot perime : celui qui exclut doit
+    l'apprendre la, pas au moment d'approuver."""
+    validite = validite_du_cahier(db, snap)
+    if not (validite and validite["stale"]):
+        return ""
+    return (" Le cahier de tests de ce lot est désormais périmé : il ne vaut plus "
+            "pour ce qui serait mis en production. Relancez-le.")
 
 @app.post("/api/review/snapshots/{snapshot_id}/exclusions/remove")
 async def remove_review_exclusions(
@@ -10836,7 +10883,7 @@ async def remove_review_exclusions(
     reviewer: Dict[str, Any] = Depends(require_reviewer)
 ):
     """Annule des exclusions posees sur un snapshot encore en attente d'homologation."""
-    _get_pending_snapshot(db, snapshot_id)
+    snap = _get_pending_snapshot(db, snapshot_id)
     if not payload.entity_ids:
         raise HTTPException(status_code=400, detail="entity_ids ne peut pas être vide.")
     rows = db.query(WatchlistEntity).filter(
@@ -10857,7 +10904,8 @@ async def remove_review_exclusions(
         "Action": "exclusions retirées", "Snapshot": snapshot_id,
         "Entités": len(rows), "Par": reviewer["username"],
     })
-    return {"message": f"{len(rows)} exclusion(s) annulée(s).", "snapshot_id": snapshot_id}
+    return {"message": f"{len(rows)} exclusion(s) annulée(s)." + _cahier_perime_par(db, snap),
+            "snapshot_id": snapshot_id}
 
 @app.get("/api/review/exclusion-evidence/{entity_pk}")
 async def download_exclusion_evidence(
@@ -10912,8 +10960,26 @@ def _retirer_les_versions_depassees(db: Session, approuve: Snapshot) -> int:
     ).update({"status": "SUPERSEDED"}, synchronize_session=False)
 
 
+def _validite_au_dossier(snap: Snapshot, validite: Optional[Dict[str, Any]],
+                         pourquoi: Optional[str], groupee: bool = False,
+                         motif_couvre: Optional[set] = None) -> Optional[Dict[str, Any]]:
+    """L'etat du cahier tel que le dossier d'homologation le fige."""
+    if not snap.backtest_report:
+        return None
+    return {
+        "stale": bool(validite and validite["stale"]),
+        "reasons": (validite or {}).get("reasons") or [],
+        "verdict": snap.backtest_report.get("verdict"),
+        "comment_required": pourquoi,
+        # Motif commun d'une homologation groupee : le dossier dit qu'il l'est,
+        # et combien de listes il couvrait.
+        "comment_shared_by": (len(motif_couvre or ()) if groupee and pourquoi else None),
+    }
+
+
 def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any],
-                          comment: Optional[str], groupee: bool = False) -> Dict[str, Any]:
+                          comment: Optional[str], groupee: bool = False,
+                          motif_couvre: Optional[set] = None) -> Dict[str, Any]:
     """
     Promotion d'UN snapshot : controles de gouvernance, bascule READY,
     supersede des anciens, puis job de rechargement/re-criblage. Les refus
@@ -10979,12 +11045,48 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                           "puis relancez le cahier de tests.")
             raise HTTPException(status_code=400, detail=detail)
 
+    # Un verdict OK ne vaut que pour ce qu'il a teste (fiskr/backtest.py,
+    # « CE QUE LE CAHIER A TESTE ») : exclusions posees ou levees depuis,
+    # production changee, fiche corrigee — le rapport est perime.
+    validite = validite_du_cahier(db, snap)
+    if backtest_required(db) and validite and validite["stale"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Le cahier de tests de ce lot est périmé : " + " ".join(validite["reasons"])
+                   + " Un rapport périmé ne vaut pas OK : relancez le cahier de tests "
+                     "avant la mise en production (réglage actif).")
+
+    # Approuver malgre un cahier WARN ou perime exige un motif ecrit, trace au
+    # dossier. Le cahier n'est bloquant que si `backtest_required` est actif ;
+    # sans lui, un WARN s'approuvait sans un mot (46 des 200 dernieres
+    # approbations en production, aucune commentee).
+    pourquoi = motif_d_approbation_exige(snap.backtest_report, validite)
+    motif = (comment or "").strip()
+    if pourquoi is not None:
+        if len(motif) < MOTIF_D_APPROBATION_MIN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approuver ce lot malgré un {pourquoi} exige un commentaire motivé "
+                       f"(au moins {MOTIF_D_APPROBATION_MIN} caractères) : il est tracé au "
+                       f"dossier d'homologation.")
+        if groupee and snapshot_id not in (motif_couvre or set()):
+            # Un motif commun n'est recevable que s'il NOMME les listes qu'il
+            # couvre : sans quoi un lot devenu WARN ou perime entre l'affichage
+            # et le clic passerait sous un motif ecrit pour d'autres.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ce lot porte un {pourquoi} et le motif commun ne le couvre pas "
+                       f"explicitement : approuvez-le seul, ou relancez l'homologation "
+                       f"groupée en le désignant.")
+
     # Snapshot de production remplace (pour cibler le re-criblage post-delta)
     previous_prod = _latest_ready_snapshot(db, snap.file_type)
 
     # Dossier d'homologation constitue AVANT la bascule : ensuite, ce snapshot
     # EST la production et le delta ne serait plus calculable (voir ReviewRecord).
-    _capture_review_record(db, snap, "APPROVED", reviewer["username"], comment)
+    _capture_review_record(db, snap, "APPROVED", reviewer["username"], comment,
+                           validite=_validite_au_dossier(snap, validite, pourquoi,
+                                                         groupee, motif_couvre))
 
     # Reference de l'univers AVANT la bascule, pour la meme raison : le
     # re-criblage qui suit prolonge la couverture des clients couverts contre
@@ -11064,6 +11166,10 @@ async def approve_pending_snapshot(
 class BulkApproveRequest(BaseModel):
     snapshot_ids: List[str]
     comment: Optional[str] = None
+    # Lots au cahier WARN ou perime que le motif commun couvre EXPLICITEMENT
+    # (l'ecran les nomme avant de demander le motif). Un tel lot absent d'ici
+    # est refuse, avec son motif, sans interrompre les autres.
+    comment_covers: Optional[List[str]] = None
 
 
 @app.post("/api/review/snapshots/approve-bulk", status_code=status.HTTP_202_ACCEPTED)
@@ -11090,10 +11196,11 @@ async def approve_pending_snapshots_bulk(
                             detail="Homologation groupée limitée à 50 listes à la fois.")
 
     approved, refused = [], []
+    couverts = {s.strip() for s in (payload.comment_covers or []) if (s or "").strip()}
     for snapshot_id in dict.fromkeys(ids):  # dedoublonne en gardant l'ordre
         try:
             approved.append(_approve_one_snapshot(db, snapshot_id, reviewer, payload.comment,
-                                                  groupee=True))
+                                                  groupee=True, motif_couvre=couverts))
         except HTTPException as refus:
             db.rollback()
             refused.append({"snapshot_id": snapshot_id, "reason": refus.detail})
@@ -11145,7 +11252,9 @@ async def reject_pending_snapshot(
         raise HTTPException(status_code=400, detail="Un commentaire est requis pour rejeter un snapshot.")
     # Un rejet s'historise autant qu'une approbation : c'est la trace de ce qui
     # a ete ecarte, et de ce qu'on avait sous les yeux pour l'ecarter.
-    _capture_review_record(db, snap, "REJECTED", reviewer["username"], comment)
+    validite = validite_du_cahier(db, snap)
+    _capture_review_record(db, snap, "REJECTED", reviewer["username"], comment,
+                           validite=_validite_au_dossier(snap, validite, None))
     snap.status = "REJECTED"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
@@ -11229,6 +11338,17 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
             alert.snoozed_until and alert.snoozed_until > datetime.utcnow()
             and alert.status in ALERT_OPEN_STATUSES
         ),
+        # Dernier criblage du couple (fiskr/alerts.py) : NULL tant qu'aucun
+        # criblage ne l'a re-rencontre. `final_score` reste celui d'origine.
+        "latest_audit_id": alert.latest_audit_id,
+        "latest_score": alert.latest_score,
+        "latest_at": alert.latest_at.isoformat() if alert.latest_at else None,
+        # Caduque (fiskr/caducite.py) : la correspondance ne tient plus — une
+        # alerte OUVERTE seulement ; clore reste un geste humain.
+        "lapsed": bool(alert.lapsed_since and alert.status in ALERT_OPEN_STATUSES),
+        "lapsed_since": alert.lapsed_since.isoformat() if alert.lapsed_since else None,
+        "lapsed_reason": alert.lapsed_reason,
+        "delisted_at": alert.delisted_at.isoformat() if alert.delisted_at else None,
     }
 
 def _apply_list_type_filter(query, column, list_type_param: Optional[str]):
@@ -12294,6 +12414,10 @@ def _registre_filtre(db: Session, statut: Optional[str], type_action: Optional[s
             # La definition du retard est celle de fiskr/kpi.py, lue telle quelle
             ids = [m.id for m in registre_des_gels.mesures_en_retard(db)]
             query = query.filter(MesureDeGel.id.in_(ids or [-1]))
+        elif code == registre_des_gels.FILTRE_RADIATION:
+            # Meme definition que `gels.radiation_a_examiner`
+            query = query.filter(MesureDeGel.radiation_constatee_le.isnot(None),
+                                 MesureDeGel.statut != registre_des_gels.STATUT_LEVEE)
         elif code in registre_des_gels.STATUTS:
             query = query.filter(MesureDeGel.statut == code)
         else:
@@ -12744,7 +12868,8 @@ async def export_gels_csv(
               "fiche_listee_id", "fiche_listee", "liste", "programmes", "reference_designation",
               "confirmee_le", "confirmee_par", "date_effet", "comptes", "declaree_le",
               "declaree_par", "reference_dgt", "adresse_dgt", "delai_declaration_heures",
-              "levee_le", "levee_par", "motif_levee", "justification_levee"]
+              "levee_le", "levee_par", "motif_levee", "justification_levee",
+              "radiation_constatee_le"]
     data = []
     for m in rows:
         delai = delai_de_declaration_secondes(m.ouverte_le, m.declaree_le)
@@ -12760,6 +12885,7 @@ async def export_gels_csv(
             iso(m.declaree_le), m.declaree_par or "", m.reference_dgt or "", m.canal_dgt or "",
             f"{delai / 3600:.1f}" if (delai is not None and m.declaree_le) else "",
             iso(m.levee_le), m.levee_par or "", m.motif_levee or "", m.justification_levee or "",
+            iso(m.radiation_constatee_le),
         ])
     return _csv_response(f"fiskr_registre_gels_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
                          header, data)
@@ -13491,6 +13617,7 @@ async def list_alerts(
     channel: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    lapsed: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -13499,9 +13626,13 @@ async def list_alerts(
     """File de travail des alertes, triee par priorite puis echeance puis
     risque (score). Le canal separe le criblage clients (SCREENING) du
     filtrage transactionnel (FILTERING). `search` cherche sur le client,
-    la fiche listee et leurs identifiants (recherche globale Ctrl+K)."""
+    la fiche listee et leurs identifiants (recherche globale Ctrl+K).
+    `lapsed=true` ne garde que les alertes caduques (fiskr/caducite.py)."""
     from sqlalchemy import case, or_
     query = db.query(Alert)
+    if lapsed is not None:
+        query = query.filter(Alert.lapsed_since.isnot(None) if lapsed
+                             else Alert.lapsed_since.is_(None))
     if channel:
         ch = channel.strip().upper()
         if ch == "SCREENING":
@@ -13578,6 +13709,12 @@ async def get_alert_detail(
     if not alert:
         raise HTTPException(status_code=404, detail="Alerte introuvable.")
     audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
+    # Le DERNIER criblage du couple, quand un criblage l'a re-rencontre : c'est
+    # son arbre que le valideur doit lire. L'arbre d'origine reste servi a
+    # cote (`decision_tree_origin`), consultable, jamais remplace en base.
+    dernier = None
+    if alert.latest_audit_id and alert.latest_audit_id != alert.audit_id:
+        dernier = db.query(AuditTrail).filter(AuditTrail.id == alert.latest_audit_id).first()
     events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
     attachments = db.query(AlertAttachment).filter(AlertAttachment.alert_id == alert_id) \
@@ -13610,8 +13747,12 @@ async def get_alert_detail(
             }
             for att in attachments
         ],
-        "decision_tree": audit.decision_tree if audit else None,
+        "decision_tree": (dernier.decision_tree if dernier is not None
+                          else (audit.decision_tree if audit else None)),
+        "decision_tree_origin": (audit.decision_tree if (audit and dernier is not None) else None),
+        "decision_tree_audit_id": dernier.id if dernier is not None else alert.audit_id,
         "watchlist_version": audit.watchlist_version if audit else None,
+        "latest_watchlist_version": dernier.watchlist_version if dernier is not None else None,
         "events": [
             {
                 "timestamp": e.timestamp.isoformat() if e.timestamp else None,

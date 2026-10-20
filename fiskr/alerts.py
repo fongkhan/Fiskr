@@ -205,6 +205,21 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
             alertes_par_rang[rang] = deja
             if match["final_score"] > deja.final_score:
                 deja.final_score = match["final_score"]
+            # Le DERNIER criblage du couple, quel que soit son sens : la modale
+            # lisait l'arbre fige a la creation (« 100 % · DOB : donnee
+            # manquante ») quand l'historique disait « REDETECTED score 95 ».
+            # `final_score` et `audit_id` gardent ce qu'ils ont toujours dit.
+            deja.latest_audit_id = audit.id
+            deja.latest_score = match["final_score"]
+            deja.latest_at = now
+            # Le couple franchit de nouveau le seuil : il n'est plus caduque
+            # (fiskr/caducite.py) — y compris une fiche radiee puis reinscrite.
+            # L'evenement DELISTED reste a l'historique : c'est un fait date.
+            refranchit = deja.lapsed_since is not None and deja.status in ALERT_OPEN_STATUSES
+            if refranchit:
+                deja.lapsed_since = None
+                deja.lapsed_reason = None
+                deja.delisted_at = None
             if deja.list_type is None and fiche.get("_list_type"):
                 deja.list_type = fiche.get("_list_type")
             # Une alerte encore ouverte, creee AVANT le plancher, y remonte au
@@ -235,6 +250,12 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
                               f"(score {match['final_score']:.1f}, audit #{audit.id}).{detail_suffix}")
                 evenements.append(AlertEvent(alert_id=deja.id, username=username,
                                              action="REDETECTED", detail=detail))
+            if refranchit:
+                evenements.append(AlertEvent(
+                    alert_id=deja.id, username=username, action="LAPSE_CLEARED",
+                    detail=(f"Le couple franchit de nouveau le seuil (score "
+                            f"{match['final_score']:.1f}, audit #{audit.id}) : l'alerte "
+                            f"n'est plus caduque.{detail_suffix}")))
             # Une paire qui VIENT de basculer le dit aussi sur l'alerte deja
             # ouverte ; sur une paire deja signalee, ce serait une ligne par
             # criblage qui n'apprend rien. (Sans identifiant : alerte creee

@@ -443,6 +443,170 @@ def validate_candidate_rule(db, candidate_rule_id: Optional[int]):
     return rule
 
 
+# ------------------ CE QUE LE CAHIER A TESTE ------------------
+# L'homologation exige « un rapport au verdict OK » (review.backtest_required),
+# et ce rapport n'etait jamais invalide : sa seule ecriture est la fin du job.
+# Reproduit sur base jetable : cahier OK (5 interceptions sur 5), puis
+# exclusion des 5 fiches DGT. L'homologation rendait 202, le dossier disait
+# « APPROVED, verdict OK », et la DGT en production comptait 0 fiche.
+#
+# Le rapport porte donc l'empreinte de ce qu'il a teste, relevee au depart :
+# les lots en production (l'univers « actuel », fiskr/univers.py), chaque lot
+# candidat avec ses exclusions, le journal des corrections de fiches. Tout
+# ecart le rend PERIME, et un rapport perime ne vaut pas OK.
+#
+# Une exception, et une seule : un candidat du MEME cahier mis en production
+# depuis. Une vague de synchronisations est testee en un cahier consolide ;
+# l'univers candidat contenait deja ce lot, sa mise en production n'est pas un
+# changement par rapport a ce que le cahier a vu. Sans elle, approuver la
+# premiere liste d'une vague rendait perime le cahier de toutes les autres.
+
+MOTIF_ANTERIEUR = ("Rapport antérieur au suivi de ce qu'il a testé : rien n'établit "
+                   "la production, les exclusions ni l'univers qu'il couvre.")
+
+# Un motif ecrit est exige pour approuver malgre un cahier WARN ou perime.
+# Releve en production : 46 des 200 dernieres approbations portaient un
+# verdict WARN (ecart jusqu'a 13,69 %), aucune ne portait de commentaire. Un
+# plancher de longueur ne fait pas un motif ; il refuse le reflexe « ok ».
+MOTIF_D_APPROBATION_MIN = 15
+
+
+def _digest_exclusions(pks) -> str:
+    return hashlib.sha256(",".join(str(p) for p in sorted(pks)).encode("ascii")).hexdigest()
+
+
+def _exclusions_par_lot(db, snapshot_ids) -> Dict[str, List[int]]:
+    """Cles des fiches exclues, par lot, en une requete (index partiel
+    `ix_wl_entities_excluded`)."""
+    from fiskr.database import WatchlistEntity
+    ids = [s for s in dict.fromkeys(snapshot_ids) if s]
+    if not ids:
+        return {}
+    par_lot: Dict[str, List[int]] = {s: [] for s in ids}
+    for sid, pk in db.query(WatchlistEntity.snapshot_id, WatchlistEntity.id).filter(
+            WatchlistEntity.snapshot_id.in_(ids), WatchlistEntity.excluded.is_(True)).all():
+        par_lot[sid].append(pk)
+    return par_lot
+
+
+def _identite_de_lot(lot) -> Tuple[Any, ...]:
+    # Le nombre de fiches, comme dans fiskr/univers.py : un lot d'ajouts
+    # manuels garde son hash quand on lui ajoute une fiche.
+    return (lot.file_type, lot.snapshot_id, lot.file_hash, int(lot.record_count or 0))
+
+
+def _derniere_correction(db) -> int:
+    from sqlalchemy import func
+    from fiskr.database import WatchlistEntityChange
+    return int(db.query(func.max(WatchlistEntityChange.id)).scalar() or 0)
+
+
+def empreinte_testee(db, pendings: List[Snapshot]) -> Dict[str, Any]:
+    """Ce qu'un cahier teste, releve AU DEPART : un geste survenu pendant le
+    criblage rend le rapport perime, jamais l'inverse."""
+    from fiskr import univers
+    lots = univers.lots_en_production(db)
+    exclues = _exclusions_par_lot(db, [s.snapshot_id for s in pendings])
+    return {
+        "version": 1,
+        "production": sorted(list(_identite_de_lot(l)) for l in lots),
+        "production_reference": univers.calculer(db, lots).empreinte,
+        "corrections": _derniere_correction(db),
+        "candidates": [{
+            "snapshot_id": s.snapshot_id, "file_type": s.file_type,
+            "file_hash": s.file_hash, "record_count": int(s.record_count or 0),
+            "excluded_count": len(exclues.get(s.snapshot_id, [])),
+            "exclusions": _digest_exclusions(exclues.get(s.snapshot_id, [])),
+        } for s in pendings],
+    }
+
+
+def _validite(snapshot_id: str, rapport: Dict[str, Any], production: set,
+              corrections: int, lignes: Dict[str, Any],
+              exclues: Dict[str, List[int]]) -> Dict[str, Any]:
+    from fiskr.sync import MANUAL_SNAPSHOT_ID
+    perimetre = rapport.get("tested_scope")
+    if not perimetre:
+        return {"stale": True, "reasons": [MOTIF_ANTERIEUR]}
+    motifs: List[str] = []
+    candidats = perimetre.get("candidates") or []
+    if snapshot_id not in {c.get("snapshot_id") for c in candidats}:
+        # Cahier consolide qui a garde la version la plus recente d'une liste
+        # (normalize_pending) : son rapport etait ecrit aussi sur l'autre.
+        motifs.append("Ce rapport ne couvre pas ce lot : une autre version de la même "
+                      "liste a été testée à sa place.")
+    appliques = []
+    for c in candidats:
+        ligne = lignes.get(c.get("snapshot_id"))
+        if ligne is None or ligne.status not in ("PENDING_REVIEW", "READY"):
+            continue  # rejete ou remplace : il n'entrera pas en production
+        if (ligne.file_hash != c.get("file_hash")
+                or int(ligne.record_count or 0) != c.get("record_count")):
+            motifs.append(f"Le lot {c.get('file_type')} a changé de contenu depuis le cahier.")
+        pks = exclues.get(c.get("snapshot_id"), [])
+        if _digest_exclusions(pks) != c.get("exclusions"):
+            motifs.append(f"Exclusions de {c.get('file_type')} posées ou levées depuis le "
+                          f"cahier ({c.get('excluded_count', 0)} → {len(pks)} fiche(s) exclue(s)).")
+        if ligne.status == "READY":
+            appliques.append(c)
+    attendue = {tuple(l) for l in perimetre.get("production") or []}
+    for c in appliques:
+        # Ce candidat est en production : il a remplace les lots de sa liste,
+        # comme l'univers candidat du cahier le prevoyait.
+        attendue = {l for l in attendue
+                    if l[0] != c["file_type"] or str(l[1]).startswith(MANUAL_SNAPSHOT_ID)}
+        attendue.add((c["file_type"], c["snapshot_id"], c["file_hash"], c["record_count"]))
+    if attendue != production:
+        types = sorted({str(l[0]) for l in attendue ^ production})
+        motifs.append("Production modifiée depuis le cahier : " + ", ".join(types) + ".")
+    if corrections != perimetre.get("corrections"):
+        motifs.append("Fiche(s) listée(s) corrigée(s) depuis le cahier.")
+    return {"stale": bool(motifs), "reasons": motifs}
+
+
+def validites_des_cahiers(db, snaps) -> Dict[str, Dict[str, Any]]:
+    """
+    Ce que vaut AUJOURD'HUI le rapport de chaque snapshot : {"stale", "reasons"}.
+    Un snapshot sans rapport n'a pas d'entree. Trois lectures pour tous : la
+    file d'attente l'affiche sur chaque ligne.
+    """
+    from sqlalchemy.orm import load_only
+    from fiskr import univers
+    rapports = {s.snapshot_id: s.backtest_report for s in snaps if s.backtest_report}
+    if not rapports:
+        return {}
+    production = {_identite_de_lot(l) for l in univers.lots_en_production(db)}
+    corrections = _derniere_correction(db)
+    ids = {c.get("snapshot_id") for r in rapports.values()
+           for c in ((r.get("tested_scope") or {}).get("candidates") or [])}
+    ids.discard(None)
+    lignes = {s.snapshot_id: s for s in db.query(Snapshot).options(load_only(
+        Snapshot.snapshot_id, Snapshot.file_type, Snapshot.file_hash,
+        Snapshot.record_count, Snapshot.status,
+    )).filter(Snapshot.snapshot_id.in_(ids)).all()} if ids else {}
+    exclues = _exclusions_par_lot(db, ids)
+    return {sid: _validite(sid, rapport, production, corrections, lignes, exclues)
+            for sid, rapport in rapports.items()}
+
+
+def validite_du_cahier(db, snap: Snapshot) -> Optional[Dict[str, Any]]:
+    """Validite du rapport d'UN snapshot, None s'il n'en a pas."""
+    return validites_des_cahiers(db, [snap]).get(snap.snapshot_id)
+
+
+def motif_d_approbation_exige(report: Optional[Dict[str, Any]],
+                              validite: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Pourquoi approuver ce lot exige un motif ecrit — ou None. Un lot sans
+    cahier n'en exige pas : rien n'y est affirme, le dossier dit « non execute »."""
+    if not report:
+        return None
+    if report.get("verdict") != "OK":
+        return f"cahier de tests au verdict {report.get('verdict') or '—'}"
+    if validite and validite.get("stale"):
+        return "cahier de tests périmé"
+    return None
+
+
 # ------------------ SENS DE L'ECART ------------------
 
 # Sens de l'ecart d'un cahier (`gap_direction`) : ce qui fait le verdict.
@@ -598,6 +762,9 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
         raise ValueError("Aucun snapshot candidat à tester.")
     pending_ids = {s.snapshot_id for s in pendings}
     current_ids, candidate_ids = _universe_snapshot_ids(db, pendings)
+    # Ce que ce cahier teste, releve AVANT les passes (cf. « CE QUE LE CAHIER
+    # A TESTE ») : l'homologation compare ensuite cette empreinte a la base.
+    perimetre_teste = empreinte_testee(db, pendings)
     panel_size = _panel_count(db, panel_snapshot_id)
 
     current_rules = active_rules(db, "SCREENING")
@@ -909,6 +1076,8 @@ def run_backtest(db, pending_snap: Snapshot, panel_snapshot_id: str,
             for s in pendings
         ],
         "unattributed_pairs": hors_perimetre,
+        # Empreinte de ce qui a ete teste : lue par `validite_du_cahier`.
+        "tested_scope": perimetre_teste,
         # Tracabilite : ce cahier a-t-il reemploye la passe partagee d'un
         # cahier precedent (meme univers, meme panel, meme parametrage) ?
         "shared_pass_reused": shared_reused,

@@ -470,8 +470,20 @@ def test_backtest_invalid_candidate_rule_is_400(client, ab_setup, bt_rule_factor
 
 
 def test_approve_gate_accepts_legacy_report_without_rules_key(client, ab_setup):
-    # Un rapport archive AVANT l'ajout de la cle `rules` reste valide :
-    # le gate d'approbation ne lit que le verdict
+    """
+    Un rapport archive AVANT l'ajout de la cle `rules` reste valide : le gate
+    d'approbation ne lit pas cette cle.
+
+    REECRIT, et dit : ce test posait un rapport reduit a son verdict
+    (`{"verdict": "OK", ...}`) et attendait l'approbation. C'etait epingler le
+    defaut — un verdict OK accepte sans que rien n'etablisse ce qu'il a teste
+    (exclusions posees apres coup : 0 fiche DGT en production sous « verdict
+    OK »). Le gate lit desormais aussi l'empreinte de ce que le cahier a teste
+    (`tested_scope`, fiskr/backtest.py). L'intention d'origine — la cle `rules`
+    n'est pas requise — est tenue avec un rapport sans `rules` qui porte cette
+    empreinte ; le rapport sans empreinte, lui, est perime et refuse.
+    """
+    from fiskr.backtest import empreinte_testee
     db = next(get_db())
     try:
         snap = db.query(Snapshot).filter(Snapshot.snapshot_id == ab_setup["pending_id"]).first()
@@ -482,6 +494,21 @@ def test_approve_gate_accepts_legacy_report_without_rules_key(client, ab_setup):
     assert client.put("/api/settings/ingestion", json={
         "require_approval": True, "backtest_required": True}).status_code == 200
 
+    refus = post_and_wait(
+        client, f"/api/review/snapshots/{ab_setup['pending_id']}/approve",
+        json={"comment": "test_bt approbation rapport legacy"},
+    )
+    assert refus.status_code == 400, refus.text
+    assert "périmé" in refus.json()["detail"]
+
+    db = next(get_db())
+    try:
+        snap = db.query(Snapshot).filter(Snapshot.snapshot_id == ab_setup["pending_id"]).first()
+        snap.backtest_report = {"verdict": "OK", "gap_pct": 0.0, "threshold_pct": 20.0,
+                                "tested_scope": empreinte_testee(db, [snap])}
+        db.commit()
+    finally:
+        db.close()
     response = post_and_wait(
         client, f"/api/review/snapshots/{ab_setup['pending_id']}/approve",
         json={"comment": "test_bt approbation rapport legacy"},

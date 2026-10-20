@@ -515,6 +515,57 @@ def lever(db, mesure: MesureDeGel, *, username: str, motif: str, justification: 
     return avertissements
 
 
+# ------------------------------------------------------------ radiation
+
+# Filtre du registre : mesures en vigueur dont la fiche a ete radiee
+FILTRE_RADIATION = "RADIATION_A_EXAMINER"
+
+
+def radiation_a_examiner(mesure: MesureDeGel) -> bool:
+    return mesure.radiation_constatee_le is not None and mesure.statut != STATUT_LEVEE
+
+
+def signaler_radiation(db, mesure: MesureDeGel, *, detail: str,
+                       maintenant: Optional[datetime] = None) -> bool:
+    """
+    La fiche de la mesure n'est plus dans sa liste en production (constate par
+    fiskr/caducite.py a la mise en production d'une version) : la mesure
+    devient « radiation a examiner ».
+
+    RIEN n'est leve. La levee suit un acte (LD §209-213), et une radiation
+    d'une liste n'en est pas un a elle seule : la personne peut rester designee
+    par un autre regime, ou la source avoir seulement change d'identifiant.
+    Le registre le dit et date le constat — filtrer « sans delai » a
+    l'abrogation (§123) commence par le savoir ; l'humain instruit la levee
+    selon la procedure ecrite (§87). Signale une fois (rend False sinon).
+    """
+    if mesure.statut == STATUT_LEVEE or mesure.radiation_constatee_le is not None:
+        return False
+    mesure.radiation_constatee_le = maintenant or datetime.utcnow()
+    mesure.radiation_detail = (detail or "")[:4000]
+    _journal(db, mesure, "systeme", "GEL_RADIATION_A_EXAMINER",
+             f"Mesure de gel #{mesure.id} : {detail} Levée à instruire (LD DGT/ACPR §87, "
+             f"§123) — vérifiez l'acte d'abrogation et qu'aucun autre régime ne désigne "
+             f"encore la personne. Rien n'est levé automatiquement.")
+    return True
+
+
+def notifier_radiation(db, mesure: MesureDeGel) -> None:
+    """Notification IMMEDIATE (apres le commit de l'appelant) : un client gele
+    sur une designation abrogee est une atteinte a ses droits qui court."""
+    from fiskr.notifier import emit
+    emit(db, "gel_radiation_a_examiner", {
+        "Mesure": f"#{mesure.id}", "Alerte": mesure.alert_id,
+        "Client": mesure.client_name, "Fiche listée": mesure.watchlist_name,
+        "Liste": mesure.list_type or "—",
+        "Statut": STATUT_LABELS.get(mesure.statut, mesure.statut),
+        "Client gelé": "oui" if mesure.client_gele_ecrit else "non",
+        "Constat": mesure.radiation_detail or "—",
+        "À faire": ("Instruire la levée selon la procédure écrite (LD DGT/ACPR §87) — "
+                    "rien n'est levé automatiquement."),
+    })
+
+
 # ------------------------------------------------------------ delai
 
 def _duree(secondes: Optional[int]) -> str:
@@ -622,6 +673,10 @@ def serialiser(db, mesure: MesureDeGel, seuil_heures: Optional[int] = None,
         "en_retard": declaration_en_retard(mesure.statut, mesure.ouverte_le,
                                            mesure.declaree_le, seuil, now),
         "seuil_heures": seuil,
+        # Fiche radiee de sa liste : levee a instruire (cf. signaler_radiation)
+        "radiation_a_examiner": radiation_a_examiner(mesure),
+        "radiation_constatee_le": iso(mesure.radiation_constatee_le),
+        "radiation_detail": mesure.radiation_detail,
     }
 
 

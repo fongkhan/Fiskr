@@ -237,6 +237,17 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
         urgency=IMMEDIATE, link="#screening/alerts-gels",
     ),
+    "gel_radiation_a_examiner": Event(
+        # IMMEDIAT : la fiche d'une mesure de gel en vigueur a disparu de sa
+        # liste a la mise en production d'une version (fiskr/caducite.py). Un
+        # client gele sur une designation abrogee subit une atteinte qui court
+        # chaque jour ; il faut « filtrer sans delai » a l'abrogation (LD
+        # DGT/ACPR 2026, §123) et instruire la levee (§87). Rien n'est leve par
+        # le produit : la notification demande une decision humaine.
+        label="Mesure de gel : fiche radiée de sa liste, levée à examiner",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-gels",
+    ),
     "alert_mentioned": Event(
         label="Vous êtes cité dans un commentaire d'alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_MENTIONED,),

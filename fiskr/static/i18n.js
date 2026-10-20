@@ -61,6 +61,22 @@
         // Écart orienté du cahier de tests (fiskr/backtest.py, « SENS DE L'ÉCART »)
         "ÉCART OK": { en: "GAP OK", de: "ABWEICHUNG OK", es: "DESVIACIÓN OK", zh: "偏差正常", ar: "الفارق مقبول" },
         "ÉCART ÉLEVÉ": { en: "HIGH GAP", de: "HOHE ABWEICHUNG", es: "DESVIACIÓN ELEVADA", zh: "偏差过高", ar: "فارق مرتفع" },
+        // Cahier de tests périmé et motif d'approbation (fiskr/backtest.py, « CE QUE LE CAHIER A TESTÉ »)
+        "Périmé": { en: "Stale", de: "Veraltet", es: "Caducado", zh: "已过期", ar: "منتهي الصلاحية" },
+        "Périmé à la décision": { en: "Stale at decision time", de: "Bei der Entscheidung veraltet", es: "Caducado en el momento de la decisión", zh: "决策时已过期", ar: "منتهي الصلاحية وقت القرار" },
+        "Rapport périmé : il ne vaut pas OK.": { en: "Stale report: it does not count as OK.", de: "Veralteter Bericht: er gilt nicht als OK.", es: "Informe caducado: no vale como OK.", zh: "报告已过期：不能视为 OK。", ar: "تقرير منتهي الصلاحية: لا يُعتدّ به كـ OK." },
+        "Ce rapport ne décrit plus ce qui serait mis en production :": { en: "This report no longer describes what would go into production:", de: "Dieser Bericht beschreibt nicht mehr, was in Produktion ginge:", es: "Este informe ya no describe lo que se pondría en producción:", zh: "该报告已不再描述将投入生产的内容：", ar: "لم يعد هذا التقرير يصف ما سيُوضع في الإنتاج:" },
+        "↻ Relancer le cahier de tests": { en: "↻ Re-run the test book", de: "↻ Testheft erneut ausführen", es: "↻ Volver a ejecutar el cuaderno de pruebas", zh: "↻ 重新运行测试手册", ar: "↻ إعادة تشغيل دفتر الاختبارات" },
+        "L'approbation est refusée tant qu'il n'est pas relancé (cahier de tests obligatoire).": { en: "Approval is refused until it is re-run (test book required).", de: "Die Freigabe wird verweigert, bis es erneut ausgeführt wird (Testheft verpflichtend).", es: "La aprobación se rechaza mientras no se vuelva a ejecutar (cuaderno de pruebas obligatorio).", zh: "在重新运行之前审批将被拒绝（测试手册为必需）。", ar: "تُرفض الموافقة ما لم يُعَد تشغيله (دفتر الاختبارات إلزامي)." },
+        "Pour approuver malgré tout, un commentaire motivé est exigé ; il est tracé au dossier d'homologation.": { en: "To approve anyway, a reasoned comment is required; it is recorded in the approval file.", de: "Um trotzdem freizugeben, ist ein begründeter Kommentar erforderlich; er wird in der Freigabeakte festgehalten.", es: "Para aprobar de todos modos se exige un comentario motivado; queda registrado en el expediente de homologación.", zh: "如仍要批准，须填写有理由的说明；该说明将记入审批档案。", ar: "للموافقة رغم ذلك، يُشترط تعليق مُعلَّل؛ ويُقيَّد في ملف الاعتماد." },
+        "Un commentaire motivé est exigé pour approuver malgré l'écart ; il est tracé au dossier d'homologation.": { en: "A reasoned comment is required to approve despite the gap; it is recorded in the approval file.", de: "Für eine Freigabe trotz der Abweichung ist ein begründeter Kommentar erforderlich; er wird in der Freigabeakte festgehalten.", es: "Se exige un comentario motivado para aprobar pese a la desviación; queda registrado en el expediente de homologación.", zh: "尽管存在偏差仍要批准时，须填写有理由的说明；该说明将记入审批档案。", ar: "يُشترط تعليق مُعلَّل للموافقة رغم الفارق؛ ويُقيَّد في ملف الاعتماد." },
+        "Un commentaire motivé est exigé : le cahier de tests de ce lot est WARN ou périmé.": { en: "A reasoned comment is required: this batch's test book is WARN or stale.", de: "Ein begründeter Kommentar ist erforderlich: das Testheft dieser Charge ist WARN oder veraltet.", es: "Se exige un comentario motivado: el cuaderno de pruebas de este lote es WARN o está caducado.", zh: "须填写有理由的说明：该批次的测试手册为 WARN 或已过期。", ar: "يُشترط تعليق مُعلَّل: دفتر اختبارات هذه الدفعة WARN أو منتهي الصلاحية." },
+        "Motif de l'approbation (obligatoire : cahier de tests WARN ou périmé)": { en: "Reason for approval (required: test book WARN or stale)", de: "Begründung der Freigabe (Pflicht: Testheft WARN oder veraltet)", es: "Motivo de la aprobación (obligatorio: cuaderno de pruebas WARN o caducado)", zh: "批准理由（必填：测试手册为 WARN 或已过期）", ar: "سبب الموافقة (إلزامي: دفتر الاختبارات WARN أو منتهي الصلاحية)" },
+        "Motif commun d'approbation": { en: "Shared reason for approval", de: "Gemeinsame Freigabebegründung", es: "Motivo común de aprobación", zh: "共同批准理由", ar: "سبب موافقة مشترك" },
+        "Pourquoi l'écart ou la péremption est accepté…": { en: "Why the gap or staleness is accepted…", de: "Warum die Abweichung oder Veralterung akzeptiert wird…", es: "Por qué se acepta la desviación o la caducidad…", zh: "为何接受该偏差或过期……", ar: "لماذا يُقبل الفارق أو انتهاء الصلاحية…" },
+        "Validité à la décision": { en: "Validity at decision time", de: "Gültigkeit bei der Entscheidung", es: "Validez en el momento de la decisión", zh: "决策时的有效性", ar: "الصلاحية وقت القرار" },
+        "Motif exigé": { en: "Reason required", de: "Begründung erforderlich", es: "Motivo exigido", zh: "须说明理由", ar: "سبب مطلوب" },
+        "motif commun à une homologation groupée": { en: "reason shared by a bulk approval", de: "gemeinsame Begründung einer Sammelfreigabe", es: "motivo común de una homologación agrupada", zh: "批量审批的共同理由", ar: "سبب مشترك لاعتماد جماعي" },
         "Écart": { en: "Gap", de: "Abweichung", es: "Desviación", zh: "偏差", ar: "الفارق" },
         "PERTE D'INTERCEPTION": { en: "INTERCEPTION LOSS", de: "TREFFERVERLUST", es: "PÉRDIDA DE INTERCEPCIÓN", zh: "拦截丢失", ar: "فقدان اعتراض" },
         "Perte d'interception": { en: "Interception loss", de: "Trefferverlust", es: "Pérdida de interceptación", zh: "拦截丢失", ar: "فقدان اعتراض" },
@@ -483,6 +499,9 @@
         "À valider (4-yeux)": { en: "To validate (4-eyes)", de: "Zu validieren (4-Augen)", es: "Por validar (4 ojos)", zh: "待复核（四眼）", ar: "بانتظار التحقق (أربع أعين)" },
         "Closes": { en: "Closed", de: "Geschlossen", es: "Cerradas", zh: "已关闭", ar: "مغلقة" },
         "Clôturées par règle": { en: "Closed by rule", de: "Per Regel geschlossen", es: "Cerradas por regla", zh: "按规则关闭", ar: "أُغلقت بقاعدة" },
+        // Alertes caduques (fiskr/caducite.py) : la correspondance ne tient plus
+        "Caduques": { en: "Lapsed", de: "Hinfällig", es: "Caducas", zh: "已失效", ar: "منقضية" },
+        "Alertes ouvertes dont la correspondance ne tient plus : fiche radiée, ou couple re-criblé sous le seuil": { en: "Open alerts whose match no longer holds: record delisted, or pair re-screened below the threshold", de: "Offene Alarme, deren Treffer nicht mehr besteht: Eintrag gestrichen oder Paar unter dem Schwellenwert neu geprüft", es: "Alertas abiertas cuya coincidencia ya no se sostiene: ficha dada de baja, o par recribado por debajo del umbral", zh: "匹配已不成立的未结警报：名单记录已除名，或该配对复筛后低于阈值", ar: "تنبيهات مفتوحة لم تعد مطابقتها قائمة: سجلّ مشطوب، أو زوج أُعيد فحصه دون العتبة" },
         "Toutes priorités": { en: "All priorities", de: "Alle Prioritäten", es: "Todas las prioridades", zh: "全部优先级", ar: "كل الأولويات" },
         "Critique": { en: "Critical", de: "Kritisch", es: "Crítica", zh: "严重", ar: "حرجة" },
         "Haute": { en: "High", de: "Hoch", es: "Alta", zh: "高", ar: "مرتفعة" },
@@ -801,6 +820,17 @@
         "Vous ne suivez plus ce dossier.": { en: "You no longer follow this case.", de: "Sie folgen diesem Vorgang nicht mehr.", es: "Ya no sigue este expediente.", zh: "您已不再关注此案卷。", ar: "لم تعد تتابع هذا الملف." },
         // Report d'une alerte (mise en attente) et triage clavier
         "EN ATTENTE": { en: "ON HOLD", de: "ZURÜCKGESTELLT", es: "EN ESPERA", zh: "搁置中", ar: "معلّقة" },
+        // Caducité d'une alerte ouverte et dernier criblage du couple (fiskr/caducite.py)
+        "CADUQUE": { en: "LAPSED", de: "HINFÄLLIG", es: "CADUCA", zh: "已失效", ar: "منقضية" },
+        "RADIÉE": { en: "DELISTED", de: "GESTRICHEN", es: "DADA DE BAJA", zh: "已除名", ar: "مشطوبة" },
+        "Caduque": { en: "Lapsed", de: "Hinfällig", es: "Caduca", zh: "已失效", ar: "منقضية" },
+        "Fiche radiée": { en: "Record delisted", de: "Eintrag gestrichen", es: "Ficha dada de baja", zh: "名单记录已除名", ar: "سجلّ مشطوب" },
+        "Fiche ré-identifiée": { en: "Record re-identified", de: "Eintrag neu identifiziert", es: "Ficha reidentificada", zh: "名单记录已重新标识", ar: "سجلّ أُعيد تعريفه" },
+        "Caducité levée": { en: "No longer lapsed", de: "Nicht mehr hinfällig", es: "Caducidad levantada", zh: "失效已解除", ar: "رُفع الانقضاء" },
+        "à la création": { en: "at creation", de: "bei Erstellung", es: "al crearse", zh: "创建时", ar: "عند الإنشاء" },
+        "dernier criblage": { en: "latest screening", de: "letzte Prüfung", es: "último cribado", zh: "最近一次筛查", ar: "آخر فحص" },
+        "Arbre de décision à la création": { en: "Decision tree at creation", de: "Entscheidungsbaum bei Erstellung", es: "Árbol de decisión al crearse", zh: "创建时的决策树", ar: "شجرة القرار عند الإنشاء" },
+        "L'alerte reste ouverte : un humain la clôt. Le motif ci-dessus est proposé à la décision.": { en: "The alert stays open: a person closes it. The reason above is offered when deciding.", de: "Der Alarm bleibt offen: ein Mensch schließt ihn. Die obige Begründung wird bei der Entscheidung vorgeschlagen.", es: "La alerta sigue abierta: la cierra una persona. El motivo anterior se propone al decidir.", zh: "警报保持未结：由人工关闭。上述理由将在决策时作为建议提供。", ar: "يبقى التنبيه مفتوحًا: يغلقه إنسان. يُقترح السبب أعلاه عند اتخاذ القرار." },
         "Mise en attente — reprend sa place dans la file à cette échéance": { en: "On hold — returns to its place in the queue at this date", de: "Zurückgestellt — kehrt zu diesem Termin an ihren Platz in der Liste zurück", es: "En espera — recupera su lugar en la cola en esa fecha", zh: "搁置中——到期后恢复其在队列中的位置", ar: "معلّقة — تستعيد مكانها في القائمة عند هذا الموعد" },
         "Réveiller maintenant": { en: "Wake now", de: "Jetzt wecken", es: "Despertar ahora", zh: "立即唤醒", ar: "إيقاظ الآن" },
         "Reporter…": { en: "Postpone…", de: "Zurückstellen…", es: "Aplazar…", zh: "推迟…", ar: "تأجيل…" },
@@ -1064,6 +1094,9 @@
         "Filtrer le registre par statut": { en: "Filter the register by status", de: "Register nach Status filtern", es: "Filtrar el registro por estado", zh: "按状态筛选登记簿", ar: "تصفية السجل حسب الحالة" },
         "À déclarer": { en: "To declare", de: "Zu melden", es: "Por declarar", zh: "待申报", ar: "قيد التصريح" },
         "En retard de déclaration": { en: "Declaration overdue", de: "Meldung überfällig", es: "Declaración atrasada", zh: "申报逾期", ar: "تصريح متأخر" },
+        // Fiche d'une mesure radiée de sa liste : levée à instruire (LD DGT/ACPR §87, §123)
+        "Radiation à examiner": { en: "Delisting to review", de: "Streichung zu prüfen", es: "Baja por examinar", zh: "除名待审查", ar: "شطب قيد الدراسة" },
+        "Levée à instruire : rien n'est levé automatiquement. Vérifiez l'acte d'abrogation et qu'aucun autre régime ne désigne encore la personne.": { en: "Lifting to be examined: nothing is lifted automatically. Check the repealing act and that no other regime still designates the person.", de: "Aufhebung zu prüfen: nichts wird automatisch aufgehoben. Prüfen Sie den Aufhebungsakt und dass kein anderes Regime die Person noch benennt.", es: "Levantamiento por instruir: nada se levanta automáticamente. Verifique el acto de derogación y que ningún otro régimen designe aún a la persona.", zh: "待审查解除：系统不会自动解除。请核实废止文件，并确认没有其他制度仍在指认该人。", ar: "رفعٌ قيد الدراسة: لا يُرفع شيء تلقائيًا. تحقّق من صكّ الإلغاء ومن أنّه لا يوجد نظام آخر لا يزال يُدرج الشخص." },
         "Déclarée": { en: "Declared", de: "Gemeldet", es: "Declarada", zh: "已申报", ar: "مصرّح بها" },
         "Levée": { en: "Lifted", de: "Aufgehoben", es: "Levantada", zh: "已解除", ar: "مرفوعة" },
         "Filtrer le registre par action": { en: "Filter the register by action", de: "Register nach Maßnahme filtern", es: "Filtrar el registro por acción", zh: "按行动筛选登记簿", ar: "تصفية السجل حسب الإجراء" },
@@ -1329,6 +1362,13 @@
             es: "$1 añadida(s), $2 retirada(s), $3 sin cambios.",
             zh: "新增 $1 项，移除 $2 项，$3 项未变。",
             ar: "$1 مضافة، $2 محذوفة، $3 دون تغيير." }],
+        // Homologation groupée : les lots que le motif commun couvre, nommés
+        [/^(\d+) liste\(s\) au cahier de tests WARN ou périmé : (.+)\. Le motif saisi sera tracé au dossier d'homologation de chacune\.$/, {
+            en: "$1 list(s) with a WARN or stale test book: $2. The reason entered will be recorded in the approval file of each.",
+            de: "$1 Liste(n) mit Testheft WARN oder veraltet: $2. Die eingegebene Begründung wird in der Freigabeakte jeder Liste festgehalten.",
+            es: "$1 lista(s) con cuaderno de pruebas WARN o caducado: $2. El motivo introducido quedará registrado en el expediente de homologación de cada una.",
+            zh: "$1 份名单的测试手册为 WARN 或已过期：$2。所填理由将记入每份名单的审批档案。",
+            ar: "$1 قائمة بدفتر اختبارات WARN أو منتهي الصلاحية: $2. سيُقيَّد السبب المُدخل في ملف اعتماد كلٍّ منها." }],
         // Delta d'homologation : ce qui n'est pas détaillé, dit en clair
         [/^(\d+) autre\(s\) non détaillée\(s\) ici : le compteur reste exact\.$/, {
             en: "$1 more not detailed here: the counter remains exact.",
