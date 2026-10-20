@@ -483,8 +483,6 @@ def evaluate_and_clean(entity: dict, channel: str = None) -> dict:
     if confidence is not None and float(confidence) < 85.0:
         warnings.append(f"Rule_M08: Échec d'Extraction de Confiance PDF (score de {confidence}%)")
 
-    status = "DEGRADED" if warnings else "OK"
-
     # ------------------ LEVEL 3: AUTO-CLEAN & Cleansing ------------------
     # Rule_I03: Incohérence de Genre Multi-valué (Fallback to U)
     resolved_gender = "U"
@@ -539,6 +537,11 @@ def evaluate_and_clean(entity: dict, channel: str = None) -> dict:
 
     # Clean maiden name
     cleansed_maiden_name = cleanse_text(maiden_name, False) if maiden_name else ""
+
+    # Le statut se decide une fois TOUS les avertissements connus. Il etait
+    # calcule avant Rule_I03 (genre multi-value, ci-dessus) : une fiche ressortait
+    # « OK » avec un avertissement dans sa propre liste.
+    status = "DEGRADED" if warnings else "OK"
 
     return {
         "is_valid": True,

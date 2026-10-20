@@ -10,7 +10,7 @@ son battement de coeur manque ; le VERROU fichier (flock) garantit qu'il n'y
 en a jamais deux, quelle que soit la course entre processus API.
 
 Il heberge aussi les planificateurs periodiques (cron des sources, inbox CFT,
-digest, retention, notifications, fouille) : sous Passenger, N processus API
+digest, retention, notifications, fouille, fraicheur) : sous Passenger, N processus API
 signifiaient N planificateurs — N digests, N synchronisations. Un seul demon,
 un seul tic.
 
@@ -232,6 +232,7 @@ def _start_schedulers():
     _minute_loop("retention", api_module._retention_tick)
     _minute_loop("notifications", api_module._notification_batch_tick)
     _minute_loop("mining", api_module._mining_tick)
+    _minute_loop("fraicheur", api_module._fraicheur_tick)
 
     # Inbox CFT : cadence propre (batch.inbox_poll_seconds), pas la minute
     def _inbox_run():

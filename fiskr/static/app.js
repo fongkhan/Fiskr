@@ -247,6 +247,13 @@ async function chargerCouvertureDuCriblage() {
  const response = await apiFetch("/api/screening/couverture", { silent: true });
  if (!response.ok) { constat.textContent = "Couverture indisponible."; return; }
  const data = await response.json();
+ // Une mesure en échec n'est ni « aucun référentiel » ni « tout est criblé » :
+ // elle le disait comme le premier, et l'écran le répétait.
+ if (data.illisible) {
+  constat.textContent = "Couverture illisible : la mesure a échoué côté serveur. Ce n'est pas l'absence de référentiel — on ne sait pas.";
+  constat.style.color = "var(--color-alert, #c62828)";
+  return;
+ }
  if (data.sans_referentiel) {
   constat.textContent = "Aucun référentiel clients en production : rien à cribler pour l'instant.";
   constat.style.color = "var(--text-muted)";
@@ -5909,6 +5916,7 @@ async function fetchIngestionSettings() {
  const digestCronEl = document.getElementById("setting-digest-cron");
  if (digestEnabledEl) digestEnabledEl.checked = !!digest.enabled;
  if (digestCronEl) digestCronEl.value = digest.cron || "0 8 * * 1-5";
+ renderDernierEnvoiDuDigest();
  // Encart de l'onglet Homologation : parcours actif seulement si le mode l'est
  const modeHint = document.getElementById("review-mode-hint");
  if (modeHint) modeHint.classList.toggle("hidden", !!ingestionSettings.require_approval);
@@ -6082,8 +6090,14 @@ async function fetchNotificationsCatalog() {
  const fallback = (notificationsCatalog.default_recipients || []).length
  ? `repli : ${escapeHtml(notificationsCatalog.default_recipients.join(", "))}`
  : "aucun destinataire de repli (NOTIFY_EMAIL_TO)";
- statusEl.innerHTML = `${smtp} · ${link} · <span style="color: var(--text-muted);">${escapeHtml(fallback)}</span>`;
+ // « Jamais envoyé » s'entend sur la fenêtre du journal : le dire, plutôt
+ // qu'affirmer un « jamais » que la purge rend invérifiable au-delà.
+ const fenetre = notificationsCatalog.journal_ttl_jours
+ ? ` · <small style="color: var(--text-muted);"><span>Dates d'envoi lues au journal des envois, conservé</span> ${Number(notificationsCatalog.journal_ttl_jours)} <span>jours</span></small>`
+ : "";
+ statusEl.innerHTML = `${smtp} · ${link} · <span style="color: var(--text-muted);">${escapeHtml(fallback)}</span>${fenetre}`;
  }
+ renderDernierEnvoiDuDigest();
  } catch (e) {
  console.error("Notifications catalog error:", e);
  }
@@ -6115,6 +6129,7 @@ function renderNotificationsCatalog() {
  <span class="notif-label">${escapeHtml(ev.label)}</span>
  ${badge}
  <small class="notif-audience">${escapeHtml(audience)}</small>
+ ${dernierEnvoiHtml(ev.key, !!enabled[ev.key])}
  </label>`;
  }).join("");
  return `
@@ -6123,6 +6138,29 @@ function renderNotificationsCatalog() {
  ${rows}
  </details>`;
  }).join("");
+}
+
+// Ce qui est RÉELLEMENT parti, lu au journal des envois, à côté de la case
+// cochée. Relevé en production : la synthèse conformité cochée n'avait jamais
+// rien envoyé, et l'échec de synchronisation comptait 0 réussite sur 335
+// tentatives — la case cochée se lisait « actif », et rien d'autre.
+function dernierEnvoiHtml(cle, actif) {
+ // Journal pas encore lu : ne rien dire plutôt qu'un « jamais » non vérifié.
+ if (!notificationsCatalog || !notificationsCatalog.derniers_envois) return "";
+ const envoi = notificationsCatalog.derniers_envois[cle] || {};
+ const rates = Number(envoi.sans_envoi || 0);
+ const ratesHtml = rates ? ` · ${rates} <span>tentative(s) sans envoi</span>` : "";
+ if (envoi.dernier_envoi) {
+ return `<small class="notif-dernier-envoi" style="color: var(--text-muted);"><span>Dernier envoi réel</span> ${escapeHtml(formatDateTime(envoi.dernier_envoi))}${ratesHtml}</small>`;
+ }
+ // Activé et jamais parti : c'est le cas qui demande un regard.
+ const couleur = actif && rates ? "var(--color-warning)" : "var(--text-muted)";
+ return `<small class="notif-dernier-envoi" style="color: ${couleur};"><span>Jamais envoyé</span>${ratesHtml}</small>`;
+}
+
+function renderDernierEnvoiDuDigest() {
+ const el = document.getElementById("digest-dernier-envoi");
+ if (el) el.innerHTML = dernierEnvoiHtml("kpi_digest", !!document.getElementById("setting-digest-enabled")?.checked);
 }
 
 // Payload d'activation envoyé avec les réglages d'ingestion (une clé par étape)
@@ -10746,6 +10784,7 @@ const ADMIN_ACTION_LABELS = {
  LEARNED_EQUIVALENCE_DECIDED: "Équivalence minée tranchée",
  // Listes
  SNAPSHOTS_PURGED: "Snapshots purgés", SNAPSHOTS_BULK_APPROVED: "Homologations en masse",
+ SNAPSHOT_APPROVED: "Liste homologuée (mise en production)", SNAPSHOT_REJECTED: "Liste rejetée à l'homologation",
  SNAPSHOT_REPAIRED: "Snapshot réparé",
  RELATION_CREATED: "Relation créée", RELATION_DELETED: "Relation supprimée",
  // Alertes et rétention

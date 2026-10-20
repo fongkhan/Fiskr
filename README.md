@@ -309,12 +309,16 @@ Le flux de travail post-criblage est documenté en détail dans **[Documentation
   export des réglages et écran de mise en service. Huit de ces lectures
   exigeaient l'administrateur ; elles sont ouvertes à l'auditeur, l'écriture
   restant fermée par deux verrous indépendants (la garde de chaque route, et le
-  refus général de toute méthode mutante).
+  refus général de toute méthode mutante). Il lit aussi le **paramétrage du
+  criblage** : règles anti-faux positifs (`GET /api/fprules`, modèles, journal
+  des modifications, cas de test), blocking keys et capacités du moteur. Seul
+  le projet de déclaration de soupçon (`GET …/str-draft`) lui reste fermé, à
+  dessein : ce GET écrit dans l'historique de l'alerte.
 * **Messages d'API multilingues** : les champs `detail`/`message` des réponses JSON sont traduits selon l'en-tête `Accept-Language` (EN/DE/ES/ZH/AR, catalogue + gabarits pour les messages à variables, repli français) — les toasts d'erreur suivent la langue de l'interface de bout en bout.
 * **Dossier d'investigation** (`GET /api/alerts/{id}/casefile`, bouton 📁 de la modale d'alerte) : alerte, arbre de décision, historique, pièces jointes, contexte client, relations et règle des 50 % — avec une **checklist d'instruction paramétrable** (chaque coche tracée dans l'historique append-only) et un **dossier imprimable** (→ PDF) à remettre au régulateur.
 * **Simulation d'impact des seuils** (`POST /api/settings/scoring/simulate`) : rejeu du journal d'audit des N derniers jours avec les seuils candidats — alertes en plus/en moins par liste, sans aucune écriture — le réglage des cut-offs devient piloté par les données.
 * **Clés d'API techniques** (`fsk_…`, carte admin des Paramètres) : comptes de service pour les intégrations (CFT, supervision) — clé montrée une seule fois, hash SHA-256 stocké, authentification `X-API-Key`, révocation immédiate, rôle admin interdit (moindre privilège).
-* **Healthcheck** `GET /api/health` non authentifié (statut/base/cache, volontairement minimal) pour load-balancers et supervision.
+* **Healthcheck** `GET /api/health` non authentifié (statut/base/cache, volontairement minimal) pour load-balancers et supervision. Sa sœur `GET /api/health/conformite` (clé auditeur) répond 503 quand la conformité est dégradée — voir [Sonde de conformité](#sonde-de-conformite).
 * **Projet de déclaration de soupçon TRACFIN** (`GET /api/alerts/{id}/str-draft` + `/print`, rôle reviewer/admin, bouton « 🇫🇷 Projet de déclaration » de la modale dossier 📁) : projet **pré-rempli** aux rubriques d'une télédéclaration — déclarant (section `institution` de `config.yaml` : nom, SIREN, correspondant), personne concernée (KYC du référentiel en production), personne listée (programmes, motifs de désignation, référence officielle), motifs tracés (scores, seuil appliqué, ajustements, règle des 50 %) et chronologie append-only. **Aucune transmission automatique** (ERMES est un portail humain) : bandeau « projet à valider par le correspondant TRACFIN », génération tracée `STR_DRAFT_GENERATED` dans l'historique de l'alerte.
 * **Envoi du projet au correspondant** (`POST /api/alerts/{id}/str-draft/send`, rôle reviewer/admin, bouton « ✉ Envoyer au correspondant » de la modale dossier) : transmet le projet **par email au correspondant TRACFIN déclaré** (`institution.correspondent_email`), le HTML imprimable servant de corps de message. Les refus sont explicites, jamais silencieux — **400** sans correspondant configuré, **503** sans SMTP, **502** avec l'erreur SMTP réelle — et l'envoi n'est tracé `STR_DRAFT_SENT` dans l'historique de l'alerte **qu'après** le départ effectif du mail. Toujours aucune transmission à TRACFIN : le correspondant reste seul décisionnaire de la télédéclaration ERMES.
 * **Qualité des données clients** (`GET /api/quality/clients`, carte « 🧪 Qualité des Données Clients » de Pilotage) : complétude des champs KYC du référentiel en production (barres vert ≥ 95 % / orange ≥ 80 % / rouge), ventilation par segment, **fiches à risque pour le criblage** (PP sans date de naissance, fiches sans pays, PP sans prénom) et score global — un dossier incomplet dégrade la précision du criblage.
@@ -654,6 +658,51 @@ Clés d'API) passée en `X-API-Key` — lecture seule par construction (toute
 ```bash
 curl -sS -H "X-API-Key: fsk_..." https://votre-instance/api/diagnostic/jobs | python -m json.tool
 ```
+
+<a id="sonde-de-conformite"></a>
+
+### Sonde de conformité : `GET /api/health/conformite`
+
+`/api/health` est la **sonde de vie** : le processus répond, la base aussi.
+Elle ne dit rien de ce que vaut ce qu'on crible — relevé en production le
+19 octobre 2026 : 47 jours sans homologation, la notification de lot en
+attente coupée, 0 envoi immédiat réussi sur 335, et `/api/health` répondait
+`ok`. Quand le courriel est en panne, c'est précisément le courriel qui ne
+préviendra pas.
+
+`GET /api/health/conformite` répond **503** dès qu'un contrôle **BLOQUANT** de
+la mise en service le dit, **200** sinon. Elle rejoue, sans les recalculer,
+les contrôles capables de bloquer qui ne coûtent que quelques lectures
+d'index : fraîcheur des listes (une version plus récente attend depuis plus
+de 7 jours), démon travailleur (arrêté avec du travail en attente, ou bat sur
+un travail figé), aucune liste en production, liste de sanctions sans sa
+source de référence (ex. liste UE sans la consolidée `eu_fsf`), secrets restés
+ceux du code source. Un contrôle illisible donne 503 : une sonde qui ne peut
+pas conclure ne dit pas « conforme ». Le corps nomme ce qui ne va pas, et dit
+ce qui a été regardé :
+
+```json
+{"status": "degraded", "checked_at": "2026-10-19T06:00:00Z",
+ "bloquants": [{"cle": "fraicheur", "titre": "Fraîcheur des listes",
+                "constat": "29 liste(s) sur 39 criblent contre une version dépassée…",
+                "remede": "…"}],
+ "portee": ["secrets", "demon", "listes", "sources_reference", "fraicheur"]}
+```
+
+Accès : **clé d'API de rôle `auditor`** (lecture seule par construction) en
+`X-API-Key`, ou session admin. À brancher sur la supervision externe, qui
+alerte sur le code HTTP sans passer par la messagerie de l'application :
+
+- **UptimeRobot** : moniteur *HTTP(s)*, URL `https://votre-instance/api/health/conformite`,
+  en-tête personnalisé `X-API-Key: fsk_…`, alerte sur tout code ≠ 200 ;
+- **Zabbix** : scénario web, étape avec l'en-tête `X-API-Key`, *Required status
+  codes* `200` ;
+- **Nagios / Icinga** : `check_http -S -H votre-instance -u /api/health/conformite -k "X-API-Key: fsk_…" -e 200`.
+
+Une fréquence d'une à cinq minutes suffit : les seuils se comptent en heures.
+La même fraîcheur part aussi en **notification immédiate** aux administrateurs
+(`fraicheur_depassee`), une fois par liste et par seuil franchi (48 h, puis
+7 jours) — la sonde couvre le jour où cette notification ne part pas.
 
 ### Documentation de l'API : `/docs`, `/redoc`, `/openapi.json`
 

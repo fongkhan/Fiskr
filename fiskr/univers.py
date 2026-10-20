@@ -124,8 +124,18 @@ def lots_en_production(db) -> list:
     recent d'abord — l'ordre n'entre pas dans l'empreinte, il sert aux
     lecteurs qui affichent les lots.
     """
+    from sqlalchemy.orm import load_only
     from fiskr.database import Snapshot
-    return db.query(Snapshot).filter(
+    # Les seules colonnes que lisent l'empreinte et ses lecteurs. Chaque lot
+    # porte son rapport de cahier de tests (jusqu'a 400 paires, ~150 Kio de
+    # JSON) : hydrater les 39 lots en production decodait ~6 Mio de JSON a
+    # chaque ouverture de page pour n'en lire que l'identifiant et le hash —
+    # 55 a 70 ms par appel du badge, contre 2 a 3 ms ainsi (SQLite, 39 lots,
+    # 670 864 fiches). Une autre colonne reste lisible, chargee a la demande.
+    return db.query(Snapshot).options(load_only(
+        Snapshot.snapshot_id, Snapshot.file_type, Snapshot.file_hash,
+        Snapshot.record_count, Snapshot.uploaded_at, Snapshot.status,
+    )).filter(
         Snapshot.file_type.in_(_types_de_listes()),
         Snapshot.status == "READY",
     ).order_by(Snapshot.uploaded_at.desc()).all()

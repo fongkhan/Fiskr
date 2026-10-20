@@ -79,6 +79,17 @@ EVENT_CATALOG: Dict[str, Event] = {
         urgency=IMMEDIATE, default_enabled=False,   # defaut historique conserve
         link="#watchlists/watchlists-review",
     ),
+    "fraicheur_depassee": Event(
+        # IMMEDIAT et ACTIF par defaut, contrairement au lot en attente : il ne
+        # part pas a chaque lot depose, mais une fois par liste et par seuil
+        # franchi (48 h, puis 7 jours — ceux de la mise en service). Releve en
+        # production le 19/10/2026 : 47 jours sans homologation, et personne
+        # prevenu — la notification de lot en attente etait coupee, et rien
+        # d'autre ne parlait du retard.
+        label="Liste en production dépassée : seuil de fraîcheur franchi",
+        category=CATEGORY_LISTS, audience=("admin",),
+        urgency=IMMEDIATE, link="#watchlists/watchlists-review",
+    ),
     "snapshot_approved": Event(
         label="Liste approuvée et mise en production",
         category=CATEGORY_LISTS, audience=("reviewer", "admin"),

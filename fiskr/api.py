@@ -58,7 +58,6 @@ from fiskr.database import (
 from fiskr.alerts import (open_or_redetect_alerts,
                           is_whitelisted, whitelisted_pairs, compute_due_at)
 from fiskr.notify import (
-    notify_event,
     smtp_configured as notify_smtp_configured,
     public_url as notify_public_url,
     default_recipients as notify_default_recipients,
@@ -96,7 +95,7 @@ from fiskr.adverse_media import search_adverse_media
 from fiskr.narrative import generate_alert_narrative
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
-    require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
+    require_fprules_lecture, require_blocking_lecture, require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
     validate_password, security_config, hash_api_key, API_KEY_PREFIX_LEN,
     generate_totp_secret, verify_totp, totp_provisioning_uri, require_admin_or_auditor
 )
@@ -559,10 +558,14 @@ def _digest_tick(tick=None) -> None:
             logger.error(f"Cron du digest invalide ({digest_cfg['cron']}) : {bad}")
             return
         payload = build_kpi_digest(db)
+        logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
+        # Par `emit`, le chemin journalise : le digest partait par l'ancien
+        # `notify_event`, qui n'ecrit rien au journal des envois. L'ecran
+        # disait « actif » sur un envoi dont personne ne pouvait savoir s'il
+        # etait jamais parti — releve en production : 0 envoi au journal.
+        emit(db, "kpi_digest", payload)
     finally:
         db.close()
-    logger.info("Digest KPI périodique : envoi de la synthèse conformité.")
-    notify_event("kpi_digest", payload)
 
 
 async def _digest_scheduler():
@@ -735,6 +738,52 @@ async def _retention_scheduler():
             await asyncio.to_thread(_retention_tick, datetime.now())
         except Exception as e:
             logger.error(f"Purge de rétention en échec sur ce tick : {e}")
+
+
+# Cadence de la surveillance de fraicheur : les seuils se comptent en heures
+# et en jours, un quart d'heure de latence ne change rien au geste attendu.
+_FRAICHEUR_CADENCE_MIN = 15
+
+
+def _fraicheur_tick(tick=None) -> None:
+    """
+    UN tic de la surveillance de fraicheur : chaque liste qui vient de franchir
+    un seuil de la mise en service emet `fraicheur_depassee` (une fois par
+    seuil, cf. fraicheur.signaler_les_franchissements). Synchrone (API ou demon).
+
+    Pourquoi un tic periodique, et pas apres chaque synchronisation ou
+    homologation : un seuil se franchit avec le TEMPS, pas a l'occasion d'un
+    evenement. Le retard se mesure depuis la plus ancienne version en attente,
+    qu'une synchronisation de plus ne deplace pas ; une homologation ne fait que
+    le faire baisser, elle n'a rien a signaler. Et le cas qui compte le plus —
+    personne n'homologue rien, 47 jours durant — est precisement celui ou aucun
+    evenement ne se produit. Le tic vit avec les autres planificateurs, dans le
+    demon : si celui-ci meurt, c'est la sonde de conformite qui le voit.
+    """
+    from fiskr.fraicheur import signaler_les_franchissements
+
+    tick = tick or datetime.now()
+    if tick.minute % _FRAICHEUR_CADENCE_MIN:
+        return
+    db = next(get_db())
+    try:
+        signales = signaler_les_franchissements(db)
+        if signales:
+            logger.warning("Fraîcheur : seuil franchi pour " + ", ".join(
+                f"{s['type']} ({s['niveau']})" for s in signales))
+    finally:
+        db.close()
+
+
+async def _fraicheur_scheduler():
+    """Boucle minute de la surveillance de fraicheur (mode thread, sans demon)."""
+    while True:
+        now = datetime.now()
+        await asyncio.sleep(60 - now.second - now.microsecond / 1_000_000 + 0.05)
+        try:
+            await asyncio.to_thread(_fraicheur_tick, datetime.now())
+        except Exception as e:
+            logger.error(f"Surveillance de fraîcheur en échec sur ce tick : {e}")
 
 _STUCK_SNAPSHOT_AFTER_HOURS = 1
 
@@ -1105,6 +1154,7 @@ async def lifespan(app: FastAPI):
         background_tasks.append(asyncio.create_task(_retention_scheduler()))
         background_tasks.append(asyncio.create_task(_notification_batch_scheduler()))
         background_tasks.append(asyncio.create_task(_resource_mining_scheduler()))
+        background_tasks.append(asyncio.create_task(_fraicheur_scheduler()))
     yield
     # Shutdown
     for task in background_tasks:
@@ -1256,6 +1306,41 @@ async def healthcheck():
         "watchlist_in_production": referentiel,
         "watchlist_cache_loaded": len(watchlist_store) > 0,
     }
+
+
+@app.get("/api/health/conformite")
+def healthcheck_conformite(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(require_roles("auditor")),
+):
+    """
+    Sonde de CONFORMITE pour une supervision externe : **503** quand un
+    controle BLOQUANT de la mise en service le dit (fraicheur au-dela de
+    7 jours, demon arrete ou travail fige, aucune liste en production, liste
+    de sanctions sans sa source de reference, secrets du code source), **200**
+    sinon. Le corps nomme ce qui ne va pas, et la portee de ce qui a ete regarde.
+
+    Releve en production le 19 octobre 2026 : 47 jours sans homologation, la
+    notification coupee, 0 envoi immediat reussi sur 335 — et `/api/health`
+    repondait « ok ». Elle dit que le processus vit ; elle ne dit pas ce que
+    vaut ce qu'il crible. Celle-ci le dit sans passer par le courriel :
+    UptimeRobot, Zabbix ou Nagios alertent sur un code HTTP.
+
+    Lisible par une cle d'API de role `auditor` (X-API-Key) : lecture seule par
+    construction. Rapide : les controles rejoues ne font que quelques lectures
+    d'index (cf. mise_en_service._CONTROLES_DE_LA_SONDE). Route `def` et non
+    `async` : ses lectures passent par le pool de fils au lieu de bloquer la
+    boucle d'evenements, qu'une supervision sollicite chaque minute.
+    """
+    from fiskr.mise_en_service import etat_de_conformite
+    etat = etat_de_conformite(db)
+    corps = {
+        "status": "ok" if etat["conforme"] else "degraded",
+        "checked_at": datetime.utcnow().isoformat() + "Z",
+        "bloquants": etat["bloquants"],
+        "portee": etat["portee"],
+    }
+    return JSONResponse(status_code=200 if etat["conforme"] else 503, content=corps)
 
 # ------------------ PYDANTIC MODELS ------------------
 
@@ -5386,6 +5471,10 @@ def _production_watchlist_summary(db: Session) -> Dict[str, Any]:
     (fiskr/univers.py). Ce badge publiait le hash du lot le plus recent — une
     empreinte pour 39 listes, qui ne bougeait ni quand on homologuait un autre
     lot, ni quand on excluait ou corrigeait une fiche.
+
+    Les lots sont lus sans leur rapport de cahier de tests (cf.
+    `univers.lots_en_production`) : ce badge est charge a chaque ouverture de
+    page.
     """
     snapshots = univers.lots_en_production(db)
     reference = univers.calculer(db, snapshots)
@@ -8558,9 +8647,9 @@ class BlockingSettingsUpdate(BaseModel):
 @app.get("/api/settings/blocking")
 async def get_blocking_settings(
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_blocking)
+    param_user: Dict[str, Any] = Depends(require_blocking_lecture)
 ):
-    """Layouts de blocking effectifs par canal (rôle blocking ou admin)."""
+    """Layouts de blocking effectifs par canal (rôle blocking, auditeur ou admin)."""
     return _blocking_payload(db)
 
 @app.put("/api/settings/blocking")
@@ -8683,9 +8772,9 @@ class EngineSettingsUpdate(BaseModel):
 @app.get("/api/settings/engine")
 async def get_engine_settings(
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_blocking)
+    param_user: Dict[str, Any] = Depends(require_blocking_lecture)
 ):
-    """Capacités du moteur, par canal (rôle blocking ou admin)."""
+    """Capacités du moteur, par canal (rôle blocking, auditeur ou admin)."""
     return _engine_payload(db)
 
 
@@ -9326,7 +9415,7 @@ async def get_name_rarity(
 @app.get("/api/fprules/templates")
 async def list_fp_rule_templates(
     channel: Optional[str] = Query(None),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     """
     Modeles de regles proposes, avec ce que chacun FAIT PERDRE.
@@ -9350,9 +9439,9 @@ async def list_fp_rules(
     channel: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
-    """Regles anti-faux positifs (rôle rules ou admin)."""
+    """Regles anti-faux positifs (rôle rules, auditeur ou admin)."""
     query = db.query(FpRule)
     if channel:
         query = query.filter(FpRule.channel == channel.strip().upper())
@@ -9406,7 +9495,7 @@ async def validate_fp_rule_code(
 async def fp_rule_context_from_alert(
     alert_id: int,
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     """Contexte rule(ctx) reconstruit depuis une alerte reelle : pre-remplit
     un cas de test de regle sans saisir le JSON a la main."""
@@ -9533,7 +9622,7 @@ async def delete_fp_rule(
 async def get_fp_rule_changes(
     rule_id: int,
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     """Journal immuable des modifications d'une regle (antichronologique)."""
     rows = db.query(FpRuleChange).filter(FpRuleChange.rule_id == rule_id) \
@@ -9695,7 +9784,7 @@ async def toggle_fp_rule(
 async def list_fp_rule_tests(
     rule_id: int,
     db: Session = Depends(get_db),
-    param_user: Dict[str, Any] = Depends(require_fprules)
+    param_user: Dict[str, Any] = Depends(require_fprules_lecture)
 ):
     tests = db.query(FpRuleTest).filter(FpRuleTest.rule_id == rule_id) \
              .order_by(FpRuleTest.id.asc()).all()
@@ -10601,7 +10690,7 @@ def _retirer_les_versions_depassees(db: Session, approuve: Snapshot) -> int:
 
 
 def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any],
-                          comment: Optional[str]) -> Dict[str, Any]:
+                          comment: Optional[str], groupee: bool = False) -> Dict[str, Any]:
     """
     Promotion d'UN snapshot : controles de gouvernance, bascule READY,
     supersede des anciens, puis job de rechargement/re-criblage. Les refus
@@ -10673,6 +10762,20 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
     _supersede_previous_snapshots(db, snap.file_type, snap.snapshot_id)
     _settle_sync_reports(db, snap.snapshot_id, "SUCCESS")
     perimes = _retirer_les_versions_depassees(db, snap)
+    # Trace au journal d'administration, dans LA transaction de la bascule :
+    # pas de mise en production sans sa ligne, pas de ligne sans elle. Seule
+    # l'homologation groupee y ecrivait — releve en production : 68
+    # approbations unitaires des 31/08 et 02/09 absentes du journal que lit un
+    # controleur, alors que leur notification etait partie. Ecrite ici, sur le
+    # chemin que partagent les deux, chaque approbation y figure une fois.
+    log_admin_action(db, reviewer["username"], "SNAPSHOT_APPROVED",
+                     target=snap.file_type,
+                     before={"production": previous_prod.snapshot_id if previous_prod else None},
+                     after={"snapshot_id": snap.snapshot_id, "fiches": snap.record_count,
+                            "exclusions": len(excluded_rows),
+                            "versions_retirees_de_la_file": perimes,
+                            "homologation": "groupée" if groupee else "unitaire"},
+                     detail=snap.review_comment)
     db.commit()
 
     job_token = f"approve:{snap.snapshot_id}"
@@ -10751,7 +10854,8 @@ async def approve_pending_snapshots_bulk(
     approved, refused = [], []
     for snapshot_id in dict.fromkeys(ids):  # dedoublonne en gardant l'ordre
         try:
-            approved.append(_approve_one_snapshot(db, snapshot_id, reviewer, payload.comment))
+            approved.append(_approve_one_snapshot(db, snapshot_id, reviewer, payload.comment,
+                                                  groupee=True))
         except HTTPException as refus:
             db.rollback()
             refused.append({"snapshot_id": snapshot_id, "reason": refus.detail})
@@ -10761,9 +10865,13 @@ async def approve_pending_snapshots_bulk(
             refused.append({"snapshot_id": snapshot_id, "reason": f"Erreur inattendue : {err}"})
 
     if approved:
+        # Le GESTE groupe, pas ses approbations : chacune a deja sa ligne
+        # SNAPSHOT_APPROVED (cf. _approve_one_snapshot). Les relister ici les
+        # ferait figurer deux fois au journal ; restent le compte et les refus,
+        # que rien d'autre ne trace.
         log_admin_action(db, reviewer["username"], "SNAPSHOTS_BULK_APPROVED",
                          target=", ".join(a["file_type"] for a in approved),
-                         after={"approved": [a["snapshot_id"] for a in approved],
+                         after={"approuvees": len(approved),
                                 "refused": [r["snapshot_id"] for r in refused]})
         db.commit()
 
@@ -10805,6 +10913,12 @@ async def reject_pending_snapshot(
     snap.reviewed_at = datetime.utcnow()
     snap.review_comment = comment
     _settle_sync_reports(db, snap.snapshot_id, "REJECTED")
+    # Meme raison que l'approbation (cf. _approve_one_snapshot) : la decision
+    # d'homologation figure au journal d'administration, dans sa transaction.
+    log_admin_action(db, reviewer["username"], "SNAPSHOT_REJECTED",
+                     target=snap.file_type,
+                     after={"snapshot_id": snap.snapshot_id, "fiches": snap.record_count},
+                     detail=comment)
     db.commit()
     emit(db, "snapshot_rejected", {
         "Liste": snap.file_type, "Fichier": snap.file_name, "Snapshot": snap.snapshot_id,
@@ -11135,10 +11249,15 @@ async def get_notifications_catalog(
     cette reponse (aucune liste d'evenements codee en dur cote front).
     """
     from fiskr.events import catalog_payload, event_categories
+    from fiskr.notifier import DELIVERY_TTL_DAYS, derniers_envois
     return {
         "categories": event_categories(),
         "events": catalog_payload(),
         "enabled": notification_events(db),
+        # Ce qui est REELLEMENT parti, a cote de ce qui est active : l'ecran
+        # affichait « actif » sur un digest qui n'avait jamais rien envoye.
+        "derniers_envois": derniers_envois(db),
+        "journal_ttl_jours": DELIVERY_TTL_DAYS,
         "batch": notification_batch_settings(db),
         "smtp_configured": notify_smtp_configured(),
         "public_url_configured": bool(notify_public_url()),
@@ -11672,6 +11791,10 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
     }
 
 
+# Ferme a l'auditeur A DESSEIN, bien que ce soit un GET : il ECRIT dans
+# l'historique de l'alerte (STR_DRAFT_GENERATED, ci-dessous). L'ouvrir ferait
+# d'une lecture de controleur une ligne au dossier — un auditeur ne laisse pas
+# de trace dans ce qu'il controle. Meme chose pour /print.
 @app.get("/api/alerts/{alert_id}/str-draft")
 async def get_alert_str_draft(
     alert_id: int,

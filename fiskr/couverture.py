@@ -79,11 +79,12 @@ def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, 
     Combien de clients en production n'ont aucune décision de criblage.
 
     Retourne toujours la même forme, y compris quand il n'y a pas de
-    référentiel : un écran ne doit pas avoir à distinguer « zéro » de
-    « impossible à dire ».
+    référentiel ou que la mesure échoue — et ces deux cas ne se confondent
+    pas : `illisible` dit « on ne sait pas », `sans_referentiel` dit « il n'y
+    a rien ». Un écran ne doit pas avoir à les distinguer lui-même.
     """
     vide = {"clients": 0, "jamais_cribles": 0, "plafonne": False,
-            "sans_referentiel": True}
+            "sans_referentiel": True, "illisible": False}
     try:
         snap_ids = _snapshots_clients(db)
         if not snap_ids:
@@ -105,12 +106,19 @@ def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, 
             "jamais_cribles": min(int(manquants), plafond),
             "plafonne": manquants > plafond,
             "sans_referentiel": False,
+            "illisible": False,
         }
     except Exception as e:
         # Une mesure illisible ne doit jamais faire tomber l'écran qui
-        # l'affiche : elle se tait, et le contrôle le dit à sa façon.
+        # l'affiche — mais elle ne doit pas non plus se faire passer pour une
+        # réponse. Elle rendait « aucun référentiel » : sur une base qui en
+        # porte un, c'était un constat faux, que la mise en service présentait
+        # comme « rien à cribler pour l'instant ». Les chiffres sont None, pas
+        # zéro : zéro serait encore une réponse.
         logger.warning(f"Couverture du criblage illisible : {e}")
-        return vide
+        return {"clients": None, "jamais_cribles": None, "plafonne": False,
+                "sans_referentiel": None, "illisible": True,
+                "erreur": f"{type(e).__name__} : {e}"}
 
 
 def phrase_de_couverture(mesure: Dict[str, Any]) -> Optional[str]:
@@ -119,6 +127,10 @@ def phrase_de_couverture(mesure: Dict[str, Any]) -> Optional[str]:
     et par l'écran de mise en service : une seule formulation, pas deux qui
     dériveraient.
     """
+    if mesure.get("illisible"):
+        return (f"Couverture du criblage illisible : la mesure a échoué "
+                f"({mesure.get('erreur') or 'sans détail'}). On ne sait donc pas si "
+                f"le référentiel a été criblé — ce n'est pas l'absence de référentiel.")
     if mesure.get("sans_referentiel") or not mesure.get("jamais_cribles"):
         return None
     combien = mesure["jamais_cribles"]

@@ -1910,6 +1910,54 @@ OPENSANCTIONS_RUNNERS: Dict[str, Callable] = {
 }
 
 
+# ------------------ SOURCE DE REFERENCE DE CHAQUE LISTE ------------------
+# La source de reference d'une liste est celle qui la REMPLACE a chaque
+# passage : ce qu'elle publie fait la liste, radiations comprises. Les sources
+# du registre OpenSanctions declarent leur liste dans fiskr/sources.py ; les
+# sources natives la portent en dur dans leur executeur
+# (`file_type="WATCHLIST_OFAC"`...), d'ou cette table. Elle n'est pas tenue a
+# la main sans garde : un test appelle chaque executeur et la confronte a la
+# liste qu'il remplace reellement (tests/test_signaux_de_conformite.py).
+_LISTE_REMPLACEE_PAR_SOURCE_NATIVE: Dict[str, str] = {
+    "ofac": "WATCHLIST_OFAC", "ofac_nonsdn": "WATCHLIST_OFAC_NONSDN",
+    "eu_fsf": "WATCHLIST_EU", "dgt": "WATCHLIST_DGT", "un": "WATCHLIST_UN",
+    "pep": "WATCHLIST_PEP", "ofsi": "WATCHLIST_OFSI", "seco": "WATCHLIST_SECO",
+    "csl": "WATCHLIST_CSL", "canada": "WATCHLIST_CANADA", "dfat": "WATCHLIST_DFAT",
+    "hk_sfc": "WATCHLIST_HK_SFC", "amf": "WATCHLIST_AMF",
+    "worldbank": "WATCHLIST_WORLDBANK",
+}
+
+# EUR-Lex (mode extract) ne remplace pas la liste UE : il la COMPLETE, en
+# fusionnant les designations du jour a la version precedente. Sans la liste
+# consolidee, il n'en porte que ce qui a paru au JO depuis qu'il tourne —
+# releve en production le 19 octobre 2026 : 320 fiches, toutes extraites du
+# JO, quand la consolidee en compte plusieurs milliers.
+SOURCES_COMPLEMENTAIRES: Dict[str, str] = {"eurlex": "WATCHLIST_EU"}
+
+
+def sources_de_reference() -> Dict[str, str]:
+    """Type de liste -> cle de la source qui le remplace (sa reference)."""
+    table = {ftype: cle for cle, ftype in _LISTE_REMPLACEE_PAR_SOURCE_NATIVE.items()}
+    table.update({src.file_type: cle for cle, src in OPENSANCTIONS_BY_KEY.items()})
+    return table
+
+
+def source_non_configuree(cfg_source: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """
+    (reglage manquant, raison) quand une source ne peut pas tourner du tout —
+    pas meme a la main —, ou None. Distinct de « desactivee » : une source
+    coupee des passages planifies se lance encore d'un clic ; une source sans
+    jeton, jamais (cf. run_eu_fsf_sync, qui rend une erreur avant tout
+    telechargement).
+    """
+    url = str((cfg_source or {}).get("url") or "").strip()
+    if not url:
+        return "url", "aucune adresse configurée"
+    if "{token}" in url and not str(cfg_source.get("token") or "").strip():
+        return "token", "jeton absent"
+    return None
+
+
 def run_canada_sync(
     db,
     trigger: str = "MANUAL",

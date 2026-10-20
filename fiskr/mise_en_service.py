@@ -301,6 +301,100 @@ def _listes_en_production(db) -> Dict[str, Any]:
         "#watchlist-mgmt/watchlist-sync")
 
 
+def _sources_de_reference(db) -> Dict[str, Any]:
+    """
+    Une liste de sanctions en production dont la source de reference ne
+    tourne pas — celle qui la REMPLACE a chaque passage (fiskr/sync.py,
+    `sources_de_reference`).
+
+    Releve en production le 19 octobre 2026 : la liste UE comptait 320 fiches,
+    toutes extraites du Journal Officiel par EUR-Lex. La liste consolidee
+    (eu_fsf), qui fait autorite et en porte plusieurs milliers, etait coupee
+    faute de jeton. L'ecran disait « 39 liste(s) en production » : il comptait
+    la liste UE sans dire qu'elle n'etait pas celle que son nom annonce.
+
+    Deux etats, qui n'ont pas la meme gravite :
+    - source NON CONFIGUREE (jeton absent, aucune adresse) : elle ne peut pas
+      tourner, pas meme a la main. La liste ne sera jamais celle de son
+      autorite — BLOQUANT ;
+    - source DESACTIVEE des passages planifies : la liste se fige sur sa
+      derniere version, et le controle de fraicheur ne le voit pas, faute de
+      version plus recente en attente — ATTENTION. Sans objet quand toute la
+      recuperation automatique est coupee : « Récupération automatique » le dit.
+
+    Seules les listes du perimetre SANCTION sont nommees : une liste de
+    vigilance (PEP, regulateurs) figee ne porte pas d'obligation de gel, et un
+    signal qui les nommerait toutes crierait au loup.
+    """
+    from fiskr.database import SyncReport
+    from fiskr.fraicheur import mesurer
+    from fiskr.perimeters import est_sanction
+    from fiskr.settings import perimeter_overrides
+    from fiskr.sync import (SOURCES_COMPLEMENTAIRES, get_sync_config,
+                            source_non_configuree, sources_de_reference)
+
+    cfg = get_sync_config(db)
+    reference = sources_de_reference()
+    surcharges = perimeter_overrides(db)
+    impossibles, figees = [], []
+    for liste in mesurer(db)["listes"]:
+        cle = reference.get(liste["type"])
+        if not liste["production_id"] or not cle or not est_sanction(liste["type"], surcharges):
+            continue
+        source = cfg.get(cle) or {}
+        empechement = source_non_configuree(source)
+        if empechement:
+            impossibles.append((liste, cle, empechement))
+        elif cfg.get("auto_enabled") and not source.get("enabled"):
+            figees.append((liste, cle))
+    if not impossibles and not figees:
+        return _controle(
+            "sources_reference", "Listes", "Sources de référence", OK,
+            "Chaque liste de sanctions en production a sa source de référence "
+            "configurée et active.", lien="#watchlist-mgmt/watchlist-sync")
+
+    def _nom(liste):
+        return liste["type"].replace("WATCHLIST_", "")
+
+    # Qui a produit la version en production, quand ce n'est pas la reference :
+    # un fait lu au rapport de synchronisation, pas deduit de la configuration.
+    origines = {}
+    if impossibles:
+        origines = dict(db.query(SyncReport.snapshot_id, SyncReport.source).filter(
+            SyncReport.snapshot_id.in_([l["production_id"] for l, _, _ in impossibles])).all())
+    constats, remedes = [], []
+    for liste, cle, (champ, empechement) in impossibles:
+        origine = origines.get(liste["production_id"])
+        complements = [c for c, t in SOURCES_COMPLEMENTAIRES.items() if t == liste["type"]]
+        provenance = (f"la version en production vient de {origine}" if origine
+                      else "la version en production vient d'un import manuel")
+        constats.append(
+            f"{_nom(liste)} ({liste['production_fiches']} fiches) : sa source de "
+            f"référence, {cle}, ne peut pas tourner ({empechement}) ; {provenance}"
+            + (f" ; {', '.join(complements)} ne fait que la compléter, sans "
+               f"jamais porter la liste entière ni ses radiations" if complements else "")
+            + ".")
+        remedes.append(f"renseignez sync.{cle}.{champ} dans config.yaml, puis activez "
+                       f"la source {cle}")
+    for liste, cle in figees:
+        constats.append(
+            f"{_nom(liste)} : sa source de référence, {cle}, est coupée des "
+            f"passages planifiés — la version en production a "
+            f"{liste['production_age_jours']} jour(s) et ne se renouvellera pas seule.")
+    if figees:
+        remedes.append("réactivez les sources coupées (écran Sources), ou retirez de "
+                       "la production les listes qui ne sont plus suivies")
+    etat = BLOQUANT if impossibles else ATTENTION
+    return _controle(
+        "sources_reference", "Listes", "Sources de référence", etat,
+        f"{len(impossibles) + len(figees)} liste(s) de sanctions en production "
+        f"sans leur source de référence. " + " ".join(constats)
+        + " Le contrôle « Listes en production » les compte pourtant comme les autres.",
+        "Pour chacune : " + " ; ".join(remedes) + ". Le gel des avoirs s'applique "
+        "à la liste de l'autorité, pas à ce qu'il en reste.",
+        "#watchlist-mgmt/watchlist-sync")
+
+
 def _sources_automatiques(db) -> Dict[str, Any]:
     try:
         from fiskr.sync import get_sync_config
@@ -328,6 +422,18 @@ def _sources_automatiques(db) -> Dict[str, Any]:
 # criblage porte sur une liste qui n'existe plus sous cette forme.
 _RETARD_TOLERE_H = 48
 _RETARD_BLOQUANT_H = 7 * 24
+SEUILS_DE_RETARD_H = {ATTENTION: _RETARD_TOLERE_H, BLOQUANT: _RETARD_BLOQUANT_H}
+
+
+def niveau_de_retard(retard_heures: int) -> str:
+    """
+    OK / ATTENTION / BLOQUANT pour un retard donne — la seule regle. Le
+    controle de fraicheur la lit, et l'evenement `fraicheur_depassee` aussi
+    (fiskr/fraicheur.py) : un signal qui partirait sur d'autres seuils que
+    l'ecran dirait une chose que l'ecran contredit.
+    """
+    return (BLOQUANT if retard_heures >= _RETARD_BLOQUANT_H
+            else ATTENTION if retard_heures >= _RETARD_TOLERE_H else OK)
 
 
 def _fraicheur_des_listes(db) -> Dict[str, Any]:
@@ -366,8 +472,7 @@ def _fraicheur_des_listes(db) -> Dict[str, Any]:
                    key=lambda l: -l["retard_heures"])[:5]
     detail = ", ".join(f"{l['type'].replace('WATCHLIST_', '')} "
                        f"({phrase_de_retard(l['retard_heures'])})" for l in pires)
-    etat_du_controle = (BLOQUANT if retard >= _RETARD_BLOQUANT_H
-                        else ATTENTION if retard >= _RETARD_TOLERE_H else OK)
+    etat_du_controle = niveau_de_retard(retard)
     if etat_du_controle == OK:
         return _controle(
             "fraicheur", "Listes", "Fraîcheur des listes", OK,
@@ -652,6 +757,15 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
     """
     from fiskr.couverture import couverture_du_criblage, phrase_de_couverture
     mesure = couverture_du_criblage(db)
+    if mesure.get("illisible"):
+        # Une mesure en echec ne dit rien du referentiel : ni « vide », ni
+        # « tout est crible ». Elle le dit, au lieu de prendre l'un des deux.
+        return _controle(
+            "couverture", "Criblage", "Couverture du criblage", ATTENTION,
+            phrase_de_couverture(mesure),
+            "Relancez la vérification ; si l'échec persiste, le journal du "
+            "serveur donne l'erreur complète (fiskr.couverture).",
+            "#screening/screening-batch")
     if mesure["sans_referentiel"]:
         return _controle(
             "couverture", "Criblage", "Couverture du criblage", A_FAIRE,
@@ -724,7 +838,7 @@ def _sources_en_echec_repete(db) -> Dict[str, Any]:
         "#watchlists/watchlists-sources")
 
 
-_CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
+_CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production, _sources_de_reference,
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
@@ -774,6 +888,53 @@ def _premier_demarrage(db) -> bool:
     except Exception as e:
         logger.warning(f"Détection de premier démarrage impossible : {e}")
         return False
+
+
+# Ce que rejoue la sonde de conformite (GET /api/health/conformite) : les
+# controles qui peuvent conclure BLOQUANT et ne coutent que quelques lectures
+# d'index. Elle est interrogee chaque minute par une supervision externe, elle
+# ne doit rien faire de lourd. Restent dehors, a dessein, ceux qui ne
+# concluent jamais BLOQUANT : une sonde ne doit faire sonner que ce qui
+# bloque. Un test verifie qu'aucun controle capable de BLOQUANT n'en manque.
+_CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
+_CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
+                          _fraicheur_des_listes)
+
+
+def etat_de_conformite(db) -> Dict[str, Any]:
+    """
+    Les controles BLOQUANT parmi ceux que rejoue la sonde, et sa portee.
+
+    Releve en production le 19 octobre 2026 : 47 jours sans homologation, la
+    notification desactivee, les envois immediats en echec (0 reussite sur
+    335) — et `/api/health` repondait « ok ». La sonde de vie dit que le
+    processus repond ; celle-ci dit si ce qu'il crible est opposable, sans
+    passer par le courriel.
+
+    Contrairement a l'ecran de mise en service, qui doit rester affichable et
+    saute un controle illisible, la sonde ne saute rien : un controle qui ne
+    peut pas conclure ne l'autorise pas a dire « conforme ». Il est rendu
+    comme un echec, nomme.
+    """
+    bloquants: List[Dict[str, Any]] = []
+    portee: List[str] = []
+    fonctions = ([(f, False) for f in _CONTROLES_DE_LA_SONDE_SANS_BASE]
+                 + [(f, True) for f in _CONTROLES_DE_LA_SONDE])
+    for fonction, avec_base in fonctions:
+        try:
+            controle = fonction(db) if avec_base else fonction()
+        except Exception as e:
+            logger.warning(f"Sonde de conformité : contrôle {fonction.__name__} illisible : {e}")
+            nom = fonction.__name__.strip("_")
+            portee.append(nom)
+            bloquants.append({"cle": nom, "titre": nom, "remede": "",
+                              "constat": f"Contrôle illisible ({type(e).__name__} : {e}) — "
+                                         f"la conformité ne peut pas être établie."})
+            continue
+        portee.append(controle["cle"])
+        if controle["etat"] == BLOQUANT:
+            bloquants.append({cle: controle[cle] for cle in ("cle", "titre", "constat", "remede")})
+    return {"conforme": not bloquants, "bloquants": bloquants, "portee": portee}
 
 
 def sonder_smtp(timeout: float = 8.0) -> Dict[str, Any]:
