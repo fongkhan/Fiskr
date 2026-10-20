@@ -1941,6 +1941,16 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-10-20-gel-et-criblage", date: "2026-10-20",
+ titre: "Ce que le criblage a vraiment fait, et la suite d'un gel",
+ points: [
+ "L'alerte montre le client et la personne listée côte à côte, avec le verdict du moteur pour chaque champ.",
+ "Un vrai positif sur une liste de gel ouvre une mesure au registre des gels : gel, déclaration à la DG Trésor, levée.",
+ "« Prendre la suivante » vous assigne l'alerte la plus urgente ; une même décision se propose pour toute une sélection, chacune validée ensuite une par une.",
+ "Une alerte que la mise à jour d'une liste ne justifie plus est marquée caduque : elle reste ouverte, et le motif vous est proposé.",
+ ],
+ },
+ {
  id: "2026-08-27-lot-13", date: "2026-08-27",
  titre: "L'outil parle au bon moment",
  points: [
