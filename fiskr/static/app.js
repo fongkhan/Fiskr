@@ -13258,6 +13258,7 @@ async function openClient360(clientId) {
  <div class="details-item"><strong>Notation de risque</strong><span>${escapeHtml(k.risk_rating || "—")}${k.pep_flag ? ' · <strong style="color: var(--color-warning);">PEP</strong>' : ""}</span></div>
  <div class="details-item"><strong>Segment / Secteur</strong><span>${escapeHtml(k.segment || "—")} ${k.activity_sector ? "· " + escapeHtml(k.activity_sector) : ""}</span></div>
  <div class="details-item"><strong>Entrée en relation</strong><span>${escapeHtml(k.relationship_start || "—")}${k.status ? " · " + escapeHtml(k.status) : ""}</span></div>
+ <div class="details-item"><strong>Fin de relation</strong><span>${escapeHtml(k.relationship_end || "—")}</span></div>
  </div>`
  : `<p class="section-desc">Aucune fiche KYC en production pour <strong>${escapeHtml(clientId)}</strong> (client ad hoc ou hors référentiel).</p>`;
 
@@ -13887,6 +13888,7 @@ async function fetchRetentionSettings() {
  const archiveEl = document.getElementById("retention-archive");
  if (archiveEl) archiveEl.checked = policy.archive !== false;
  renderRetentionPreview(data.preview || {});
+ renderRetentionConservees(data.conservees, data.motifs_de_conservation);
  renderRetentionLegal(data.sous_la_duree_legale, data.duree_legale_jours);
  } catch (e) { console.error("Retention fetch error:", e); }
 }
@@ -13895,8 +13897,10 @@ async function fetchRetentionSettings() {
 // Code monétaire et financier) ne se ressemblent pas : le premier empêche de
 // vider la base par mégarde, le second dit combien de temps la preuve doit
 // exister. Régler le journal de criblage sur 31 jours était accepté sans un
-// mot — et un mois plus tard la preuve n'existait plus. On ne l'interdit pas :
-// on refuse seulement que le choix se fasse sans le savoir.
+// mot — et un mois plus tard la preuve n'existait plus. La purge applique
+// désormais elle-même le plancher : c'est le RÉGLAGE qui est sous la durée
+// légale, plus la conservation — l'écran ne dit donc plus « conservation sous
+// la durée légale », qui serait devenu faux.
 function renderRetentionLegal(ecarts, planchers) {
  const el = document.getElementById("retention-legal");
  if (!el) return;
@@ -13907,9 +13911,35 @@ function renderRetentionLegal(ecarts, planchers) {
  return;
  }
  el.classList.remove("hidden");
- el.textContent = "Conservation sous la durée légale — "
-  + liste.map(e => e.message || `${e.famille} : ${e.jours} j`).join(" ")
-  + ` Le réglage reste possible, mais il est tracé au journal d'administration.`;
+ el.innerHTML = `<strong>Réglage sous la durée légale</strong> — `
+  + liste.map(e => `<span>${escapeHtml(e.message || `${e.famille} : ${e.jours} j`)}</span>`).join(" ")
+  + ` <span>Le réglage reste possible, mais il est tracé au journal d'administration.</span>`;
+}
+
+// Les familles probantes, nommées comme les champs de la carte
+const LIBELLES_FAMILLES_PROBANTES = { audit_trail: "Décisions de criblage", closed_alerts: "Alertes clôturées" };
+
+// Ce que la politique aurait purgé et que la loi garde, et pourquoi (motifs
+// rendus par le serveur, fiskr/conservation.py). Un client en portefeuille
+// garde son dossier : c'est le fonctionnement normal, pas une alarme — le
+// paragraphe reste neutre, et absent quand il n'y a rien à dire.
+function renderRetentionConservees(conservees, motifs) {
+ const el = document.getElementById("retention-conservees");
+ if (!el) return;
+ const lignes = [];
+ Object.entries(conservees || {}).forEach(([famille, parMotif]) => {
+  Object.entries(parMotif || {}).forEach(([motif, n]) => {
+   if (n > 0) lignes.push(`<li><strong>${Number(n)}</strong> · <span>${escapeHtml(LIBELLES_FAMILLES_PROBANTES[famille] || famille)}</span> — <span>${escapeHtml((motifs || {})[motif] || motif)}</span></li>`);
+  });
+ });
+ if (!lignes.length) {
+  el.classList.add("hidden");
+  el.innerHTML = "";
+  return;
+ }
+ el.classList.remove("hidden");
+ el.innerHTML = `<span>Conservées au-delà de la durée réglée, le délai légal courant depuis la fin de la relation (art. L561-12 CMF) :</span>
+  <ul style="margin: 0.25rem 0 0 1.25rem;">${lignes.join("")}</ul>`;
 }
 
 function renderRetentionPreview(preview) {

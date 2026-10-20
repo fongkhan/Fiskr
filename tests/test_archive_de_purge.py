@@ -54,12 +54,15 @@ def db():
 
 @pytest.fixture()
 def politique(monkeypatch):
-    """Alertes clôturées purgées à 30 jours, familles restantes désactivées."""
+    """Alertes clôturées purgées à 30 jours, familles restantes désactivées.
+
+    La purge ne descend plus sous le plancher légal (fiskr/conservation.py) :
+    elle ne journalise donc plus d'avertissement « sous la durée légale », et
+    il n'y a plus rien à neutraliser ici."""
     def _policy(db_):
         return {"closed_alerts": 30, "audit_trail": 0, "sync_reports": 0,
                 "batch_campaigns": 0, "archive": True, "cron": "0 3 * * *"}
     monkeypatch.setattr(retention_mod, "retention_policy", _policy)
-    monkeypatch.setattr(retention_mod, "retention_sous_la_duree_legale", lambda p: [])
     return _policy
 
 
@@ -71,7 +74,12 @@ def archive(tmp_path, monkeypatch):
 
 
 def _alerte_avec_piece(db, tmp_path, suffixe, chemin=None, ecrire=True):
-    vieux = datetime.utcnow() - timedelta(days=120)
+    # Plus de cinq ans : le client témoin n'a pas de fiche (opération
+    # occasionnelle), et la purge garde cinq années civiles à compter de
+    # l'opération quelle que soit la politique (lot « conservation ») — à
+    # 120 jours, l'alerte n'était plus purgeable et ces tests ne testaient
+    # plus l'archive.
+    vieux = datetime.utcnow() - timedelta(days=6 * 366)
     from fiskr.database import ALERT_CLOSED_STATUSES, AuditTrail
     piste = AuditTrail(client_id=f"R{UID}{suffixe}", client_name="Témoin",
                        client_type="I", watchlist_id="W1", watchlist_name="VOLKOV",

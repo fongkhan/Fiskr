@@ -8,6 +8,10 @@ Regles de conception :
   purge : c'est la trace append-only attendue en controle — chaque purge y
   est au contraire journalisee (action RETENTION_PURGE, volumes par famille) ;
 - garde-fou : aucune purge en dessous de RETENTION_MIN_DAYS (30 jours) ;
+- les familles PROBANTES (journal de criblage, alertes cloturees avec leurs
+  pieces) comptent leur duree depuis la FIN DE LA RELATION, jamais en dessous
+  de cinq annees civiles (CMF L.561-12, cf. fiskr/conservation.py) : un
+  client en relation, ou sans date de fin, n'est jamais purge ;
 - le journal de criblage (compliance_audit_trail) n'est purge que pour les
   lignes qui ne sont plus referencees par aucune alerte restante : une alerte
   conservee garde toujours son decision tree ;
@@ -24,12 +28,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from fiskr import conservation
 from fiskr.database import (
     AuditTrail, Alert, AlertEvent, AlertAttachment, AdminAuditLog,
     BatchCampaign, BatchResult, SyncReport, ALERT_CLOSED_STATUSES,
 )
 from fiskr.settings import (retention_policy, RETENTION_FAMILIES,
-                            retention_sous_la_duree_legale)
+                            RETENTION_FAMILLES_PROBANTES)
 
 logger = logging.getLogger("fiskr.retention")
 
@@ -105,32 +110,66 @@ def _archiver_fichier(archive_path: Path, attachment) -> Optional[str]:
         return None
 
 
-def _cutoffs(policy: Dict) -> Dict[str, Optional[datetime]]:
-    """Date limite par famille (None = famille desactivee, jamais purgee)."""
-    now = datetime.utcnow()
+def _dates_de_la_politique(policy: Dict, now: datetime) -> Dict[str, Optional[datetime]]:
+    """Ce que la politique, seule, purgerait : la date de la ligne contre la
+    duree reglee (None = famille desactivee)."""
     return {
         family: (now - timedelta(days=int(policy[family]))) if int(policy[family] or 0) > 0 else None
         for family in RETENTION_FAMILIES
     }
 
 
-def _purgeable_audit_query(db, cutoff: datetime):
-    """Lignes d'audit expirees ET orphelines (plus referencees par une alerte)."""
+def _cutoffs(policy: Dict, maintenant: Optional[datetime] = None) -> Dict[str, Optional[datetime]]:
+    """
+    Date limite par famille (None = famille desactivee, jamais purgee).
+
+    Pour une famille probante, c'est la date avant laquelle le DELAI doit avoir
+    commence a courir — fin de la relation, ou operation occasionnelle — et
+    jamais plus recente que cinq annees civiles : la purge comptait depuis la
+    date de la ligne, et une politique a 1 825 jours detruisait le dossier
+    d'un client toujours en portefeuille (fiskr/conservation.py).
+    """
+    now = maintenant or datetime.utcnow()
+    plancher = conservation.limite_legale(now)
+    limites = _dates_de_la_politique(policy, now)
+    for family in RETENTION_FAMILLES_PROBANTES:
+        if limites.get(family) is not None:
+            limites[family] = min(limites[family], plancher)
+    return limites
+
+
+def _audit_orphelin(db, depuis: datetime):
+    """Lignes d'audit plus anciennes que `depuis` et plus referencees par
+    aucune alerte."""
     referenced = db.query(Alert.audit_id)
     # Le DERNIER criblage d'une alerte est l'arbre que son valideur lit
     # (fiskr/alerts.py, `latest_audit_id`) : il est reference au meme titre.
     derniers = db.query(Alert.latest_audit_id).filter(Alert.latest_audit_id.isnot(None))
     return db.query(AuditTrail).filter(
-        AuditTrail.timestamp < cutoff,
+        AuditTrail.timestamp < depuis,
         ~AuditTrail.id.in_(referenced),
         ~AuditTrail.id.in_(derniers),
     )
 
 
-def _purgeable_alert_ids(db, cutoff: datetime):
+def _motif_audit(cutoff: datetime):
+    return conservation.motif(AuditTrail.client_id, AuditTrail.timestamp, cutoff)
+
+
+def _purgeable_audit_query(db, cutoff: datetime):
+    """Lignes d'audit orphelines dont le delai de conservation a couru avant
+    `cutoff` (fin de relation, ou ligne d'un client sans fiche)."""
+    return _audit_orphelin(db, cutoff).filter(_motif_audit(cutoff) == conservation.PURGEABLE)
+
+
+def _date_de_l_alerte():
     # Date de reference : la decision quand elle existe, sinon la creation
     # (les clotures automatiques CLOSED_BY_RULE n'ont pas de decided_at)
-    from sqlalchemy import or_, and_
+    from sqlalchemy import func
+    return func.coalesce(Alert.decided_at, Alert.created_at)
+
+
+def _alertes_cloturees(db, depuis: datetime, *colonnes):
     from fiskr.database import MesureDeGel
     # Une alerte qui porte une mesure de gel est le DOSSIER de cette mesure :
     # la piece de declaration a la DG Tresor est une piece jointe de l'alerte,
@@ -140,15 +179,56 @@ def _purgeable_alert_ids(db, cutoff: datetime):
     # famille de retention (comme le journal d'administration, il n'est jamais
     # purge) ; les alertes qu'il porte ne le sont donc pas non plus.
     tenues = db.query(MesureDeGel.alert_id)
-    rows = db.query(Alert.id).filter(
+    return db.query(*colonnes).filter(
         Alert.status.in_(ALERT_CLOSED_STATUSES),
-        or_(
-            and_(Alert.decided_at.isnot(None), Alert.decided_at < cutoff),
-            and_(Alert.decided_at.is_(None), Alert.created_at < cutoff),
-        ),
+        _date_de_l_alerte() < depuis,
         ~Alert.id.in_(tenues),
-    ).all()
+    )
+
+
+def _motif_alerte(cutoff: datetime):
+    return conservation.motif(Alert.client_id, _date_de_l_alerte(), cutoff)
+
+
+def _purgeable_alert_ids(db, cutoff: datetime):
+    rows = _alertes_cloturees(db, cutoff, Alert.id).filter(
+        _motif_alerte(cutoff) == conservation.PURGEABLE).all()
     return [r[0] for r in rows]
+
+
+def conservees_au_titre_de_la_relation(db, policy: Optional[Dict] = None,
+                                       maintenant: Optional[datetime] = None) -> Dict[str, Dict[str, int]]:
+    """
+    Par famille probante : combien de pieces la politique aurait purgees (leur
+    date est plus ancienne que la duree reglee) et que la loi garde, et
+    pourquoi (cf. conservation.MOTIFS). Lu par l'ecran de retention et ecrit
+    au journal de chaque purge : ce qui est annonce comme conserve est ce que
+    la purge epargne, par la MEME expression.
+    """
+    from sqlalchemy import func
+    policy = policy or retention_policy(db)
+    now = maintenant or datetime.utcnow()
+    politique = _dates_de_la_politique(policy, now)
+    limites = _cutoffs(policy, now)
+    sources = {
+        "audit_trail": lambda depuis, limite: _audit_orphelin(db, depuis).with_entities(
+            _motif_audit(limite).label("motif")),
+        "closed_alerts": lambda depuis, limite: _alertes_cloturees(
+            db, depuis, _motif_alerte(limite).label("motif")),
+    }
+    sortie: Dict[str, Dict[str, int]] = {}
+    for family in RETENTION_FAMILLES_PROBANTES:
+        depuis, limite = politique.get(family), limites.get(family)
+        if depuis is None or family not in sources:
+            continue
+        # Regroupement sur la colonne d'une sous-requete, pas sur l'expression :
+        # PostgreSQL refuse un GROUP BY dont l'expression ne se reconnait pas
+        # a l'identique dans le SELECT.
+        sous = sources[family](depuis, limite).subquery()
+        comptes = {m: int(n) for m, n in db.query(sous.c.motif, func.count())
+                   .group_by(sous.c.motif).all()}
+        sortie[family] = {m: comptes.get(m, 0) for m in conservation.MOTIFS}
+    return sortie
 
 
 def _purgeable_campaign_ids(db, cutoff: datetime):
@@ -159,10 +239,10 @@ def _purgeable_campaign_ids(db, cutoff: datetime):
     return [r[0] for r in rows]
 
 
-def preview_retention(db) -> Dict[str, int]:
+def preview_retention(db, maintenant: Optional[datetime] = None) -> Dict[str, int]:
     """Volumes qui SERAIENT purges avec la politique actuelle (aucune ecriture)."""
     policy = retention_policy(db)
-    cutoffs = _cutoffs(policy)
+    cutoffs = _cutoffs(policy, maintenant)
     preview = {}
     for family, cutoff in cutoffs.items():
         if cutoff is None:
@@ -288,30 +368,27 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
             deleted["batch_campaigns"] = db.query(BatchCampaign).filter(
                 BatchCampaign.id.in_(campaign_ids)).delete(synchronize_session=False)
 
-    # Dernière ligne : une purge qui emporte de la preuve sous le plancher légal
-    # le DIT, dans le journal que le contrôle lira. Elle ne s'interrompt pas —
-    # ce serait décider à la place de l'exploitant, et sans lui laisser de
-    # moyen d'agir — mais elle ne passe plus inaperçue.
-    ecarts = retention_sous_la_duree_legale(policy)
+    # Le journal dit sous quel plancher la purge a compte, et ce qu'il a garde.
+    # Il disait « CONSERVATION SOUS LA DURÉE LÉGALE » quand la politique etait
+    # reglee sous cinq ans : ce n'est plus vrai — les familles probantes ne
+    # purgent que des pieces dont les cinq ans depuis la fin de la relation
+    # sont ecoules (cf. _cutoffs) — et le journal ne l'affirmera donc plus.
     if any(deleted.values()):
         archived_to = str(archive_path) if archive_enabled and archive_path.exists() else None
-        avertissement = ""
-        if ecarts and any(deleted.get(e["famille"]) for e in ecarts):
-            avertissement = " — CONSERVATION SOUS LA DURÉE LÉGALE : " + " ; ".join(
-                e["message"] for e in ecarts if deleted.get(e["famille"]))
-            logger.warning("Purge de rétention sous la durée légale :%s", avertissement)
+        gardees = conservees_au_titre_de_la_relation(db, policy)
         db.add(AdminAuditLog(
             username=username, action="RETENTION_PURGE", target="retention",
             after={**deleted, "policy": {f: policy[f] for f in RETENTION_FAMILIES},
                    "archive": archived_to, "pieces": pieces,
-                   "sous_la_duree_legale": [e["famille"] for e in ecarts
-                                            if deleted.get(e["famille"])]},
+                   "plancher_legal": {
+                       "article": "CMF L.561-12",
+                       "delai_ecoule_avant": conservation.limite_legale().date().isoformat()},
+                   "conservees_au_titre_de_la_relation": gardees},
             detail="Purge de rétention : " + ", ".join(
                 f"{family}={count}" for family, count in deleted.items() if count)
                    + (f" — archivée dans {archived_to}" if archived_to else " — sans archive")
                    + (f" — {pieces['archivees']} pièce(s) jointe(s) copiée(s) dans l'archive"
-                      if pieces["archivees"] else "")
-                   + avertissement,
+                      if pieces["archivees"] else ""),
         ))
         logger.info(f"Purge de rétention effectuée : {deleted} (archive : {archived_to})")
 

@@ -15,11 +15,15 @@ genre de défaut qui ne se voit pas le jour où on le commet, mais le jour où u
 contrôleur demande à voir — et il ne se répare pas, la preuve détruite ne se
 reconstitue pas.
 
-Ce qui est fait ici n'est **pas** un interdit : une installation hors de France
-peut relever d'une autre règle, et c'est la décision de l'exploitant. Ce qui
-est refusé, c'est que le choix se fasse sans le savoir. Le plancher est nommé,
-l'API l'annonce, le journal d'administration le trace, l'écran de mise en
-service le rappelle, et chaque purge concernée le redit.
+Ce qui est fait ici n'est **pas** un interdit : le réglage reste accepté. Ce
+qui est refusé, c'est que le choix se fasse sans le savoir. Le plancher est
+nommé, l'API l'annonce, le journal d'administration le trace, l'écran de mise
+en service le rappelle.
+
+Lot « conservation » : la purge applique désormais elle-même le plancher —
+cinq années civiles à compter de la fin de la relation (fiskr/conservation.py,
+tests/test_conservation_depuis_la_fin_de_relation.py). Deux tests ci-dessous
+épinglaient l'état d'avant et ont été réécrits, en le disant.
 """
 import uuid
 from datetime import datetime, timedelta
@@ -60,8 +64,19 @@ def client_admin():
         db.close()
 
 
-def test_le_plancher_legal_vaut_cinq_ans():
-    assert DUREE_LEGALE_JOURS == 5 * 365
+def test_le_plancher_legal_vaut_cinq_annees_civiles():
+    """
+    Réécrit (lot « conservation ») : ce test épinglait `5 * 365`, soit 1 825
+    jours — MOINS que cinq ans dans toute fenêtre, chacune contenant au moins
+    un 29 février. Le plancher en jours est désormais la plus longue fenêtre de
+    cinq années civiles, dérivée du calendrier.
+    """
+    from fiskr.conservation import il_y_a
+    debuts = [datetime(2028, 1, 1) + timedelta(days=i) for i in range(4 * 366)]
+    fenetres = {(jour - il_y_a(jour)).days for jour in debuts}
+    assert fenetres == {1826, 1827}, "une fenêtre de cinq ans compte un ou deux 29 février"
+    assert DUREE_LEGALE_JOURS == max(fenetres) == 1827
+    assert 5 * 365 < min(fenetres)
 
 
 def test_le_garde_fou_technique_ne_se_confond_pas_avec_l_obligation():
@@ -185,35 +200,48 @@ def test_la_mise_en_service_rappelle_l_ecart(client_admin):
 
 # ------------------------------------------------ ce que la purge en dit
 
-def test_la_purge_ecrit_ce_qu_elle_emporte(client_admin):
+def test_une_purge_sous_une_politique_courte_ne_descend_plus_sous_le_plancher(client_admin):
     """
-    Dernière ligne : la purge ne s'interrompt pas — ce serait décider à la
-    place de l'exploitant sans lui laisser de moyen d'agir — mais elle inscrit
-    dans le journal que ce qu'elle a détruit l'était sous le plancher légal.
+    Réécrit (lot « conservation »). Ce test épinglait une purge qui, réglée à
+    30 jours, DÉTRUISAIT une ligne de 400 jours et l'écrivait « CONSERVATION
+    SOUS LA DURÉE LÉGALE » au journal : le défaut était consigné, pas empêché.
+
+    La purge applique désormais le plancher : la ligne de 400 jours d'un
+    criblage sans fiche client (opération occasionnelle) reste, celle de six
+    ans part, et le journal ne prétend plus avoir conservé sous la durée
+    légale — ce serait faux. Il dit sous quel plancher la purge a compté.
     """
     from fiskr.retention import run_retention
 
     db = next(get_db())
     try:
         client_admin.put("/api/settings/retention", json={"audit_trail": 30})
-        vieux = AuditTrail(
-            client_id=f"RET-{uuid.uuid4().hex[:8]}", client_name="Ancien Dossier",
-            client_type="PP", watchlist_id="—", decision_tree={}, config_state={},
-            watchlist_version="test", watchlist_hash="test",
-            watchlist_name="—", status="NO_MATCH", base_score=0.0, final_score=0.0,
-            timestamp=datetime.utcnow() - timedelta(days=400))
-        db.add(vieux)
+
+        def ligne(jours):
+            l = AuditTrail(
+                client_id=f"RET-{uuid.uuid4().hex[:8]}", client_name="Ancien Dossier",
+                client_type="PP", watchlist_id="—", decision_tree={}, config_state={},
+                watchlist_version="test", watchlist_hash="test",
+                watchlist_name="—", status="NO_MATCH", base_score=0.0, final_score=0.0,
+                timestamp=datetime.utcnow() - timedelta(days=jours))
+            db.add(l)
+            return l
+        recente, ancienne = ligne(400), ligne(6 * 366)
         db.commit()
+        ids = (recente.id, ancienne.id)
 
         supprimes = run_retention(db, username="test-retention")
         assert supprimes["audit_trail"] >= 1
+        db.expire_all()
+        assert db.get(AuditTrail, ids[0]) is not None, "une ligne de 400 jours partait à 30 jours"
+        assert db.get(AuditTrail, ids[1]) is None
 
         trace = db.query(AdminAuditLog).filter(
             AdminAuditLog.action == "RETENTION_PURGE",
         ).order_by(AdminAuditLog.id.desc()).first()
         assert trace is not None
-        assert "SOUS LA DURÉE LÉGALE" in trace.detail
-        assert "audit_trail" in trace.after.get("sous_la_duree_legale", [])
+        assert "SOUS LA DURÉE LÉGALE" not in trace.detail
+        assert trace.after["plancher_legal"]["article"] == "CMF L.561-12"
     finally:
         client_admin.put("/api/settings/retention", json={"audit_trail": 0})
         db.close()

@@ -293,10 +293,33 @@ def _est_gele(statut: Optional[str]) -> bool:
     return str(statut or "").strip().upper() == STATUT_CLIENT_GELE
 
 
+def _tient_le_client():
+    """Une mesure TIENT son client gele tant qu'elle n'est pas levee et qu'elle
+    a inscrit le gel sur sa fiche. Une seule definition : la levee, l'import
+    du referentiel et le webhook d'upsert la lisent."""
+    return (MesureDeGel.statut != STATUT_LEVEE) & MesureDeGel.client_gele_ecrit.is_(True)
+
+
 def _autres_gels_en_vigueur(db, mesure: MesureDeGel) -> List[MesureDeGel]:
     return db.query(MesureDeGel).filter(
         MesureDeGel.client_id == mesure.client_id, MesureDeGel.id != mesure.id,
-        MesureDeGel.statut != STATUT_LEVEE, MesureDeGel.client_gele_ecrit.is_(True)).all()
+        _tient_le_client()).all()
+
+
+def mesures_qui_tiennent(db, client_id: Optional[str]) -> List[MesureDeGel]:
+    """
+    Les mesures en vigueur qui tiennent ce client gele.
+
+    Le webhook `client-upsert` reecrivait `client_status` comme n'importe quel
+    champ : un SI amont qui renvoie « actif » — ou qui n'envoie pas de statut
+    du tout — degelait le client sans un mot, pendant que le registre portait
+    une mesure en vigueur. Tant que cette liste n'est pas vide, aucune entree
+    ne fait sortir le client de GELE ; seule la levee (`lever`) rend le statut.
+    """
+    if not client_id:
+        return []
+    return db.query(MesureDeGel).filter(
+        MesureDeGel.client_id == client_id, _tient_le_client()).order_by(MesureDeGel.id).all()
 
 
 def _geler_client(db, mesure: MesureDeGel) -> Optional[str]:
@@ -345,8 +368,7 @@ def reappliquer_aux_clients(db, snapshot_id: str) -> int:
     Appele apres chaque mise en production d'un CLIENT_BASE. Rend le nombre de
     fiches regelees (le commit est a l'appelant).
     """
-    en_vigueur = db.query(MesureDeGel).filter(
-        MesureDeGel.statut != STATUT_LEVEE, MesureDeGel.client_gele_ecrit.is_(True)).all()
+    en_vigueur = db.query(MesureDeGel).filter(_tient_le_client()).all()
     ids = sorted({m.client_id for m in en_vigueur if m.client_id})
     if not ids:
         return 0

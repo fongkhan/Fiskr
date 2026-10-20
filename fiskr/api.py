@@ -152,7 +152,9 @@ from fiskr import gels as registre_des_gels
 from fiskr.database import MesureDeGel
 from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
                             gel_declaration_delai_heures, perimeter_overrides)
-from fiskr.retention import preview_retention, run_retention
+from fiskr.retention import (preview_retention, run_retention,
+                             conservees_au_titre_de_la_relation)
+from fiskr import conservation
 from fiskr.apimessages import resolve_lang as resolve_api_lang, translate_payload
 from fiskr import progress as progress_registry
 from fiskr import jobs as job_queue
@@ -845,6 +847,10 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
                 snap.phase = "DONE"
                 snap.status = "PENDING_REVIEW" if (
                     staging and snap.file_type != "CLIENT_BASE") else "READY"
+                if snap.file_type == "CLIENT_BASE":
+                    # Un referentiel repare entre en production comme un
+                    # import abouti : il ne degele personne non plus.
+                    registre_des_gels.reappliquer_aux_clients(db, snap.snapshot_id)
                 summary["repaired"] += 1
             else:
                 snap.status = "ERROR"
@@ -2103,7 +2109,11 @@ async def get_retention(
             # Le minimum technique et le plancher legal ne se ressemblent pas :
             # l'ecran doit pouvoir montrer les deux, et dire lequel est franchi.
             "duree_legale_jours": DUREE_LEGALE_JOURS,
-            "sous_la_duree_legale": retention_sous_la_duree_legale(politique)}
+            "sous_la_duree_legale": retention_sous_la_duree_legale(politique),
+            # Ce que la politique aurait purge et que la loi garde, et pourquoi
+            # (libelles derives de fiskr/conservation.py, jamais recopies)
+            "conservees": conservees_au_titre_de_la_relation(db, politique),
+            "motifs_de_conservation": conservation.MOTIFS}
 
 @app.put("/api/settings/retention")
 async def update_retention_settings(
@@ -2146,11 +2156,11 @@ async def update_retention_settings(
         raise HTTPException(status_code=400, detail="Aucun réglage fourni.")
     set_setting(db, SETTING_RETENTION, merged, updated_by=admin_user["username"])
     # Ce que la loi impose n'est pas ce que le garde-fou technique verifie. Un
-    # reglage sous le plancher de L561-12 reste ACCEPTE — une installation hors
-    # de France peut relever d'une autre regle, et c'est la decision de
-    # l'exploitant — mais il ne peut plus se prendre sans le savoir : il est
-    # annonce dans la reponse et trace au journal d'administration, ou un
-    # controle le retrouvera avec sa date et son auteur.
+    # reglage sous le plancher de L561-12 reste ACCEPTE, mais la purge ne
+    # descend pas en dessous (fiskr/conservation.py : cinq annees civiles
+    # depuis la fin de la relation) : il est annonce dans la reponse — la
+    # duree affichee n'est pas celle appliquee — et trace au journal
+    # d'administration, ou un controle le retrouvera avec sa date et son auteur.
     ecarts = retention_sous_la_duree_legale(merged)
     delta = {k: v for k, v in merged.items() if before.get(k) != v}
     if delta:
@@ -3719,6 +3729,8 @@ _CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "client_id": (), "client_type": (), "client_first_name": (),
         "client_last_name": (), "client_company_name": (), "client_dob": (),
         "nationality": (), "residence": (),
+        # Point de depart des cinq ans de conservation (fiskr/conservation.py)
+        "client_relationship_end": ("relationship_end",),
     },
     "WATCHLIST_EU": {
         "entity_id": ("id",),
@@ -3732,6 +3744,12 @@ _CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
 
 # Champs attendus par type, dans l'ordre d'affichage : DÉRIVÉS de la table.
 _APERCU_CHAMPS = {t: tuple(champs) for t, champs in _CHAMPS_CSV.items()}
+
+# Champs dont la FORME compte. La date de fin de relation se compare en SQL
+# comme une chaîne ISO : écrite telle quelle, « 20/10/2019 » se classerait
+# avant « 2021-10-20 ». L'aperçu montre la valeur LUE — vide si illisible, le
+# signe visible d'une colonne mal formée — et l'import écrit la même.
+_LECTURES_CSV = {"client_relationship_end": conservation.date_de_fin_de_relation}
 
 
 def _normaliser_ligne_csv(file_type: str, ligne: Dict[str, Any]) -> Dict[str, Any]:
@@ -3755,6 +3773,8 @@ def _apercu_champs_compris(file_type: str, item: Dict[str, Any]) -> Dict[str, st
     sortie: Dict[str, str] = {}
     for champ in _APERCU_CHAMPS.get(file_type, ()):
         valeur = item.get(champ)
+        if champ in _LECTURES_CSV:
+            valeur = _LECTURES_CSV[champ](valeur)
         sortie[champ] = "" if valeur in (None, "") else str(valeur)
     return sortie
 
@@ -4032,6 +4052,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         # nommee produisait donc un « import reussi » avec une liste vide ou
         # amputee — le defaut le plus couteux du produit, et le plus discret.
         rejets = _CompteurDeRejets()
+        fins_illisibles = 0  # dates de fin de relation non comprises (CLIENT_BASE)
         ofac_relations = None  # liens entre profils (OFAC uniquement)
 
         # 3. Parse contents based on File Type
@@ -4298,7 +4319,15 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 if not report["is_valid"]:
                     rejets.ajouter(report)
                     continue
-                    
+
+                # Une date de fin illisible n'ecarte pas la fiche (elle doit
+                # rester criblee) : elle n'est pas ecrite, le client reste
+                # repute en relation — et l'import le dit.
+                fin_brute = item.get("client_relationship_end")
+                fin_de_relation = _LECTURES_CSV["client_relationship_end"](fin_brute)
+                if conservation.illisible(fin_brute, fin_de_relation):
+                    fins_illisibles += 1
+
                 ent_checksum = compute_checksum(item)
                 
                 # Split countries
@@ -4354,6 +4383,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     client_activity_sector=item.get("client_activity_sector") or None,
                     client_activity_countries=[c.strip().upper() for c in (item.get("client_activity_countries") or "").split(",") if c.strip()],
                     client_relationship_start=item.get("client_relationship_start") or None,
+                    client_relationship_end=fin_de_relation,
                     client_status=(item.get("client_status") or "").strip().upper() or None,
                     entity_checksum=ent_checksum
                 )
@@ -4425,6 +4455,10 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 pass
             criblage = _cribler_le_referentiel_importe(db, snap_id, username)
             message = f"{message} {criblage['message']}"
+        if fins_illisibles:
+            message = (f"{message} {fins_illisibles} date(s) de fin de relation illisible(s) "
+                       f"(AAAA-MM-JJ ou JJ/MM/AAAA attendu) : non enregistrée(s), ces clients "
+                       f"restent réputés en relation et leurs pièces conservées.")
         # Une correspondance qui retombe sur une alerte deja ouverte ne cree
         # rien : la porte reste la meme (le re-criblage a bien produit
         # quelque chose), mais les trois nombres sont maintenant distincts.
@@ -4455,6 +4489,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             "status": snap.status,
             "rescreen": rescreen_result,
             "criblage": criblage,
+            "relationship_end_unreadable": fins_illisibles,
             **rejets.rapport(),
         }
     except Exception as e:
@@ -6947,7 +6982,8 @@ async def get_client_overview(
             "phone": entity.client_phone, "email": entity.client_email,
             "risk_rating": entity.client_risk_rating, "pep_flag": bool(entity.client_pep_flag),
             "segment": entity.client_segment, "activity_sector": entity.client_activity_sector,
-            "relationship_start": entity.client_relationship_start, "status": entity.client_status,
+            "relationship_start": entity.client_relationship_start,
+            "relationship_end": entity.client_relationship_end, "status": entity.client_status,
             "snapshot_uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
             # Quand cette fiche a ete criblee, et contre quelle version des listes
             "dernier_criblage": _trace_de_criblage(db, entity),
@@ -13313,6 +13349,11 @@ class HookClientUpsert(BaseModel):
     client_segment: Optional[str] = None
     client_activity_sector: Optional[str] = None
     client_relationship_start: Optional[str] = None
+    # AAAA-MM-JJ (ou JJ/MM/AAAA) : point de depart des cinq ans de
+    # conservation. ABSENT de la charge utile, il est laisse tel quel — le
+    # remplacement etant complet, un appelant qui ne le connait pas
+    # effacerait sinon la date posee par l'import. `null` explicite l'efface.
+    client_relationship_end: Optional[str] = None
     client_status: Optional[str] = None
 
 
@@ -13431,6 +13472,37 @@ async def hook_client_upsert(
             )
 
         values = payload.model_dump()
+        avertissements: List[str] = []
+        if "client_relationship_end" not in payload.model_fields_set:
+            values.pop("client_relationship_end")
+        else:
+            fin_brute = values["client_relationship_end"]
+            values["client_relationship_end"] = conservation.date_de_fin_de_relation(fin_brute)
+            if conservation.illisible(fin_brute, values["client_relationship_end"]):
+                avertissements.append(
+                    f"date de fin de relation illisible (« {str(fin_brute)[:40]} », AAAA-MM-JJ "
+                    f"attendu) : non enregistrée, le client reste réputé en relation.")
+        # Le registre des gels l'emporte sur le SI amont, qui l'ignore : une
+        # mesure en vigueur garde le client GELE, quoi que dise la charge utile
+        # (un statut absent l'effacerait tout autant). Le reste de la fiche
+        # s'applique ; seule la levee de la mesure rend le statut.
+        gel_maintenu = None
+        tiennent = registre_des_gels.mesures_qui_tiennent(db, payload.client_id)
+        if tiennent:
+            demande = values.get("client_status")
+            values["client_status"] = registre_des_gels.STATUT_CLIENT_GELE
+            if str(demande or "").strip().upper() != registre_des_gels.STATUT_CLIENT_GELE:
+                numeros = ", ".join(f"#{m.id}" for m in tiennent)
+                gel_maintenu = {
+                    "requested_status": demande,
+                    "applied_status": registre_des_gels.STATUT_CLIENT_GELE,
+                    "freeze_measures": [m.id for m in tiennent],
+                    "summary": (f"statut « {demande or 'vide'} » non appliqué : mesure(s) de gel "
+                                f"{numeros} en vigueur au registre, le client reste GELE. Seule "
+                                f"la levée de la mesure rend le statut ; le reste de la fiche "
+                                f"est appliqué."),
+                }
+                avertissements.append(gel_maintenu["summary"])
         existing = db.query(ClientEntity).filter(
             ClientEntity.snapshot_id == snap.snapshot_id,
             ClientEntity.client_id == payload.client_id,
@@ -13454,22 +13526,29 @@ async def hook_client_upsert(
             changed_fields = sorted(k for k, v in values.items() if v is not None and k != "client_id")
 
         identification = elements_d_identification(changed_fields)
+        trace = {"operation": action_detail, "fields": changed_fields,
+                 "identification_fields": identification,
+                 "snapshot_id": snap.snapshot_id}
+        if gel_maintenu:
+            # Un SI qui tente de degeler un client se retrouve au journal
+            trace["status_kept_frozen"] = {k: gel_maintenu[k] for k in
+                                           ("requested_status", "freeze_measures")}
         log_admin_action(db, current_user["username"], "CLIENT_UPSERT_HOOK",
-                         target=payload.client_id,
-                         after={"operation": action_detail, "fields": changed_fields,
-                                "identification_fields": identification,
-                                "snapshot_id": snap.snapshot_id})
+                         target=payload.client_id, after=trace)
         screening = _cribler_apres_upsert(db, row, action_detail, changed_fields,
                                           identification, current_user["username"])
         db.commit()
         result = {
             "message": f"Fiche client {payload.client_id} {'mise à jour' if action_detail == 'updated' else 'créée'} "
-                       f"dans le référentiel en production — {screening['summary']}",
+                       f"dans le référentiel en production — {screening['summary']}"
+                       + "".join(f" — {a}" for a in avertissements),
             "operation": action_detail,
             "client_id": payload.client_id,
             "snapshot_id": snap.snapshot_id,
             "changed_fields": changed_fields,
             "screening": screening,
+            "frozen": gel_maintenu,
+            "warnings": avertissements,
         }
         _hook_store_delivery(db, cle, "client-upsert", current_user["username"], 200, result)
         return result

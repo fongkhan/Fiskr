@@ -222,6 +222,11 @@ class ClientEntity(Base):
     client_activity_sector = Column(String(100), nullable=True) # code NAF / secteur
     client_activity_countries = Column(JSON, nullable=True)     # pays d'exposition operationnelle
     client_relationship_start = Column(String(20), nullable=True)
+    # Fin de la relation d'affaires (AAAA-MM-JJ, lue par
+    # fiskr.conservation.date_de_fin_de_relation) : c'est d'elle, et non de la
+    # date d'une ligne, que courent les cinq ans de conservation (CMF L.561-12).
+    # NULL : le client est en relation, ses pieces ne sont jamais purgees.
+    client_relationship_end = Column(String(20), nullable=True)
     # actif / cloture / gele — normalise en majuscules a l'import ; « GELE »
     # est ecrit par le registre des mesures de gel (fiskr/gels.py)
     client_status = Column(String(20), nullable=True)
@@ -1662,6 +1667,7 @@ def init_db():
                 ("client_activity_sector", "VARCHAR(100)"),
                 ("client_activity_countries", "JSON"),
                 ("client_relationship_start", "VARCHAR(20)"),
+                ("client_relationship_end", "VARCHAR(20)"),
                 ("client_status", "VARCHAR(20)"),
             ],
             "alerts": [

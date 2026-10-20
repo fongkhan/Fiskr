@@ -687,9 +687,13 @@ def _conservation(db) -> Dict[str, Any]:
     vider la base par inadvertance.
 
     Le contrôle se pose ici et pas seulement à l'instant du réglage : une
-    politique se change un jour et se vit des années. Une purge sous le
-    plancher légal doit rester lisible longtemps après la personne qui l'a
-    décidée — c'est précisément ce qu'un contrôle vient chercher.
+    politique se change un jour et se vit des années.
+
+    La purge applique désormais elle-même le plancher (fiskr/conservation.py :
+    cinq années civiles depuis la fin de la relation), donc une politique plus
+    courte ne détruit plus rien trop tôt. Le point reste en ATTENTION parce que
+    l'écran annonce alors une durée que le produit n'applique pas — et c'est
+    celle-là qu'un registre des traitements recopiera.
     """
     from fiskr.settings import (retention_policy, retention_sous_la_duree_legale,
                                 DUREE_LEGALE_JOURS)
@@ -697,17 +701,17 @@ def _conservation(db) -> Dict[str, Any]:
     if not ecarts:
         return _controle(
             "conservation", "Exploitation", "Conservation des pièces probantes", OK,
-            f"Journal de criblage et alertes clôturées conservés au moins "
-            f"{DUREE_LEGALE_JOURS} jours (cinq ans).",
+            f"Journal de criblage et alertes clôturées réglés à {DUREE_LEGALE_JOURS} "
+            f"jours au moins (cinq années civiles) ou sans limite ; la purge compte "
+            f"depuis la fin de la relation d'affaires.",
             lien="#settings/settings-governance")
     return _controle(
         "conservation", "Exploitation", "Conservation des pièces probantes", ATTENTION,
         " ; ".join(e["message"] for e in ecarts)
-        + " Le produit fonctionne ; c'est la preuve qui manquera le jour où on "
-          "la demandera, et elle ne se reconstitue pas.",
-        "Portez ces durées à 1825 jours au moins (0 = conservation illimitée), "
-        "ou assurez-vous que l'archive de purge est bien externalisée et "
-        "conservée le temps requis.",
+        + " Rien n'est purgé trop tôt, mais la durée affichée n'est pas celle "
+          "que le produit applique.",
+        f"Portez ces durées à {DUREE_LEGALE_JOURS} jours au moins (0 = conservation "
+        f"illimitée) : le réglage dira alors ce que fait la purge.",
         "#settings/settings-retention")
 
 

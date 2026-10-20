@@ -290,12 +290,21 @@ RETENTION_MIN_DAYS = 30  # garde-fou TECHNIQUE : jamais moins de 30 jours quand 
 #
 # Un administrateur pouvait donc regler le journal de criblage sur 31 jours :
 # accepte sans un mot, et un mois plus tard la preuve n'existe plus. Ce
-# plancher-la est desormais NOMME. Il n'interdit pas — une installation hors
-# de France peut relever d'une autre regle, et c'est la decision de
-# l'exploitant — mais il ne laisse plus le choix se faire sans le savoir :
-# l'API l'annonce, le journal d'administration le trace, l'ecran de mise en
-# service le rappelle et chaque purge concernee le redit.
-DUREE_LEGALE_JOURS = 5 * 365  # 1825 — L561-12 CMF
+# plancher-la est desormais NOMME : l'API l'annonce, le journal
+# d'administration le trace, l'ecran de mise en service le rappelle.
+#
+# Et la purge l'APPLIQUE (fiskr/conservation.py) : les cinq ans courent depuis
+# la fin de la relation, et aucune politique ne les raccourcit. La directive
+# (UE) 2015/849 (art. 40) les impose dans toute l'Union, et la recommandation
+# 11 du GAFI fixe « au moins cinq ans » au-dela : une regle LBA-FT qui
+# prevoirait moins, l'installation hors de France n'en trouvera pas. Une
+# politique reglee en dessous reste acceptee et annoncee — elle n'a
+# simplement pas d'effet sous le plancher.
+#
+# Le plancher en jours etait 5 * 365 = 1825 : moins que cinq ans dans TOUTE
+# fenetre (chacune contient un 29 fevrier). Il est desormais derive du
+# calendrier — la plus longue fenetre de cinq annees civiles, 1 827 jours.
+from fiskr.conservation import DUREE_LEGALE_JOURS
 
 # Familles qui portent la preuve opposable. Les deux autres (rapports de
 # synchronisation, campagnes batch) sont de l'exploitation : utiles, non
@@ -329,9 +338,11 @@ def retention_sous_la_duree_legale(policy: Dict[str, Any]) -> List[Dict[str, Any
                 "jours": jours,
                 "plancher_legal": DUREE_LEGALE_JOURS,
                 "message": (
-                    f"{_LIBELLE_FAMILLE.get(famille, famille)} : purge à {jours} jours, "
+                    f"{_LIBELLE_FAMILLE.get(famille, famille)} : purge réglée à {jours} jours, "
                     f"alors que l'article L561-12 du Code monétaire et financier "
-                    f"impose {DUREE_LEGALE_JOURS} jours (cinq ans) de conservation."),
+                    f"impose cinq ans de conservation à compter de la fin de la "
+                    f"relation (jusqu'à {DUREE_LEGALE_JOURS} jours) : la purge "
+                    f"applique ces cinq ans, le réglage n'a pas d'effet en dessous."),
             })
     return ecarts
 DEFAULT_RETENTION = {"audit_trail": 0, "closed_alerts": 0, "sync_reports": 0,
