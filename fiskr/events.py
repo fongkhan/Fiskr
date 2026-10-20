@@ -248,6 +248,16 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
         urgency=IMMEDIATE, link="#screening/alerts-gels",
     ),
+    "ppe_decision_en_retard": Event(
+        # IMMEDIAT : un dossier PPE sans decision au-dela du delai, c'est une
+        # relation qui court sans la decision que R.561-20-2 1° reserve a
+        # l'organe executif ou a la personne qu'il habilite. Les reviseurs
+        # sont ces personnes dans Fiskr (fiskr/ppe.py). Une fois par dossier :
+        # repete a chaque recapitulatif, il finirait filtre.
+        label="Dossier PPE sans décision d'entrée ou de maintien en relation dans le délai",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-ppe",
+    ),
     "alert_mentioned": Event(
         label="Vous êtes cité dans un commentaire d'alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_MENTIONED,),

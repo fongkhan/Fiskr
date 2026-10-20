@@ -113,6 +113,16 @@ class WatchlistEntity(Base):
     name_original_script = Column(String(1000), nullable=True)  # nom en ecriture d'origine
     title = Column(String(255), nullable=True)          # titre honorifique (distinct de designation)
     pep_role = Column(String(500), nullable=True)       # fonction PEP (OpenSanctions)
+    # Qualite LUE a la source (fiskr/ppe.py, QUALITES) : PPE, membre de la
+    # famille, personne etroitement associee — ou « non precisee » quand le
+    # format consomme ne le dit pas. Jamais « PPE » par defaut : le lecteur
+    # affirmait PPE de chaque fiche, proche compris.
+    pep_qualite = Column(String(20), nullable=True)
+    # Fin de la DERNIERE fonction quand toutes sont terminees (ISO, borne haute
+    # d'une date partielle) ; vide si une fonction est en cours ou non datee
+    pep_fin_de_fonction = Column(String(20), nullable=True)
+    # Liens lus a la source (proche -> PPE) : [{"nature", "relation", "personne", "personne_id", "personne_ppe"}]
+    pep_liens = Column(JSON, nullable=True)
     secondary_sanctions_risk = Column(Text, nullable=True)  # OFAC CAATSA
     designating_state = Column(String(200), nullable=True)  # Etat a l'origine de l'inscription (ONU)
     # Personnes morales
@@ -645,6 +655,65 @@ class MesureDeGel(Base):
     # levee faite par le produit. Signalee une fois.
     radiation_constatee_le = Column(DateTime, nullable=True)
     radiation_detail = Column(Text, nullable=True)
+
+
+class DossierPPE(Base):
+    """
+    Dossier PPE : ce qui SUIT une correspondance confirmee sur une liste de
+    personnes politiquement exposees (fiskr/ppe.py). Avant lui, `_close_alert`
+    closait une alerte PEP confirmee comme les autres : aucune decision de
+    la direction, aucune origine des fonds, rien ne suivait — alors que
+    R.561-20-2 en fait trois obligations.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "ppe_dossiers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    statut = Column(String(20), nullable=False, default="A_DECIDER", index=True)
+    # Identite figee a l'ouverture : le registre se lit sans rejouer l'alerte
+    client_id = Column(String(100), nullable=True, index=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    list_type = Column(String(30), nullable=True)
+    # Ce que la SOURCE dit, fige a l'ouverture (la fiche peut changer ensuite)
+    qualite_source = Column(String(20), nullable=True)
+    fonction_source = Column(Text, nullable=True)
+    fin_de_fonction_source = Column(String(20), nullable=True)
+    liens_source = Column(JSON, nullable=True)
+    # Ce que l'instruction RETIENT (qualite au sens de R.561-18 I, II ou III)
+    qualite_retenue = Column(String(20), nullable=True)
+    fonction = Column(Text, nullable=True)
+    fin_de_fonction = Column(String(20), nullable=True)
+    # Origine du patrimoine et des fonds (R.561-20-2 2°) et pieces jointes de
+    # l'alerte qui l'etablissent (identifiants AlertAttachment)
+    origine_fonds = Column(Text, nullable=True)
+    origine_patrimoine = Column(Text, nullable=True)
+    pieces_origine = Column(JSON, nullable=True)
+    # Classification du client par le SI amont au moment du constat :
+    # True declare PPE, False non, None absente (champ vide ou fiche introuvable)
+    client_pep_declare = Column(Boolean, nullable=True)
+    ppe_non_declaree = Column(Boolean, nullable=True)
+    # Point de depart du delai : la confirmation ; ceux qui l'ont instruite ne
+    # decident pas de la relation
+    ouvert_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    ouvert_par = Column(String(100), nullable=False)
+    proposee_par = Column(String(100), nullable=True)
+    confirmee_par = Column(String(100), nullable=True)
+    # Decision d'entrer ou de rester en relation (R.561-20-2 1°)
+    decision = Column(String(30), nullable=True)
+    decision_motif = Column(Text, nullable=True)
+    decision_reference = Column(String(255), nullable=True)
+    decidee_le = Column(DateTime, nullable=True)
+    decidee_par = Column(String(100), nullable=True)
+    # Vigilance renforcee (R.561-20-2 3°) : prochaine revue du dossier
+    prochaine_revue_le = Column(DateTime, nullable=True)
+    # Retard de decision signale une fois (notification immediate)
+    retard_signale_le = Column(DateTime, nullable=True)
+
 
 class AdminAuditLog(Base):
     """Journal append-only des actions d'administration (utilisateurs,

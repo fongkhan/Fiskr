@@ -123,7 +123,7 @@ def listes_de_demonstration():
 
 # Ordre de suppression : les tables porteuses de cles etrangeres d'abord.
 _INT_PK_TABLES = (
-    "MesureDeGel", "AlertEvent", "AlertAttachment", "Alert", "AuditTrail",
+    "DossierPPE", "MesureDeGel", "AlertEvent", "AlertAttachment", "Alert", "AuditTrail",
     "FpRuleTest", "FpRuleChange", "FpRule",
     "WatchlistEntityChange", "EntityRelationship",
     "BatchResult", "BatchCampaign",

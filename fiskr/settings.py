@@ -163,6 +163,41 @@ def gel_declaration_delai_heures(db) -> int:
     bas, haut = GEL_DELAI_BORNES_HEURES
     return heures if bas <= heures <= haut else DEFAULT_GEL_DELAI_HEURES
 
+
+# Delai (jours) au-dela duquel un dossier PPE sans decision d'entrer ou de
+# rester en relation leve une notification immediate et un controle de mise
+# en service BLOQUANT (fiskr/ppe.py).
+#
+# R.561-20-2 ne donne pas de chiffre : la decision « ne peut etre prise que
+# par un membre de l'organe executif ou toute personne habilitee a cet effet
+# par l'organe executif ». Pour un client qui DEVIENT PPE en cours de relation
+# (L.561-10 1°), la relation court pendant ce temps sans la decision que le
+# texte exige. Trente jours, parce que la decision suppose ce que Fiskr ne
+# peut pas faire seul : demander au client et recevoir les justificatifs de
+# l'origine des fonds et du patrimoine que l'ACPR enumere (bulletins de
+# salaire, avis d'imposition, actes de propriete, actes de cession —
+# publication ACPR « Les personnes politiquement exposees », juillet 2024),
+# puis les presenter a la personne habilitee. Au-dela d'un mois, le dossier
+# n'attend plus une instruction : il attend que quelqu'un s'en saisisse.
+SETTING_PPE_DELAI = "ppe.decision_delai_jours"
+DEFAULT_PPE_DELAI_JOURS = 30
+# Bornes : en dessous d'un jour, chaque confirmation sonnerait avant que le
+# client ait pu etre interroge ; au-dela d'un trimestre, le reglage ne
+# decrirait plus une decision prise, mais une decision remise.
+PPE_DELAI_BORNES_JOURS = (1, 90)
+
+
+def ppe_decision_delai_jours(db) -> int:
+    """Delai de decision d'un dossier PPE (jours), borne. Une valeur illisible
+    retombe sur le defaut : jamais sur « aucun delai »."""
+    valeur = get_setting_with_source(db, SETTING_PPE_DELAI, DEFAULT_PPE_DELAI_JOURS)["value"]
+    try:
+        jours = int(valeur)
+    except (TypeError, ValueError):
+        return DEFAULT_PPE_DELAI_JOURS
+    bas, haut = PPE_DELAI_BORNES_JOURS
+    return jours if bas <= jours <= haut else DEFAULT_PPE_DELAI_JOURS
+
 # Motifs de cloture proposes a la saisie d'une decision d'alerte. Une
 # bibliotheque, pas un carcan : le motif choisi s'insere dans le commentaire
 # et reste editable — la motivation reglementaire finale appartient a

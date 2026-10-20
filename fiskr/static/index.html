@@ -1008,6 +1008,9 @@
  <button id="sub-btn-alerts-gels" class="sub-tab-btn" title="Mesures de gel et déclarations à la DG Trésor" onclick="switchSubTab('screening', 'alerts-gels')">
  Registre des gels
  </button>
+ <button id="sub-btn-alerts-ppe" class="sub-tab-btn" title="Personnes politiquement exposées confirmées : décision de la direction, origine des fonds" onclick="switchSubTab('screening', 'alerts-ppe')">
+ Dossiers PPE
+ </button>
  <button id="sub-btn-alerts-whitelist" class="sub-tab-btn" onclick="switchSubTab('screening', 'alerts-whitelist')">
  Liste Blanche
  </button>
@@ -1544,6 +1547,41 @@
  </table>
  </div>
  <p id="gels-total" class="section-desc" style="margin-top: 0.5rem;"></p>
+ </div>
+ </div>
+ </div>
+
+ <!-- DOSSIERS PPE (décision d'entrer ou de rester en relation, R.561-20-2) -->
+ <div id="sub-sec-alerts-ppe" class="sub-tab-content hidden">
+ <div class="grid-layout une-colonne">
+ <div class="card result-card">
+ <h2>Dossiers PPE</h2>
+ <p class="section-desc">Ce qui suit une personne politiquement exposée confirmée (CMF L.561-10 1°). La décision de nouer ou de maintenir la relation revient à un membre de l'organe exécutif ou à une personne qu'il habilite — dans Fiskr, un réviseur qui n'a pas instruit l'alerte —, après recherche de l'origine du patrimoine et des fonds ; la vigilance est ensuite renforcée (R.561-20-2). Fiskr trace et date ; il ne corrige pas la classification du client dans le SI amont, il dit quand elle manque.</p>
+ <div id="ppe-synthese" style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;"></div>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <select id="ppe-statut-filter" onchange="fetchDossiersPPE()" aria-label="Filtrer les dossiers PPE par statut" style="width: auto; min-width: 200px;">
+ <option value="">Tous les statuts</option>
+ <option value="A_DECIDER">Décision à prendre</option>
+ <option value="EN_RETARD">Décision en retard</option>
+ <option value="NON_DECLAREE">PPE non déclarée</option>
+ <option value="REVUE_ECHUE">Revue échue</option>
+ <option value="DECIDE">Décidé</option>
+ </select>
+ <input type="text" id="ppe-recherche" onchange="fetchDossiersPPE()" placeholder="Client ou fiche listée…" aria-label="Rechercher un client ou une fiche listée" style="width: auto; min-width: 220px;">
+ <button class="btn btn-sm btn-secondary" onclick="exportDossiersPPECsv()" title="Exporter les dossiers PPE filtrés en CSV" style="margin-left: auto;">⬇ CSV</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="ppe-table">
+ <thead>
+ <tr>
+ <th>Dossier PPE</th><th>Confirmée le</th><th>Client</th><th>Listé</th><th>Qualité</th>
+ <th>Statut</th><th>Décision</th><th>Délai</th><th>Dossier</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <p id="ppe-total" class="section-desc" style="margin-top: 0.5rem;"></p>
  </div>
  </div>
  </div>
@@ -2630,6 +2668,11 @@
  <label for="setting-gel-delay">Délai de déclaration d'un gel à la DG Trésor (heures)</label>
  <input type="number" id="setting-gel-delay" min="1" max="72" step="1" style="max-width: 120px;">
  <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La déclaration est due « immédiatement » après la confirmation (CMF L.562-4). Au-delà de ce délai, une mesure non déclarée déclenche une notification immédiate et bloque la mise en service. De 1 à 72 heures.</small>
+ </div>
+ <div class="form-group" style="margin-top: 0.75rem; max-width: 640px;">
+ <label for="setting-ppe-delay">Délai de décision d'un dossier PPE (jours)</label>
+ <input type="number" id="setting-ppe-delay" min="1" max="90" step="1" style="max-width: 120px;">
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La décision d'entrer ou de rester en relation avec une PPE revient à une personne habilitée (CMF R.561-20-2). Au-delà de ce délai, un dossier sans décision déclenche une notification immédiate et bloque la mise en service. De 1 à 90 jours.</small>
  </div>
  <div class="form-group" style="margin-top: 0.75rem;">
  <label for="setting-close-reasons-fp">Motifs de clôture : faux positif</label>

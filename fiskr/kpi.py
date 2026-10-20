@@ -134,6 +134,70 @@ def synthese_des_gels(db, maintenant: Optional[datetime] = None) -> Dict[str, An
     }
 
 
+# ------------------ PPE : DELAI CONFIRMATION -> DECISION DE LA DIRECTION ------------------
+
+def delai_de_decision_ppe_secondes(ouvert_le: Optional[datetime],
+                                   decidee_le: Optional[datetime],
+                                   maintenant: Optional[datetime] = None) -> Optional[int]:
+    """
+    Delai entre la confirmation d'une correspondance sur une liste PEP
+    (ouverture du dossier PPE) et la decision d'entrer ou de rester en
+    relation, prise par l'organe executif ou une personne qu'il habilite
+    (R.561-20-2 1°) — la SEULE definition, lue par le dossier, l'indicateur,
+    la notification de retard et le controle de mise en service.
+
+    - Dossier decide : decidee_le - ouvert_le.
+    - Dossier SANS decision : le delai court encore (maintenant - ouvert_le).
+    - Decision ANTERIEURE a la confirmation dans Fiskr (client deja connu
+      PPE, decision prise a l'entree en relation et reportee au dossier) : 0.
+      Elle n'est pas ecartee comme une horloge incoherente — l'ecarter
+      retirerait de la moyenne les dossiers les mieux tenus.
+    """
+    if ouvert_le is None:
+        return None
+    fin = decidee_le if decidee_le is not None else (maintenant or datetime.utcnow())
+    return max(0, int(round((fin - ouvert_le).total_seconds())))
+
+
+def decision_ppe_en_retard(statut: Optional[str], ouvert_le: Optional[datetime],
+                           decidee_le: Optional[datetime], seuil_jours: float,
+                           maintenant: Optional[datetime] = None) -> bool:
+    """Un dossier ENCORE sans decision dont le delai depasse le seuil. Une
+    decision prise tard n'est plus « en retard » : c'est un fait passe que
+    l'indicateur compte (`decided_late`), pas une action a mener."""
+    from fiskr.ppe import STATUT_A_DECIDER
+    if statut != STATUT_A_DECIDER or decidee_le is not None:
+        return False
+    delai = delai_de_decision_ppe_secondes(ouvert_le, None, maintenant)
+    return delai is not None and delai > seuil_jours * 86400
+
+
+def synthese_des_dossiers_ppe(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
+    """Les dossiers PPE, tels que le pilotage les lit."""
+    from fiskr.database import DossierPPE
+    from fiskr.ppe import STATUT_A_DECIDER, STATUT_DECIDE
+    from fiskr.settings import ppe_decision_delai_jours
+
+    now = maintenant or datetime.utcnow()
+    seuil = ppe_decision_delai_jours(db)
+    lignes = db.query(DossierPPE.statut, DossierPPE.ouvert_le, DossierPPE.decidee_le,
+                      DossierPPE.ppe_non_declaree).all()
+    delais = [delai_de_decision_ppe_secondes(o, d) for _s, o, d, _n in lignes if d is not None]
+    delais = [d for d in delais if d is not None]
+    return {
+        "to_decide": sum(1 for s, _o, _d, _n in lignes if s == STATUT_A_DECIDER),
+        "overdue": sum(1 for s, o, d, _n in lignes
+                       if decision_ppe_en_retard(s, o, d, seuil, now)),
+        "decided": sum(1 for s, _o, _d, _n in lignes if s == STATUT_DECIDE),
+        "decided_late": sum(1 for d in delais if d > seuil * 86400),
+        "undeclared_by_upstream": sum(1 for _s, _o, _d, n in lignes if n),
+        "avg_decision_delay_seconds": (int(round(sum(delais) / len(delais)))
+                                       if delais else None),
+        "max_decision_delay_seconds": max(delais) if delais else None,
+        "threshold_days": seuil,
+    }
+
+
 def fraicheur_resumee(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
     """La fraicheur des listes, telle que le pilotage la lit."""
     from fiskr.fraicheur import mesurer
@@ -335,6 +399,9 @@ def indicateurs(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
         # declarer, en retard, et le delai confirmation -> declaration
         # (LD DGT/ACPR §99 : « delais de declaration », point de controle).
         "asset_freezes": synthese_des_gels(db, now),
+        # Ce qui suit une PPE confirmee : dossiers sans decision, en retard,
+        # et le delai confirmation -> decision de la direction (R.561-20-2 1°)
+        "pep_dossiers": synthese_des_dossiers_ppe(db, now),
         "screening": {"decisions_by_status": audit_counts},
         "lists": {
             "production_entities_by_type": {k: int(v or 0) for k, v in ready_by_type.items()},

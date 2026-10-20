@@ -99,3 +99,32 @@ def perimetre_de(list_type: Optional[str],
 def est_sanction(list_type: Optional[str],
                  surcharges: Optional[Dict[str, str]] = None) -> bool:
     return perimetre_de(list_type, surcharges) == PERIMETRE_SANCTION
+
+
+# Listes de personnes politiquement exposees, a l'interieur du perimetre
+# HORS_SANCTION. Une correspondance CONFIRMEE n'y impose aucun gel, mais les
+# mesures de vigilance complementaires de CMF L.561-10 1° et R.561-20-2 :
+# decision d'entrer ou de rester en relation prise par l'organe executif ou
+# une personne qu'il habilite, recherche de l'origine du patrimoine et des
+# fonds, vigilance renforcee (fiskr/ppe.py). Les autres listes HORS_SANCTION —
+# regulateurs, exclusions de bailleurs — n'ont rien de PPE : c'est la raison
+# d'une classe a part, plutot que « tout ce qui n'est pas SANCTION ».
+#
+# Le registre des sources ne porte aujourd'hui aucune liste PPE (ses familles
+# sont sanctions, regulateurs, exclusions) : seul le type historique en est.
+# Une liste PPE ajoutee demain (une liste nationale, un fournisseur
+# commercial) s'ajoute ICI, et le dossier PPE la suit sans rien toucher
+# d'autre.
+_TYPES_PPE = frozenset({"WATCHLIST_PEP"})
+
+
+def types_ppe() -> frozenset:
+    return _TYPES_PPE
+
+
+def est_ppe(list_type: Optional[str]) -> bool:
+    """La liste recense-t-elle des personnes politiquement exposees ? Le
+    classement SANCTION / HORS_SANCTION n'y change rien : une liste PEP qu'un
+    exploitant rangerait cote SANCTION ouvrirait une mesure de gel ET un
+    dossier PPE, les deux obligations etant independantes."""
+    return bool(list_type) and str(list_type).strip().upper() in _TYPES_PPE

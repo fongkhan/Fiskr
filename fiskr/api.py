@@ -35,7 +35,7 @@ from fiskr.delta import calculate_delta_db
 from fiskr.tasks import _refresh_production_cache
 from fiskr.ingest import (
     parse_ofac_advanced_xml, parse_csv_file, parse_pdf_watchlist, parse_dgt_gels_json,
-    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets_csv, parse_ofsi_conlist_csv,
+    parse_eu_fsf_xml, parse_un_consolidated_xml, parse_pep_targets, parse_ofsi_conlist_csv,
     parse_seco_xml, parse_seco_opensanctions_csv, parse_ofac_consolidated_xml, parse_csl_json,
     parse_canada_sema_csv, parse_dfat_consolidated,
     parse_hk_sfc_alert_list, parse_amf_blacklist, parse_worldbank_debarred_json,
@@ -149,9 +149,11 @@ from fiskr.settings import (
 from fiskr import resources as resource_tables
 from fiskr import country_risk
 from fiskr import gels as registre_des_gels
-from fiskr.database import MesureDeGel
+from fiskr import ppe as dossiers_ppe
+from fiskr.database import DossierPPE, MesureDeGel
 from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
-                            gel_declaration_delai_heures, perimeter_overrides)
+                            gel_declaration_delai_heures, perimeter_overrides,
+                            SETTING_PPE_DELAI, PPE_DELAI_BORNES_JOURS, ppe_decision_delai_jours)
 from fiskr.retention import (preview_retention, run_retention,
                              conservees_au_titre_de_la_relation)
 from fiskr import conservation
@@ -689,6 +691,14 @@ def _notification_batch_tick(tick=None) -> None:
         except Exception as e:
             db.rollback()
             logger.error(f"Détection des déclarations de gel en retard impossible : {e}")
+        # Dossiers PPE sans decision au-dela du delai : meme cadence, meme
+        # raison — un recapitulatif coupe ne doit pas taire une relation qui
+        # court sans la decision de R.561-20-2 1°.
+        try:
+            dossiers_ppe.detecter_retards(db)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Détection des dossiers PPE sans décision impossible : {e}")
         batch_cfg = notification_batch_settings(db)
         if not batch_cfg["enabled"]:
             return
@@ -2475,7 +2485,7 @@ _PORTABLE_SETTINGS = {
     SETTING_AUTO_BACKTEST_ENABLED,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
-    SETTING_GEL_DELAI,
+    SETTING_GEL_DELAI, SETTING_PPE_DELAI,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
     # Synchronisation automatique : les cles de source sont universelles,
@@ -4075,8 +4085,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     origin=_os_src.origin,
                     designation_reasons=_os_src.designation_reasons)
             elif file_type == "WATCHLIST_PEP":
-                # Dataset PEP OpenSanctions (targets.simple.csv)
-                parser_stream = parse_pep_targets_csv(str(temp_file_path))
+                # Dataset PEP OpenSanctions : targets.nested.json (qualite lue)
+                # ou targets.simple.csv (qualite non precisee) — le fichier decide
+                parser_stream = parse_pep_targets(str(temp_file_path))
             elif file_type == "WATCHLIST_OFSI":
                 # Liste consolidee UK OFSI (ConList.csv format 2022)
                 parser_stream = parse_ofsi_conlist_csv(str(temp_file_path))
@@ -8519,6 +8530,8 @@ class IngestionSettingsUpdate(BaseModel):
     alert_sla_hours: Optional[Dict[str, int]] = None
     # Delai de declaration d'une mesure de gel a la DG Tresor (heures)
     gel_declaration_delay_hours: Optional[int] = None
+    # Delai de decision d'un dossier PPE par une personne habilitee (jours)
+    ppe_decision_delay_days: Optional[int] = None
     # Motifs de cloture proposes aux analystes ([] = aucune suggestion) :
     # {"motif", "decisions"} — une simple chaine (ancien client) est classee
     # comme a la migration (fiskr/settings.py, `motifs_de_cloture`)
@@ -8579,6 +8592,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
         "gel_declaration_delay_hours": gel_declaration_delai_heures(db),
+        "ppe_decision_delay_days": ppe_decision_delai_jours(db),
         "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
@@ -8637,7 +8651,7 @@ async def update_ingestion_settings(
     changed = {k: v for k, v in updates.items() if v is not None}
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
-              payload.gel_declaration_delay_hours,
+              payload.gel_declaration_delay_hours, payload.ppe_decision_delay_days,
               payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
@@ -8696,6 +8710,15 @@ async def update_ingestion_settings(
             raise HTTPException(status_code=400,
                                 detail=f"Délai de déclaration d'un gel : entre {bas} et {haut} heures.")
         set_setting(db, SETTING_GEL_DELAI, int(payload.gel_declaration_delay_hours),
+                    updated_by=admin_user["username"])
+    if payload.ppe_decision_delay_days is not None:
+        bas, haut = PPE_DELAI_BORNES_JOURS
+        if not (bas <= payload.ppe_decision_delay_days <= haut):
+            # Meme refus franc que le delai de gel : hors bornes, la lecture
+            # retomberait en silence sur le defaut
+            raise HTTPException(status_code=400,
+                                detail=f"Délai de décision d'un dossier PPE : entre {bas} et {haut} jours.")
+        set_setting(db, SETTING_PPE_DELAI, int(payload.ppe_decision_delay_days),
                     updated_by=admin_user["username"])
     if payload.alert_close_reasons is not None:
         bruts = [m for m in payload.alert_close_reasons
@@ -12928,6 +12951,274 @@ async def export_gels_csv(
                          header, data)
 
 
+# ------------------ DOSSIERS PPE (R.561-20-2) ------------------
+# Ce qui suit une PPE confirmee : qualite retenue, fonction et fin de fonction,
+# origine des fonds et du patrimoine, decision d'entrer ou de rester en
+# relation par une personne habilitee (fiskr/ppe.py). Memes motifs que le
+# registre des gels : lecture auditeur comprise, pieces jointes de l'alerte,
+# refus francs.
+
+def _dossier_ppe_ou_404(db: Session, dossier_id: int) -> DossierPPE:
+    dossier = db.query(DossierPPE).filter(DossierPPE.id == dossier_id).first()
+    if dossier is None:
+        raise HTTPException(status_code=404, detail="Dossier PPE introuvable.")
+    return dossier
+
+
+def _refus_ppe(refus: "dossiers_ppe.RefusPPE") -> HTTPException:
+    return HTTPException(status_code=refus.status_code, detail=str(refus))
+
+
+class PPEInstructionRequest(BaseModel):
+    qualite_retenue: Optional[str] = None
+    fonction: Optional[str] = Field(None, max_length=4000)
+    fin_de_fonction: Optional[str] = None
+    origine_fonds: Optional[str] = Field(None, max_length=4000)
+    origine_patrimoine: Optional[str] = Field(None, max_length=4000)
+
+
+class PPEDecisionRequest(BaseModel):
+    decision: str
+    motif: str = Field(..., max_length=4000)
+    reference: Optional[str] = Field(None, max_length=255)
+    decidee_le: Optional[str] = None
+    prochaine_revue_le: Optional[str] = None
+
+
+def _registre_ppe_filtre(db: Session, statut: Optional[str], list_type: Optional[str],
+                         q: Optional[str]):
+    """Filtres des dossiers PPE, partages par l'ecran et l'export CSV."""
+    query = db.query(DossierPPE)
+    if statut:
+        code = statut.strip().upper()
+        if code == dossiers_ppe.FILTRE_EN_RETARD:
+            # La definition du retard est celle de fiskr/kpi.py, lue telle quelle
+            ids = [d.id for d in dossiers_ppe.dossiers_en_retard(db)]
+            query = query.filter(DossierPPE.id.in_(ids or [-1]))
+        elif code == dossiers_ppe.FILTRE_NON_DECLAREE:
+            query = query.filter(DossierPPE.ppe_non_declaree.is_(True))
+        elif code == dossiers_ppe.FILTRE_REVUE_ECHUE:
+            # Meme definition que `ppe.revue_echue`
+            query = query.filter(DossierPPE.statut == dossiers_ppe.STATUT_DECIDE,
+                                 DossierPPE.prochaine_revue_le <= datetime.utcnow())
+        elif code in dossiers_ppe.STATUTS:
+            query = query.filter(DossierPPE.statut == code)
+        else:
+            raise HTTPException(status_code=400, detail="Statut de dossier PPE inconnu.")
+    query = _apply_list_type_filter(query, DossierPPE.list_type, list_type)
+    if q and q.strip():
+        motif = f"%{q.strip()[:100]}%"
+        query = query.filter(DossierPPE.client_name.ilike(motif)
+                             | DossierPPE.watchlist_name.ilike(motif)
+                             | DossierPPE.client_id.ilike(motif))
+    return query
+
+
+@app.get("/api/ppe")
+async def list_ppe_dossiers(
+    statut: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    alert_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Dossiers PPE (lecture, auditeur compris) : filtrables par statut
+    (A_DECIDER, DECIDE, ou EN_RETARD, NON_DECLAREE, REVUE_ECHUE), liste et
+    client. Portent la synthese du pilotage (delai confirmation -> decision,
+    fiskr/kpi.py) et le vocabulaire de l'ecran.
+    """
+    from fiskr.kpi import synthese_des_dossiers_ppe
+    query = _registre_ppe_filtre(db, statut, list_type, q)
+    if alert_id is not None:
+        query = query.filter(DossierPPE.alert_id == alert_id)
+    total = query.count()
+    lignes = query.order_by(DossierPPE.ouvert_le.desc(), DossierPPE.id.desc()) \
+                  .offset((page - 1) * page_size).limit(page_size).all()
+    seuil = ppe_decision_delai_jours(db)
+    ids_pieces = [i for d in lignes for i in (d.pieces_origine or [])]
+    pieces = {p.id: p for p in db.query(AlertAttachment).filter(
+        AlertAttachment.id.in_(ids_pieces)).all()} if ids_pieces else {}
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [dossiers_ppe.serialiser(db, d, seuil, pieces=pieces) for d in lignes],
+        "synthese": synthese_des_dossiers_ppe(db),
+        "vocabulaire": dossiers_ppe.vocabulaire(),
+    }
+
+
+@app.get("/api/ppe/{dossier_id}")
+async def get_ppe_dossier(
+    dossier_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Un dossier PPE, avec les etapes tracees au journal de son alerte et la
+    classification du client telle que le SI amont la dit AUJOURD'HUI."""
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    evenements = db.query(AlertEvent).filter(
+        AlertEvent.alert_id == dossier.alert_id, AlertEvent.action.like("PPE_%")) \
+        .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    return {
+        **dossiers_ppe.serialiser(db, dossier, avec_client_actuel=True),
+        "evenements": [
+            {"timestamp": e.timestamp.isoformat() if e.timestamp else None,
+             "username": e.username, "action": e.action, "detail": e.detail}
+            for e in evenements if re.search(rf"#{dossier.id}\b", e.detail or "")
+        ],
+    }
+
+
+@app.post("/api/alerts/{alert_id}/ppe")
+async def open_ppe_dossier(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Dossier d'une PPE confirmee AVANT le dossier PPE : son delai court
+    depuis la confirmation."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    try:
+        dossier = dossiers_ppe.ouvrir(db, alert, current_user["username"])
+    except dossiers_ppe.RefusPPE as refus:
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Dossier PPE #{dossier.id} ouvert : décision à prendre par une "
+                       f"personne habilitée.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.put("/api/ppe/{dossier_id}")
+async def update_ppe_dossier(
+    dossier_id: int,
+    payload: PPEInstructionRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Instruction : qualite retenue, fonction et fin de fonction, origine des
+    fonds et du patrimoine (R.561-20-2 2°)."""
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.enregistrer_instruction(
+            db, dossier, username=current_user["username"],
+            qualite_retenue=payload.qualite_retenue, fonction=payload.fonction,
+            fin_de_fonction=payload.fin_de_fonction, origine_fonds=payload.origine_fonds,
+            origine_patrimoine=payload.origine_patrimoine)
+    except dossiers_ppe.RefusPPE as refus:
+        db.rollback()
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Dossier PPE #{dossier.id} enregistré.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.post("/api/ppe/{dossier_id}/pieces")
+async def add_ppe_piece(
+    dossier_id: int,
+    file: Optional[UploadFile] = File(None),
+    comment: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Piece de l'origine des fonds ou du patrimoine : piece jointe de
+    l'alerte (inventaire des pieces probantes), referencee par le dossier."""
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.verifier_avant_piece(dossier)
+        if file is None or not (file.filename or "").strip():
+            raise dossiers_ppe.RefusPPE("Joignez la pièce (relevé, avis d'imposition, acte…).")
+    except dossiers_ppe.RefusPPE as refus:
+        raise _refus_ppe(refus)
+    safe_name, target_path = _chemin_de_piece_d_alerte(dossier.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, dossier.alert_id, safe_name, target_path,
+        (comment or "").strip() or f"Origine des fonds ou du patrimoine — dossier PPE #{dossier.id}.",
+        current_user["username"])
+    dossiers_ppe.ajouter_piece(db, dossier, piece, current_user["username"])
+    db.commit()
+    return {"message": f"Pièce jointe au dossier PPE #{dossier.id}.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.post("/api/ppe/{dossier_id}/decision")
+async def record_ppe_decision(
+    dossier_id: int,
+    payload: PPEDecisionRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Decision d'entrer ou de rester en relation (R.561-20-2 1°) : reviewer ou
+    admin — la traduction dans Fiskr de la personne habilitee par l'organe
+    executif —, et jamais celui qui a propose ou valide la confirmation.
+    """
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.enregistrer_decision(
+            db, dossier, username=reviewer["username"], decision=payload.decision,
+            motif=payload.motif, reference=payload.reference, decidee_le=payload.decidee_le,
+            prochaine_revue_le=payload.prochaine_revue_le)
+    except dossiers_ppe.RefusPPE as refus:
+        db.rollback()
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Décision enregistrée au dossier PPE #{dossier.id}.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
+@app.get("/api/export/ppe.csv")
+async def export_ppe_csv(
+    statut: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV des dossiers PPE (memes filtres que l'ecran) : la piece que
+    le controle demande entiere, pas la page affichee."""
+    from fiskr.kpi import delai_de_decision_ppe_secondes
+    rows = _registre_ppe_filtre(db, statut, list_type, q) \
+        .order_by(DossierPPE.ouvert_le.desc(), DossierPPE.id.desc()).limit(_EXPORT_MAX_ROWS).all()
+    retard = {d.id for d in dossiers_ppe.dossiers_en_retard(db)}
+    maintenant = datetime.utcnow()
+
+    def iso(d):
+        return d.isoformat() if d else ""
+
+    header = ["dossier", "alerte", "statut", "en_retard", "client_id", "client",
+              "fiche_listee_id", "fiche_listee", "liste", "qualite_source", "qualite_retenue",
+              "fonction", "fin_de_fonction", "fonction_terminee_depuis_plus_d_un_an",
+              "ppe_non_declaree", "origine_fonds", "origine_patrimoine", "pieces_origine",
+              "confirmee_le", "proposee_par", "confirmee_par", "decision", "decision_motif",
+              "decision_reference", "decidee_le", "decidee_par", "delai_decision_jours",
+              "prochaine_revue_le"]
+    data = []
+    for d in rows:
+        delai = delai_de_decision_ppe_secondes(d.ouvert_le, d.decidee_le)
+        data.append([
+            d.id, d.alert_id, d.statut, "oui" if d.id in retard else "non",
+            d.client_id or "", d.client_name, d.watchlist_entity_id, d.watchlist_name,
+            d.list_type or "", d.qualite_source or "", d.qualite_retenue or "",
+            d.fonction or "", d.fin_de_fonction or "",
+            "oui" if dossiers_ppe.exposition_echue(d.fin_de_fonction, maintenant) else "non",
+            "oui" if d.ppe_non_declaree else "non", d.origine_fonds or "",
+            d.origine_patrimoine or "", " | ".join(str(i) for i in (d.pieces_origine or [])),
+            iso(d.ouvert_le), d.proposee_par or "", d.confirmee_par or "",
+            d.decision or "", d.decision_motif or "", d.decision_reference or "",
+            iso(d.decidee_le), d.decidee_par or "",
+            f"{delai / 86400:.1f}" if (delai is not None and d.decidee_le) else "",
+            iso(d.prochaine_revue_le),
+        ])
+    return _csv_response(f"fiskr_dossiers_ppe_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+                         header, data)
+
+
 # ------------------ QUALITE DES DONNEES CLIENTS ------------------
 
 # Champs KYC evalues : (attribut, libelle, PP seulement)
@@ -13846,6 +14137,14 @@ async def get_alert_detail(
         "gel_mesures": _mesures_de_l_alerte(db, alert.id, attachments),
         "gel_du": registre_des_gels.est_due(alert, perimeter_overrides(db)),
         "gel_vocabulaire": registre_des_gels.vocabulaire(),
+        # La suite d'une PPE confirmee : son dossier (fiskr/ppe.py). `ppe_du`
+        # dit si l'alerte en impose un — l'ecran propose de l'ouvrir quand il
+        # manque ; `ppe_sans_dossier` dit pourquoi une PPE confirmee n'en a
+        # pas, quand c'est voulu (partie de paiement).
+        "ppe_dossiers": _dossiers_ppe_de_l_alerte(db, alert.id, attachments),
+        "ppe_du": dossiers_ppe.est_du(alert),
+        "ppe_sans_dossier": dossiers_ppe.motif_sans_dossier(alert),
+        "ppe_vocabulaire": dossiers_ppe.vocabulaire(),
         # Client et personne listee cote a cote (fiskr/comparaison.py)
         "comparison": _comparaison_de_l_alerte(db, alert, audit),
     }
@@ -13991,6 +14290,17 @@ def _mesures_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[s
     pieces = {att.id: att for att in attachments}
     return [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in mesures]
 
+
+def _dossiers_ppe_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[str, Any]]:
+    dossiers = db.query(DossierPPE).filter(DossierPPE.alert_id == alert_id) \
+                 .order_by(DossierPPE.id.asc()).all()
+    if not dossiers:
+        return []
+    seuil = ppe_decision_delai_jours(db)
+    pieces = {att.id: att for att in attachments}
+    return [dossiers_ppe.serialiser(db, d, seuil, pieces=pieces, avec_client_actuel=True)
+            for d in dossiers]
+
 @app.post("/api/alerts/{alert_id}/assign")
 async def assign_alert(
     alert_id: int,
@@ -14077,11 +14387,19 @@ def _close_alert(db: Session, alert: Alert, decision: str, username: str,
     declaration. Toute confirmation passe ici (proposition sans 4-yeux comme
     validation) : la mesure « a declarer » ne peut donc pas etre oubliee par
     un chemin, elle est ouverte dans la meme transaction que la cloture.
+
+    Meme regle pour une PPE confirmee (liste PEP, fiskr/perimeters.py) : rien
+    ne suivait. Le dossier PPE (fiskr/ppe.py) s'ouvre ici, dans la meme
+    transaction — decision d'entrer ou de rester en relation par une personne
+    habilitee, origine des fonds et du patrimoine (R.561-20-2). Les deux
+    obligations sont independantes : une liste PEP rangee SANCTION par
+    l'exploitant ouvre l'une et l'autre.
     """
     alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
     alert.decided_by = username
     alert.decided_at = datetime.utcnow()
     alert.decision_comment = comment
+    dossiers_ppe.ouvrir_si_du(db, alert, username)
     return registre_des_gels.ouvrir_si_due(db, alert, username)
 
 
@@ -14181,7 +14499,8 @@ def _enregistrer_la_proposition(db: Session, alert: Alert, decision: str, commen
     mesure = _close_alert(db, alert, decision, username, comment)
     _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}{precision}")
     _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
-    return label, "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure), mesure
+    return (label, "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure)
+            + _message_de_dossier_ppe(db, alert), mesure)
 
 
 def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
@@ -14189,6 +14508,20 @@ def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
         return ""
     return (f" Mesure de gel #{mesure.id} ouverte : déclaration à la DG Trésor "
             f"due immédiatement (Criblage → Registre des gels).")
+
+
+def _message_de_dossier_ppe(db: Session, alert: Alert) -> str:
+    """Ce que la confirmation vient d'ouvrir, dit dans la reponse : le dossier
+    PPE s'ouvre dans la transaction de la cloture (`_close_alert`)."""
+    if alert.status != "CLOSED_CONFIRMED":
+        return ""
+    dossier = db.query(DossierPPE).filter(DossierPPE.alert_id == alert.id).first()
+    if dossier is None:
+        return ""
+    return (f" Dossier PPE #{dossier.id} ouvert : décision d'entrer ou de rester en relation "
+            f"à prendre par une personne habilitée (Criblage → Dossiers PPE)."
+            + (" PPE non déclarée par le SI amont : la classification du client y est à "
+               "corriger." if dossier.ppe_non_declaree else ""))
 
 @app.post("/api/alerts/{alert_id}/propose")
 async def propose_alert_decision(
@@ -14286,7 +14619,8 @@ async def validate_alert_decision(
         # Le statut se dit par son libellé : le toast affichait
         # « (CLOSED_FALSE_POSITIVE) » au milieu d'une phrase en français.
         libelle = ALERT_STATUS_LABELS.get(alert.status, alert.status)
-        message = f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
+        message = (f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
+                   + _message_de_dossier_ppe(db, alert))
         message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
         event_key, extra = "alert_decision_validated", {
             "Validée par": username, "Statut": libelle,

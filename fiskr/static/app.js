@@ -1022,6 +1022,9 @@ const ALERT_EVENT_LABELS = {
  WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
  DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
  LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
+ PPE_DOSSIER_OUVERT: "Dossier PPE ouvert", PPE_NON_DECLAREE: "PPE non déclarée par le SI amont",
+ PPE_DOSSIER_INSTRUIT: "Dossier PPE instruit", PPE_PIECE_ORIGINE: "Pièce de l'origine des fonds",
+ PPE_DECISION: "Décision sur la relation (PPE)", PPE_DECISION_EN_RETARD: "Décision PPE en retard",
 };
 
 function alertEventLabel(action) {
@@ -2882,6 +2885,8 @@ function switchSubTab(sectionId, subTabId) {
  fetchSavedViews("SCREENING");
  } else if (subTabId === "alerts-gels") {
  fetchGels();
+ } else if (subTabId === "alerts-ppe") {
+ fetchDossiersPPE();
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
  populateAssigneeFilters();
@@ -5696,6 +5701,11 @@ function extendedFieldsRows(item) {
  }
  const crypto = cryptoWalletsText(item.crypto_wallets);
  if (crypto) rows.push(`<div class="details-item" style="grid-column: span 2;"><strong>Adresses crypto</strong><span>${escapeHtml(crypto)}</span></div>`);
+ // Ce que la source PEP dit de la personne, lu et non saisi (la qualité est
+ // dans les motifs de la désignation) : la fin de fonction et le lien vers la PPE
+ if (item.pep_fin_de_fonction) rows.push(`<div class="details-item"><strong>Fin de fonction PEP</strong><span>${formatDate(item.pep_fin_de_fonction)}</span></div>`);
+ const liensPPE = _liensPPE(item.pep_liens);
+ if (liensPPE) rows.push(`<div class="details-item" style="grid-column: span 2;"><strong>Lien avec une PPE</strong><span>${liensPPE}</span></div>`);
  return rows.length
  ? `<h3 style="margin: 1rem 0 0.5rem;">Champs étendus</h3><div class="details-grid">${rows.join("")}</div>`
  : "";
@@ -6276,6 +6286,8 @@ async function fetchIngestionSettings() {
  }
  const gelDelayEl = document.getElementById("setting-gel-delay");
  if (gelDelayEl) gelDelayEl.value = ingestionSettings.gel_declaration_delay_hours ?? "";
+ const ppeDelayEl = document.getElementById("setting-ppe-delay");
+ if (ppeDelayEl) ppeDelayEl.value = ingestionSettings.ppe_decision_delay_days ?? "";
  // Notifications : l'écran est généré depuis le catalogue du serveur
  fetchNotificationsCatalog();
  // Digest KPI périodique
@@ -6403,6 +6415,9 @@ async function saveIngestionSettings() {
  // bornes est refusée par le serveur avec la raison.
  ...(document.getElementById("setting-gel-delay")?.value
    ? { gel_declaration_delay_hours: parseInt(document.getElementById("setting-gel-delay").value, 10) }
+   : {}),
+ ...(document.getElementById("setting-ppe-delay")?.value
+   ? { ppe_decision_delay_days: parseInt(document.getElementById("setting-ppe-delay").value, 10) }
    : {}),
  // Activation étape par étape : cases générées depuis le catalogue serveur
  notification_events: collectNotificationEvents(),
@@ -7095,12 +7110,20 @@ function renderReviewDeltaDetails(deltaDetails) {
  // Correction du lecteur OpenSanctions (fiskr/ingest.py) : une fiche dont
  // seule la FORME change n'est pas une modification de la source, mais le
  // lot reste à homologuer une fois — c'est ce que la production gardera.
- const forme = details.reader_form_count
-  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${Number(details.reader_form_count)} fiche(s) ne changent que de forme : les programmes de sanction passent de pep_role à sanction_programs (lecteur corrigé), sans modification de la source.</span>`
+ // Deux corrections, dites chacune : les programmes de sanction rangés à
+ // leur place, et la qualité PEP que le lecteur n'affirme plus (le compte
+ // total les comprend toutes deux).
+ const formeQualite = Number(details.reader_quality_form_count || 0);
+ const formeProgrammes = Number(details.reader_form_count || 0) - formeQualite;
+ const forme = (formeProgrammes > 0
+  ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${formeProgrammes} fiche(s) ne changent que de forme : les programmes de sanction passent de pep_role à sanction_programs (lecteur corrigé), sans modification de la source.</span>`
     + (details.reader_form_unverified_count
      ? ` <span>Dont ${Number(details.reader_form_unverified_count)} comparée(s) en partie seulement : l'ancienne version tronquait ce texte à 500 caractères.</span>` : "")
     + `</p>`
-  : "";
+  : "")
+  + (formeQualite > 0
+   ? `<p class="section-desc" style="margin: 0 0 0.6rem;"><span>${formeQualite} fiche(s) ne changent que de forme : « Personne Politiquement Exposée (PEP) », affirmé sans avoir été lu, devient « qualité non précisée par la source » (lecteur corrigé), sans modification de la source.</span></p>`
+   : "");
  if (!added.length && !removed.length && !modified.length) {
  container.innerHTML = '<p class="section-desc">Aucune différence détaillée à afficher (liste identique ou premier import).</p>' + forme + empreinteSeule;
  return;
@@ -8489,6 +8512,7 @@ async function openAlertModal(alertId) {
  </div>
  ${actionsHtml}
  ${blocMesuresDeGel(a, isReviewer)}
+ ${blocDossiersPPE(a, isReviewer)}
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
  <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()"> Générer un narratif</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="fetchAlertAdverseMedia('client')"> Presse : client</button>
@@ -8977,6 +9001,265 @@ async function fetchGels() {
    </tr>`).join("");
  } catch (e) {
   tableError("#gels-table", 11);
+ }
+}
+
+// ------------------ DOSSIERS PPE (étapes dans l'alerte et registre) ------------------
+// Une PPE confirmée ouvre un dossier (fiskr/ppe.py) : qualité retenue,
+// fonction et fin de fonction, origine des fonds et du patrimoine, décision
+// d'entrer ou de rester en relation par une personne habilitée qui n'a pas
+// instruit l'alerte (R.561-20-2). Le vocabulaire (qualités, décisions) vient
+// du serveur : une seule définition.
+
+function badgeStatutPPE(d) {
+ // Ce qui demande une action est dit À CÔTÉ du statut, qui ne change pas
+ const signaux = [
+  d.ppe_non_declaree ? `<span class="status-badge alert" style="white-space: nowrap;">PPE non déclarée</span>` : "",
+  d.exposition_echue ? `<span class="status-badge warning" style="white-space: nowrap;">Fonction terminée depuis plus d'un an</span>` : "",
+  d.revue_echue ? `<span class="status-badge warning" style="white-space: nowrap;">Revue échue</span>` : "",
+ ].filter(Boolean).join(" ");
+ const suite = signaux ? " " + signaux : "";
+ if (d.en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">Décision en retard</span>${suite}`;
+ const classe = { A_DECIDER: "warning", DECIDE: "no_match" }[d.statut] || "";
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(d.statut_label)}</span>${suite}`;
+}
+
+function _liensPPE(liens) {
+ return (liens || []).map(l => `${escapeHtml(l.personne || l.personne_id || "—")}${l.relation ? ` (${escapeHtml(l.relation)})` : ""}${l.personne_ppe ? " — PPE" : ""}`).join(" ; ");
+}
+
+// Date ISO (AAAA-MM-JJ) dans un an : la revue proposée par défaut
+function _dansUnAn() {
+ const d = new Date();
+ d.setFullYear(d.getFullYear() + 1);
+ return d.toISOString().slice(0, 10);
+}
+
+function _etapeInstructionPPE(d, vocab, auditeur) {
+ const pieces = (d.pieces_origine || []).map(p => p.file_present === false || !p.file_name
+  ? `<li><span style="text-decoration: line-through; color: var(--text-muted);">${escapeHtml(p.file_name || "#" + p.id)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span></li>`
+  : `<li><a href="/api/alerts/attachments/${p.id}" target="_blank" style="color: var(--color-accent);">${escapeHtml(p.file_name)}</a></li>`).join("");
+ const listePieces = `<ul style="list-style: none; margin: 0.3rem 0; font-size: 0.85rem;">${pieces || `<li style="color: var(--text-muted);">Aucune pièce de l'origine des fonds ou du patrimoine.</li>`}</ul>`;
+ if (auditeur || d.statut !== "A_DECIDER") {
+  return `<p style="font-size: 0.85rem;"><span>Qualité retenue</span> : <strong>${escapeHtml(d.qualite_retenue_label || "—")}</strong>
+   ${d.fonction ? `<br><span>Fonction</span> : ${escapeHtml(d.fonction)}` : ""}
+   ${d.fin_de_fonction ? `<br><span>Fin de fonction</span> : ${formatDate(d.fin_de_fonction)}` : ""}
+   <br><span>Origine des fonds</span> : ${escapeHtml(d.origine_fonds || "—")}
+   <br><span>Origine du patrimoine</span> : ${escapeHtml(d.origine_patrimoine || "—")}</p>${listePieces}`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="ppe-qualite-${d.id}">Qualité retenue</label>
+    <select id="ppe-qualite-${d.id}"><option value="">—</option>${_options(vocab.qualites, d.qualite_retenue)}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-fin-${d.id}">Fin de fonction</label>
+    <input type="date" id="ppe-fin-${d.id}" value="${escapeHtml(d.fin_de_fonction || "")}"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-fonction-${d.id}">Fonction</label>
+   <textarea id="ppe-fonction-${d.id}" rows="2" placeholder="Fonction exercée (ou celle de la PPE à laquelle la personne est liée)">${escapeHtml(d.fonction || "")}</textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-fonds-${d.id}">Origine des fonds</label>
+   <textarea id="ppe-fonds-${d.id}" rows="2" placeholder="D'où viennent les fonds versés sur le compte ou le contrat (salaires, cession, donation…)">${escapeHtml(d.origine_fonds || "")}</textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-patrimoine-${d.id}">Origine du patrimoine</label>
+   <textarea id="ppe-patrimoine-${d.id}" rows="2" placeholder="Composition et origine du patrimoine immobilier et mobilier">${escapeHtml(d.origine_patrimoine || "")}</textarea></div>
+  <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;" onclick="enregistrerInstructionPPE(${d.id}, ${d.alert_id})">Enregistrer l'instruction</button>
+  <h4 style="font-size: 0.82rem; margin: 0.6rem 0 0.2rem;">Pièces de l'origine des fonds et du patrimoine</h4>${listePieces}
+  <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+   <input type="file" id="ppe-piece-${d.id}" aria-label="Pièce de l'origine des fonds ou du patrimoine" style="flex: 1 1 220px; padding: 0.35rem; font-size: 0.8rem;">
+   <button class="btn btn-sm btn-secondary" onclick="joindrePiecePPE(${d.id}, ${d.alert_id})">Joindre la pièce</button>
+  </div>`;
+}
+
+function _etapeDecisionPPE(d, vocab, isReviewer, auditeur) {
+ if (d.statut === "DECIDE") {
+  return `<p style="font-size: 0.85rem;"><strong>${escapeHtml(d.decision_label || d.decision || "")}</strong> · ${formatDate(d.decidee_le)} · @${escapeHtml(d.decidee_par || "")}
+   ${d.decision_reference ? ` · <span>réf.</span> ${escapeHtml(d.decision_reference)}` : ""}
+   · <span>délai depuis la confirmation</span> : <strong>${formatDuree(d.delai_decision_secondes)}</strong><br>
+   ${escapeHtml(d.decision_motif || "")}
+   ${d.prochaine_revue_le ? `<br><span>Prochaine revue</span> : <strong style="${d.revue_echue ? "color: var(--color-warning);" : ""}">${formatDate(d.prochaine_revue_le)}</strong>` : ""}</p>`;
+ }
+ const delai = d.en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;">Délai de décision dépassé : <span>${formatDuree(d.delai_decision_secondes)}</span> (<span>seuil</span> ${d.seuil_jours} j).</p>`
+  : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>Décision attendue — délai écoulé</span> : ${formatDuree(d.delai_decision_secondes)} (<span>seuil</span> ${d.seuil_jours} j).</p>`;
+ const moi = currentUser ? currentUser.username : "";
+ if (!isReviewer || auditeur) {
+  return `${delai}<p style="font-size: 0.82rem; color: var(--text-muted);">La décision revient à une personne habilitée (rôle réviseur) qui n'a pas instruit l'alerte.</p>`;
+ }
+ if ((d.instruit_par || []).includes(moi)) {
+  return `${delai}<p style="font-size: 0.82rem; color: var(--text-muted);">Vous avez proposé ou validé la confirmation : la décision revient à une autre personne habilitée.</p>`;
+ }
+ return `${delai}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="ppe-decision-${d.id}">Décision</label>
+    <select id="ppe-decision-${d.id}">${_options(vocab.decisions, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-decidee-${d.id}">Décidée le</label>
+    <input type="datetime-local" id="ppe-decidee-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-${d.id}">Prochaine revue</label>
+    <input type="date" id="ppe-revue-${d.id}" value="${_dansUnAn()}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-reference-${d.id}">Référence</label>
+    <input type="text" id="ppe-reference-${d.id}" maxlength="255" placeholder="Comité, procès-verbal…"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-motif-${d.id}">Motif de la décision</label>
+   <textarea id="ppe-motif-${d.id}" rows="2" maxlength="4000"></textarea></div>
+  <small style="color: var(--text-muted); display: block;">Une entrée ou un maintien en relation exige la qualité retenue, l'origine des fonds et du patrimoine, au moins une pièce et une prochaine revue datée (R.561-20-2).</small>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerDecisionPPE(${d.id}, ${d.alert_id})">Enregistrer la décision</button>`;
+}
+
+function _blocDossierPPE(d, vocab, isReviewer, auditeur) {
+ const liens = _liensPPE(d.liens_source);
+ const nonDeclaree = d.ppe_non_declaree
+  ? `<p style="color: var(--color-alert); font-size: 0.85rem; font-weight: 600;"><span>PPE non déclarée par le SI amont : la classification du client est à corriger dans le SI amont. Fiskr ne la corrige pas.</span>${d.client_pep_declare_actuel === true ? ` <span style="font-weight: normal;">Le SI amont le déclare désormais PPE.</span>` : ""}</p>`
+  : "";
+ const echue = d.exposition_echue
+  ? `<p style="color: var(--color-warning); font-size: 0.85rem;"><span>Fonction terminée le</span> ${formatDate(d.fin_de_fonction)} : <span>plus d'un an (R.561-18 I). Rien n'est fermé automatiquement — la personne habilitée décide si la vigilance complémentaire est maintenue.</span></p>`
+  : "";
+ return `<div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem;">
+  <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+   <strong><span>Dossier PPE</span> #${d.id}</strong> ${badgeStatutPPE(d)}
+   <small style="color: var(--text-muted);"><span>ouvert à la confirmation</span> · ${formatDateTime(d.ouvert_le)} · @${escapeHtml(d.ouvert_par || "")}</small>
+  </div>
+  ${nonDeclaree}
+  <p style="font-size: 0.85rem;"><span>Qualité lue à la source</span> : <strong>${escapeHtml(d.qualite_source_label)}</strong>
+   ${d.fonction_source ? `<br><span>Fonction lue</span> : ${escapeHtml(d.fonction_source)}` : ""}
+   ${d.fin_de_fonction_source ? `<br><span>Fin de fonction lue</span> : ${formatDate(d.fin_de_fonction_source)}` : ""}
+   ${liens ? `<br><span>Lien avec une PPE</span> : ${liens}` : ""}</p>
+  ${echue}
+  <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Instruction</h4>${_etapeInstructionPPE(d, vocab, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Décision d'entrer ou de rester en relation</h4>${_etapeDecisionPPE(d, vocab, isReviewer, auditeur)}
+ </div>`;
+}
+
+function blocDossiersPPE(a, isReviewer) {
+ const dossiers = a.ppe_dossiers || [];
+ if (!dossiers.length && !a.ppe_du && !a.ppe_sans_dossier) return "";
+ const vocab = a.ppe_vocabulaire || {};
+ const auditeur = userRoles(currentUser).includes("auditor");
+ // PPE confirmée AVANT le dossier : rien ne l'y fera entrer toute seule —
+ // le bouton le dit, et le délai courra depuis la confirmation.
+ const manquant = !dossiers.length && a.ppe_du && !auditeur
+  ? `<p style="color: var(--color-alert); font-size: 0.85rem; font-weight: 600;">PPE confirmée sans dossier : aucune décision d'entrer ou de rester en relation n'est tracée.</p>
+   <button class="btn btn-sm btn-primary" onclick="ouvrirDossierPPE(${a.id})">Ouvrir le dossier PPE</button>`
+  : "";
+ const sansDossier = a.ppe_sans_dossier ? `<p class="section-desc">${escapeHtml(a.ppe_sans_dossier)}</p>` : "";
+ return `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Dossier PPE (R.561-20-2)</h3>
+  ${dossiers.map(d => _blocDossierPPE(d, vocab, isReviewer, auditeur)).join("")}
+  ${manquant}${sansDossier}
+ </div>`;
+}
+
+async function _ppeRequete(url, options, alertId) {
+ try {
+  const response = await apiFetch(url, options);
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  showToast(data.message, "success");
+  if (alertId) openAlertModal(alertId);
+  rafraichirSiAffichee("screening", "alerts-ppe", fetchDossiersPPE);
+  return data;
+ } catch (e) {
+  showToast("Erreur réseau de communication.", "error");
+  return null;
+ }
+}
+
+async function ouvrirDossierPPE(alertId) {
+ await _ppeRequete(`/api/alerts/${alertId}/ppe`, { method: "POST" }, alertId);
+}
+
+async function enregistrerInstructionPPE(dossierId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${dossierId}`)?.value ?? "";
+ await _ppeRequete(`/api/ppe/${dossierId}`, {
+  method: "PUT", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+   qualite_retenue: valeur("ppe-qualite"), fin_de_fonction: valeur("ppe-fin"),
+   fonction: valeur("ppe-fonction"), origine_fonds: valeur("ppe-fonds"),
+   origine_patrimoine: valeur("ppe-patrimoine"),
+  }),
+ }, alertId);
+}
+
+async function joindrePiecePPE(dossierId, alertId) {
+ const fichier = document.getElementById(`ppe-piece-${dossierId}`)?.files?.[0];
+ if (!fichier) {
+  showToast("Choisissez la pièce : relevé, avis d'imposition, acte de propriété…", "error");
+  return;
+ }
+ const form = new FormData();
+ form.append("file", fichier);
+ await _ppeRequete(`/api/ppe/${dossierId}/pieces`, { method: "POST", body: form }, alertId);
+}
+
+async function enregistrerDecisionPPE(dossierId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${dossierId}`)?.value || "";
+ const payload = { decision: valeur("ppe-decision"), motif: valeur("ppe-motif"),
+  reference: valeur("ppe-reference") };
+ if (valeur("ppe-decidee")) payload.decidee_le = new Date(valeur("ppe-decidee")).toISOString();
+ // La revue ne vaut que pour une relation qui s'ouvre ou continue : le
+ // serveur l'ignore pour un refus ou une fin de relation
+ if (valeur("ppe-revue")) payload.prochaine_revue_le = new Date(valeur("ppe-revue") + "T12:00:00").toISOString();
+ if (!await confirmDialog("Enregistrer cette décision ? Le dossier ne se réécrit plus ensuite.")) return;
+ await _ppeRequete(`/api/ppe/${dossierId}/decision`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
+function _parametresDesDossiersPPE() {
+ const params = new URLSearchParams();
+ const statut = document.getElementById("ppe-statut-filter")?.value;
+ const recherche = (document.getElementById("ppe-recherche")?.value || "").trim();
+ if (statut) params.set("statut", statut);
+ if (recherche) params.set("q", recherche);
+ return params;
+}
+
+function exportDossiersPPECsv() {
+ // Tous les dossiers filtrés, côté serveur : la pièce qu'un contrôle demande entière
+ window.open(`/api/export/ppe.csv?${_parametresDesDossiersPPE().toString()}`, "_blank");
+}
+
+function _afficherSyntheseDesDossiersPPE(s) {
+ const el = document.getElementById("ppe-synthese");
+ if (!el || !s) return;
+ el.innerHTML = `
+  <span><strong>${s.to_decide}</strong> <span>à décider</span></span>
+  <span style="${s.overdue ? "color: var(--color-alert); font-weight: 600;" : ""}"><strong>${s.overdue}</strong> <span>en retard</span> (<span>seuil</span> ${s.threshold_days} j)</span>
+  <span><strong>${s.decided}</strong> <span>décidé(s)</span></span>
+  <span><span>Délai moyen confirmation → décision</span> : <strong>${formatDuree(s.avg_decision_delay_seconds)}</strong></span>
+  ${s.undeclared_by_upstream ? `<span style="color: var(--color-alert);"><strong>${s.undeclared_by_upstream}</strong> <span>PPE non déclarée(s) par le SI amont</span></span>` : ""}
+  ${s.decided_late ? `<span style="color: var(--color-warning);"><strong>${s.decided_late}</strong> <span>décidé(s) hors délai</span></span>` : ""}`;
+}
+
+async function fetchDossiersPPE() {
+ const tbody = document.querySelector("#ppe-table tbody");
+ if (!tbody) return;
+ tableLoading("#ppe-table", 9);
+ const params = _parametresDesDossiersPPE();
+ const filtre = params.toString() !== "";
+ params.set("page_size", "200");
+ try {
+  const response = await apiFetch(`/api/ppe?${params.toString()}`);
+  if (!response.ok) { tableError("#ppe-table", 9); return; }
+  const data = await response.json();
+  _afficherSyntheseDesDossiersPPE(data.synthese);
+  const total = document.getElementById("ppe-total");
+  if (total) total.textContent = data.total > data.items.length ? `${data.items.length} / ${data.total}` : "";
+  if (!data.items.length) {
+   tableEmpty("#ppe-table", 9, filtre ? "Aucun dossier pour ces filtres." : "Aucun dossier PPE.", "",
+    filtre ? "" : "Un dossier s'ouvre à la confirmation d'une alerte sur une liste de personnes politiquement exposées.");
+   return;
+  }
+  tbody.innerHTML = data.items.map(d => `
+   <tr>
+    <td>#${d.id}</td>
+    <td>${formatDateTime(d.ouvert_le)}</td>
+    <td>${escapeHtml(d.client_name)}</td>
+    <td>${escapeHtml(d.watchlist_name)}</td>
+    <td>${escapeHtml(d.qualite_retenue_label || d.qualite_source_label)}</td>
+    <td>${badgeStatutPPE(d)}</td>
+    <td>${d.decision_label ? escapeHtml(d.decision_label) : "—"}</td>
+    <td>${formatDuree(d.delai_decision_secondes)}</td>
+    <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${d.alert_id})" title="Ouvrir l'alerte et les étapes du dossier">Ouvrir</button></td>
+   </tr>`).join("");
+ } catch (e) {
+  tableError("#ppe-table", 9);
  }
 }
 
