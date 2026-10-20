@@ -57,7 +57,9 @@ Le passage en **surveillance continue** : dès qu'un snapshot de liste entre en 
 * Les nouveaux hits ouvrent des alertes par le cycle de vie standard (dédupliquées ; événements signés `rescreen-auto`).
 * Les paires en liste blanche sont supprimées de façon tracée (compteur `whitelisted_suppressed`).
 * Désactivable à chaud (`ingestion.auto_rescreen`, défaut activé) ; les compteurs (`changed_entities`, `clients_screened`, `new_alerts`, `whitelisted_suppressed`) sont retournés dans les réponses de sync/upload/approbation.
-* **Lookback manuel** (capacité Wolfsberg) : `POST /api/rescreen/run` (admin, body `{file_type?}`) re-crible tout le référentiel clients contre toutes les listes en production, ou un seul type.
+* **Lookback manuel** (capacité Wolfsberg) : `POST /api/rescreen/run` (admin, body `{file_type?}`) re-crible tout le référentiel clients contre toutes les listes en production, ou un seul type — refusé (409) si ce type n'est pas en production.
+* **Clients nouveaux ou modifiés** : la mise en production d'un référentiel clients lance le travail `client_screening`, qui crible contre tout l'univers les clients ajoutés ou dont un élément d'identification a changé (§122 et §141 des lignes directrices DGT/ACPR) ; les clients inchangés héritent de leur trace.
+* **Trace par client** : chaque passage écrit une ligne `screening_passes` (référence de l'univers, périmètre, effectifs, horodatages) et date chaque fiche criblée (`screened_at`, `screening_pass_id`, `covered_universe_hash`). Les correspondances gardent leur ligne d'audit ; un client propre n'en a pas — une ligne `NO_MATCH` par client et par passage pèserait 4,2 Go à 750 000 clients. Un re-criblage post-delta prolonge la couverture des seules fiches couvertes contre l'univers d'avant la mise à jour. La carte « Couverture du criblage » et la mise en service lisent cette trace : jamais criblés, non couverts contre la version en production, dernier passage.
 
 ## 4. Narratifs d'alertes (human-in-the-loop)
 

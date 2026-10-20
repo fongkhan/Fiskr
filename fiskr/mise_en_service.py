@@ -755,15 +755,26 @@ def _pieces_probantes(db) -> Dict[str, Any]:
 
 def _couverture_du_criblage(db) -> Dict[str, Any]:
     """
-    « Tous vos clients ont-ils été criblés ? » — la première question d'un
-    contrôle, et le produit ne savait pas y répondre.
+    « Tous vos clients ont-ils été criblés, et contre la version des listes en
+    production ? » — la première question d'un contrôle.
 
-    Importer un référentiel clients déclenche un contrôle de complétude, pas un
-    criblage ; le re-criblage automatique se déclenche quand une LISTE change,
-    jamais quand des CLIENTS arrivent. Un référentiel fraîchement importé
-    restait donc entier hors du criblage, sans que rien ne le signale.
+    Deux constats, le pire l'emporte :
+
+    - le re-criblage automatique est coupé : plus aucune mise à jour de liste
+      n'est confrontée au référentiel (lignes directrices DGT/ACPR, §123 :
+      « sans délai » à chaque modification des mesures), et le réglage se
+      coupait sans qu'aucun contrôle le relève ;
+    - des clients ne sont pas couverts contre la version en production. Le
+      délai toléré est celui de la fraîcheur des listes, et pour la même
+      raison : une liste en retard et un client non recriblé exposent au même
+      gel manqué. En deçà, un travail en cours est laissé à son œuvre ; sans
+      travail en cours, l'écart ne se résorbera pas seul et il est signalé.
     """
+    from datetime import datetime
     from fiskr.couverture import couverture_du_criblage, phrase_de_couverture
+    from fiskr.fraicheur import phrase_de_retard
+    from fiskr.settings import auto_rescreen_enabled
+
     mesure = couverture_du_criblage(db)
     if mesure.get("illisible"):
         # Une mesure en echec ne dit rien du referentiel : ni « vide », ni
@@ -782,18 +793,57 @@ def _couverture_du_criblage(db) -> Dict[str, Any]:
             "Importez une base clients (CLIENT_BASE) depuis l'écran Imports. "
             "Le criblage n'a rien à comparer tant qu'elle manque.",
             "#watchlist-mgmt/watchlist-import")
-    if not mesure["jamais_cribles"]:
+
+    rang = {OK: 0, ATTENTION: 1, BLOQUANT: 2}
+    etat, constats, remedes, lien = OK, [], [], "#screening/screening-batch"
+    if not auto_rescreen_enabled(db):
+        etat = ATTENTION
+        constats.append(
+            "Le re-criblage automatique est coupé : une liste mise en production "
+            "n'est plus confrontée au référentiel clients, et rien d'autre ne le fait.")
+        remedes.append(
+            "Rallumez « Re-criblage automatique du référentiel clients après chaque "
+            "mise à jour de liste » (Paramètres → Gouvernance).")
+        lien = "#settings/settings-governance"
+
+    phrase = phrase_de_couverture(mesure)
+    if phrase:
+        heures = None
+        if mesure.get("en_attente_depuis"):
+            depuis = datetime.fromisoformat(mesure["en_attente_depuis"])
+            heures = max(0, int((datetime.utcnow() - depuis).total_seconds() // 3600))
+        if heures is not None and heures >= _RETARD_BLOQUANT_H:
+            ecart = BLOQUANT
+        elif heures is not None and heures >= _RETARD_TOLERE_H:
+            ecart = ATTENTION
+        elif mesure.get("travaux_en_cours"):
+            ecart = OK
+        else:
+            ecart = ATTENTION
+        if heures is not None:
+            phrase += f" Le plus ancien attend depuis {phrase_de_retard(heures)}."
+        elif mesure.get("attente_inconnue"):
+            phrase += (" Aucun passage n'a encore confronté le référentiel à cette "
+                       "version : une fiche listée ajoutée ou corrigée sans re-criblage.")
+        if ecart == OK:
+            phrase += " Un criblage est en cours : il les couvrira."
+        else:
+            remedes.append(
+                "Lancez un lookback (Criblage → Batch) : il confronte tout le "
+                "référentiel aux listes en production et date chaque fiche. C'est "
+                "l'opération la plus lourde du produit — elle part en tâche de fond.")
+            lien = "#screening/screening-batch"
+        constats.append(phrase)
+        if rang[ecart] > rang[etat]:
+            etat = ecart
+
+    if not constats:
         return _controle(
             "couverture", "Criblage", "Couverture du criblage", OK,
-            f"Les {mesure['clients']} clients du référentiel ont tous été "
-            f"criblés au moins une fois.", lien="#screening/screening-batch")
-    return _controle(
-        "couverture", "Criblage", "Couverture du criblage", ATTENTION,
-        phrase_de_couverture(mesure),
-        "Lancez un lookback (Criblage → Re-criblage) : il confronte tout le "
-        "référentiel aux listes en production. C'est l'opération la plus lourde "
-        "du produit — elle part en tâche de fond et se suit par jeton.",
-        "#screening/screening-batch")
+            f"Les {mesure['clients']} clients du référentiel sont criblés contre la "
+            f"version des listes en production.", lien="#screening/screening-batch")
+    return _controle("couverture", "Criblage", "Couverture du criblage", etat,
+                     " ".join(constats), " ".join(remedes), lien)
 
 
 def _declarations_de_gel(db) -> Dict[str, Any]:
@@ -961,8 +1011,12 @@ def _premier_demarrage(db) -> bool:
 # concluent jamais BLOQUANT : une sonde ne doit faire sonner que ce qui
 # bloque. Un test verifie qu'aucun controle capable de BLOQUANT n'en manque.
 _CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
+# La couverture du criblage y est aussi : un referentiel que rien n'a confronte
+# a la version en production depuis une semaine est un defaut de conformite,
+# pas un detail d'ecran. Son comptage est borne (PLAFOND_DE_COMPTAGE).
 _CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
-                          _fraicheur_des_listes, _declarations_de_gel)
+                          _fraicheur_des_listes, _declarations_de_gel,
+                          _couverture_du_criblage)
 
 
 def etat_de_conformite(db) -> Dict[str, Any]:

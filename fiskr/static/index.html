@@ -1356,8 +1356,9 @@
       importé n'était atteignable qu'en appelant l'API à la main. -->
  <div class="card">
  <h2><svg class="ui-icon" aria-hidden="true"><use href="#i-shield"></use></svg> Couverture du criblage</h2>
- <p class="section-desc">Importer un référentiel clients ne les crible pas : c'est une mise à jour de liste (re-criblage delta, automatique) ou un lookback qui le fait. Cette carte dit combien de clients n'ont encore aucune décision à leur nom au journal de criblage.</p>
- <p id="couverture-constat" class="section-desc" role="status" style="margin-bottom: 0.75rem;">Mesure en cours…</p>
+ <p class="section-desc">Chaque passage de criblage date les fiches qu'il crible : le criblage des clients nouveaux ou modifiés qui suit un import de référentiel, le re-criblage qui suit une mise à jour de liste, le lookback. Cette carte dit combien de clients n'ont jamais été criblés, et combien ne le sont pas contre la version des listes en production.</p>
+ <p id="couverture-constat" class="section-desc" role="status" style="margin-bottom: 0.25rem;">Mesure en cours…</p>
+ <p id="couverture-passage" class="section-desc" style="margin-bottom: 0.75rem; color: var(--text-muted);"></p>
  <div class="filter-bar">
  <select id="lookback-file-type" aria-label="Restreindre le lookback à un type de liste" style="flex: 0 1 260px;">
  <option value="">Toutes les listes en production</option>

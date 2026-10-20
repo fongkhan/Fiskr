@@ -254,23 +254,63 @@ async function chargerCouvertureDuCriblage() {
   constat.style.color = "var(--color-alert, #c62828)";
   return;
  }
+ afficherDernierPassage(data.dernier_passage);
  if (data.sans_referentiel) {
   constat.textContent = "Aucun référentiel clients en production : rien à cribler pour l'instant.";
   constat.style.color = "var(--text-muted)";
   return;
  }
- if (!data.jamais_cribles) {
-  constat.textContent = `Les ${data.clients} clients du référentiel ont tous été criblés au moins une fois.`;
+ // La mesure lit désormais la trace que chaque passage laisse sur chaque
+ // fiche : « tous criblés au moins une fois » ne suffit plus, la question est
+ // « contre la version des listes en production ».
+ if (!data.phrase) {
+  constat.textContent = `Les ${data.clients} clients du référentiel sont criblés contre la version des listes en production.`;
   constat.style.color = "var(--color-success, #2e7d32)";
   return;
  }
- constat.textContent = data.phrase || "";
+ constat.textContent = data.phrase;
  constat.style.color = "var(--color-warning, #b8860b)";
  } catch (e) {
  // Un « Mesure en cours… » qui ne finit jamais laisse croire au calcul.
  console.error("Couverture fetch error:", e);
  constat.textContent = "Couverture indisponible : le serveur n'a pas répondu.";
  constat.style.color = "var(--color-alert, #c62828)";
+ }
+}
+
+// Le passage le plus récent, tel que la base le décrit : nature, date,
+// effectif, et la version des listes contre laquelle il a criblé. Chaque
+// morceau est un nœud à part — l'i18n traduit les libellés fixes, la version
+// et la date restent ce qu'elles sont.
+const NATURES_DE_PASSAGE = {
+ LOOKBACK: "Lookback",
+ MISE_A_JOUR_LISTE: "Re-criblage après mise à jour de liste",
+ REFERENTIEL_CLIENTS: "Criblage des clients nouveaux ou modifiés",
+};
+
+function afficherDernierPassage(passage) {
+ const zone = document.getElementById("couverture-passage");
+ if (!zone) return;
+ zone.textContent = "";
+ if (!passage) return;
+ const statut = passage.statut === "ECHEC" ? "Dernier passage en échec :"
+  : passage.statut === "EN_COURS" ? "Passage en cours :" : "Dernier passage :";
+ const quand = passage.fin || passage.debut;
+ const morceaux = [statut, NATURES_DE_PASSAGE[passage.nature] || passage.nature,
+  quand ? formatDateTime(quand) : "",
+  `${passage.clients_cribles} client(s) criblé(s)`, passage.version || ""];
+ morceaux.filter(Boolean).forEach((texte, i) => {
+  if (i > 1) zone.appendChild(document.createTextNode(" · "));
+  else if (i === 1) zone.appendChild(document.createTextNode(" "));
+  const span = document.createElement("span");
+  span.textContent = texte;
+  zone.appendChild(span);
+ });
+ if (passage.statut === "ECHEC" && passage.erreur) {
+  zone.appendChild(document.createTextNode(" — "));
+  const cause = document.createElement("span");
+  cause.textContent = passage.erreur;
+  zone.appendChild(cause);
  }
 }
 
@@ -309,8 +349,11 @@ async function lancerLookback() {
  showToast(data.message || "Lookback lancé.", "success");
  // Même chemin que les autres travaux lourds : la pastille suit la
  // progression, et la couverture se relit quand le job se termine —
- // c'est précisément le chiffre que le lookback vient de changer.
- onOperationDone(data.job_token, () => chargerCouvertureDuCriblage());
+ // c'est précisément le chiffre que le lookback vient de changer. Sans
+ // jeton, le travail a déjà fini dans la requête : on relit tout de suite,
+ // sinon la carte attendrait une fin qui a déjà eu lieu.
+ if (data.job_token) onOperationDone(data.job_token, () => chargerCouvertureDuCriblage());
+ else chargerCouvertureDuCriblage();
  } catch (e) {
  console.error("Lookback error:", e);
  showToast("Erreur réseau au lancement du lookback.", "error");
@@ -3382,7 +3425,7 @@ const OPERATION_KIND_ICONS = {
  approve: uiIcon("check-circle"),
  batch: uiIcon("package"), batch_campaign: uiIcon("package"),
  quality: uiIcon("activity"), quality_check: uiIcon("activity"),
- lookback: uiIcon("clock"), mining: uiIcon("search"),
+ lookback: uiIcon("clock"), client_screening: uiIcon("shield"), mining: uiIcon("search"),
  engine_simulation: uiIcon("sliders"), resource_simulation: uiIcon("sliders"),
  fprules_bench: uiIcon("target"), testpanel_generate: uiIcon("users"),
 };
@@ -3437,6 +3480,37 @@ function startProgressPolling(token, barPrefix, intervalMs = 1500) {
  wrap.classList.add("hidden");
  if (fillEl) fillEl.classList.remove("indeterminate");
  };
+}
+
+// Le criblage qui suit l'import d'un référentiel clients : lancé, terminé
+// (exécution immédiate), en échec, ou impossible faute de liste en production.
+// Chacun se dit ; « rien ne vous attend » n'est jamais la réponse par défaut.
+async function signalerCriblageDesClients(criblage) {
+ if (!criblage.launched) {
+  showToast("Ces clients ne sont PAS criblés : aucune liste n'est en production.", "error", 10000);
+  return;
+ }
+ if (criblage.status === "ERROR") {
+  showToast("Le criblage des clients a échoué : les fiches restent NON criblées. Relancez un lookback.", "error", 10000);
+  return;
+ }
+ const termine = criblage.status === "DONE";
+ if (termine) {
+  const r = criblage.result || {};
+  showToast(`Criblage des clients terminé : ${r.clients_screened || 0} criblé(s), ${r.unchanged_clients || 0} inchangé(s), ${r.new_alerts || 0} alerte(s) ouverte(s).`,
+            r.new_alerts ? "warning" : "success", 9000);
+ } else {
+  showToast("Criblage des clients nouveaux ou modifiés lancé : il se suit dans les opérations en cours.", "info", 9000);
+  onOperationDone(criblage.job_token, () => chargerCouvertureDuCriblage());
+ }
+ const ouvrir = await confirmDialog(termine
+  ? "Le criblage des clients nouveaux ou modifiés est terminé. Ouvrir la carte « Couverture du criblage » pour en voir le résultat ?"
+  : "Le criblage des clients nouveaux ou modifiés est lancé. Ouvrir la carte « Couverture du criblage » pour en suivre le résultat ?",
+  { confirmLabel: "Ouvrir la couverture", cancelLabel: "Plus tard" });
+ if (ouvrir) {
+  switchTab("screening");
+  switchSubTab("screening", "screening-batch");
+ }
 }
 
 // Handle Snapshot Ingestion (Upload file)
@@ -3531,6 +3605,10 @@ async function handleIngestion(event) {
   showToast(`${data.rejected_count} ligne(s) écartée(s) par le contrôle qualité.${motifs ? " " + motifs : ""}`,
             "warning", 10000);
  }
+ // Un référentiel clients part au criblage dès son entrée en production.
+ // L'import annonçait « Successfully imported 406 items » sans cribler
+ // personne : il dit maintenant ce qui se passe, et où en lire le résultat.
+ if (data.criblage) signalerCriblageDesClients(data.criblage);
  fileInput.value = "";
  rafraichirLotsEtWatchlist();
  fetchWatchlistHash();

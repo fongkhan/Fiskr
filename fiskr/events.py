@@ -166,6 +166,16 @@ EVENT_CATALOG: Dict[str, Event] = {
     ),
 
     # ------------------ CRIBLAGE CLIENTS ------------------
+    "client_screening_completed": Event(
+        # IMMEDIAT, et seulement quand des correspondances sont tombees : des
+        # clients qui arrivent et qui ressemblent a une personne designee
+        # demandent une instruction AVANT l'entree en relation (lignes
+        # directrices DGT/ACPR, §122). Un import sans correspondance ne
+        # notifie rien — il n'appelle aucune action.
+        label="Clients nouveaux ou modifiés : correspondances au criblage",
+        category=CATEGORY_SCREENING, audience=("user", "reviewer"),
+        urgency=IMMEDIATE, link="#alerts/alerts-screening",
+    ),
     "alert_created": Event(
         label="Nouvelle alerte créée",
         category=CATEGORY_SCREENING, audience=("user", "reviewer"),

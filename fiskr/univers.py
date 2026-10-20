@@ -228,8 +228,10 @@ def connue(empreinte: Optional[str]) -> Optional[ReferenceUnivers]:
 # les lecteurs qui ne tiennent pas l'univers en memoire : le re-criblage du
 # demon et la table de rarete construite depuis la base. Un seul tuple,
 # remplace d'un bloc : un fil ne lit jamais l'epoque de l'un avec la reference
-# de l'autre.
-_par_epoque: Tuple[Optional[int], Optional[ReferenceUnivers]] = (None, None)
+# de l'autre. La cle porte aussi la BASE lue : une epoque n'est qu'un compteur,
+# et deux bases au meme compteur (les bases jetables d'une suite de tests, une
+# migration) ne decrivent pas le meme univers.
+_par_epoque: Tuple[Optional[tuple], Optional[ReferenceUnivers]] = (None, None)
 
 
 def reference_en_production(db) -> ReferenceUnivers:
@@ -240,7 +242,7 @@ def reference_en_production(db) -> ReferenceUnivers:
     # L'epoque est lue AVANT les lots : un geste survenu entre les deux
     # lectures laisse une epoque plus ancienne que la reference, donc un
     # recalcul au prochain appel — jamais l'inverse, qui figerait l'ancienne.
-    epoque = watchlist_epoch(db)
+    epoque = (str(db.get_bind().url), watchlist_epoch(db))
     memoire_epoque, memoire = _par_epoque
     if memoire is not None and memoire_epoque == epoque:
         return memoire

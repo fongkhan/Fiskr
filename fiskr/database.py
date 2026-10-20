@@ -229,6 +229,76 @@ class ClientEntity(Base):
     # Checksum for version comparisons
     entity_checksum = Column(String(64), nullable=False)
 
+    # ---- Trace du dernier criblage (cf. ScreeningPass, fiskr/couverture.py) ----
+    # Un passage de criblage n'ecrivait au journal d'audit que les clients qui
+    # ont une correspondance : un lookback annoncait « 3 clients criblés » sans
+    # laisser une seule preuve, et la couverture, mesuree sur ce journal,
+    # restait « 3 jamais criblés » pour toujours. Une ligne NO_MATCH par client
+    # et par passage n'est pas tenable (mesure : 5,5 Ko la ligne, 4,2 Go par
+    # passage a 750 000 clients) — la trace vit donc ici, mise a jour en masse.
+    # Quand la fiche a ete criblee pour la derniere fois, et par quel passage
+    # (NULL : criblage unitaire, dont la piece est sa ligne d'audit).
+    screened_at = Column(DateTime, nullable=True)
+    screening_pass_id = Column(Integer, nullable=True)
+    # Empreinte des elements d'identification (fiskr/identification.py) au
+    # dernier criblage contre l'univers COMPLET : c'est elle qu'un nouvel import
+    # compare, pour ne recribler que les clients ajoutes ou modifies.
+    screened_identity_sha256 = Column(String(64), nullable=True)
+    # Empreinte de l'univers en production contre lequel la fiche est criblee
+    # EN ENTIER (passage complet, ou passage delta qui prolonge cette couverture).
+    covered_universe_hash = Column(String(64), nullable=True)
+
+# Colonnes de TRACE portees par la fiche client : elles disent quand et contre
+# quoi elle a ete criblee, elles ne font pas partie du profil. Aucun profil de
+# criblage ne doit les transporter — un datetime dans le profil finirait dans un
+# arbre de decision que la colonne JSON du journal refuse (cf. modified_at).
+CLIENT_SCREENING_TRACE_COLUMNS = ("screened_at", "screening_pass_id",
+                                  "screened_identity_sha256", "covered_universe_hash")
+
+
+class ScreeningPass(Base):
+    """
+    Un passage de criblage du referentiel clients : lookback, re-criblage apres
+    une mise a jour de liste, criblage des clients nouveaux ou modifies.
+
+    Il porte ce que les lignes d'audit ne portent que pour les correspondances :
+    CONTRE QUOI le referentiel a ete crible (la reference de l'univers, lue au
+    point unique `rescreen.reference_de_l_univers`, par le chemin du journal), sur quel
+    perimetre, combien de clients, quand. Chaque fiche criblee le designe
+    (`ClientEntity.screening_pass_id`). Une ligne par passage, quel que soit le
+    nombre de clients : c'est ce qui rend la trace tenable.
+    """
+    __tablename__ = "screening_passes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # LOOKBACK | MISE_A_JOUR_LISTE | REFERENTIEL_CLIENTS
+    nature = Column(String(30), nullable=False, index=True)
+    trigger_detail = Column(String(255), nullable=True)
+    # EN_COURS | TERMINE | ECHEC
+    status = Column(String(20), nullable=False, default="EN_COURS", index=True)
+    watchlist_version = Column(String(50), nullable=False)
+    watchlist_hash = Column(String(64), nullable=False)
+    # Lots en production au moment du passage, quand la reference les expose
+    # (cf. rescreen.reference_de_l_univers) ; NULL sinon, jamais inventee.
+    watchlist_composition = Column(JSON, nullable=True)
+    # Passage delta : reference de l'univers AVANT la mise a jour. Seuls les
+    # clients couverts contre elle deviennent couverts contre la nouvelle — un
+    # client que personne n'avait crible contre l'ancienne ne l'est pas plus
+    # parce qu'on l'a confronte aux seules fiches nouvelles.
+    previous_watchlist_hash = Column(String(64), nullable=True)
+    # {"listes": [...] | "TOUTES", "complet": bool, "snapshot_id": ...}
+    scope = Column(JSON, nullable=True)
+    entities_compared = Column(Integer, default=0)
+    clients_screened = Column(Integer, default=0)
+    # Fiches dont ce passage a etabli ou prolonge la couverture
+    clients_covered = Column(Integer, default=0)
+    counters = Column(JSON, nullable=True)
+    started_by = Column(String(100), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+
+
 class AuditTrail(Base):
     __tablename__ = "compliance_audit_trail"
     

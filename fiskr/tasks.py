@@ -152,11 +152,13 @@ def backtest_task(ctx: jobs.JobContext, *, snapshot_id: Optional[str] = None,
 @jobs.task("approve")
 def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
                           previous_snapshot_id: Optional[str] = None,
-                          excluded_count: int = 0, username: str = "?") -> None:
+                          excluded_count: int = 0, username: str = "?",
+                          reference_avant: Optional[str] = None) -> None:
     """
     Suites d'une approbation : rafraichissement du cache de production puis
     re-criblage post-delta du referentiel clients. La promotion elle-meme,
-    acte de gouvernance, a deja ete commitee de facon synchrone par l'endpoint.
+    acte de gouvernance, a deja ete commitee de facon synchrone par l'endpoint,
+    qui a releve la reference de l'univers juste avant (`reference_avant`).
     """
     from fiskr.notifier import emit
     from fiskr.rescreen import rescreen_after_snapshot_change
@@ -178,6 +180,7 @@ def approve_followup_task(ctx: jobs.JobContext, *, snapshot_id: str,
                 progress=lambda done, total: ctx.update(
                     phase="RESCREEN", processed=done, total=total,
                     snapshot_id=snapshot_id),
+                reference_avant=reference_avant, started_by=username,
             )
         # Étape structurante de la production des listes : mail immédiat
         report = snap.backtest_report or {}
@@ -314,6 +317,13 @@ def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
         }
         if run_key == "eurlex" and for_date:
             kwargs["for_date"] = datetime.strptime(for_date, "%Y-%m-%d").date()
+        # Reference de l'univers AVANT que la synchronisation ne l'applique :
+        # c'est d'elle que le re-criblage prolonge la couverture des clients.
+        # La lecture ne laisse pas de transaction ouverte derriere elle : le
+        # telechargement qui suit peut durer des minutes (cf. sync.py, DFAT).
+        from fiskr.rescreen import reference_de_l_univers
+        reference_avant = reference_de_l_univers(session)[1]
+        session.commit()
         report = _SYNC_RUNNERS[run_key](session, **kwargs)
         result = _serialize_sync_report(report)
         # Surveillance continue : re-criblage du referentiel clients contre
@@ -328,6 +338,7 @@ def sync_source_task(ctx: jobs.JobContext, *, run_key: str, engine_source: str,
                     progress=lambda done, total: ctx.update(
                         phase="RESCREEN", processed=done, total=total,
                         snapshot_id=report.snapshot_id),
+                    reference_avant=reference_avant, started_by=username,
                 )
         # Snapshot retenu en homologation : cahier de tests automatique pour
         # que l'examen s'ouvre avec le rapport A/B deja pret (ou en cours)
@@ -430,7 +441,10 @@ def lookback_task(ctx: jobs.JobContext, *, file_type: Optional[str] = None,
                   username: str = "?") -> None:
     """Lookback manuel (guidance Wolfsberg) : tout le referentiel contre
     toutes les listes en production — l'operation la plus lourde du produit,
-    executee et suivie par la file."""
+    executee et suivie par la file.
+
+    Sans liste en production dans le perimetre, le travail ECHOUE avec la
+    cause (UniversAbsent) : il finissait sur « Lookback exécuté », zero client."""
     from fiskr.rescreen import rescreen_lookback
 
     session = ctx.session()
@@ -438,8 +452,53 @@ def lookback_task(ctx: jobs.JobContext, *, file_type: Optional[str] = None,
         result = rescreen_lookback(
             session, file_type,
             progress=lambda done, total: ctx.update(
-                phase="RESCREEN", processed=done, total=total))
-        ctx.set_result({"message": "Lookback exécuté.", **result})
+                phase="RESCREEN", processed=done, total=total),
+            started_by=username)
+        ctx.set_result({"message": f"Lookback exécuté : {result.get('clients_screened', 0)} "
+                                   f"client(s) criblé(s), trace datée sur chaque fiche.",
+                        **result})
+    finally:
+        session.close()
+
+
+@jobs.task("client_screening")
+def client_screening_task(ctx: jobs.JobContext, *, snapshot_id: str,
+                          username: str = "?") -> None:
+    """
+    Criblage des clients nouveaux ou modifies d'un referentiel qui vient
+    d'entrer en production, contre tout l'univers en production (cf.
+    rescreen.cribler_les_clients_nouveaux_ou_modifies). Une correspondance
+    ouvre une alerte comme partout ailleurs, et le dit tout de suite :
+    cribler avant l'entree en relation n'a de sens que si quelqu'un regarde.
+    """
+    from fiskr.notifier import emit
+    from fiskr.rescreen import cribler_les_clients_nouveaux_ou_modifies
+
+    session = ctx.session()
+    try:
+        ctx.update(phase="RESCREEN", snapshot_id=snapshot_id)
+        result = cribler_les_clients_nouveaux_ou_modifies(
+            session, snapshot_id,
+            progress=lambda done, total: ctx.update(
+                phase="RESCREEN", processed=done, total=total, snapshot_id=snapshot_id),
+            started_by=username)
+        cribles = int(result.get("clients_screened") or 0)
+        message = (f"{cribles} client(s) nouveau(x) ou modifié(s) criblé(s) contre les listes "
+                   f"en production ; {result.get('unchanged_clients', 0)} inchangé(s), non "
+                   f"recriblé(s).")
+        mouvements = sum(int(result.get(cle) or 0)
+                         for cle in ("new_alerts", "redetected_alerts", "closed_by_rule"))
+        if mouvements:
+            emit(session, "client_screening_completed", {
+                "Référentiel": snapshot_id,
+                "Clients criblés": cribles,
+                "Clients inchangés": result.get("unchanged_clients"),
+                "Nouvelles alertes": result.get("new_alerts"),
+                "Alertes re-détectées": result.get("redetected_alerts"),
+                "Clôturées par règle": result.get("closed_by_rule"),
+                "Lancé par": username,
+            })
+        ctx.set_result({"message": message, **result})
     finally:
         session.close()
 

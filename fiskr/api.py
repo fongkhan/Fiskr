@@ -3909,6 +3909,48 @@ def _memoriser_correspondance(db: Session, file_type: str, chemin, delimiter: st
             pass
 
 
+def _cribler_le_referentiel_importe(db: Session, snapshot_id: str,
+                                    username: str) -> Dict[str, Any]:
+    """
+    Un referentiel clients entre en production : ses clients nouveaux ou
+    modifies partent au criblage (travail `client_screening`), et le message
+    d'import dit ce qui se passe — ou pourquoi rien ne se passe.
+
+    L'import ne criblait personne et annoncait « Successfully imported 406
+    items » ; l'accueil disait « Rien ne vous attend ». Un client arrive apres la
+    derniere mise a jour des listes n'etait confronte a rien.
+    """
+    from fiskr.rescreen import lots_en_production
+    if not lots_en_production(db):
+        return {"launched": False, "reason": "NO_LIST_IN_PRODUCTION",
+                "message": ("Ces clients ne sont PAS criblés : aucune liste n'est en "
+                            "production, ils n'ont été comparés à rien. Ils le restent "
+                            "tant qu'aucune liste n'est en production.")}
+    token = f"client-screening:{snapshot_id}"
+    suivi = ("Il se suit dans les opérations en cours ; son résultat s'affiche sur la "
+             "carte « Couverture du criblage » (Criblage → Batch).")
+    try:
+        job = job_queue.submit("client_screening", token=token,
+                               label="Criblage des clients nouveaux ou modifiés",
+                               params={"snapshot_id": snapshot_id, "username": username},
+                               created_by=username, dedupe_key=token,
+                               snapshot_id=snapshot_id)
+    except JobConflict:
+        return {"launched": True, "job_token": token, "status": "QUEUED",
+                "message": f"Criblage des clients nouveaux ou modifiés déjà en cours. {suivi}"}
+    if job.status == "DONE":
+        return {"launched": True, "job_token": token, "status": "DONE",
+                "result": job.result,
+                "message": f"Criblage terminé : {(job.result or {}).get('message', '')}"}
+    if job.status == "ERROR":
+        return {"launched": True, "job_token": token, "status": "ERROR",
+                "message": (f"Le criblage des clients a échoué : {job.error}. Les fiches "
+                            f"concernées restent NON criblées — relancez un lookback.")}
+    return {"launched": True, "job_token": token, "status": job.status,
+            "message": ("Criblage des clients nouveaux ou modifiés lancé contre les "
+                        f"listes en production. {suivi}")}
+
+
 def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                original_filename: str, file_type: str,
                                delimiter: str, ssie_selector_overrides,
@@ -4267,6 +4309,11 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
         # Update Snapshot status. En mode homologation, les watchlists attendent
         # un pointage humain (PENDING_REVIEW) et restent hors du cache de criblage.
         staging = file_type in WATCHLIST_FILE_TYPES and require_approval_enabled(db)
+        # Reference de l'univers AVANT que ce lot n'y entre : le re-criblage qui
+        # suit en prolonge la couverture des clients (cf. rescreen).
+        from fiskr.rescreen import reference_de_l_univers
+        reference_avant = (reference_de_l_univers(db)[1]
+                           if file_type in WATCHLIST_FILE_TYPES and not staging else None)
         snap.status = "PENDING_REVIEW" if staging else "READY"
         snap.record_count = record_count
         snap.processed_count = record_count
@@ -4289,7 +4336,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             # Surveillance continue : re-criblage du referentiel clients
             # contre les entites du nouveau snapshot
             if auto_rescreen_enabled(db):
-                rescreen_result = rescreen_after_snapshot_change(db, file_type, snap_id, None)
+                rescreen_result = rescreen_after_snapshot_change(
+                    db, file_type, snap_id, None, reference_avant=reference_avant,
+                    started_by=username)
 
         if staging:
             message = (
@@ -4306,6 +4355,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
                 "Importé par": username, "Snapshot": snap_id,
             })
+        criblage = None
         if file_type == "CLIENT_BASE" and snap.status == "READY":
             # Contrôle de complétude en tâche de fond : hors de la requête
             # (un référentiel volumineux doublerait le temps d'import perçu)
@@ -4317,6 +4367,8 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                                  snapshot_id=snap_id)
             except JobConflict:
                 pass
+            criblage = _cribler_le_referentiel_importe(db, snap_id, username)
+            message = f"{message} {criblage['message']}"
         # Une correspondance qui retombe sur une alerte deja ouverte ne cree
         # rien : la porte reste la meme (le re-criblage a bien produit
         # quelque chose), mais les trois nombres sont maintenant distincts.
@@ -4346,6 +4398,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             "record_count": record_count,
             "status": snap.status,
             "rescreen": rescreen_result,
+            "criblage": criblage,
             **rejets.rapport(),
         }
     except Exception as e:
@@ -6772,14 +6825,45 @@ async def screen_existing_client(
     if row is None:
         raise HTTPException(status_code=404,
                             detail="Client introuvable dans le référentiel en production.")
-    return cribler_un_profil(db, _profil_du_referentiel(row), current_user["username"], None)
+    resultat = cribler_un_profil(db, _profil_du_referentiel(row), current_user["username"], None)
+    # La fiche porte la date et la reference de ce criblage (cf. couverture)
+    from fiskr.rescreen import dater_un_criblage_unitaire
+    dater_un_criblage_unitaire(db, row, resultat.get("audit_trail_id"))
+    db.commit()
+    return resultat
 
 
 def _profil_du_referentiel(row: ClientEntity) -> Dict[str, Any]:
     """Profil de criblage d'une fiche du referentiel : toutes ses colonnes,
-    hors la plomberie de stockage."""
+    hors la plomberie de stockage et la trace de criblage."""
+    from fiskr.database import CLIENT_SCREENING_TRACE_COLUMNS
     return {c.name: getattr(row, c.name) for c in row.__table__.columns
-            if c.name not in ("id", "snapshot_id", "entity_checksum")}
+            if c.name not in ("id", "snapshot_id", "entity_checksum")
+            and c.name not in CLIENT_SCREENING_TRACE_COLUMNS}
+
+
+def _trace_de_criblage(db: Session, fiche: ClientEntity) -> Optional[Dict[str, Any]]:
+    """
+    Le dernier criblage d'une fiche : quand, par quel passage, et si elle est
+    couverte contre la version des listes en production. None : la fiche ne
+    porte aucune trace (jamais criblee, ou criblee avant que les passages ne
+    laissent la leur — son historique de decisions le dit alors).
+    """
+    from fiskr.database import ScreeningPass
+    from fiskr.rescreen import reference_de_l_univers
+    if fiche.screened_at is None and fiche.covered_universe_hash is None:
+        return None
+    passage = (db.get(ScreeningPass, fiche.screening_pass_id)
+               if fiche.screening_pass_id else None)
+    return {
+        "screened_at": fiche.screened_at.isoformat() if fiche.screened_at else None,
+        "screening_pass_id": fiche.screening_pass_id,
+        "nature": passage.nature if passage else "UNITAIRE",
+        "watchlist_version": passage.watchlist_version if passage else None,
+        "covered_universe_hash": fiche.covered_universe_hash,
+        "covered_by_production_version":
+            fiche.covered_universe_hash == reference_de_l_univers(db)[1],
+    }
 
 
 @app.get("/api/clients/{client_id}/overview")
@@ -6815,6 +6899,8 @@ async def get_client_overview(
             "segment": entity.client_segment, "activity_sector": entity.client_activity_sector,
             "relationship_start": entity.client_relationship_start, "status": entity.client_status,
             "snapshot_uploaded_at": snap.uploaded_at.isoformat() if snap.uploaded_at else None,
+            # Quand cette fiche a ete criblee, et contre quelle version des listes
+            "dernier_criblage": _trace_de_criblage(db, entity),
         }
 
     audits = db.query(AuditTrail).filter(AuditTrail.client_id == client_id) \
@@ -7603,6 +7689,8 @@ _OPERATION_LINKS = {
     "quality": "#kpi/kpi-quality",
     "quality_check": "#kpi/kpi-quality",
     "lookback": "#screening/alerts-screening",
+    # Le resultat d'un import de referentiel se lit sur la carte de couverture
+    "client_screening": "#screening/screening-batch",
     "mining": "#alerts/alerts-resources",
     "engine_simulation": "#alerts/alerts-blocking",
     "resource_simulation": "#alerts/alerts-resources",
@@ -10820,6 +10908,12 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
     # EST la production et le delta ne serait plus calculable (voir ReviewRecord).
     _capture_review_record(db, snap, "APPROVED", reviewer["username"], comment)
 
+    # Reference de l'univers AVANT la bascule, pour la meme raison : le
+    # re-criblage qui suit prolonge la couverture des clients couverts contre
+    # elle, et elle n'est plus lisible une fois ce lot en production.
+    from fiskr.rescreen import reference_de_l_univers
+    reference_avant = reference_de_l_univers(db)[1]
+
     snap.status = "READY"
     snap.reviewed_by = reviewer["username"]
     snap.reviewed_at = datetime.utcnow()
@@ -10849,7 +10943,8 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                 params={"snapshot_id": snap.snapshot_id,
                         "previous_snapshot_id": previous_prod.snapshot_id if previous_prod else None,
                         "excluded_count": len(excluded_rows),
-                        "username": reviewer["username"]},
+                        "username": reviewer["username"],
+                        "reference_avant": reference_avant},
                 started_by=reviewer["username"],
                 dedupe_key=job_token, snapshot_id=snap.snapshot_id)
     message = "Snapshot approuvé et promu en production. Rechargement du cache et re-criblage en cours."
@@ -13061,6 +13156,10 @@ def _cribler_apres_upsert(db: Session, row: ClientEntity, operation: str,
         return {"performed": False, "reason": reason,
                 "identification_fields_changed": identification,
                 "summary": summary, "detail": exc.detail}
+    # La fiche porte la date et la reference de ce criblage (cf. couverture) :
+    # le commit de l'appelant la valide avec la fiche.
+    from fiskr.rescreen import dater_un_criblage_unitaire
+    dater_un_criblage_unitaire(db, row, result.get("audit_trail_id"))
     best = result.get("best_match") or {}
     statut = best.get("status") or "NO_MATCH"
     summary = f"criblée contre les listes en production : {statut}"
@@ -14680,14 +14779,13 @@ async def couverture_du_criblage_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Combien de clients du referentiel n'ont JAMAIS ete cribles.
+    Combien de clients du referentiel n'ont JAMAIS ete cribles, combien ne le
+    sont pas contre la version des listes en production, et le dernier passage.
 
     « Tous vos clients ont-ils ete cribles ? » est la premiere question d'un
-    controle, et le produit ne savait pas y repondre : importer un referentiel
-    clients declenche un controle de completude, pas un criblage, et le
-    re-criblage automatique se declenche quand une LISTE change — jamais quand
-    des CLIENTS arrivent. Un referentiel fraichement importe restait donc
-    entier hors du criblage sans que rien ne le signale.
+    controle. La mesure lit la trace que chaque passage de criblage laisse sur
+    chaque fiche (fiskr/couverture.py) : mesuree sur le journal d'audit, qui
+    n'ecrit que les correspondances, elle ne s'eteignait jamais.
 
     Lu en base a chaque appel : c'est un fait, pas un compteur a entretenir.
     """
@@ -14709,10 +14807,16 @@ async def run_manual_rescreen(
     C'etait la plus lourde operation du produit encore executee DANS la
     requete : elle part desormais dans la file de travaux (202 + jeton, suivi
     par la pastille), le refus d'un type inconnu restant synchrone (400).
+
+    Une restriction a une liste ABSENTE de la production est refusee (409), le
+    meme refus que tout autre criblage : le travail se terminait sur « Lookback
+    exécuté » apres n'avoir compare personne a rien.
     """
     file_type = (payload.file_type or "").strip().upper() or None
     if file_type and file_type not in WATCHLIST_FILE_TYPES:
         raise HTTPException(status_code=400, detail=f"Type de liste inconnu ({', '.join(WATCHLIST_FILE_TYPES)}).")
+    _ensure_watchlist_cache(db)
+    exiger_un_univers([file_type] if file_type else None)
     token = f"lookback-{uuid.uuid4().hex[:8]}"
     job = _submit_job("lookback", token=token,
                       label="Lookback du référentiel clients"

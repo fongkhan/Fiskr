@@ -34,6 +34,8 @@ modifier ne demande pas de recribler. Les regles anti-faux positifs, elles,
 peuvent lire n'importe quel champ du profil — elles ne trouvent ni ne notent
 rien, elles tranchent une correspondance deja trouvee.
 """
+import hashlib
+import json
 from functools import lru_cache
 from typing import FrozenSet
 
@@ -114,3 +116,23 @@ def elements_d_identification(champs) -> list:
     """Ceux de ces champs qui sont des elements d'identification, tries."""
     lus = champs_lus_par_le_moteur()
     return sorted(c for c in champs if c in lus)
+
+
+def empreinte_d_identification(profil) -> str:
+    """
+    Empreinte des elements d'identification d'un profil client : ce que le
+    moteur lit, et rien d'autre.
+
+    Un import de referentiel ne recrible que les clients dont elle a change
+    depuis leur dernier criblage. L'empreinte de la fiche entiere
+    (`entity_checksum`) ne convient pas : un telephone ou un segment modifie
+    la ferait changer et recriblerait un client dont rien de ce que le moteur
+    lit n'a bouge. Celle-ci suit le releve : le jour ou le moteur apprend a
+    lire un champ de plus, toutes les empreintes changent — et le prochain
+    import recrible tout le monde, ce qui est juste, puisque le criblage
+    d'hier n'avait pas regarde ce champ.
+    """
+    lus = champs_lus_par_le_moteur()
+    identite = {cle: profil[cle] for cle in sorted(lus) if cle in profil}
+    return hashlib.sha256(json.dumps(identite, sort_keys=True, default=str,
+                                     ensure_ascii=False).encode("utf-8")).hexdigest()

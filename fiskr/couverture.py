@@ -1,9 +1,10 @@
 """
-Couverture du criblage : combien de clients n'ont JAMAIS été criblés.
+Couverture du criblage : combien de clients n'ont JAMAIS été criblés, et
+combien ne le sont pas contre la version des listes en production.
 
 Pourquoi cette question n'avait pas de réponse
 ----------------------------------------------
-Importer un référentiel clients déclenche un contrôle de complétude — pas un
+Importer un référentiel clients déclenchait un contrôle de complétude — pas un
 criblage. Le re-criblage automatique, lui, se déclenche quand une LISTE change
 (`rescreen_after_snapshot_change`), jamais quand des CLIENTS arrivent. Un
 référentiel fraîchement importé restait donc entier hors du criblage jusqu'à
@@ -13,20 +14,26 @@ part, ne le disait. Ni l'écran, ni le message d'import, ni un compteur.
 C'est la première question d'un contrôle : « tous vos clients ont-ils été
 criblés ? ». Le produit ne savait pas y répondre.
 
-Ce que cette mesure dit, et ce qu'elle ne dit pas
-------------------------------------------------
-Elle répond à « ce client a-t-il été criblé au moins une fois ? », en cherchant
-une trace au journal de criblage immuable. C'est une question franche, à
-laquelle la base sait répondre.
+Ce que cette mesure lit
+-----------------------
+La trace que chaque passage de criblage laisse sur chaque fiche
+(`ClientEntity.screened_at`, `covered_universe_hash`, cf. fiskr/rescreen.py).
+Elle se mesurait sur le journal d'audit, qui n'écrit une ligne que pour une
+correspondance : un lookback sur des clients propres ne laissait rien, et
+« jamais criblé » ne s'éteignait jamais — relevé en production, 382 clients
+sur 406 après un lookback complet, et le même chiffre après chaque relance.
 
-Elle ne prétend PAS répondre à « ce client a-t-il été criblé contre la liste
-exactement en production aujourd'hui ». Après une mise en production, le
-re-criblage ne compare le référentiel qu'aux fiches NOUVELLES OU MODIFIÉES —
-c'est ce qui le rend tenable — et n'écrit une ligne d'audit que pour les
-correspondances. Un client propre ne laisse donc pas de trace datée de ce
-passage. Compter les traces portant le hash du jour dirait « personne n'est
-couvert » le lendemain de chaque mise en production : ce serait faux, et un
-indicateur faux est pire que pas d'indicateur.
+« Jamais criblé » : ni passage sur la fiche, ni décision au journal (les
+criblages antérieurs aux passages n'ont laissé que la seconde).
+
+« Non criblé contre la version en production » : la fiche n'est pas couverte
+contre l'univers que `rescreen.reference_de_l_univers` décrit aujourd'hui. Un
+passage complet (lookback, criblage des clients nouveaux ou modifiés) couvre
+ses fiches ; un re-criblage après mise à jour de liste prolonge la couverture
+des fiches couvertes contre la version d'avant — il les a confrontées à tout
+ce qui a changé. C'est ce qui permet de répondre sans compter des lignes au
+hash du jour, qui diraient « personne n'est couvert » le lendemain de chaque
+mise en production.
 
 Coût
 ----
@@ -74,9 +81,102 @@ def clients_en_production(db) -> int:
         ClientEntity.snapshot_id.in_(snap_ids)).count())
 
 
+# Les travaux qui, en cours, vont changer la couverture d'eux-mêmes : tant que
+# l'un d'eux tourne ou attend, un écart n'est pas encore un manquement.
+TRAVAUX_DE_CRIBLAGE = ("client_screening", "lookback", "approve", "sync", "ingest")
+
+
+def _contre_la_version_en_production(db, snap_ids, plafond: int) -> Dict[str, Any]:
+    """
+    Les clients qui ne sont pas couverts contre l'univers en production, et
+    depuis quand ils attendent.
+
+    La référence de l'univers est lue par `rescreen.reference_de_l_univers`,
+    le point unique qu'empruntent aussi les passages et leurs lignes d'audit : comparée
+    à la couverture portée par chaque fiche, elle dit qui a été confronté à
+    TOUT ce qui est en production aujourd'hui.
+
+    Depuis quand : un client qu'aucun passage complet n'a jamais couvert
+    attend depuis son arrivée — qu'il ait été daté par des re-criblages delta
+    ou non, il n'a jamais été confronté à tout l'univers ; un client couvert
+    contre une version antérieure, depuis le premier passage qui a vu la
+    version en production. Si aucun passage ne l'a vue — une fiche ajoutée ou
+    corrigée à la main, un re-criblage coupé — la durée est INCONNUE, et la
+    mesure le dit au lieu d'annoncer zéro.
+    """
+    from sqlalchemy import func, or_
+    from fiskr.database import Job, ScreeningPass
+    from fiskr.rescreen import lots_en_production, reference_de_l_univers
+
+    version, empreinte, _composition = reference_de_l_univers(db)
+    sortie = {"non_couverts": 0, "non_couverts_plafonne": False,
+              "version_en_production": version, "en_attente_depuis": None,
+              "attente_inconnue": False,
+              "travaux_en_cours": db.query(Job.id).filter(
+                  Job.kind.in_(TRAVAUX_DE_CRIBLAGE),
+                  Job.status.in_(("QUEUED", "RUNNING"))).count(),
+              "dernier_passage": _dernier_passage(db, empreinte)}
+    if not lots_en_production(db):
+        # Aucune liste : être « couvert contre » un univers vide ne veut rien
+        # dire. Le contrôle des listes en production le dit, et bloque.
+        return sortie
+
+    non_couverts = db.query(ClientEntity.id).filter(
+        ClientEntity.snapshot_id.in_(snap_ids),
+        or_(ClientEntity.covered_universe_hash.is_(None),
+            ClientEntity.covered_universe_hash != empreinte),
+    ).limit(plafond + 1).count()
+    sortie["non_couverts"] = min(int(non_couverts), plafond)
+    sortie["non_couverts_plafonne"] = non_couverts > plafond
+    if not non_couverts:
+        return sortie
+
+    depuis = []
+    arrivee = db.query(func.min(Snapshot.uploaded_at)).join(
+        ClientEntity, ClientEntity.snapshot_id == Snapshot.snapshot_id).filter(
+        ClientEntity.snapshot_id.in_(snap_ids),
+        ClientEntity.covered_universe_hash.is_(None)).scalar()
+    if arrivee:
+        depuis.append(arrivee)
+    anterieurs = db.query(ClientEntity.id).filter(
+        ClientEntity.snapshot_id.in_(snap_ids),
+        ClientEntity.covered_universe_hash.isnot(None),
+        ClientEntity.covered_universe_hash != empreinte).first()
+    if anterieurs:
+        vue = db.query(func.min(ScreeningPass.started_at)).filter(
+            ScreeningPass.watchlist_hash == empreinte).scalar()
+        if vue:
+            depuis.append(vue)
+        else:
+            sortie["attente_inconnue"] = True
+    if depuis:
+        sortie["en_attente_depuis"] = min(depuis).isoformat()
+    return sortie
+
+
+def _dernier_passage(db, empreinte: str) -> Optional[Dict[str, Any]]:
+    """Le passage de criblage le plus récent, tel qu'un écran le cite."""
+    from fiskr.database import ScreeningPass
+    passage = db.query(ScreeningPass).order_by(ScreeningPass.id.desc()).first()
+    if passage is None:
+        return None
+    return {
+        "id": passage.id, "nature": passage.nature, "statut": passage.status,
+        "version": passage.watchlist_version,
+        "version_en_production": passage.watchlist_hash == empreinte,
+        "debut": passage.started_at.isoformat() if passage.started_at else None,
+        "fin": passage.finished_at.isoformat() if passage.finished_at else None,
+        "clients_cribles": passage.clients_screened or 0,
+        "clients_couverts": passage.clients_covered or 0,
+        "fiches_comparees": passage.entities_compared or 0,
+        "erreur": passage.error,
+    }
+
+
 def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, Any]:
     """
-    Combien de clients en production n'ont aucune décision de criblage.
+    Combien de clients en production n'ont jamais été criblés, et combien ne
+    le sont pas contre la version des listes en production.
 
     Retourne toujours la même forme, y compris quand il n'y a pas de
     référentiel ou que la mesure échoue — et ces deux cas ne se confondent
@@ -84,7 +184,9 @@ def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, 
     a rien ». Un écran ne doit pas avoir à les distinguer lui-même.
     """
     vide = {"clients": 0, "jamais_cribles": 0, "plafonne": False,
-            "sans_referentiel": True, "illisible": False}
+            "sans_referentiel": True, "illisible": False, "non_couverts": 0, "non_couverts_plafonne": False,
+            "version_en_production": None, "en_attente_depuis": None,
+            "attente_inconnue": False, "travaux_en_cours": 0, "dernier_passage": None}
     try:
         snap_ids = _snapshots_clients(db)
         if not snap_ids:
@@ -93,13 +195,15 @@ def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, 
         clients = db.query(ClientEntity.id).filter(
             ClientEntity.snapshot_id.in_(snap_ids)).count()
 
+        # Jamais criblé : ni passage sur la fiche, ni décision au journal (les
+        # criblages antérieurs aux passages n'ont laissé que la seconde).
         # Sous-requête corrélée : une sonde d'index par client, arrêtée net au
         # plafond. `LIMIT` sur la sélection, `COUNT` par-dessus — pas l'inverse.
-        manquants = db.query(ClientEntity.id).filter(
-            ClientEntity.snapshot_id.in_(snap_ids),
-            ~db.query(AuditTrail.id).filter(
-                AuditTrail.client_id == ClientEntity.client_id).exists(),
-        ).limit(plafond + 1).count()
+        jamais = (ClientEntity.snapshot_id.in_(snap_ids),
+                  ClientEntity.screened_at.is_(None),
+                  ~db.query(AuditTrail.id).filter(
+                      AuditTrail.client_id == ClientEntity.client_id).exists())
+        manquants = db.query(ClientEntity.id).filter(*jamais).limit(plafond + 1).count()
 
         return {
             "clients": int(clients),
@@ -107,6 +211,7 @@ def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, 
             "plafonne": manquants > plafond,
             "sans_referentiel": False,
             "illisible": False,
+            **_contre_la_version_en_production(db, snap_ids, plafond),
         }
     except Exception as e:
         # Une mesure illisible ne doit jamais faire tomber l'écran qui
@@ -116,27 +221,39 @@ def couverture_du_criblage(db, plafond: int = PLAFOND_DE_COMPTAGE) -> Dict[str, 
         # comme « rien à cribler pour l'instant ». Les chiffres sont None, pas
         # zéro : zéro serait encore une réponse.
         logger.warning(f"Couverture du criblage illisible : {e}")
-        return {"clients": None, "jamais_cribles": None, "plafonne": False,
-                "sans_referentiel": None, "illisible": True,
+        return {**vide, "clients": None, "jamais_cribles": None,
+                "sans_referentiel": None, "illisible": True, "non_couverts": None,
                 "erreur": f"{type(e).__name__} : {e}"}
 
 
 def phrase_de_couverture(mesure: Dict[str, Any]) -> Optional[str]:
     """
-    Une phrase, ou rien si tout est criblé. Utilisée par le message d'import
-    et par l'écran de mise en service : une seule formulation, pas deux qui
-    dériveraient.
+    Une phrase, ou rien si tout est couvert. Utilisée par la carte de
+    couverture et par l'écran de mise en service : une seule formulation, pas
+    deux qui dériveraient. Elle nomme ce qui ne va pas, jamais ce qui va.
     """
     if mesure.get("illisible"):
         return (f"Couverture du criblage illisible : la mesure a échoué "
                 f"({mesure.get('erreur') or 'sans détail'}). On ne sait donc pas si "
                 f"le référentiel a été criblé — ce n'est pas l'absence de référentiel.")
-    if mesure.get("sans_referentiel") or not mesure.get("jamais_cribles"):
+    if mesure.get("sans_referentiel"):
         return None
-    combien = mesure["jamais_cribles"]
-    quantite = f"Plus de {combien}" if mesure.get("plafonne") else str(combien)
-    pluriel = "s" if combien > 1 else ""
-    return (f"{quantite} client{pluriel} du référentiel n'{'ont' if combien > 1 else 'a'} "
-            f"jamais été criblé{pluriel} : aucune décision à leur nom au journal de "
-            f"criblage. Importer des clients ne les crible pas — c'est une mise à jour "
-            f"de liste, ou un lookback, qui le fait.")
+    phrases = []
+    combien = mesure.get("jamais_cribles") or 0
+    if combien:
+        quantite = f"Plus de {combien}" if mesure.get("plafonne") else str(combien)
+        pluriel = "s" if combien > 1 else ""
+        phrases.append(
+            f"{quantite} client{pluriel} du référentiel n'{'ont' if combien > 1 else 'a'} "
+            f"jamais été criblé{pluriel} : aucune trace de criblage à leur nom, ni "
+            f"passage ni décision au journal.")
+    # Les jamais criblés sont aussi non couverts : on ne nomme que les autres.
+    autres = (mesure.get("non_couverts") or 0) - combien
+    if autres > 0:
+        quantite = f"Plus de {autres}" if mesure.get("non_couverts_plafonne") else str(autres)
+        pluriel = "s" if autres > 1 else ""
+        phrases.append(
+            f"{quantite} client{pluriel} {'ont' if autres > 1 else 'a'} été criblé{pluriel}, "
+            f"mais pas contre la version des listes en production "
+            f"({mesure.get('version_en_production')}).")
+    return " ".join(phrases) or None
