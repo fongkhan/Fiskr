@@ -709,8 +709,11 @@ alerte sur le code HTTP sans passer par la messagerie de l'application :
 
 Une fréquence d'une à cinq minutes suffit : les seuils se comptent en heures.
 La même fraîcheur part aussi en **notification immédiate** aux administrateurs
-(`fraicheur_depassee`), une fois par liste et par seuil franchi (48 h, puis
-7 jours) — la sonde couvre le jour où cette notification ne part pas.
+(`fraicheur_depassee`) quand des listes franchissent un seuil (48 h, puis
+7 jours) : **une seule** notification par passage, qui nomme les listes
+concernées par retard décroissant avec le niveau de chacune (dix au plus, puis
+« … et N autres »), et chaque liste n'est signalée qu'une fois par seuil. La
+sonde couvre le jour où cette notification ne part pas.
 
 ### Documentation de l'API : `/docs`, `/redoc`, `/openapi.json`
 

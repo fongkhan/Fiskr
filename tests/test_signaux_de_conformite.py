@@ -125,7 +125,7 @@ def test_franchir_le_seuil_attention_emet_un_evenement_et_un_seul(base, emission
     premier = fraicheur.signaler_les_franchissements(db)
     assert [(s["type"], s["niveau"]) for s in premier] == [("WATCHLIST_UN", mes.ATTENTION)]
     assert [cle for cle, _ in emissions] == ["fraicheur_depassee"]
-    assert emissions[0][1]["Liste"] == "WATCHLIST_UN"
+    assert emissions[0][1]["Listes concernées"].startswith(f"UN ({mes.ATTENTION}, ")
 
     # Second passage, rien n'a changé : silence. Un signal répété à chaque
     # passage se filtre, et ne dit plus rien le jour où il compte.
@@ -143,7 +143,8 @@ def test_le_seuil_bloquant_se_signale_a_son_tour_puis_se_tait(base, emissions):
     bloquant = fraicheur.signaler_les_franchissements(db, maintenant=plus_tard)
     assert [s["niveau"] for s in bloquant] == [mes.BLOQUANT]
     assert fraicheur.signaler_les_franchissements(db, maintenant=plus_tard) == []
-    assert [c["Seuil franchi"].split(" ")[0] for _, c in emissions] == [mes.ATTENTION, mes.BLOQUANT]
+    assert [c["Listes concernées"].split(" ")[1].strip("(,") for _, c in emissions] == [
+        mes.ATTENTION, mes.BLOQUANT]
 
 
 def test_une_liste_qui_saute_au_bloquant_ne_se_signale_qu_une_fois(base, emissions):
@@ -184,6 +185,67 @@ def test_les_seuils_de_l_evenement_sont_ceux_de_la_mise_en_service(base, emissio
     _lot(db, "WATCHLIST_UN", "PENDING_REVIEW", 12)
     assert [s["niveau"] for s in fraicheur.signaler_les_franchissements(db)] == [mes.ATTENTION]
     assert mes._fraicheur_des_listes(db)["etat"] == mes.ATTENTION
+
+
+def _vingt_neuf_listes_en_retard(db, une_a_48h=False):
+    """29 listes en production, chacune avec une version plus récente en
+    attente depuis 8 à 36 jours — le relevé du 1er octobre en avait 29. Avec
+    `une_a_48h`, la plus récente (UN) n'attend que depuis 50 h."""
+    from fiskr.database import WATCHLIST_FILE_TYPES
+    types = [t for t in WATCHLIST_FILE_TYPES if t != "WATCHLIST_UN"][:28] + ["WATCHLIST_UN"]
+    for rang, ftype in enumerate(types):
+        _lot(db, ftype, "READY", 24 * 40)
+        _lot(db, ftype, "PENDING_REVIEW",
+             50 if (une_a_48h and ftype == "WATCHLIST_UN") else 24 * (8 + rang))
+    return types
+
+
+def test_vingt_neuf_listes_franchissant_d_un_coup_font_un_seul_evenement(base, emissions):
+    """
+    Au premier passage après le déploiement, les 29 listes en retard de la
+    production franchissent toutes un seuil. Une émission par liste, c'était
+    29 courriels identiques d'un coup : le signal qu'on apprend à filtrer.
+    """
+    db, _ = base
+    types = _vingt_neuf_listes_en_retard(db)
+
+    signales = fraicheur.signaler_les_franchissements(db)
+    assert len(emissions) == 1, f"{len(emissions)} évènements pour un seul passage"
+    assert sorted(s["type"] for s in signales) == sorted(types)
+    assert [s["retard_heures"] for s in signales] == sorted(
+        (s["retard_heures"] for s in signales), reverse=True)
+    charge = emissions[0][1]
+    assert charge["Listes"].startswith("29 liste(s)")
+    assert charge[f"{mes.BLOQUANT} — plus de 7 jours de retard"] == 29
+    # Court au-delà de dix : les dix plus en retard, nommés dans l'ordre, puis le reste compté.
+    nommees = charge["Listes concernées"]
+    attendues = [s["type"].replace("WATCHLIST_", "") for s in signales[:fraicheur.LISTES_NOMMEES]]
+    entrees = nommees.split(" … ")[0].split(" ; ")
+    assert [n.split(" (")[0] for n in entrees] == attendues
+    assert all(f"({mes.BLOQUANT}, " in n for n in entrees)
+    assert nommees.endswith("… et 19 autres")
+
+    # Tic suivant, rien n'a bougé : rien.
+    assert fraicheur.signaler_les_franchissements(db) == []
+    assert len(emissions) == 1
+
+
+def test_une_liste_qui_passe_ensuite_de_48h_a_7_jours_se_signale_seule(base, emissions):
+    """La mémoire reste par liste : grouper l'émission ne doit ni réémettre les
+    28 déjà signalées, ni taire celle qui s'aggrave."""
+    db, _ = base
+    _vingt_neuf_listes_en_retard(db, une_a_48h=True)
+    premier = fraicheur.signaler_les_franchissements(db)
+    assert len(premier) == 29 and len(emissions) == 1
+    assert emissions[0][1][f"{mes.ATTENTION} — plus de 2 jours de retard"] == 1
+
+    plus_tard = datetime.utcnow() + timedelta(days=6)
+    second = fraicheur.signaler_les_franchissements(db, maintenant=plus_tard)
+    assert [(s["type"], s["niveau"]) for s in second] == [("WATCHLIST_UN", mes.BLOQUANT)]
+    assert len(emissions) == 2
+    assert emissions[1][1]["Listes"].startswith("1 liste(s)")
+    assert emissions[1][1]["Listes concernées"].startswith(f"UN ({mes.BLOQUANT}, ")
+    assert "autre" not in emissions[1][1]["Listes concernées"]
 
 
 def test_l_evenement_est_immediat_actif_et_vise_les_administrateurs():

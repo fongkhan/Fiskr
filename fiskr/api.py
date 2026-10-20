@@ -762,9 +762,10 @@ _FRAICHEUR_CADENCE_MIN = 15
 
 def _fraicheur_tick(tick=None) -> None:
     """
-    UN tic de la surveillance de fraicheur : chaque liste qui vient de franchir
-    un seuil de la mise en service emet `fraicheur_depassee` (une fois par
-    seuil, cf. fraicheur.signaler_les_franchissements). Synchrone (API ou demon).
+    UN tic de la surveillance de fraicheur : s'il constate que des listes
+    viennent de franchir un seuil de la mise en service, il emet UN
+    `fraicheur_depassee` qui les nomme (une fois par liste et par seuil, cf.
+    fraicheur.signaler_les_franchissements). Synchrone (API ou demon).
 
     Pourquoi un tic periodique, et pas apres chaque synchronisation ou
     homologation : un seuil se franchit avec le TEMPS, pas a l'occasion d'un

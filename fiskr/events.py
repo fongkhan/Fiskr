@@ -81,12 +81,13 @@ EVENT_CATALOG: Dict[str, Event] = {
     ),
     "fraicheur_depassee": Event(
         # IMMEDIAT et ACTIF par defaut, contrairement au lot en attente : il ne
-        # part pas a chaque lot depose, mais une fois par liste et par seuil
-        # franchi (48 h, puis 7 jours — ceux de la mise en service). Releve en
-        # production le 19/10/2026 : 47 jours sans homologation, et personne
-        # prevenu — la notification de lot en attente etait coupee, et rien
-        # d'autre ne parlait du retard.
-        label="Liste en production dépassée : seuil de fraîcheur franchi",
+        # part pas a chaque lot depose, mais quand des listes franchissent un
+        # seuil (48 h, puis 7 jours — ceux de la mise en service) — UN
+        # evenement par passage, qui les nomme toutes (cf. fiskr/fraicheur.py).
+        # Releve en production le 19/10/2026 : 47 jours sans homologation, et
+        # personne prevenu — la notification de lot en attente etait coupee, et
+        # rien d'autre ne parlait du retard.
+        label="Listes en production dépassées : seuil de fraîcheur franchi",
         category=CATEGORY_LISTS, audience=("admin",),
         urgency=IMMEDIATE, link="#watchlists/watchlists-review",
     ),

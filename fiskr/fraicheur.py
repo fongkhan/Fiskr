@@ -115,16 +115,32 @@ def mesurer(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
 # chaque passage se filtre — il ne dit plus rien le jour ou il compte.
 SETTING_NIVEAUX_SIGNALES = "fraicheur.niveaux_signales"
 
+# Listes nommees dans le corps de l'evenement ; au-dela, « … et N autres ».
+# Dix noms tiennent dans l'apercu d'un courriel ou d'une notification sans
+# defiler ; au-dela, un nom de plus ne change pas le geste attendu — une
+# homologation groupee, sur l'ecran d'homologation, qui les liste toutes. Les
+# dix nommes sont les plus en retard : ceux qu'on lirait en premier de toute
+# facon.
+LISTES_NOMMEES = 10
+
 
 def signaler_les_franchissements(db, maintenant: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """
-    Emet `fraicheur_depassee` pour chaque liste qui vient de franchir un seuil
-    de la mise en service (48 h, puis 7 jours), une fois par seuil. Retourne
-    les franchissements signales.
+    Emet UN evenement `fraicheur_depassee` par passage qui constate des
+    franchissements de seuil (48 h, puis 7 jours — ceux de la mise en
+    service), nommant les listes concernees par retard decroissant, avec le
+    niveau de chacune. Retourne tous les franchissements, tries de meme.
 
     Releve en production le 19 octobre 2026 : 47 jours sans homologation, et
     personne prevenu. La mesure existait, l'ecran la montrait — a qui
     l'ouvrait. Rien ne la portait vers quelqu'un.
+
+    Groupe, et non une emission par liste : au premier passage apres le
+    deploiement, les 29 listes en retard de la production auraient envoye 29
+    courriels identiques d'un coup — exactement le signal qu'on apprend a
+    filtrer. La MEMOIRE, elle, reste par liste : c'est elle qui fait qu'une
+    liste deja signalee ne revient pas, et qu'une liste qui passe ensuite de
+    48 h a 7 jours se signale seule.
 
     Les seuils ne sont pas recopies : `niveau_de_retard` est la regle meme du
     controle « Fraîcheur des listes ». Ce qui ne s'aggrave pas se tait : une
@@ -152,18 +168,30 @@ def signaler_les_franchissements(db, maintenant: Optional[datetime] = None) -> L
         nouvelle_memoire[liste["type"]] = niveau
         if rang[niveau] <= rang.get(memoire.get(liste["type"]), 0):
             continue
-        emit(db, "fraicheur_depassee", {
-            "Liste": liste["type"],
-            "Retard": phrase_de_retard(liste["retard_heures"]),
-            "Seuil franchi": f"{niveau} — {phrase_de_retard(SEUILS_DE_RETARD_H[niveau])} de retard",
-            "Version en production du": (liste["production_du"] or "aucune")[:16].replace("T", " "),
-            "Versions plus récentes en attente": liste["versions_en_attente"],
-            "Plus ancienne en attente depuis": (liste["en_retard_depuis"] or "")[:16].replace("T", " "),
-            "À faire": "Homologuez la dernière version de cette liste : les plus "
-                       "anciennes quittent alors la file d'elles-mêmes.",
-        })
         signales.append({"type": liste["type"], "niveau": niveau,
                          "retard_heures": liste["retard_heures"]})
+    signales.sort(key=lambda s: -s["retard_heures"])
+
+    if signales:
+        nommees = " ; ".join(
+            f"{s['type'].replace('WATCHLIST_', '')} ({s['niveau']}, "
+            f"{phrase_de_retard(s['retard_heures'])})" for s in signales[:LISTES_NOMMEES])
+        reste = len(signales) - LISTES_NOMMEES
+        if reste > 0:
+            nommees += f" … et {reste} autre{'s' if reste > 1 else ''}"
+        par_niveau = {
+            f"{niveau} — plus de {phrase_de_retard(SEUILS_DE_RETARD_H[niveau])} de retard":
+                sum(1 for s in signales if s["niveau"] == niveau)
+            for niveau in (BLOQUANT, ATTENTION)
+            if any(s["niveau"] == niveau for s in signales)}
+        emit(db, "fraicheur_depassee", {
+            "Listes": f"{len(signales)} liste(s) viennent de franchir un seuil de fraîcheur",
+            **par_niveau,
+            "Listes concernées": nommees,
+            "À faire": "Homologuez la dernière version de chaque liste (homologation "
+                       "groupée) : les plus anciennes quittent alors la file d'elles-"
+                       "mêmes. L'écran d'homologation les liste toutes.",
+        })
     if nouvelle_memoire != memoire:
         set_setting(db, SETTING_NIVEAUX_SIGNALES, nouvelle_memoire, updated_by="système")
     return signales
