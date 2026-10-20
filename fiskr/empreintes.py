@@ -32,9 +32,7 @@ empreinte ne lui est posee retroactivement : celle du jour de la migration se
 ferait passer pour celle de la decision.
 """
 import hashlib
-import inspect
 import json
-import re
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -73,37 +71,32 @@ def _motif_des_cotes(cotes) -> Optional[str]:
 
 # ------------------ CE QUE LE MOTEUR LIT DU CLIENT ------------------
 
-# Lecture d'un champ client par le moteur : `x.get("client_...")`. Les champs
-# `transaction_*` sont les identifiants de moyen de transport du profil.
-_LECTURE_CLIENT = re.compile(r"""\.get\(\s*['"]((?:client|transaction)_[a-z_]+)['"]""")
-
-
 @lru_cache(maxsize=1)
 def champs_client_cribles() -> Tuple[str, ...]:
     """
-    Elements d'identification du client que le moteur LIT, derives du code de
-    `fiskr.scoring` (rapprochement flou, correspondances fortes) et de
-    `fiskr.blocking` (cles de blocage) — jamais recopies.
+    Elements d'identification du client que le moteur LIT — la definition de
+    `fiskr.identification`, la meme qui decide qu'un upsert par webhook doit
+    recribler son client. Deux releves paralleles (l'un lexical, l'autre par
+    sonde) avaient ete ecrits par deux chantiers ; ils differaient deja d'un
+    champ (`client_is_deceased`, que le quality gate lit). Une seule
+    definition : sinon la paire et le webhook finiraient par ne plus surveiller
+    la meme chose.
 
-    Une liste tenue a la main deriverait : le jour ou le moteur apprend a lire
-    un champ de plus, la paire cesserait de le surveiller sans que rien ne le
-    dise, ce qui est le defaut meme que cette empreinte corrige. Meme methode
-    que `screenpool.projection_for` : un scan lexical ne peut pas rater un
-    champ cite, au pire il en retient un de trop — ici sans danger, un champ
-    jamais renseigne n'entre pas dans l'empreinte.
+    Restreint aux champs du PROFIL client (`client_*`, et `transaction_*` pour
+    les identifiants de moyen de transport) : la sonde note aussi les cles
+    internes que le moteur derive en chemin. `client_id` n'en est pas : c'est
+    la cle de la paire, pas un element d'identification.
 
     Les champs de gouvernance (notation de risque, segment, statut…) n'en sont
-    pas : le moteur ne les lit pas, et une paire qui se rouvrirait parce que la
-    notation interne du client a bouge crierait au loup. `client_id` non plus :
-    c'est la cle de la paire, pas un element d'identification.
+    pas davantage : le moteur ne les lit pas, et une paire qui se rouvrirait
+    parce que la notation interne du client a bouge crierait au loup.
 
-    Echec franc si le code du moteur est illisible (deploiement sans sources) :
-    une empreinte calculee sur rien couvrirait tout.
+    Echec franc si le releve ne trouve rien : une empreinte calculee sur rien
+    couvrirait tout.
     """
-    from fiskr import blocking, scoring
-    champs = set()
-    for module in (scoring, blocking):
-        champs.update(_LECTURE_CLIENT.findall(inspect.getsource(module)))
+    from fiskr.identification import champs_lus_par_le_moteur
+    champs = {c for c in champs_lus_par_le_moteur()
+              if c.startswith(("client_", "transaction_"))}
     champs.discard("client_id")
     if not champs:
         raise RuntimeError("Aucun champ client lu par le moteur n'a été trouvé : "
@@ -122,7 +115,9 @@ def _canonique(valeur: Any) -> Any:
     if valeur is None:
         return None
     if isinstance(valeur, bool):
-        return valeur
+        # Un drapeau a faux n'affirme rien : l'API le rend False par defaut,
+        # le referentiel NULL. Les confondre, comme le vide et l'absent.
+        return True if valeur else None
     if isinstance(valeur, (int, float)):
         return valeur
     if isinstance(valeur, str):
