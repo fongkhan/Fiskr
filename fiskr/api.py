@@ -3371,8 +3371,11 @@ async def screen_transaction_message(
     - `INCOMPLETE` : rien n'est en alerte, mais le filtrage ne peut pas établir
       un PASS — une partie n'a pu être comparée à rien (statut
       `NOT_SCREENED`, motif dans `not_screened_label`), ou une information
-      obligatoire du règlement (UE) 2023/1113, art. 4, manque
-      (`missing_information`, liste nommée avec les transactions concernées) ;
+      obligatoire du règlement (UE) 2023/1113 manque (`missing_information`,
+      liste nommée avec les transactions concernées) — art. 5 (les deux
+      numéros de compte) quand tous les prestataires de la chaîne sont établis
+      dans l'Union ou l'EEE d'après leur BIC, art. 4 sinon, et le manque dit
+      pourquoi (`general_rule_reasons`) ;
     - `PASS` : toutes les parties criblées sans correspondance, message complet.
 
     Chaque partie, criblée ou non, est tracée dans le journal d'audit. Une

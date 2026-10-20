@@ -176,6 +176,14 @@ def _compte(container, role_tag: str) -> str:
     return _child_text(acct, "Id", "IBAN") or _child_text(acct, "Id", "Othr", "Id")
 
 
+def _pays_de_l_iban(container, role_tag: str) -> str:
+    """Pays de l'IBAN du compte (ses deux premieres lettres, ISO 13616 : le
+    pays ou le compte est tenu), ou '' si le compte n'est pas un IBAN."""
+    tag = COMPTE_DE.get(role_tag)
+    iban = _alphanum(_child_text(_child(container, tag), "Id", "IBAN")) if (tag and container is not None) else ""
+    return iban[:2] if len(iban) >= 15 and iban[:2].isalpha() else ""
+
+
 def _extract_party(elem, role_tag: str, container=None) -> Optional[Dict[str, Any]]:
     """
     Extrait une partie : nom, adresse, identifiants, naissance, compte.
@@ -206,6 +214,7 @@ def _extract_party(elem, role_tag: str, container=None) -> Optional[Dict[str, An
         "lei": _child_text(org, "LEI"),
         "other_ids": _autres_identifiants(org, prive),
         "account": _compte(container, role_tag),
+        "account_country": _pays_de_l_iban(container, role_tag),
         "birth_date": _child_text(birth, "BirthDt"),
         "birth_city": _child_text(birth, "CityOfBirth"),
         "birth_country": _child_text(birth, "CtryOfBirth").upper(),
@@ -466,22 +475,36 @@ def libelle_partie(party: Dict[str, Any]) -> str:
 
 # ------------------ COMPLETUDE : REGLEMENT (UE) 2023/1113 ------------------
 #
-# Art. 4 : informations qui accompagnent un transfert de fonds ; art. 7 §2 b) :
-# le prestataire du beneficiaire detecte l'ABSENCE de celles de l'art. 4 §1
-# a), b), c) et §2 a), b) — cas general, celui ou le prestataire du donneur
-# d'ordre est etabli hors de l'Union. Seul ce cas general est code, pour les
-# deux types de message. Les derogations ne sont PAS appliquees :
-#   - art. 5 et art. 7 §2 a) (prestataires etablis dans l'Union : les numeros
-#     de compte suffisent) — un virement intra-UE sans adresse du donneur
-#     d'ordre est donc signale, alors que l'art. 5 l'admet ;
-#   - art. 6 §2 (au plus 1 000 EUR vers l'exterieur : noms et comptes
-#     suffisent) ;
+# Art. 4 : informations qui accompagnent un transfert de fonds ; art. 7 §2 :
+# le prestataire du beneficiaire en detecte l'ABSENCE. Deux regimes sont codes,
+# pour les deux types de message :
+#   - art. 5 §1 (et 7 §2 a) : quand TOUS les prestataires de la chaine sont
+#     etablis dans l'Union, les numeros de compte du donneur d'ordre et du
+#     beneficiaire suffisent. Sans cette derogation, presque tout virement SEPA
+#     d'un etablissement francais ressortait INCOMPLETE faute d'adresse du
+#     donneur d'ordre — un controle qui crie au loup sur le cas courant est
+#     debranche ;
+#   - art. 4 §1 a) b) c) et §2 a) b) (et 7 §2 b) : la regle generale, des
+#     qu'un prestataire est hors de l'Union ou que sa localisation est inconnue.
+#     La derogation ne s'accorde que sur une condition ETABLIE : un prestataire
+#     sans BIC ne la permet pas, et le manque dit pourquoi.
+# Ne sont PAS appliques :
+#   - art. 6 §2 (au plus 1 000 EUR vers un prestataire hors Union : noms et
+#     comptes suffisent). Sa condition « transferts qui ne semblent pas lies a
+#     d'autres transferts » ne s'etablit pas sur un message isole — et le
+#     fractionnement sous le seuil est precisement le risque vise ; un montant
+#     dans une autre devise demanderait en outre un cours date. Il ne joue que
+#     sur l'adresse du donneur d'ordre, pour les seuls paiements sortants ;
 #   - art. 4 §3 (transfert hors compte de paiement : identifiant unique de
 #     transaction au lieu du compte) — le message ne dit pas si le transfert
-#     part d'un compte, l'absence de compte reste donc signalee.
-# Une derogation reduit ce qui est EXIGE : ne pas l'appliquer fait signaler
-# davantage, jamais moins, et le signal reste nomme, donc tranchable. Le LEI
-# (art. 4 §1 d) et §2 c), « s'il est fourni ») n'est jamais un manque.
+#     part d'un compte, l'absence de compte reste donc signalee ;
+#   - art. 35 (accords avec Monaco, les iles anglo-normandes...) : des
+#     autorisations au cas par cas, qui traitent un transfert comme interne a
+#     UN Etat membre ;
+#   - les exigences du reglement (UE) n° 260/2012 (SEPA), que l'art. 5 reserve.
+# Une derogation non appliquee fait signaler davantage, jamais moins, et le
+# signal reste nomme, donc tranchable. Le LEI (art. 4 §1 d) et §2 c), « s'il
+# est fourni ») n'est jamais un manque.
 MANQUES = {
     "DBTR_NM": ("Nom du donneur d'ordre (Dbtr/Nm)", "2023/1113 art. 4 §1 a)"),
     "DBTR_ACCT": ("Numéro de compte du donneur d'ordre (DbtrAcct)", "2023/1113 art. 4 §1 b)"),
@@ -490,12 +513,76 @@ MANQUES = {
     "CDTR_NM": ("Nom du bénéficiaire (Cdtr/Nm)", "2023/1113 art. 4 §2 a)"),
     "CDTR_ACCT": ("Numéro de compte du bénéficiaire (CdtrAcct)", "2023/1113 art. 4 §2 b)"),
 }
+# Ce que la derogation intra-Union exige encore, et sous quelle reference.
+EXIGES_ART_5 = {"DBTR_ACCT": "2023/1113 art. 5 §1", "CDTR_ACCT": "2023/1113 art. 5 §1"}
 # Identifiants de transaction rendus par manque : au-dela, le compte suffit.
 MAX_TRANSACTIONS_PAR_MANQUE = 20
 
+# Ou le reglement s'applique, en codes pays ISO 3166-1 alpha-2 tels que les BIC
+# les portent (caracteres 5-6) : les 27 Etats membres (GR pour la Grece) ; les
+# regions ultraperipheriques qui ont un code propre, partie de l'Union (art. 349
+# et 355 §1 TFUE : Guadeloupe, Guyane, Martinique, La Reunion, Mayotte,
+# Saint-Martin) et les iles Aland (art. 355 §4) ; les trois Etats AELE de
+# l'EEE, le reglement ayant ete incorpore a l'accord EEE par la decision du
+# Comite mixte n° 42/2025 (JO L 2025/771 du 8 mai 2025), en vigueur le 24 juin
+# 2025 (EEA-Lex 32023R1113). Une seule table : la derogation de l'art. 5 la lit.
+PAYS_DU_REGLEMENT = frozenset({
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+    "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+    "GP", "GF", "MQ", "RE", "YT", "MF", "AX",
+    "IS", "LI", "NO",
+})
+MOTIFS_REGLE_GENERALE = {
+    "PRESTATAIRE_HORS_UNION": "Règle générale (art. 4) : un prestataire de la chaîne est établi hors de l'Union et de l'EEE.",
+    "LOCALISATION_INCONNUE": "Règle générale (art. 4) : un prestataire de la chaîne n'a pas de BIC, sa localisation est inconnue — la dérogation intra-Union (art. 5) ne peut pas être établie.",
+}
 
-def _manques_transaction(tx: Dict[str, Any]) -> List[str]:
-    """Codes des informations obligatoires absentes d'une transaction."""
+
+def _prestataires_de_la_chaine(tx: Dict[str, Any]) -> List[Tuple[str, str, Optional[str]]]:
+    """
+    (role, ce qui l'identifie, pays d'etablissement ou None) de chaque
+    prestataire de la chaine de paiement.
+
+    Le pays est celui du BIC (caracteres 5-6). Les banques du donneur d'ordre
+    et du beneficiaire existent toujours : absentes du message (un pain.001
+    SEPA ne donne souvent que l'IBAN), leur pays est celui de l'IBAN du compte
+    qu'elles tiennent. Un agent present SANS BIC (LEI, code de compensation)
+    est de localisation inconnue.
+    """
+    agents = [p for p in tx["parties"] if p.get("is_agent")]
+    roles = {p["role_tag"]: p for p in tx["parties"]}
+    chaine: List[Tuple[str, str, Optional[str]]] = []
+    for agent in agents:
+        bic = bic_comparable(agent.get("bic"))
+        chaine.append((agent["role"], bic or libelle_partie(agent), bic[4:6] if bic else None))
+    for role_agent, role_partie in (("DbtrAgt", "Dbtr"), ("CdtrAgt", "Cdtr")):
+        if role_agent in roles:
+            continue
+        pays = (roles.get(role_partie) or {}).get("account_country") or None
+        chaine.append((AGENT_ROLES[role_agent], f"IBAN {pays}" if pays else "absente du message, compte sans IBAN", pays))
+    return chaine
+
+
+def regime_de_completude(tx: Dict[str, Any]) -> Dict[str, Any]:
+    """Article qui fixe ce que la transaction doit porter : « 5 » quand tous
+    ses prestataires sont etablis dans l'Union ou l'EEE, « 4 » sinon, avec le
+    motif et les prestataires qui l'imposent."""
+    hors, inconnus = [], []
+    for role, ident, pays in _prestataires_de_la_chaine(tx):
+        if pays is None:
+            inconnus.append(f"{role} : {ident}")
+        elif pays not in PAYS_DU_REGLEMENT:
+            hors.append(f"{role} : {ident} ({pays})")
+    if hors:
+        return {"article": "4", "motif": "PRESTATAIRE_HORS_UNION", "prestataires": hors}
+    if inconnus:
+        return {"article": "4", "motif": "LOCALISATION_INCONNUE", "prestataires": inconnus}
+    return {"article": "5", "motif": None, "prestataires": []}
+
+
+def _manques_transaction(tx: Dict[str, Any], regime: Dict[str, Any]) -> List[str]:
+    """Codes des informations obligatoires absentes d'une transaction, sous
+    son regime (art. 5 : les deux comptes ; art. 4 : les cinq elements)."""
     roles = {p["role_tag"]: p for p in tx["parties"] if not p.get("is_agent")}
     dbtr, cdtr = roles.get("Dbtr") or {}, roles.get("Cdtr") or {}
     adresse = bool(dbtr.get("country") and (dbtr.get("town") or dbtr.get("address")))
@@ -512,23 +599,50 @@ def _manques_transaction(tx: Dict[str, Any]) -> List[str]:
         manques.append("CDTR_NM")
     if not cdtr.get("account"):
         manques.append("CDTR_ACCT")
+    if regime["article"] == "5":
+        manques = [code for code in manques if code in EXIGES_ART_5]
     return manques
 
 
 def manques_de_completude(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Informations obligatoires absentes du message, nommees, avec les
-    transactions concernees. Vide = message complet au sens de l'art. 4."""
+    """
+    Informations obligatoires absentes du message, nommees, avec les
+    transactions concernees. Vide = message complet au regard du regime de
+    chacune de ses transactions.
+
+    Un manque que la derogation intra-Union aurait leve (nom, adresse) porte
+    le motif pour lequel elle ne s'applique pas, et les prestataires en cause :
+    l'operateur doit pouvoir trancher sans relire le XML.
+    """
     par_code: Dict[str, List[str]] = {}
+    sous_art_4: Dict[str, bool] = {}
+    pourquoi: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for rang, tx in enumerate(parsed["transactions"], start=1):
-        for code in _manques_transaction(tx):
+        regime = regime_de_completude(tx)
+        for code in _manques_transaction(tx, regime):
             par_code.setdefault(code, []).append(tx.get("end_to_end_id") or f"#{rang}")
+            if regime["article"] == "4":
+                sous_art_4[code] = True
+            if regime["motif"] and code not in EXIGES_ART_5:
+                motif = pourquoi.setdefault(code, {}).setdefault(regime["motif"], {
+                    "code": regime["motif"], "label": MOTIFS_REGLE_GENERALE[regime["motif"]],
+                    "providers": []})
+                for prestataire in regime["prestataires"]:
+                    if prestataire not in motif["providers"]:
+                        motif["providers"].append(prestataire)
     return [{
         "code": code,
         "label": MANQUES[code][0],
-        "reference": MANQUES[code][1],
+        "reference": MANQUES[code][1] if sous_art_4.get(code) else EXIGES_ART_5[code],
         "transactions_count": len(par_code[code]),
         "transactions": par_code[code][:MAX_TRANSACTIONS_PAR_MANQUE],
+        "general_rule_reasons": list((pourquoi.get(code) or {}).values()),
     } for code in MANQUES if code in par_code]
+
+
+def transactions_sous_art_5(parsed: Dict[str, Any]) -> int:
+    """Nombre de transactions auxquelles la derogation intra-Union s'applique."""
+    return sum(1 for tx in parsed["transactions"] if regime_de_completude(tx)["article"] == "5")
 
 
 def verdict_du_message(en_alerte: bool, non_criblees: int, manques: List[Dict[str, Any]]) -> str:
@@ -1243,6 +1357,9 @@ def screen_payment_message(db, parsed: Dict[str, Any],
         "hits_count": len(hits),
         "not_screened_count": non_criblees,
         "missing_information": manques,
+        # Ce que la derogation intra-Union a leve doit se voir aussi : un PASS
+        # sous l'art. 5 n'a pas exige l'adresse du donneur d'ordre.
+        "completeness": {"transactions_article_5": transactions_sous_art_5(parsed)},
         "free_text": {"screened": remises,
                       "hits": sum(1 for p in hits if p.get("free_text"))},
         "screening_lists": restriction,

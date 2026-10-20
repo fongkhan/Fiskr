@@ -9357,22 +9357,28 @@ function renderTransactionResult(data) {
  const parties = data.parties || [];
  const nonCriblees = data.not_screened_count || 0;
  const remises = (data.free_text || {}).screened || 0;
+ const art5 = (data.completeness || {}).transactions_article_5 || 0;
  // Chaque compteur dans son propre nœud : c'est ce qui le rend traduisible.
  document.getElementById("txn-message-info").innerHTML =
  escapeHtml(`Message ${m.message_type || "?"} · MsgId ${m.msg_id || "—"} · ${data.transactions_count} transaction(s) · ` +
  `${parties.length - nonCriblees} partie(s) distincte(s) criblée(s).`) +
  (nonCriblees ? ` <strong style="color:var(--color-warning)">${nonCriblees} partie(s) non criblée(s)</strong>` : "") +
- (remises ? ` <span>${remises} information(s) de remise criblée(s)</span>` : "");
+ (remises ? ` <span>${remises} information(s) de remise criblée(s)</span>` : "") +
+ // Ce que la dérogation intra-Union a levé se voit aussi : un PASS sous
+ // l'art. 5 n'a pas exigé l'adresse du donneur d'ordre.
+ (art5 ? ` <span>${art5} transaction(s) sous la dérogation intra-Union (art. 5)</span>` : "");
 
- // Informations obligatoires absentes (règlement (UE) 2023/1113, art. 4) :
- // on ne nomme que ce qui manque — un message complet n'affiche rien.
+ // Informations obligatoires absentes (règlement (UE) 2023/1113, art. 4 et 5) :
+ // on ne nomme que ce qui manque — un message complet n'affiche rien. Un
+ // manque que la dérogation aurait levé dit pourquoi elle ne s'applique pas.
  const manques = data.missing_information || [];
  document.getElementById("txn-missing-info").innerHTML = manques.length ? `
  <div class="card" style="border-left: 3px solid var(--color-warning); margin: 0.5rem 0; padding: 0.75rem 1rem;">
- <strong>Informations obligatoires manquantes</strong> <small style="color:var(--text-muted)">Règlement (UE) 2023/1113, art. 4</small>
+ <strong>Informations obligatoires manquantes</strong> <small style="color:var(--text-muted)">Règlement (UE) 2023/1113, art. 4 et 5</small>
  <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${manques.map(x => `
  <li><span>${escapeHtml(x.label)}</span> <small style="color:var(--text-muted)">${escapeHtml(x.reference)}</small>
- <small><code>${escapeHtml((x.transactions || []).join(", "))}${x.transactions_count > (x.transactions || []).length ? " …" : ""}</code></small></li>`).join("")}
+ <small><code>${escapeHtml((x.transactions || []).join(", "))}${x.transactions_count > (x.transactions || []).length ? " …" : ""}</code></small>${(x.general_rule_reasons || []).map(r => `
+ <br><small>${escapeHtml(r.label)}</small> <small style="color:var(--text-muted)">${escapeHtml((r.providers || []).join(", "))}</small>`).join("")}</li>`).join("")}
  </ul>
  </div>` : "";
 

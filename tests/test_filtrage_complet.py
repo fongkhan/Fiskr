@@ -168,6 +168,7 @@ def test_le_message_r2_ne_rend_pas_pass_et_trace_chaque_partie(db):
     assert resultat["not_screened_count"] == 1
 
 
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_le_message_r2_par_l_api_ne_rend_plus_pass():
     """La reproduction exacte, par l'endpoint : 200 PASS et zéro ligne d'audit
     avant ; une ligne par partie et pas de PASS après."""
@@ -258,6 +259,7 @@ def test_un_message_a_zero_partie_est_refuse(db):
     assert db.query(AuditTrail).count() == 0
 
 
+@pytest.mark.usefixtures("listes_de_demonstration")
 def test_l_api_refuse_en_422_un_message_sans_partie_exploitable():
     xml = ('<Document><FIToFICstmrCdtTrf><GrpHdr><MsgId>VIDE</MsgId></GrpHdr>'
            '<CdtTrfTxInf><DbtrAgt><FinInstnId><ClrSysMmbId><MmbId>1</MmbId></ClrSysMmbId>'
@@ -371,30 +373,108 @@ def test_la_restriction_de_listes_s_applique_au_texte_libre(db):
 
 # ------------------ 3. COMPLETUDE, REGLEMENT (UE) 2023/1113 ------------------
 
+# Une banque du bénéficiaire établie aux États-Unis : la chaîne sort de
+# l'Union, la règle générale de l'art. 4 s'applique.
+AGENTS_HORS_UNION = ("<DbtrAgt><FinInstnId><BICFI>BNPAFRPP</BICFI></FinInstnId></DbtrAgt>"
+                     "<CdtrAgt><FinInstnId><BICFI>CHASUS33</BICFI></FinInstnId></CdtrAgt>")
+# Le cas courant d'un établissement français : un SEPA dont le donneur d'ordre
+# n'a que son nom et son IBAN.
+DONNEUR_SANS_ADRESSE = "<Nm>Blorptech Vexatron SARL</Nm>"
+
+
 def test_un_message_complet_et_propre_rend_pass(db):
-    resultat = _cribler(db, _pacs(), [PUTIN, BANQUE_LISTEE])
+    resultat = _cribler(db, _pacs(agents=AGENTS_HORS_UNION), [PUTIN, BANQUE_LISTEE])
     assert resultat["verdict"] == "PASS"
     assert resultat["missing_information"] == []
     assert resultat["not_screened_count"] == 0
     assert resultat["hits_count"] == 0
 
 
-def test_un_donneur_d_ordre_sans_compte_est_un_manque_nomme(db):
+def test_un_sepa_intra_union_sans_adresse_du_donneur_d_ordre_rend_pass(db):
+    """Art. 5 §1 : tous les prestataires dans l'Union (BIC FR → DE), les deux
+    numéros de compte suffisent. Sans la dérogation, presque tout virement SEPA
+    ressortait INCOMPLETE faute d'adresse — un contrôle qu'on débranche."""
+    resultat = _cribler(db, _pacs(dbtr=DONNEUR_SANS_ADRESSE), [PUTIN])
+    assert resultat["missing_information"] == []
+    assert resultat["verdict"] == "PASS"
+    # Le PASS dit ce que la dérogation a levé
+    assert resultat["completeness"] == {"transactions_article_5": 1}
+
+
+def test_la_derogation_intra_union_exige_encore_les_comptes(db):
     resultat = _cribler(db, _pacs(dbtr_acct=""), [PUTIN])
     assert resultat["verdict"] == "INCOMPLETE"
     manques = {m["code"]: m for m in resultat["missing_information"]}
     assert set(manques) == {"DBTR_ACCT"}
     assert "DbtrAcct" in manques["DBTR_ACCT"]["label"]
-    assert manques["DBTR_ACCT"]["reference"] == "2023/1113 art. 4 §1 b)"
+    assert manques["DBTR_ACCT"]["reference"] == "2023/1113 art. 5 §1"
     assert manques["DBTR_ACCT"]["transactions"] == ["E2E-1"]
+    # Le compte est exigé sous les deux régimes : pas de motif de règle générale
+    assert manques["DBTR_ACCT"]["general_rule_reasons"] == []
+
+
+def test_un_agent_hors_union_retablit_la_regle_generale(db):
+    agents = ("<DbtrAgt><FinInstnId><BICFI>BNPAFRPP</BICFI></FinInstnId></DbtrAgt>"
+              "<IntrmyAgt1><FinInstnId><BICFI>CHASUS33</BICFI></FinInstnId></IntrmyAgt1>"
+              "<CdtrAgt><FinInstnId><BICFI>DEUTDEFF</BICFI></FinInstnId></CdtrAgt>")
+    resultat = _cribler(db, _pacs(dbtr=DONNEUR_SANS_ADRESSE, agents=agents), [PUTIN])
+    assert resultat["verdict"] == "INCOMPLETE"
+    manques = {m["code"]: m for m in resultat["missing_information"]}
+    assert set(manques) == {"DBTR_ADR"}
+    assert manques["DBTR_ADR"]["reference"] == "2023/1113 art. 4 §1 c)"
+    motif, = manques["DBTR_ADR"]["general_rule_reasons"]
+    assert motif["code"] == "PRESTATAIRE_HORS_UNION"
+    assert motif["providers"] == ["Banque intermédiaire : CHASUS33 (US)"]
+    assert resultat["completeness"] == {"transactions_article_5": 0}
+
+
+def test_un_agent_sans_bic_ne_permet_pas_la_derogation(db):
+    """Sa localisation est inconnue : la dérogation ne s'accorde que sur une
+    condition établie. L'agent est pourtant bien criblé (sur son LEI) : c'est
+    la complétude, et elle seule, qui rend INCOMPLETE — et elle dit pourquoi."""
+    agents = ("<DbtrAgt><FinInstnId><BICFI>BNPAFRPP</BICFI></FinInstnId></DbtrAgt>"
+              "<CdtrAgt><FinInstnId><LEI>529900T8BM49AURSDO55</LEI></FinInstnId></CdtrAgt>")
+    resultat = _cribler(db, _pacs(dbtr=DONNEUR_SANS_ADRESSE, agents=agents), [PUTIN])
+    assert resultat["not_screened_count"] == 0
+    assert _par_role(resultat, "Banque du bénéficiaire")["screened_on"] == ["LEI"]
+    assert resultat["verdict"] == "INCOMPLETE"
+    motif, = {m["code"]: m for m in resultat["missing_information"]}["DBTR_ADR"]["general_rule_reasons"]
+    assert motif["code"] == "LOCALISATION_INCONNUE"
+    assert "pas de BIC" in motif["label"]
+    assert motif["providers"] == ["Banque du bénéficiaire : LEI 529900T8BM49AURSDO55"]
+
+
+def test_l_eee_compte_comme_l_union(db):
+    """Le règlement est incorporé à l'accord EEE (décision du Comité mixte
+    n° 42/2025) : une banque norvégienne ne rompt pas la dérogation."""
+    agents = ("<DbtrAgt><FinInstnId><BICFI>BNPAFRPP</BICFI></FinInstnId></DbtrAgt>"
+              "<CdtrAgt><FinInstnId><BICFI>DNBANOKK</BICFI></FinInstnId></CdtrAgt>")
+    resultat = _cribler(db, _pacs(dbtr=DONNEUR_SANS_ADRESSE, agents=agents), [PUTIN])
+    assert resultat["verdict"] == "PASS"
+
+
+def test_une_banque_absente_du_message_est_localisee_par_l_iban(db):
+    """Un ordre SEPA ne donne souvent que l'IBAN du bénéficiaire : sa banque
+    existe, et le pays de l'IBAN dit où elle tient le compte."""
+    seule_banque = "<DbtrAgt><FinInstnId><BICFI>BNPAFRPP</BICFI></FinInstnId></DbtrAgt>"
+    resultat = _cribler(db, _pacs(dbtr=DONNEUR_SANS_ADRESSE, agents=seule_banque), [PUTIN])
+    assert resultat["verdict"] == "PASS"
+    # Un IBAN suisse : la banque du bénéficiaire est hors de l'Union et de l'EEE
+    suisse = "<CdtrAcct><Id><IBAN>CH9300762011623852957</IBAN></Id></CdtrAcct>"
+    resultat = _cribler(db, _pacs(dbtr=DONNEUR_SANS_ADRESSE, agents=seule_banque, cdtr_acct=suisse,
+                                  msg_id="MSG-CH"), [PUTIN])
+    assert resultat["verdict"] == "INCOMPLETE"
+    motif, = resultat["missing_information"][0]["general_rule_reasons"]
+    assert motif["providers"] == ["Banque du bénéficiaire : IBAN CH (CH)"]
 
 
 def test_les_cinq_informations_de_l_article_4_sont_controlees(db):
-    """Sans nom ni compte ni adresse du donneur d'ordre, ni nom ni compte du
-    bénéficiaire : les cinq manques sont nommés. Le message garde une partie
-    exploitable (les banques, sur leur BIC) : il n'est pas refusé, il est
-    INCOMPLETE."""
-    resultat = _cribler(db, _pacs(dbtr=None, dbtr_acct="", cdtr=None, cdtr_acct=""), [PUTIN])
+    """Hors de l'Union, sans nom ni compte ni adresse du donneur d'ordre, ni
+    nom ni compte du bénéficiaire : les cinq manques sont nommés. Le message
+    garde une partie exploitable (les banques, sur leur BIC) : il n'est pas
+    refusé, il est INCOMPLETE."""
+    resultat = _cribler(db, _pacs(dbtr=None, dbtr_acct="", cdtr=None, cdtr_acct="",
+                                  agents=AGENTS_HORS_UNION), [PUTIN])
     assert resultat["verdict"] == "INCOMPLETE"
     assert [m["code"] for m in resultat["missing_information"]] == [
         "DBTR_NM", "DBTR_ACCT", "DBTR_ADR", "CDTR_NM", "CDTR_ACCT"]
@@ -402,8 +482,8 @@ def test_les_cinq_informations_de_l_article_4_sont_controlees(db):
 
 def test_une_adresse_sans_ville_n_est_pas_une_adresse(db):
     """« l'adresse, y compris le nom du pays » : un pays seul n'en est pas une."""
-    resultat = _cribler(db, _pacs(dbtr="<Nm>Blorptech Vexatron SARL</Nm><PstlAdr><Ctry>FR</Ctry></PstlAdr>"),
-                        [PUTIN])
+    resultat = _cribler(db, _pacs(dbtr="<Nm>Blorptech Vexatron SARL</Nm><PstlAdr><Ctry>FR</Ctry></PstlAdr>",
+                                  agents=AGENTS_HORS_UNION), [PUTIN])
     assert [m["code"] for m in resultat["missing_information"]] == ["DBTR_ADR"]
 
 
@@ -412,7 +492,7 @@ def test_la_date_et_le_lieu_de_naissance_remplacent_l_adresse(db):
     date et le lieu de naissance."""
     naissance = ("<Nm>Blorptech Vexatron</Nm><Id><PrvtId><DtAndPlcOfBirth><BirthDt>1970-01-01</BirthDt>"
                  "<CityOfBirth>Lyon</CityOfBirth><CtryOfBirth>FR</CtryOfBirth></DtAndPlcOfBirth></PrvtId></Id>")
-    resultat = _cribler(db, _pacs(dbtr=naissance), [PUTIN])
+    resultat = _cribler(db, _pacs(dbtr=naissance, agents=AGENTS_HORS_UNION), [PUTIN])
     assert resultat["missing_information"] == []
     assert resultat["verdict"] == "PASS"
 
