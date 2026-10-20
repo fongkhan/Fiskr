@@ -170,7 +170,7 @@ def _date_de_l_alerte():
 
 
 def _alertes_cloturees(db, depuis: datetime, *colonnes):
-    from fiskr.database import MesureDeGel
+    from fiskr.database import DossierPPE, MesureDeGel
     # Une alerte qui porte une mesure de gel est le DOSSIER de cette mesure :
     # la piece de declaration a la DG Tresor est une piece jointe de l'alerte,
     # et le registre la reference (cle etrangere). La purger effacerait la
@@ -178,11 +178,16 @@ def _alertes_cloturees(db, depuis: datetime, *colonnes):
     # et casserait la cle sur PostgreSQL. Le registre des gels n'est pas une
     # famille de retention (comme le journal d'administration, il n'est jamais
     # purge) ; les alertes qu'il porte ne le sont donc pas non plus.
-    tenues = db.query(MesureDeGel.alert_id)
+    # Meme raison pour le dossier PPE (fiskr/ppe.py) : l'origine des fonds et la
+    # decision de la direction sont des pieces de l'alerte, et le dossier la
+    # reference par cle etrangere.
+    tenues_par_un_gel = db.query(MesureDeGel.alert_id)
+    tenues_par_un_dossier_ppe = db.query(DossierPPE.alert_id)
     return db.query(*colonnes).filter(
         Alert.status.in_(ALERT_CLOSED_STATUSES),
         _date_de_l_alerte() < depuis,
-        ~Alert.id.in_(tenues),
+        ~Alert.id.in_(tenues_par_un_gel),
+        ~Alert.id.in_(tenues_par_un_dossier_ppe),
     )
 
 

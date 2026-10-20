@@ -31,7 +31,7 @@ from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.database import (
     get_db, Alert, AlertAttachment, AlertEvent, AppSetting, AuditTrail, ClientEntity,
-    MesureDeGel, Snapshot,
+    DossierPPE, MesureDeGel, Snapshot,
 )
 from fiskr.settings import (
     SETTING_ALERT_FOUR_EYES, SETTING_GEL_DELAI, SETTING_NOTIFICATION_BATCH,
@@ -122,6 +122,9 @@ def ctx():
         ids = [a.id for a in db.query(Alert).filter(Alert.client_id.like(f"{PREFIXE}%")).all()]
         if ids:
             db.query(MesureDeGel).filter(MesureDeGel.alert_id.in_(ids)).delete(synchronize_session=False)
+            # Une PPE confirmée ouvre un dossier : orphelin, il retiendrait l'alerte
+            # qui réutiliserait son identifiant (SQLite recycle les rowid).
+            db.query(DossierPPE).filter(DossierPPE.alert_id.in_(ids)).delete(synchronize_session=False)
             db.query(AlertEvent).filter(AlertEvent.alert_id.in_(ids)).delete(synchronize_session=False)
             db.query(AlertAttachment).filter(AlertAttachment.alert_id.in_(ids)).delete(synchronize_session=False)
             db.query(Alert).filter(Alert.id.in_(ids)).delete(synchronize_session=False)
@@ -492,14 +495,22 @@ def test_un_import_du_referentiel_ne_degele_personne(ctx):
 
 
 def test_la_purge_ne_touche_pas_une_alerte_portant_une_mesure(ctx):
+    """Une alerte qui porte une mesure de gel, ou un dossier PPE, est le
+    dossier de cette mesure : ses pièces y sont jointes et le registre la
+    référence. Le témoin était une PPE confirmée ; depuis le dossier PPE, une
+    PPE confirmée est tenue elle aussi — le témoin est une liste de régulateur,
+    qui n'ouvre ni mesure ni dossier."""
     from fiskr.retention import _purgeable_alert_ids
     a = ctx["alerte"]("WATCHLIST_DGT", "Purge")
     ctx["confirmer"](a)
-    temoin = ctx["alerte"]("WATCHLIST_PEP", "PurgeTemoin")
+    ppe = ctx["alerte"]("WATCHLIST_PEP", "PurgePpe")
+    ctx["confirmer"](ppe)
+    temoin = ctx["alerte"]("WATCHLIST_AMF", "PurgeTemoin")
     ctx["confirmer"](temoin)
     purgeables = _purgeable_alert_ids(ctx["db"], datetime.utcnow() + timedelta(days=1))
     assert temoin.id in purgeables, "le témoin prouve que la date limite purgerait"
     assert a.id not in purgeables
+    assert ppe.id not in purgeables, "le dossier PPE perdrait l'origine des fonds"
 
 
 def test_le_delai_de_declaration_n_a_qu_une_definition():
