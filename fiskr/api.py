@@ -57,7 +57,8 @@ from fiskr.database import (
 )
 from fiskr.alerts import (open_or_redetect_alerts,
                           is_whitelisted, whitelisted_pairs, compute_due_at,
-                          PLANCHER_SANCTION)
+                          PLANCHER_SANCTION, STATUTS_A_PRENDRE, critere_de_canal,
+                          criteres_prenables, prendre_la_suivante, rang_de_priorite_sql)
 from fiskr.notify import (
     smtp_configured as notify_smtp_configured,
     public_url as notify_public_url,
@@ -13667,11 +13668,9 @@ async def list_alerts(
     ).one()
     open_count = int(open_count)
     # CRITICAL d'abord, puis echeance la plus proche, puis score : la file
-    # se lit de haut en bas dans l'ordre de traitement attendu
-    priority_rank = case(
-        {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
-        value=Alert.priority, else_=2
-    )
+    # se lit de haut en bas dans l'ordre de traitement attendu (rang derive
+    # de ALERT_PRIORITIES, partage avec « Prendre la suivante »)
+    priority_rank = rang_de_priorite_sql()
     # Les mises en attente descendent en bas de la file — visibles (jamais
     # masquees : un produit de conformite ne cache pas du travail), mais
     # apres les alertes actives. Un report expire redevient actif tout seul.
@@ -14065,6 +14064,47 @@ def _poser_la_paire_de_l_alerte(db: Session, alert: Alert, paire: Optional[White
     return f" Paire de liste blanche #{paire.id} posée."
 
 
+def _valider_la_decision_proposee(db: Session, decision: Optional[str],
+                                  commentaire: Optional[str]) -> Tuple[str, str]:
+    """Decision et motif d'une proposition, verifies UNE fois pour l'action
+    unitaire comme pour l'action en masse : un seul chemin, une seule regle."""
+    decision = (decision or "").strip().upper()
+    if decision not in ("CONFIRMED", "FALSE_POSITIVE"):
+        raise HTTPException(status_code=400, detail="Décision invalide (CONFIRMED ou FALSE_POSITIVE).")
+    commentaire = (commentaire or "").strip()
+    if not commentaire:
+        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
+    _refuser_un_motif_de_l_autre_decision(db, decision, commentaire)
+    return decision, commentaire
+
+
+def _enregistrer_la_proposition(db: Session, alert: Alert, decision: str, comment: str,
+                                username: str, four_eyes: bool,
+                                precision: str = "") -> Tuple[str, str, Optional[MesureDeGel]]:
+    """Ecrit la proposition sur l'alerte et son evenement PROPOSED (plus la
+    cloture directe si le 4-yeux est desactive). Rend (libelle, message,
+    mesure de gel eventuelle). `precision` complete le journal (« proposition
+    en masse »). L'appelant valide la transaction."""
+    # Proposer une decision, c'est instruire : une mise en attente encore
+    # active n'a plus de sens et fausserait le classement de la file.
+    if alert.snoozed_until:
+        alert.snoozed_until = None
+    alert.proposed_decision = decision
+    alert.proposed_by = username
+    alert.proposed_at = datetime.utcnow()
+    alert.proposal_comment = comment
+    label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
+    if four_eyes:
+        alert.status = "PENDING_VALIDATION"
+        _log_alert_event(db, alert.id, username, "PROPOSED",
+                         f"Décision proposée : {label}. {comment}{precision}")
+        return label, "Décision proposée, en attente de validation 4-yeux.", None
+    mesure = _close_alert(db, alert, decision, username, comment)
+    _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}{precision}")
+    _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
+    return label, "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure), mesure
+
+
 def _message_de_mesure(mesure: Optional[MesureDeGel]) -> str:
     if mesure is None:
         return ""
@@ -14086,13 +14126,7 @@ async def propose_alert_decision(
     alert = _get_open_alert(db, alert_id)
     if alert.status == "PENDING_VALIDATION":
         raise HTTPException(status_code=409, detail="Une décision est déjà en attente de validation.")
-    decision = (payload.decision or "").strip().upper()
-    if decision not in ("CONFIRMED", "FALSE_POSITIVE"):
-        raise HTTPException(status_code=400, detail="Décision invalide (CONFIRMED ou FALSE_POSITIVE).")
-    comment = (payload.comment or "").strip()
-    if not comment:
-        raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
-    _refuser_un_motif_de_l_autre_decision(db, decision, comment)
+    decision, comment = _valider_la_decision_proposee(db, payload.decision, payload.comment)
 
     username = current_user["username"]
     four_eyes = alert_four_eyes_required(db)
@@ -14103,25 +14137,9 @@ async def propose_alert_decision(
                 "La mise en liste blanche se décide à la validation 4-yeux, pas à la proposition."))
         paire = _preparer_la_paire_de_l_alerte(db, alert, current_user, decision,
                                                payload.whitelist, comment)
-    # Proposer une decision, c'est instruire : une mise en attente encore
-    # active n'a plus de sens et fausserait le classement de la file.
-    if alert.snoozed_until:
-        alert.snoozed_until = None
-    alert.proposed_decision = decision
-    alert.proposed_by = username
-    alert.proposed_at = datetime.utcnow()
-    alert.proposal_comment = comment
-    label = "vrai positif confirmé" if decision == "CONFIRMED" else "faux positif"
-
-    if four_eyes:
-        alert.status = "PENDING_VALIDATION"
-        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision proposée : {label}. {comment}")
-        message = "Décision proposée, en attente de validation 4-yeux."
-    else:
-        mesure = _close_alert(db, alert, decision, username, comment)
-        _log_alert_event(db, alert.id, username, "PROPOSED", f"Décision : {label}. {comment}")
-        _log_alert_event(db, alert.id, username, "VALIDATED", "Clôture directe (validation 4-yeux désactivée).")
-        message = "Alerte clôturée (validation 4-yeux désactivée)." + _message_de_mesure(mesure)
+    label, message, _mesure = _enregistrer_la_proposition(db, alert, decision, comment,
+                                                          username, four_eyes)
+    if not four_eyes:
         message += _poser_la_paire_de_l_alerte(db, alert, paire, username)
     db.commit()
     if paire is not None:
@@ -14326,11 +14344,34 @@ async def snooze_alert(
 
 class AlertBulkRequest(BaseModel):
     ids: List[int]
-    action: str  # "assign" | "priority"
+    action: str  # "assign" | "priority" | "propose"
     assignee: Optional[str] = None
     priority: Optional[str] = None
+    # Proposition en masse : une decision et un motif COMMUNS. `confirm_sanction`
+    # dit que l'analyste a lu l'avertissement « liste de gel » (voir plus bas).
+    decision: Optional[str] = None
+    comment: Optional[str] = None
+    confirm_sanction: bool = False
 
 _ALERT_BULK_MAX = 200
+
+# Pourquoi une alerte est ecartee d'une action en masse : un code stable et une
+# phrase SANS variable — le detail (assignee, statut) voyage a cote, et la
+# phrase se traduit telle quelle dans les six langues de l'interface. La liste
+# d'identifiants sans raison laissait deviner : close ? introuvable ? a un autre ?
+_ECARTS_EN_MASSE = {
+    "INTROUVABLE": "Alerte introuvable.",
+    "CLOSE": "Alerte déjà close.",
+    "SOUS_LE_PLANCHER": "Liste de gel (périmètre SANCTION) : priorité sous le plancher.",
+    "EN_ATTENTE_DE_VALIDATION": "Une décision est déjà en attente de validation.",
+    "ASSIGNEE_A_UN_AUTRE": "Assignée à un autre analyste : c'est à son assigné de la proposer.",
+    "SANCTION_SANS_QUATRE_YEUX": "Liste de gel (périmètre SANCTION) : sans validation 4-yeux, la proposer en masse la clôturerait sans second regard. À instruire à l'unité.",
+}
+
+
+def _ecart(alert_id: int, code: str, **detail) -> Dict[str, Any]:
+    return {"id": alert_id, "code": code, "reason": _ECARTS_EN_MASSE[code], **detail}
+
 
 @app.post("/api/alerts/bulk")
 async def bulk_alert_action(
@@ -14339,11 +14380,24 @@ async def bulk_alert_action(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Action en masse sur des alertes OUVERTES (≤ 200 a la fois) : assignation
-    ou changement de priorite. Memes regles que les actions unitaires
-    (assigner a un tiers = admin), meme journalisation : un AlertEvent par
-    alerte traitee — jamais d'action silencieuse. Les alertes cloturees ou
-    introuvables sont ignorees et restituees dans `skipped`.
+    Action en masse sur des alertes OUVERTES (≤ 200 a la fois) : assignation,
+    changement de priorite, ou proposition d'une meme decision. Memes regles
+    que les actions unitaires (assigner a un tiers = admin ; meme validation du
+    motif que la proposition unitaire), meme journalisation : un AlertEvent par
+    alerte traitee — jamais d'action silencieuse. Chaque alerte ecartee est
+    restituee dans `skipped` avec sa raison.
+
+    Proposer en masse, c'est instruire en serie, pas valider en serie : une
+    seule fiche listee a produit 10 des 26 alertes d'une file (mesure), et la
+    meme decision se motivait dix fois a la main. Chaque alerte recoit SON
+    evenement PROPOSED ; le 4-yeux reste unitaire — le proposeur ne valide
+    aucune de ses propositions, et la validation ne se fait pas en masse.
+    Ecartees : une alerte assignee a quelqu'un d'autre (c'est son dossier),
+    une decision deja en attente, et un faux positif sur une liste de gel quand
+    le 4-yeux est desactive — la proposition clorait alors l'alerte sans second
+    regard, et le perimetre SANCTION ne se clot pas en volume. Avec le 4-yeux,
+    ce faux positif exige `confirm_sanction` : sans lui, rien n'est ecrit et la
+    reponse (409) nomme les alertes concernees.
     """
     ids = list(dict.fromkeys(payload.ids or []))
     if not ids:
@@ -14351,66 +14405,183 @@ async def bulk_alert_action(
     if len(ids) > _ALERT_BULK_MAX:
         raise HTTPException(status_code=400, detail=f"Maximum {_ALERT_BULK_MAX} alertes par action en masse.")
     action = (payload.action or "").strip().lower()
-    if action not in ("assign", "priority"):
-        raise HTTPException(status_code=400, detail="Action en masse inconnue (assign ou priority).")
+    if action == "validate":
+        raise HTTPException(status_code=400, detail=(
+            "La validation 4-yeux reste unitaire : chaque décision proposée se valide une par "
+            "une, par un réviseur différent du proposeur."))
+    if action not in ("assign", "priority", "propose"):
+        raise HTTPException(status_code=400, detail="Action en masse inconnue (assign, priority ou propose).")
+    moi = current_user["username"]
 
     if action == "assign":
-        assignee = (payload.assignee or "").strip() or current_user["username"]
-        if assignee != current_user["username"] and "admin" not in parse_roles(current_user.get("role")):
+        assignee = (payload.assignee or "").strip() or moi
+        if assignee != moi and "admin" not in parse_roles(current_user.get("role")):
             raise HTTPException(status_code=403,
                                 detail="Seul un administrateur peut assigner des alertes à un autre analyste.")
         assignee, _redirected = resolve_delegate(db, assignee)
-    else:
+    elif action == "priority":
         new_priority = (payload.priority or "").strip().upper()
         if new_priority not in ALERT_PRIORITIES:
             raise HTTPException(status_code=400, detail=f"Priorité invalide ({', '.join(ALERT_PRIORITIES)}).")
+    else:
+        decision, comment = _valider_la_decision_proposee(db, payload.decision, payload.comment)
+        four_eyes = alert_four_eyes_required(db)
 
     alerts = {a.id: a for a in db.query(Alert).filter(Alert.id.in_(ids)).all()}
-    updated, skipped, sous_plancher = [], [], []
-    if action == "priority":
-        from fiskr.alerts import plancher_de_priorite, sous_le_plancher
-        from fiskr.settings import perimeter_overrides
-        surcharges = perimeter_overrides(db)
+    skipped, sous_plancher, a_confirmer = [], [], []
+    retenues: List[Alert] = []
+    from fiskr.alerts import plancher_de_priorite, sous_le_plancher
+    from fiskr.perimeters import est_sanction
+    surcharges = perimeter_overrides(db) if action != "assign" else None
     for alert_id in ids:
         alert = alerts.get(alert_id)
-        if alert is None or alert.status not in ALERT_OPEN_STATUSES:
-            skipped.append(alert_id)
+        if alert is None:
+            skipped.append(_ecart(alert_id, "INTROUVABLE"))
+            continue
+        if alert.status not in ALERT_OPEN_STATUSES:
+            skipped.append(_ecart(alert_id, "CLOSE", status=alert.status))
             continue
         if action == "priority" and sous_le_plancher(
                 new_priority, plancher_de_priorite(alert.list_type, surcharges)):
             # Meme regle que l'action unitaire : ignoree, et nommee
-            skipped.append(alert_id)
+            skipped.append(_ecart(alert_id, "SOUS_LE_PLANCHER"))
             sous_plancher.append(alert_id)
             continue
+        if action == "propose":
+            if alert.status == "PENDING_VALIDATION":
+                skipped.append(_ecart(alert_id, "EN_ATTENTE_DE_VALIDATION"))
+                continue
+            if alert.assigned_to and alert.assigned_to != moi:
+                skipped.append(_ecart(alert_id, "ASSIGNEE_A_UN_AUTRE", assigned_to=alert.assigned_to))
+                continue
+            if decision == "FALSE_POSITIVE" and est_sanction(alert.list_type, surcharges):
+                if not four_eyes:
+                    skipped.append(_ecart(alert_id, "SANCTION_SANS_QUATRE_YEUX"))
+                    continue
+                if not payload.confirm_sanction:
+                    a_confirmer.append(alert_id)
+        retenues.append(alert)
+
+    if a_confirmer:
+        # Rien n'est ecrit : la confirmation porte sur le lot entier, et une
+        # moitie de lot deja proposee laisserait l'ecran dans un etat que
+        # l'analyste n'a pas choisi.
+        raise HTTPException(status_code=409, detail={
+            "code": "CONFIRMATION_SANCTION",
+            "alert_ids": a_confirmer,
+            # Ce qui va se faire, puis pourquoi on demande : l'ecran affiche
+            # cette phrase telle quelle dans sa confirmation.
+            "message": (f"Vous proposez « faux positif » pour {len(a_confirmer)} alerte(s) d'une "
+                        f"liste de gel (périmètre SANCTION). Rien n'est clos : chaque proposition "
+                        f"attendra sa propre validation 4-yeux. Mais une correspondance de gel "
+                        f"manquée est constatable à l'audit et sanctionnable : confirmez que "
+                        f"chacune a été instruite individuellement."),
+        })
+
+    updated, mesures, label = [], [], None
+    for alert in retenues:
         if action == "assign":
             alert.assigned_to = assignee
             if alert.status == "OPEN":
                 alert.status = "IN_PROGRESS"
-            _log_alert_event(db, alert.id, current_user["username"], "ASSIGNED",
+            _log_alert_event(db, alert.id, moi, "ASSIGNED",
                              f"Assignée à {assignee} (action en masse).")
-        else:
+        elif action == "priority":
             old_priority = alert.priority or "—"
             alert.priority = new_priority
             alert.due_at = compute_due_at(db, new_priority, alert.created_at)
-            _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
+            _log_alert_event(db, alert.id, moi, "PRIORITY_CHANGED",
                              f"Priorité {ALERT_PRIORITY_LABELS.get(old_priority, old_priority)} → "
                              f"{ALERT_PRIORITY_LABELS[new_priority]} (action en masse).")
-        updated.append(alert_id)
+        else:
+            label, _message, mesure = _enregistrer_la_proposition(
+                db, alert, decision, comment, moi, four_eyes,
+                precision=f" (proposition en masse : {len(retenues)} alerte(s), même motif)")
+            if mesure is not None:
+                mesures.append(mesure)
+        updated.append(alert.id)
     db.commit()
+    identifiants = (", ".join(str(i) for i in updated[:20])
+                    + (" …" if len(updated) > 20 else ""))
     if updated and action == "assign":
         # Une seule notification pour tout le lot (jamais N mails d'affilée)
         emit(db, "alert_assigned", {
             "_assignee": assignee,
             "Alertes assignées": len(updated), "Action": "assignation en masse",
-            "Identifiants": ", ".join(str(i) for i in updated[:20])
-                            + (" …" if len(updated) > 20 else ""),
-            "Assignées par": current_user["username"],
+            "Identifiants": identifiants,
+            "Assignées par": moi,
         })
+    if updated and action == "propose":
+        # Meme regle : une notification pour le lot ; les suiveurs, eux, sont
+        # prevenus dossier par dossier, puisqu'ils suivent chacun.
+        commun = {"Alertes": len(updated), "Action": "proposition en masse",
+                  "Identifiants": identifiants, "Décision": label, "Commentaire": comment}
+        if four_eyes:
+            emit(db, "alert_pending_validation", {**commun, "Proposée par": moi})
+        else:
+            emit(db, "alert_closed_direct", {**commun, "Clôturée par": moi})
+        for alert in retenues:
+            _notifier_les_suiveurs(db, alert, f"Décision proposée : {label}", moi)
+    if action == "propose":
+        if four_eyes:
+            message = (f"{len(updated)} décision(s) proposée(s), chacune en attente de sa "
+                       f"validation 4-yeux ; {len(skipped)} alerte(s) écartée(s).")
+        else:
+            message = (f"{len(updated)} alerte(s) clôturée(s) (validation 4-yeux désactivée) ; "
+                       f"{len(skipped)} alerte(s) écartée(s).")
+        if mesures:
+            message += (f" {len(mesures)} mesure(s) de gel ouverte(s) : déclaration à la DG "
+                        f"Trésor due immédiatement (Criblage → Registre des gels).")
+    else:
+        message = (f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."
+                   + (f" Dont {len(sous_plancher)} sur une liste de gel : priorité "
+                      f"minimale {PLANCHER_SANCTION} (périmètre SANCTION)."
+                      if sous_plancher else ""))
     return {"updated": updated, "skipped": skipped, "below_floor": sous_plancher,
-            "message": f"{len(updated)} alerte(s) mise(s) à jour, {len(skipped)} ignorée(s)."
-                       + (f" Dont {len(sous_plancher)} sur une liste de gel : priorité "
-                          f"minimale {PLANCHER_SANCTION} (périmètre SANCTION)."
-                          if sous_plancher else "")}
+            "message": message}
+
+
+@app.post("/api/alerts/claim-next")
+async def claim_next_alert(
+    channel: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    « Prendre la suivante » : s'assigner l'alerte non assignee la plus urgente
+    — echeance SLA, puis priorite (fiskr.alerts.ordre_de_prise) —, de facon
+    ATOMIQUE : deux analystes qui cliquent ensemble obtiennent deux alertes
+    differentes, jamais la meme (fiskr.alerts.prendre_la_suivante).
+
+    Mesure : une analyste ouvrait son accueil sur « Rien ne vous attend »
+    devant 26 alertes que personne n'avait prises, puis choisissait a la main
+    dans la file — et deux collegues pouvaient choisir la meme. Rien a prendre
+    n'est pas une erreur : la reponse le dit (`claimed: false`), avec le nombre
+    d'alertes non assignees qu'un report tient encore a l'ecart.
+    """
+    if channel and channel.strip().upper() not in ("SCREENING", "FILTERING"):
+        raise HTTPException(status_code=400, detail="Canal inconnu (SCREENING ou FILTERING).")
+    moi = current_user["username"]
+    alerte = prendre_la_suivante(db, moi, channel)
+    if alerte is None:
+        db.rollback()
+        en_attente = db.query(Alert).filter(
+            Alert.assigned_to.is_(None), Alert.status.in_(STATUTS_A_PRENDRE),
+            Alert.snoozed_until > datetime.utcnow())
+        canal = critere_de_canal(channel)
+        if canal is not None:
+            en_attente = en_attente.filter(canal)
+        return {"claimed": False, "alert": None, "snoozed_unassigned": en_attente.count(),
+                "message": "Aucune alerte à prendre : chaque alerte à instruire a déjà quelqu'un."}
+    _log_alert_event(db, alerte.id, moi, "ASSIGNED",
+                     f"Prise en charge par {moi} (« Prendre la suivante » : la plus urgente "
+                     f"des alertes non assignées).")
+    db.commit()
+    # Pas de courriel « alerte assignee » : on ne previent pas quelqu'un de ce
+    # qu'il vient de faire lui-meme. Les suiveurs du dossier, eux, l'apprennent.
+    _notifier_les_suiveurs(db, alerte, f"Prise en charge par @{moi}", moi)
+    return {"claimed": True, "alert": _alert_summary(alerte),
+            "message": f"Alerte #{alerte.id} prise en charge : la plus urgente des alertes non assignées."}
 
 # ------------------ VUES SAUVEGARDEES (filtres des files d'alertes) ------------------
 
@@ -14538,15 +14709,14 @@ async def get_ma_journee(
     pas. Le compte personnel ne retient donc que ce sur quoi ce lecteur peut
     reellement agir.
     """
-    from sqlalchemy import case, or_
+    from sqlalchemy import or_
     moi = current_user["username"]
     roles = parse_roles(current_user.get("role"))
     peut_valider = bool({"admin", "reviewer"} & set(roles))
     maintenant = datetime.utcnow()
 
     ouvertes = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
-    rang = case({"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3},
-                value=Alert.priority, else_=2)
+    rang = rang_de_priorite_sql()
 
     # 1. Mes alertes : celles qui me sont assignees, dans l'ordre de la file.
     miennes_q = ouvertes.filter(Alert.assigned_to == moi)
@@ -14581,6 +14751,19 @@ async def get_ma_journee(
     # 5. Les lots qui attendent une homologation, si j'y ai droit.
     lots = db.query(Snapshot).filter(Snapshot.status == "PENDING_REVIEW").count() if peut_valider else 0
 
+    # 6. Ce qui n'est a personne. « Rien ne vous attend » s'affichait devant 26
+    # alertes non assignees : le compte ne retenait que `assigned_to == moi`, et
+    # l'accueil concluait a une journee vide. Ces alertes ne sont pas « a moi »
+    # — l'ecran le dit ainsi —, mais elles attendent quelqu'un. Memes criteres
+    # que « Prendre la suivante » : l'accueil n'annonce rien que le bouton ne
+    # puisse donner.
+    prenables = db.query(Alert).filter(*criteres_prenables(maintenant))
+    non_assignees = {
+        "total": prenables.count(),
+        "en_retard": prenables.filter(Alert.due_at.isnot(None), Alert.due_at < maintenant).count(),
+        "peut_prendre": "auditor" not in roles,
+    }
+
     def _resume(a: Alert) -> Dict[str, Any]:
         return {"id": a.id, "channel": a.channel or "SCREENING",
                 "client_name": a.client_name, "watchlist_name": a.watchlist_name,
@@ -14599,6 +14782,7 @@ async def get_ma_journee(
         "reveils_du_jour": reveils,
         "dossiers_suivis": suivis,
         "lots_a_homologuer": lots,
+        "non_assignees": non_assignees,
     }
 
 @app.get("/api/me/dashboard")

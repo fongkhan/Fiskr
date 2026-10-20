@@ -1470,6 +1470,15 @@
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('SCREENING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
  <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('SCREENING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
  </div>
+ <div class="file-outils">
+ <button class="btn btn-sm btn-primary" onclick="prendreLaSuivante('SCREENING')" title="S'assigner l'alerte non assignée la plus urgente (échéance SLA, puis priorité) et l'ouvrir">Prendre la suivante</button>
+ <label class="file-groupement" for="screening-group-by"><span>Regrouper</span>
+ <select id="screening-group-by" onchange="fetchAlerts('SCREENING', 1)" aria-label="Regrouper la file">
+ <option value="">Sans regroupement</option>
+ <option value="watchlist">Par fiche listée</option>
+ <option value="client">Par client</option>
+ </select></label>
+ </div>
  <div id="screening-bulk-bar" class="bulk-bar hidden">
  <span id="screening-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
  <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('SCREENING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
@@ -1481,8 +1490,11 @@
  <option value="LOW">Basse</option>
  </select>
  <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('SCREENING')">Appliquer la priorité</button>
+ <button class="btn btn-sm btn-primary" onclick="bulkProposeSelected('SCREENING', 'FALSE_POSITIVE')">Proposer faux positif…</button>
+ <button class="btn btn-sm btn-secondary" onclick="bulkProposeSelected('SCREENING', 'CONFIRMED')">Proposer vrai positif…</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('SCREENING')">✕ Vider la sélection</button>
  </div>
+ <div id="screening-bulk-report" class="bulk-report hidden" role="status" aria-live="polite"></div>
  <div class="table-container max-height-table">
  <table id="screening-alerts-table">
  <thead>
@@ -1822,6 +1834,15 @@
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="saveCurrentView('FILTERING')" title="Sauvegarder les filtres courants comme vue"><svg class="ui-icon" aria-hidden="true"><use href="#i-save"></use></svg></button>
  <button class="btn btn-sm btn-secondary" onclick="exportAlertsCsv('FILTERING')" title="Exporter la file filtrée en CSV">⬇ CSV</button>
  </div>
+ <div class="file-outils">
+ <button class="btn btn-sm btn-primary" onclick="prendreLaSuivante('FILTERING')" title="S'assigner l'alerte non assignée la plus urgente (échéance SLA, puis priorité) et l'ouvrir">Prendre la suivante</button>
+ <label class="file-groupement" for="filtering-group-by"><span>Regrouper</span>
+ <select id="filtering-group-by" onchange="fetchAlerts('FILTERING', 1)" aria-label="Regrouper la file">
+ <option value="">Sans regroupement</option>
+ <option value="watchlist">Par fiche listée</option>
+ <option value="client">Par partie</option>
+ </select></label>
+ </div>
  <div id="filtering-bulk-bar" class="bulk-bar hidden">
  <span id="filtering-bulk-count" class="bulk-count">0 sélectionnée(s)</span>
  <button class="btn btn-sm btn-secondary" onclick="bulkAssignSelected('FILTERING')"><svg class="ui-icon" aria-hidden="true"><use href="#i-map-pin"></use></svg> M'assigner la sélection</button>
@@ -1833,8 +1854,11 @@
  <option value="LOW">Basse</option>
  </select>
  <button class="btn btn-sm btn-secondary" onclick="bulkPrioritySelected('FILTERING')">Appliquer la priorité</button>
+ <button class="btn btn-sm btn-primary" onclick="bulkProposeSelected('FILTERING', 'FALSE_POSITIVE')">Proposer faux positif…</button>
+ <button class="btn btn-sm btn-secondary" onclick="bulkProposeSelected('FILTERING', 'CONFIRMED')">Proposer vrai positif…</button>
  <button class="btn btn-sm" style="background: var(--surface-3);" onclick="clearAlertSelection('FILTERING')">✕ Vider la sélection</button>
  </div>
+ <div id="filtering-bulk-report" class="bulk-report hidden" role="status" aria-live="polite"></div>
  <div class="table-container max-height-table">
  <table id="filtering-alerts-table">
  <thead>

@@ -2097,7 +2097,9 @@ function initA11y() {
  if (e.key !== "Escape") return;
  const open = Array.from(document.querySelectorAll(".modal:not(.hidden)"))
  .filter((m) => m.id !== "app-dialog").pop();
- if (open) fermerModale(open);
+ // Touche consommée : sans le dire, le triage clavier (écouteur suivant)
+ // voyait une page sans modale et relâchait aussi la visée de la file.
+ if (open) { fermerModale(open); e.preventDefault(); }
  });
  document.querySelectorAll(".modal").forEach((m) => {
  m.setAttribute("role", "dialog");
@@ -8227,6 +8229,8 @@ async function fetchAlerts(channel = "SCREENING", page = null) {
  if (prioFilterEl && prioFilterEl.value) params.set("priority", prioFilterEl.value);
  const assigneeFilterEl = document.getElementById(conf.assigneeFilter);
  if (assigneeFilterEl && assigneeFilterEl.value) params.set("assigned_to", assigneeFilterEl.value);
+ // Vue regroupée (par fiche listée, par client) : mêmes filtres, toute la file
+ if (_modeDeRegroupement(channel)) { await _chargerLaFileRegroupee(channel, params); return; }
  tableLoading(document.querySelector(`#${conf.table} tbody`), 10);
  const response = await apiFetch(`/api/alerts?${params}`);
  if (!response.ok) {
@@ -8342,10 +8346,11 @@ function renderAlertsTable(channel, items) {
  <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${a.id})"> Instruire</button></td>
  </tr>`;
  }).join("");
- // La visée clavier (j/k) survit au re-rendu : on la repose par identifiant.
+ // La visée clavier (j/k) survit au re-rendu : on la repose par identifiant,
+ // et le focus avec elle s'il s'était perdu avec les lignes remplacées.
  if (_viseAlerteId !== null) {
  const ligne = tbody.querySelector(`tr[data-alert-id="${_viseAlerteId}"]`);
- if (ligne) ligne.classList.add("ligne-visee");
+ if (ligne) { ligne.classList.add("ligne-visee"); _focaliserLaVisee(ligne); }
  }
 }
 
@@ -8354,6 +8359,10 @@ async function openAlertModal(alertId) {
  try {
  const response = await apiFetch(`/api/alerts/${alertId}`);
  const a = await response.json();
+ // Une réponse dépassée ne remplace pas l'alerte demandée depuis : « Proposer
+ // & suivante » recharge l'alerte proposée PUIS ouvre la suivante, et la
+ // première réponse pouvait arriver la dernière.
+ if (currentAlertId !== alertId) return;
  if (!response.ok) {
  showToast("Erreur : " + (a.detail || "Impossible de charger l'alerte."), "error");
  return;
@@ -8399,6 +8408,7 @@ async function openAlertModal(alertId) {
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.2); color: var(--danger-soft-text);" onclick="alertActionWithComment('escalate', 'Motif de l\\'escalade')"> Escalader</button>`;
  actionsHtml += `<button class="btn btn-sm btn-primary" onclick="proposeAlertDecision('FALSE_POSITIVE')"> Proposer : Faux positif</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposeAlertDecision('CONFIRMED')"> Proposer : Vrai positif</button>`;
+ actionsHtml += boutonProposerEtSuivante();
  } else if (isReviewer && a.proposed_by !== me) {
  actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">Proposé par @${escapeHtml(a.proposed_by)} : <strong>${a.proposed_decision === "CONFIRMED" ? "vrai positif" : "faux positif"}</strong></span>`;
  actionsHtml += `<button class="btn btn-sm btn-primary" onclick="validateAlertDecision(true)">✓ Valider (4-yeux)</button>`;
@@ -8567,6 +8577,7 @@ function ouvrirFicheDepuisLAlerte(dbId) {
 function closeAlertModal() {
  document.getElementById("alert-modal").classList.add("hidden");
  currentAlertId = null;
+ _revenirALaFile();
 }
 
 async function _postAlertAction(path, body) {
@@ -8580,6 +8591,9 @@ async function _postAlertAction(path, body) {
  showToast("Erreur : " + (data.detail || "Action refusée."), "error");
  return null;
  }
+ // Avant le re-rendu que l'appelant déclenche : la ligne suivante se lit
+ // dans la file telle qu'elle est encore affichée.
+ if (["propose", "validate", "escalate"].includes(path)) _viseeApresTraitement(currentAlertId);
  return data;
 }
 
@@ -8619,6 +8633,7 @@ async function _posterReport(alertId, corps) {
  // L'avertissement SLA n'est pas un détail : l'échéance réglementaire
  // tombera pendant l'attente. Plus long à l'écran, et en avertissement.
  if (data.warning) showToast(data.warning, "warning", 9000);
+ if (corps.until) _viseeApresTraitement(alertId);   // reportée : traitée pour aujourd'hui
  refreshAlertQueues();
  const modale = document.getElementById("alert-modal");
  if (modale && _modaleVisible(modale) && currentAlertId === alertId) openAlertModal(alertId);
@@ -8981,18 +8996,64 @@ function _viserLigne(ligne) {
  ligne.classList.add("ligne-visee");
  _viseAlerteId = parseInt(ligne.dataset.alertId, 10);
  ligne.scrollIntoView({ block: "nearest" });
+ _focaliserLaVisee(ligne);
+}
+
+// Le focus suit la visée : mesuré, après une proposition puis Échap, le focus
+// tombait sur BODY et la surbrillance repartait du haut de la file. La ligne
+// visée prend le focus (tabindex -1 : focalisable sans entrer dans la
+// tabulation) quand personne d'autre ne l'a — jamais par-dessus une modale ni
+// en volant le focus d'un champ.
+function _focaliserLaVisee(ligne) {
+ if (!ligne || !ligne.isConnected) return;
+ ligne.tabIndex = -1;
+ const actif = document.activeElement;
+ const libre = !actif || actif === document.body || actif === document.documentElement
+  || (actif.closest && (actif.closest("tbody") === ligne.parentElement || actif.closest(".modal.hidden")));
+ if (libre && !document.querySelector(".modal:not(.hidden)")) ligne.focus({ preventScroll: true });
+}
+
+// Une alerte traitée (proposée, validée, escaladée, reportée) passe la visée à
+// la ligne qui la SUIT dans la file affichée — mémorisée par identifiant, pas
+// par rang : le re-rendu qui suit l'action déplace ou retire des lignes. À
+// défaut de suivante, la précédente.
+function _viseeApresTraitement(alertId) {
+ const conf = _fileAffichee();
+ const tbody = conf && document.querySelector(`#${conf.table} tbody`);
+ const ligne = tbody && tbody.querySelector(`tr[data-alert-id="${alertId}"]`);
+ if (!ligne) return;
+ const lignes = Array.from(tbody.querySelectorAll("tr[data-alert-id]"));
+ const i = lignes.indexOf(ligne);
+ const voisine = lignes[i + 1] || lignes[i - 1] || null;
+ _viseAlerteId = voisine ? parseInt(voisine.dataset.alertId, 10) : null;
+}
+
+// Fermer l'alerte rend la main à la file, sur la ligne visée.
+function _revenirALaFile() {
+ const conf = _fileAffichee();
+ if (!conf || _viseAlerteId === null) return;
+ const ligne = document.querySelector(`#${conf.table} tbody tr[data-alert-id="${_viseAlerteId}"]`);
+ if (!ligne) return;
+ document.querySelectorAll("tr.ligne-visee").forEach((tr) => tr.classList.remove("ligne-visee"));
+ ligne.classList.add("ligne-visee");
+ _focaliserLaVisee(ligne);
 }
 
 function initTriageClavier() {
  document.addEventListener("keydown", (e) => {
  if (e.ctrlKey || e.metaKey || e.altKey) return;
+ // Une touche déjà consommée (Échap qui vient de fermer une modale) n'est
+ // pas un ordre de triage.
+ if (e.defaultPrevented) return;
  if (!["j", "k", "o", "r", "Enter", "Escape"].includes(e.key)) return;
  const cible = e.target;
  if (cible && (cible.tagName === "INPUT" || cible.tagName === "TEXTAREA"
   || cible.tagName === "SELECT" || cible.isContentEditable)) return;
  // Entrée active déjà l'élément focalisé (tri des colonnes, boutons) : on
- // ne la prend que quand le focus est au corps de page, à personne.
- if (e.key === "Enter" && cible !== document.body && cible !== document.documentElement) return;
+ // ne la prend que quand le focus est au corps de page, à personne — ou sur
+ // la ligne visée elle-même.
+ const surLaVisee = cible && cible.matches && cible.matches("tr.ligne-visee");
+ if (e.key === "Enter" && cible !== document.body && cible !== document.documentElement && !surLaVisee) return;
  if (document.querySelector(".modal:not(.hidden)")) return;
  const conf = _fileAffichee();
  if (!conf) return;
@@ -9168,6 +9229,7 @@ async function proposeAlertDecision(decision) {
  showToast(data.message, "success"); openAlertModal(currentAlertId); refreshAlertQueues();
  if (memoriser && pieceExigee) _poserApresCloture(a, comment);
  }
+ return data;
 }
 
 async function validateAlertDecision(approve) {
@@ -9827,6 +9889,15 @@ async function renderMaJourneeWidget(body) {
  for (const a of j.mes_alertes.items.slice(0, 4)) {
   morceaux.push(ligne(`#${a.id} — ${escapeHtml(a.client_name || "?")}`,
    `${escapeHtml(a.priority || "—")}${a.overdue ? " · en retard" : ""}`, ouvrir(a)));
+ }
+ // Ce qui n'est à personne : dit tel quel, jamais « à vous ». L'accueil
+ // affichait « Rien ne vous attend » devant 26 alertes non assignées.
+ const libres = j.non_assignees || { total: 0 };
+ if (libres.total) {
+  morceaux.push(`<li style="cursor: default;">
+   <span class="item-main" style="white-space: normal;"><strong>${libres.total}</strong> <span>${libres.total === 1 ? "alerte non assignée attend quelqu'un" : "alertes non assignées attendent quelqu'un"}</span>${libres.en_retard ? ` · <strong style="color: var(--color-alert);">${libres.en_retard}</strong> <span>en retard</span>` : ""}</span>
+   ${libres.peut_prendre ? `<button class="btn btn-sm btn-primary" onclick="prendreLaSuivante()">Prendre la suivante</button>` : ""}
+  </li>`);
  }
  for (const a of j.a_valider.items.slice(0, 3)) {
   morceaux.push(ligne(`#${a.id} — <span>à valider</span> · ${escapeHtml(a.client_name || "?")}`,
@@ -13288,6 +13359,7 @@ async function runBulkAlertAction(channel, payload, confirmMsg) {
  return;
  }
  showToast(data.message || "Action en masse effectuée.", "success");
+ _rendreCompteDeLActionEnMasse(channel, data);
  clearAlertSelection(channel, false);
  fetchAlerts(channel);
  refreshSidebarCounters();
@@ -13305,6 +13377,233 @@ function bulkPrioritySelected(channel) {
  if (!priority) { showToast("Choisissez d'abord une priorité.", "error"); return; }
  runBulkAlertAction(channel, { action: "priority", priority },
  `Passer les {n} alerte(s) sélectionnée(s) en priorité ${priority} (échéance SLA recalculée) ?`);
+}
+
+// =========================================================================
+// FILE DE L'ANALYSTE : REGROUPER, PROPOSER EN SÉRIE, PRENDRE LA SUIVANTE
+// =========================================================================
+
+// Mesuré sur une file de 26 alertes : une seule fiche listée (PIERRE DUBOIS)
+// en produisait 10, et deux clients en portaient deux chacun (une OFAC, une
+// UE, la même personne). Regrouper montre le travail qui se fait d'un geste.
+// Le regroupement se calcule sur TOUTE la file filtrée — pages relues jusqu'au
+// plafond —, jamais sur la page affichée : un groupe compté sur une page
+// annoncerait 4 alertes là où il y en a 40. Au-delà du plafond, l'écran le dit.
+const _REGROUPEMENT_MAX = 1000;
+
+function _prefixeDeFile(channel) { return channel === "FILTERING" ? "filtering" : "screening"; }
+
+function _modeDeRegroupement(channel) {
+ const el = document.getElementById(`${_prefixeDeFile(channel)}-group-by`);
+ return el ? el.value : "";
+}
+
+function _cleDeGroupe(a, mode) {
+ if (mode === "watchlist") return `w:${a.watchlist_entity_id}`;
+ // Un identifiant client stable regroupe ; une partie de message de paiement
+ // (TXN:message:rang) est unique par message — c'est son nom qui la retrouve.
+ if (a.client_id && !String(a.client_id).startsWith("TXN:")) return `c:${a.client_id}`;
+ return `n:${String(a.client_name || "").trim().toUpperCase()}`;
+}
+
+async function _chargerLaFileRegroupee(channel, params) {
+ const conf = ALERT_CHANNEL_CONF[channel];
+ const tbody = document.querySelector(`#${conf.table} tbody`);
+ tableLoading(tbody, 10);
+ const mode = _modeDeRegroupement(channel);
+ const items = [];
+ let total = 0;
+ params.set("page_size", "200");
+ for (let page = 1; items.length < _REGROUPEMENT_MAX; page++) {
+  params.set("page", String(page));
+  const response = await apiFetch(`/api/alerts?${params}`);
+  if (!response.ok) { tableError(`#${conf.table}`, 10, "File d'alertes indisponible."); return; }
+  const data = await response.json();
+  total = data.total;
+  items.push(...(data.items || []));
+  if (!(data.items || []).length || items.length >= total) break;
+ }
+ // Les plus gros groupes d'abord ; à taille égale, l'ordre de la file (celui
+ // de leur membre le plus urgent). Les membres gardent l'ordre de la file.
+ const groupes = new Map();
+ items.forEach((a, rang) => {
+  const cle = _cleDeGroupe(a, mode);
+  if (!groupes.has(cle)) groupes.set(cle, { rang, membres: [] });
+  groupes.get(cle).membres.push(a);
+ });
+ const tries = Array.from(groupes.values())
+  .sort((x, y) => (y.membres.length - x.membres.length) || (x.rang - y.rang));
+ renderAlertsTable(channel, tries.flatMap((g) => g.membres));
+ _poserLesEntetesDeGroupe(channel, tries, mode);
+ const pagination = document.getElementById(`${_prefixeDeFile(channel)}-alerts-pagination`);
+ if (pagination) pagination.classList.add("hidden");
+ if (total > items.length && tbody.firstElementChild) {
+  tbody.insertAdjacentHTML("afterbegin", `<tr class="entete-groupe"><td colspan="10">
+   <span>Regroupement calculé sur les premières alertes de la file seulement :</span> ${items.length} / ${total}.
+   <span>Affinez les filtres pour des groupes complets.</span></td></tr>`);
+ }
+}
+
+function _poserLesEntetesDeGroupe(channel, groupes, mode) {
+ const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
+ if (!tbody || !groupes.length) return;
+ const ligneDe = (id) => tbody.querySelector(`tr[data-alert-id="${id}"]`);
+ const seules = groupes.filter((g) => g.membres.length === 1);
+ for (const g of groupes) {
+  if (g.membres.length < 2) continue;
+  const premier = g.membres[0];
+  const ids = g.membres.filter((a) => !a.status.startsWith("CLOSED")).map((a) => a.id);
+  const listes = Array.from(new Set(g.membres.map((a) => a.list_type))).map(listTypeBadge).join(" ");
+  const titre = mode === "watchlist"
+   ? `<strong>${escapeHtml(premier.watchlist_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(premier.watchlist_entity_id)}</small>`
+   : `<strong>${escapeHtml(premier.client_name)}</strong> <small style="color: var(--text-muted);">${escapeHtml(premier.client_id || "")}</small>`;
+  const autres = mode === "watchlist"
+   ? `${new Set(g.membres.map((a) => a.client_id || a.client_name)).size} <span>clients différents</span>`
+   : `${new Set(g.membres.map((a) => a.watchlist_entity_id)).size} <span>fiches listées différentes</span>`;
+  const ligne = ligneDe(premier.id);
+  if (!ligne) continue;
+  ligne.insertAdjacentHTML("beforebegin", `<tr class="entete-groupe">
+   <td>${ids.length ? `<input type="checkbox" onchange="selectionnerLeGroupe('${channel}', [${ids.join(",")}], this.checked)" aria-label="Sélectionner le groupe">` : ""}</td>
+   <td colspan="9"><span class="groupe-compte">${g.membres.length}</span> <span>alertes</span> · ${titre} · ${listes} · ${autres}</td>
+  </tr>`);
+ }
+ const premiereSeule = seules.length ? ligneDe(seules[0].membres[0].id) : null;
+ if (premiereSeule && seules.length < groupes.length) {
+  premiereSeule.insertAdjacentHTML("beforebegin", `<tr class="entete-groupe"><td></td>
+   <td colspan="9"><span class="groupe-compte">${seules.length}</span> <span>alertes sans regroupement</span></td></tr>`);
+ }
+}
+
+function selectionnerLeGroupe(channel, ids, checked) {
+ const tbody = document.querySelector(`#${ALERT_CHANNEL_CONF[channel].table} tbody`);
+ const selection = selectedAlertsByChannel[channel];
+ for (const id of ids) {
+  const boite = tbody && tbody.querySelector(`.alert-select[data-alert-id="${id}"]`);
+  if (boite) boite.checked = checked;
+  if (checked) selection.add(id); else selection.delete(id);
+ }
+ updateBulkBar(channel);
+}
+
+// Compte rendu d'une action en masse : ce qui a été écarté, et pourquoi. Rien
+// n'est affiché quand rien n'a été écarté — le toast suffit.
+function _rendreCompteDeLActionEnMasse(channel, data) {
+ const el = document.getElementById(`${_prefixeDeFile(channel)}-bulk-report`);
+ if (!el) return;
+ const ecartees = (data && data.skipped) || [];
+ if (!ecartees.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+ const detail = (e) => e.assigned_to ? ` (@${escapeHtml(e.assigned_to)})`
+  : e.status ? ` (${escapeHtml(statusLabel(e.status))})` : "";
+ el.innerHTML = `
+  <div style="display: flex; justify-content: space-between; gap: 0.5rem; align-items: flex-start;">
+   <span><strong>${ecartees.length}</strong> <span>alerte(s) écartée(s) de l'action en masse :</span></span>
+   <button type="button" class="btn btn-sm" style="background: var(--surface-3);" onclick="this.closest('.bulk-report').classList.add('hidden')" aria-label="Fermer le compte rendu">✕</button>
+  </div>
+  <ul>${ecartees.map((e) => `<li><a href="#" onclick="openAlertModal(${e.id}); return false;">#${e.id}</a> — <span>${escapeHtml(e.reason || e.code)}</span>${detail(e)}</li>`).join("")}</ul>`;
+ el.classList.remove("hidden");
+}
+
+async function _posterLaPropositionEnMasse(corps) {
+ const response = await apiFetch("/api/alerts/bulk", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(corps),
+ });
+ return { ok: response.ok, status: response.status, data: await response.json() };
+}
+
+// Proposer la même décision, avec le même motif, pour toute la sélection. Le
+// serveur écrit une proposition par alerte ; la validation 4-yeux reste une
+// par une. Un faux positif sur une liste de gel (périmètre SANCTION) demande
+// une confirmation explicite : le serveur la réclame (409) avant d'écrire quoi
+// que ce soit, et dit pourquoi.
+async function bulkProposeSelected(channel, decision) {
+ const ids = Array.from(selectedAlertsByChannel[channel]);
+ if (!ids.length) { showToast("Aucune alerte sélectionnée.", "error"); return; }
+ const titre = decision === "CONFIRMED"
+  ? "Proposer « vrai positif » pour la sélection" : "Proposer « faux positif » pour la sélection";
+ const comment = await promptDialog(titre, {
+  message: "Un même motif pour chaque alerte sélectionnée : chacune reçoit sa proposition, et chacune sera validée une par une (4-yeux) par un réviseur différent de vous.",
+  textarea: true, placeholder: "Motivation réglementaire commune...",
+  // Les motifs de CETTE décision seulement : en masse, un clic distrait se
+  // multiplierait par le nombre d'alertes cochées.
+  suggestions: motifsDeLaDecision(await chargerMotifsDeCloture(), decision),
+ });
+ if (comment === null) return;
+ const corps = { ids, action: "propose", decision, comment };
+ try {
+  let reponse = await _posterLaPropositionEnMasse(corps);
+  const detail = reponse.data && reponse.data.detail;
+  if (reponse.status === 409 && detail && detail.code === "CONFIRMATION_SANCTION") {
+   const ok = await confirmDialog(detail.message, {
+    title: "Faux positif sur une liste de gel (périmètre SANCTION)",
+    confirmLabel: "Je confirme : chacune a été instruite", danger: true });
+   if (!ok) return;
+   reponse = await _posterLaPropositionEnMasse({ ...corps, confirm_sanction: true });
+  }
+  if (!reponse.ok) {
+   const d = reponse.data && reponse.data.detail;
+   showToast("Erreur : " + ((d && d.message) || d || "Action en masse refusée."), "error");
+   return;
+  }
+  const data = reponse.data;
+  showToast(data.message, data.skipped.length ? "warning" : "success", 7000);
+  _rendreCompteDeLActionEnMasse(channel, data);
+  clearAlertSelection(channel, false);
+  fetchAlerts(channel);
+  refreshSidebarCounters();
+ } catch (e) { console.error("Bulk propose error:", e); }
+}
+
+// « Prendre la suivante » : le serveur s'assigne, atomiquement, l'alerte non
+// assignée la plus urgente (échéance SLA, puis priorité) ; l'écran l'ouvre et
+// pose la visée de la file dessus. Rien à prendre n'est pas une erreur.
+async function prendreLaSuivante(channel = null) {
+ try {
+  const url = channel ? `/api/alerts/claim-next?channel=${encodeURIComponent(channel)}` : "/api/alerts/claim-next";
+  const response = await apiFetch(url, { method: "POST" });
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  _maJournee = null;   // l'accueil relira ce qui reste à prendre
+  if (!data.claimed) {
+   showToast(data.message, "info", 6000);
+   if (data.snoozed_unassigned) {
+    showToast(`${data.snoozed_unassigned} alerte(s) non assignée(s) en attente : elles reviennent d'elles-mêmes à l'échéance de leur report.`, "info", 7000);
+   }
+   return null;
+  }
+  const a = data.alert;
+  showToast(data.message, "success");
+  const espace = a.channel === "FILTERING" ? "filtering" : "screening";
+  switchTab(espace);
+  switchSubTab(espace, a.channel === "FILTERING" ? "alerts-filtering" : "alerts-screening");
+  _viseAlerteId = a.id;
+  refreshAlertQueues();
+  openAlertModal(a.id);
+  return a;
+ } catch (e) {
+  console.error("Claim next error:", e);
+  return null;
+ }
+}
+
+// « Proposer & suivante » dans la modale : un bouton qui se déplie en ses deux
+// décisions — la décision reste dite en toutes lettres, jamais devinée.
+function boutonProposerEtSuivante() {
+ return `<span id="alert-proposer-suivante" style="display: inline-flex; gap: 0.5rem; flex-wrap: wrap;"><button class="btn btn-sm btn-secondary" onclick="deplierProposerEtSuivante()" title="Proposer une décision pour cette alerte, puis prendre la suivante non assignée la plus urgente">Proposer & suivante…</button></span>`;
+}
+
+function deplierProposerEtSuivante() {
+ const el = document.getElementById("alert-proposer-suivante");
+ if (!el) return;
+ el.innerHTML = `<button class="btn btn-sm btn-primary" onclick="proposerEtSuivante('FALSE_POSITIVE')">Faux positif & suivante</button>
+  <button class="btn btn-sm" style="background: rgba(239,68,68,0.85);" onclick="proposerEtSuivante('CONFIRMED')">Vrai positif & suivante</button>`;
+ const premier = el.querySelector("button");
+ if (premier) premier.focus();
+}
+
+async function proposerEtSuivante(decision) {
+ const data = await proposeAlertDecision(decision);
+ if (data) await prendreLaSuivante(data.channel || "SCREENING");
 }
 
 // --- MFA TOTP (carte Paramètres + réinitialisation admin) ---

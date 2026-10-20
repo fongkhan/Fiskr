@@ -205,6 +205,11 @@ def test_bulk_assign_and_priority(client):
     valeur épinglait précisément ce que le plancher interdit (le refus est
     tenu par tests/test_gel_des_avoirs.py). L'intention du test — une alerte
     clôturée est ignorée au passage suivant — est gardée, avec HIGH.
+
+    Réécrit (file de l'analyste, octobre 2026) : `skipped` était une liste
+    d'identifiants sans raison — close ? introuvable ? sous le plancher ? Chaque
+    entrée porte désormais son identifiant, son code et sa raison ; le test
+    l'exige au lieu de chercher l'identifiant nu.
     """
     alert_ids = [_screen_putin(client, _new_client_id())["alert_id"] for _ in range(3)]
 
@@ -241,7 +246,10 @@ def test_bulk_assign_and_priority(client):
     again = client.post("/api/alerts/bulk", json={
         "ids": alert_ids, "action": "priority", "priority": "HIGH"})
     assert again.status_code == 200
-    assert alert_ids[0] in again.json()["skipped"]
+    ecartees = {e["id"]: e for e in again.json()["skipped"]}
+    assert ecartees[alert_ids[0]]["code"] == "CLOSE"
+    assert ecartees[alert_ids[0]]["status"] == "CLOSED_FALSE_POSITIVE"
+    assert ecartees[alert_ids[0]]["reason"]
     assert sorted(again.json()["updated"]) == sorted(alert_ids[1:])
 
 

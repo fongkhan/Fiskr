@@ -83,6 +83,92 @@ def compute_due_at(db, priority: str, created_at: Optional[datetime] = None) -> 
     return _echeance(alert_sla_hours(db), priority, created_at)
 
 
+# ------------------------------------------------ prendre la suivante
+
+# Rang de traitement d'une priorite, DERIVE de ALERT_PRIORITIES (du plus bas au
+# plus haut) : CRITICAL 0, HIGH 1, MEDIUM 2, LOW 3. La file, « Ma journee » et
+# « Prendre la suivante » lisent ce rang ; une priorite inconnue vaut MEDIUM.
+RANG_DE_PRIORITE = {p: i for i, p in enumerate(reversed(ALERT_PRIORITIES))}
+
+
+def rang_de_priorite_sql():
+    from sqlalchemy import case
+    return case(RANG_DE_PRIORITE, value=Alert.priority, else_=RANG_DE_PRIORITE["MEDIUM"])
+
+
+def critere_de_canal(channel: Optional[str]):
+    """Condition SQL d'un canal, ou None. SCREENING inclut les alertes
+    anterieures a la colonne channel (NULL = criblage)."""
+    if not channel:
+        return None
+    ch = channel.strip().upper()
+    if ch == "SCREENING":
+        return (Alert.channel == "SCREENING") | (Alert.channel.is_(None))
+    return Alert.channel == ch
+
+
+# Ce que « Prendre la suivante » peut prendre : une alerte a INSTRUIRE (ni en
+# attente de validation — c'est le travail d'un reviseur —, ni escaladee), que
+# personne n'a, et que personne n'a mise en attente : un report actif dit
+# « pas avant telle date », la donner maintenant l'annulerait. L'accueil compte
+# les alertes non assignees avec ces memes criteres : il n'annonce rien que le
+# bouton ne puisse donner.
+STATUTS_A_PRENDRE = ("OPEN", "IN_PROGRESS")
+
+
+def criteres_prenables(maintenant: datetime) -> tuple:
+    from sqlalchemy import or_
+    return (Alert.assigned_to.is_(None), Alert.status.in_(STATUTS_A_PRENDRE),
+            or_(Alert.snoozed_until.is_(None), Alert.snoozed_until <= maintenant))
+
+
+def ordre_de_prise() -> tuple:
+    """L'echeance SLA d'abord — c'est l'obligation qui court, et elle porte deja
+    la priorite (SLA par priorite) —, puis la priorite a echeance egale, le
+    score, l'anciennete. La file affichee trie priorite puis echeance ; les deux
+    lisent le meme rang et la meme echeance."""
+    return (Alert.due_at.asc().nullslast(), rang_de_priorite_sql().asc(),
+            Alert.final_score.desc(), Alert.created_at.asc(), Alert.id.asc())
+
+
+def prendre_la_suivante(db, username: str, channel: Optional[str] = None) -> Optional[Alert]:
+    """
+    S'assigne l'alerte prenable la plus urgente, ou None s'il n'y en a pas.
+
+    ATOMIQUE par comparaison-echange : l'UPDATE repete les criteres
+    (« toujours a personne ») et ne touche la ligne que s'ils tiennent encore.
+    Deux analystes qui cliquent ensemble lisent le meme candidat ; un seul
+    UPDATE affecte la ligne, l'autre en affecte zero et passe au suivant. Un
+    « lire puis ecrire » ordinaire donnait la meme alerte aux deux — le second
+    ecrasant le premier sans que ni l'un ni l'autre le sache. Meme garantie sur
+    PostgreSQL (l'UPDATE concurrent attend le verrou de ligne puis reevalue sa
+    clause WHERE) et sur SQLite (ecritures serialisees). Chaque echec ecarte un
+    candidat : la boucle se termine, et None ne sort que d'une requete qui n'a
+    plus rien trouve. L'appelant journalise et valide la transaction.
+    """
+    from sqlalchemy import update
+    maintenant = datetime.utcnow()
+    criteres = list(criteres_prenables(maintenant))
+    canal = critere_de_canal(channel)
+    if canal is not None:
+        criteres.append(canal)
+    ecartees: List[int] = []
+    while True:
+        requete = db.query(Alert.id).filter(*criteres)
+        if ecartees:
+            requete = requete.filter(Alert.id.not_in(ecartees))
+        candidat = requete.order_by(*ordre_de_prise()).first()
+        if candidat is None:
+            return None
+        prise = db.execute(
+            update(Alert).where(Alert.id == candidat.id, *criteres)
+            .values(assigned_to=username, status="IN_PROGRESS")
+            .execution_options(synchronize_session=False))
+        if prise.rowcount == 1:
+            return db.query(Alert).populate_existing().filter(Alert.id == candidat.id).one()
+        ecartees.append(candidat.id)
+
+
 def is_whitelisted(db, client_id: Optional[str], entity_id: Optional[str]) -> Optional[WhitelistPair]:
     """
     Retourne la paire de liste blanche ACTIVE (non revoquee, non expiree)

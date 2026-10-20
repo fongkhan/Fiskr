@@ -104,11 +104,27 @@ MESSAGES: Dict[str, Dict[str, str]] = {
     "Aucune alerte sélectionnée.": {
         "en": "No alert selected.", "de": "Kein Alarm ausgewählt.",
         "es": "Ninguna alerta seleccionada.", "zh": "未选择警报。", "ar": "لم يُحدد أي تنبيه."},
-    "Action en masse inconnue (assign ou priority).": {
-        "en": "Unknown bulk action (assign or priority).",
-        "de": "Unbekannte Massenaktion (assign oder priority).",
-        "es": "Acción masiva desconocida (assign o priority).",
-        "zh": "未知的批量操作（assign 或 priority）。", "ar": "إجراء جماعي غير معروف (assign أو priority)."},
+    "Action en masse inconnue (assign, priority ou propose).": {
+        "en": "Unknown bulk action (assign, priority or propose).",
+        "de": "Unbekannte Massenaktion (assign, priority oder propose).",
+        "es": "Acción masiva desconocida (assign, priority o propose).",
+        "zh": "未知的批量操作（assign、priority 或 propose）。", "ar": "إجراء جماعي غير معروف (assign أو priority أو propose)."},
+    "La validation 4-yeux reste unitaire : chaque décision proposée se valide une par une, par un réviseur différent du proposeur.": {
+        "en": "Four-eyes validation stays one at a time: each proposed decision is validated individually, by a reviewer other than the proposer.",
+        "de": "Die Vier-Augen-Freigabe bleibt einzeln: jede vorgeschlagene Entscheidung wird einzeln freigegeben, von einem anderen Prüfer als dem Vorschlagenden.",
+        "es": "La validación a cuatro ojos sigue siendo unitaria: cada decisión propuesta se valida una a una, por un revisor distinto del proponente.",
+        "zh": "四眼复核仍须逐条进行：每项提议的决定都要单独复核，且复核人不得是提议人。",
+        "ar": "يبقى تحقق الأربع أعين فرديًا: يُعتمد كل قرار مقترح على حدة، من قِبل مراجع غير صاحب الاقتراح."},
+    "Aucune alerte à prendre : chaque alerte à instruire a déjà quelqu'un.": {
+        "en": "No alert to take: every alert to be investigated already has someone.",
+        "de": "Kein Alarm zu übernehmen: jeder zu bearbeitende Alarm hat bereits jemanden.",
+        "es": "Ninguna alerta que tomar: cada alerta por instruir ya tiene a alguien.",
+        "zh": "没有可领取的警报：每条待处理的警报都已有人负责。",
+        "ar": "لا يوجد تنبيه لأخذه: لكل تنبيه قيد التحقيق شخص مسؤول بالفعل."},
+    "Canal inconnu (SCREENING ou FILTERING).": {
+        "en": "Unknown channel (SCREENING or FILTERING).", "de": "Unbekannter Kanal (SCREENING oder FILTERING).",
+        "es": "Canal desconocido (SCREENING o FILTERING).", "zh": "未知通道（SCREENING 或 FILTERING）。",
+        "ar": "قناة غير معروفة (SCREENING أو FILTERING)."},
     # Réglages & gouvernance
     "Aucun réglage fourni.": {
         "en": "No setting provided.", "de": "Keine Einstellung übermittelt.",
@@ -274,6 +290,59 @@ TEMPLATES = [
         "de": "{0} Alarm(e) aktualisiert, {1} übersprungen.",
         "es": "{0} alerta(s) actualizada(s), {1} ignorada(s).",
         "zh": "已更新 {0} 条警报，跳过 {1} 条。", "ar": "حُدّث {0} تنبيه وتم تجاهل {1}."}),
+    # File de l'analyste : proposition en masse et « Prendre la suivante »
+    (re.compile(r"^(\d+) décision\(s\) proposée\(s\), chacune en attente de sa validation 4-yeux ; "
+                r"(\d+) alerte\(s\) écartée\(s\)\.$"), {
+        "en": "{0} decision(s) proposed, each awaiting its own four-eyes validation; {1} alert(s) set aside.",
+        "de": "{0} Entscheidung(en) vorgeschlagen, jede wartet auf ihre eigene Vier-Augen-Freigabe; {1} Alarm(e) ausgelassen.",
+        "es": "{0} decisión(es) propuesta(s), cada una pendiente de su validación a cuatro ojos; {1} alerta(s) descartada(s).",
+        "zh": "已提议 {0} 项决定，每项都等待各自的四眼复核；{1} 条警报被排除。",
+        "ar": "اقتُرح {0} قرار، كل منها بانتظار تحقق الأربع أعين الخاص به؛ استُبعد {1} تنبيه."}),
+    (re.compile(r"^(\d+) alerte\(s\) clôturée\(s\) \(validation 4-yeux désactivée\) ; "
+                r"(\d+) alerte\(s\) écartée\(s\)\.$"), {
+        "en": "{0} alert(s) closed (four-eyes validation disabled); {1} alert(s) set aside.",
+        "de": "{0} Alarm(e) geschlossen (Vier-Augen-Freigabe deaktiviert); {1} Alarm(e) ausgelassen.",
+        "es": "{0} alerta(s) cerrada(s) (validación a cuatro ojos desactivada); {1} alerta(s) descartada(s).",
+        "zh": "已关闭 {0} 条警报（四眼复核已停用）；{1} 条警报被排除。",
+        "ar": "أُغلق {0} تنبيه (تحقق الأربع أعين معطّل)؛ استُبعد {1} تنبيه."}),
+    (re.compile(r"^Vous proposez « faux positif » pour (\d+) alerte\(s\) d'une liste de gel \(périmètre "
+                r"SANCTION\)\. Rien n'est clos : chaque proposition attendra sa propre validation 4-yeux\. "
+                r"Mais une correspondance de gel manquée est constatable à l'audit et sanctionnable : "
+                r"confirmez que chacune a été instruite individuellement\.$"), {
+        "en": "You are proposing “false positive” for {0} alert(s) on a freeze list (SANCTION perimeter). "
+              "Nothing is closed: each proposal will await its own four-eyes validation. But a missed freeze "
+              "match is visible at audit and sanctionable: confirm that each one was investigated individually.",
+        "de": "Sie schlagen „Fehlalarm“ für {0} Alarm(e) einer Einfrierungsliste vor (Perimeter SANCTION). "
+              "Nichts wird geschlossen: jeder Vorschlag wartet auf seine eigene Vier-Augen-Freigabe. Ein "
+              "übersehener Treffer ist jedoch bei der Prüfung feststellbar und sanktionierbar: bestätigen Sie, "
+              "dass jeder einzeln bearbeitet wurde.",
+        "es": "Propone «falso positivo» para {0} alerta(s) de una lista de congelación (perímetro SANCTION). "
+              "Nada se cierra: cada propuesta esperará su propia validación a cuatro ojos. Pero una "
+              "coincidencia de congelación omitida es constatable en auditoría y sancionable: confirme que "
+              "cada una se instruyó individualmente.",
+        "zh": "您正在为冻结名单（SANCTION 范围）上的 {0} 条警报提议“误报”。不会关闭任何警报："
+              "每项提议都将等待各自的四眼复核。但漏掉冻结命中会在审计中被发现并可能受罚：请确认每条都已单独调查。",
+        "ar": "أنت تقترح «إيجابي كاذب» لـ {0} تنبيه على قائمة تجميد (نطاق SANCTION). لا يُغلق شيء: "
+              "سينتظر كل اقتراح تحقق الأربع أعين الخاص به. لكن التطابق الفائت مع قائمة تجميد يُكتشف عند "
+              "التدقيق ويُعاقب عليه: أكّد أن كل تنبيه قد حُقق فيه على حدة."}),
+    (re.compile(r"^Alerte #(\d+) prise en charge : la plus urgente des alertes non assignées\.$"), {
+        "en": "Alert #{0} taken: the most urgent of the unassigned alerts.",
+        "de": "Alarm #{0} übernommen: der dringendste der nicht zugewiesenen Alarme.",
+        "es": "Alerta #{0} asumida: la más urgente de las alertas sin asignar.",
+        "zh": "已领取警报 #{0}：未指派警报中最紧急的一条。",
+        "ar": "أُخذ التنبيه رقم {0}: الأكثر إلحاحًا بين التنبيهات غير المسندة."}),
+    (re.compile(r"^Motif réservé à un vrai positif : « (.+) »\. Il ne peut pas motiver un faux positif\.$"), {
+        "en": "Reason reserved for a true positive: “{0}”. It cannot justify a false positive.",
+        "de": "Begründung für einen echten Treffer reserviert: „{0}“. Sie kann keinen Fehlalarm begründen.",
+        "es": "Motivo reservado a un verdadero positivo: «{0}». No puede motivar un falso positivo.",
+        "zh": "该理由仅适用于真阳性：“{0}”。不能用于说明误报。",
+        "ar": "سبب مخصص لإيجابي حقيقي: «{0}». لا يمكن أن يبرر إيجابيًا كاذبًا."}),
+    (re.compile(r"^Motif réservé à un faux positif : « (.+) »\. Il ne peut pas motiver un vrai positif\.$"), {
+        "en": "Reason reserved for a false positive: “{0}”. It cannot justify a true positive.",
+        "de": "Begründung für einen Fehlalarm reserviert: „{0}“. Sie kann keinen echten Treffer begründen.",
+        "es": "Motivo reservado a un falso positivo: «{0}». No puede motivar un verdadero positivo.",
+        "zh": "该理由仅适用于误报：“{0}”。不能用于说明真阳性。",
+        "ar": "سبب مخصص لإيجابي كاذب: «{0}». لا يمكن أن يبرر إيجابيًا حقيقيًا."}),
     (re.compile(r"^Vue « (.+) » sauvegardée\.$"), {
         "en": "View “{0}” saved.", "de": "Ansicht „{0}“ gespeichert.",
         "es": "Vista «{0}» guardada.", "zh": "视图“{0}”已保存。", "ar": "حُفظت طريقة العرض «{0}»."}),
