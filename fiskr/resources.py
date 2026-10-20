@@ -97,6 +97,9 @@ class ResourceIndex:
         self.collisions: List[Dict[str, str]] = []
         self.content_hash: str = ""
         self.learned_terms: int = 0
+        # Empreinte des equivalences apprises fusionnees (`_merge_learned_from_db`) :
+        # avec `content_hash`, ce que `actualiser` compare a la base et au disque.
+        self.learned_hash: Optional[str] = None
 
     # ---------------- Interrogation ----------------
 
@@ -306,12 +309,11 @@ def load_index(directory: Path) -> ResourceIndex:
     directory = Path(directory)
     if not directory.exists():
         logger.info(f"Répertoire de ressources absent ({directory}) : aucune équivalence chargée.")
-        index.content_hash = hashlib.sha256(b"").hexdigest()[:16]
+        index.content_hash = _empreinte_des_fichiers([])
         return index
 
-    digest = hashlib.sha256()
-    for path in sorted(directory.glob("*.y*ml")):
-        raw = path.read_text(encoding="utf-8")
+    textes = _fichiers(directory)
+    for path, raw in textes:
         try:
             doc = yaml.safe_load(raw)
         except yaml.YAMLError as e:
@@ -320,7 +322,6 @@ def load_index(directory: Path) -> ResourceIndex:
         terms_added = 0
         for class_id, terms in parsed["groups"]:
             terms_added += index._add_group(parsed["field"], class_id, terms, path.name)
-        digest.update(raw.encode("utf-8"))
         index.files.append({
             "file": path.name,
             "field": parsed["field"],
@@ -330,7 +331,7 @@ def load_index(directory: Path) -> ResourceIndex:
             "terms": terms_added,
         })
 
-    index.content_hash = digest.hexdigest()[:16]
+    index.content_hash = _empreinte_des_fichiers(textes)
     if index.collisions:
         # Signale mais ne bloque pas : la collision est tracee et visible dans
         # l'ecran de diagnostic, le premier declarant l'emporte
@@ -340,11 +341,41 @@ def load_index(directory: Path) -> ResourceIndex:
     return index
 
 
+def _fichiers(directory: Path) -> List[Tuple[Path, str]]:
+    """Les fichiers de ressources d'un repertoire, dans l'ordre de chargement."""
+    directory = Path(directory)
+    if not directory.exists():
+        return []
+    return [(path, path.read_text(encoding="utf-8"))
+            for path in sorted(directory.glob("*.y*ml"))]
+
+
+def _empreinte_des_fichiers(textes: List[Tuple[Path, str]]) -> str:
+    """`content_hash` d'un index : l'empreinte du texte brut de ses fichiers.
+    Une seule definition, que lisent le chargement et `actualiser` — qui la
+    calcule sans analyser le YAML (190 ms par chargement, mesure)."""
+    digest = hashlib.sha256()
+    for _path, raw in textes:
+        digest.update(raw.encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def _empreinte_des_apprises(groups: Dict[str, Dict[str, List[str]]]) -> str:
+    """Empreinte des equivalences approuvees, independante de l'ordre de
+    lecture des lignes (une base n'en garantit aucun sans ORDER BY)."""
+    forme = {champ: {classe: sorted(termes) for classe, termes in classes.items()}
+             for champ, classes in groups.items()}
+    return hashlib.sha256(json.dumps(forme, sort_keys=True, ensure_ascii=False)
+                          .encode("utf-8")).hexdigest()[:16]
+
+
 # ------------------ INDEX ACTIF (partage par le criblage) ------------------
 
 _lock = threading.Lock()
 _active: Optional[ResourceIndex] = None
 _active_dir: Optional[Path] = None
+# Vrai quand l'index actif a ete pose par `set_index` : `actualiser` le laisse.
+_force = False
 
 
 def default_directory() -> Path:
@@ -366,7 +397,9 @@ def _merge_learned_from_db(index: ResourceIndex, db=None) -> None:
         from fiskr.resource_mining import approved_groups
 
         if db is not None:
-            index.merge_learned(approved_groups(db))
+            groups = approved_groups(db)
+            index.merge_learned(groups)
+            index.learned_hash = _empreinte_des_apprises(groups)
             return
         from fiskr.database import SessionLocal
 
@@ -374,7 +407,9 @@ def _merge_learned_from_db(index: ResourceIndex, db=None) -> None:
             return
         session = SessionLocal()
         try:
-            index.merge_learned(approved_groups(session))
+            groups = approved_groups(session)
+            index.merge_learned(groups)
+            index.learned_hash = _empreinte_des_apprises(groups)
         finally:
             session.close()
     except Exception as e:
@@ -401,22 +436,68 @@ def get_index() -> ResourceIndex:
 
 def reload_index(directory: Optional[Path] = None, db=None) -> ResourceIndex:
     """Recharge l'index a chaud (remplacement atomique de l'instance)."""
-    global _active, _active_dir
+    global _active, _active_dir, _force
     target = Path(directory) if directory else default_directory()
     fresh = load_index(target)
     _merge_learned_from_db(fresh, db=db)
     with _lock:
         _active = fresh
         _active_dir = target
+        _force = False
     invalidate_context()
     return fresh
 
 
+def actualiser(db) -> bool:
+    """
+    Relit l'index actif si ce qu'il contient a change depuis sa construction :
+    le texte des fichiers, ou les equivalences approuvees en base. Rend True
+    s'il a ete remplace. Appele par le rechargement par EPOQUE (fiskr/
+    parametrage.py), dans les processus qui n'ont pas fait le changement.
+
+    Seul le processus qui approuvait une equivalence (ou rechargeait les
+    fichiers) rechargeait son index : reproduit, un processus B dont le seul
+    lien avec A est la base relisait son cache a l'epoque suivante et scorait
+    toujours sans l'equivalence — `invalidate_context` y vidait le contexte,
+    pas l'index. Comparer deux empreintes coute une lecture des fichiers et
+    une requete ; recharger, une analyse YAML (190 ms) : on ne recharge que ce
+    qui a change.
+
+    Un index force par `set_index` (tests, essais) n'est jamais remplace :
+    son contenu ne vient ni des fichiers ni de la base. Un fichier devenu
+    invalide sur le disque laisse l'index precedent en place, comme le refus
+    de POST /api/resources/reload le laisse dans le processus qui le recoit.
+    """
+    with _lock:
+        courant, repertoire, force = _active, _active_dir, _force
+    invalidate_context()
+    if courant is None or force:
+        return False   # chargement paresseux au premier criblage : il lira l'etat du jour
+    cible = default_directory()
+    try:
+        from fiskr.resource_mining import approved_groups
+        fichiers = _empreinte_des_fichiers(_fichiers(cible))
+        apprises = _empreinte_des_apprises(approved_groups(db))
+    except Exception as e:  # jamais bloquant : l'index en place reste servi
+        logger.warning(f"Ressources : actualisation impossible ({e}) — index en place conservé.")
+        return False
+    if (repertoire == cible and courant.content_hash == fichiers
+            and courant.learned_hash == apprises):
+        return False
+    try:
+        reload_index(cible, db=db)
+    except ResourceError as e:
+        logger.error(f"Ressources invalides sur le disque, index précédent conservé : {e}")
+        return False
+    return True
+
+
 def set_index(index: Optional[ResourceIndex]) -> None:
     """Force l'index actif (tests). None = rechargement paresseux."""
-    global _active
+    global _active, _force
     with _lock:
         _active = index
+        _force = index is not None
     invalidate_context()
 
 

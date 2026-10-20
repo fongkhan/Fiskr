@@ -221,30 +221,35 @@ def _send_now(event_key: str, label: str, payload: Dict[str, Any],
 
 def emit(db, event_key: str, payload: Optional[Dict[str, Any]] = None, *,
          urgency_override: Optional[str] = None,
-         recipients_override: Optional[Sequence[str]] = None) -> None:
+         recipients_override: Optional[Sequence[str]] = None) -> Optional[int]:
     """
     Notifie une etape metier. Ne leve JAMAIS : a appeler apres le commit de
     l'operation, sans try/except cote appelant.
 
     Les cles de charge utile prefixees `_` servent au routage et ne sont pas
     affichees : `_assignee` (audience assignee), `_actor` (audience actor).
+
+    Rend l'identifiant de la ligne ecrite au journal des notifications, ou
+    None si rien n'y a ete ecrit (evenement coupe, journal indisponible) : un
+    appelant qui doit n'emettre qu'une fois (fiskr/tasks.py, l'approbation)
+    sait ainsi si la notification existe. La ligne est validee par le commit
+    de CETTE session : ce que l'appelant y a pose part avec elle.
     """
     try:
         event = EVENT_CATALOG.get(event_key)
         if event is None:
             logger.error(f"Évènement de notification inconnu : {event_key}")
-            return
+            return None
         payload = dict(payload or {})
         if not notification_events(db).get(event_key, event.default_enabled):
-            return
+            return None
 
         recipients = list(recipients_override) if recipients_override else resolve_recipients(db, event_key, payload)
         urgency = urgency_override or event.urgency
 
         if urgency == DIGEST:
             # Mise en file : la boucle de regroupement composera un seul mail
-            _record(db, event_key, event, recipients, payload, "QUEUED")
-            return
+            return _record(db, event_key, event, recipients, payload, "QUEUED")
 
         delivery_id = _record(db, event_key, event, recipients, payload, "QUEUED")
         thread = threading.Thread(
@@ -253,8 +258,10 @@ def emit(db, event_key: str, payload: Optional[Dict[str, Any]] = None, *,
             daemon=True,
         )
         thread.start()
+        return delivery_id
     except Exception as e:  # aucune notification ne casse une opération métier
         logger.error(f"Notification impossible ({event_key}) : {e}")
+        return None
 
 
 # ------------------ RECAPITULATIF PERIODIQUE ------------------

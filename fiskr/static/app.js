@@ -3554,6 +3554,7 @@ const OPERATION_KIND_ICONS = {
  batch: uiIcon("package"), batch_campaign: uiIcon("package"),
  quality: uiIcon("activity"), quality_check: uiIcon("activity"),
  lookback: uiIcon("clock"), client_screening: uiIcon("shield"), mining: uiIcon("search"),
+ entity_rescreen: uiIcon("shield"),
  engine_simulation: uiIcon("sliders"), resource_simulation: uiIcon("sliders"),
  fprules_bench: uiIcon("target"), testpanel_generate: uiIcon("users"),
 };

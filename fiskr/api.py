@@ -11,7 +11,7 @@ import secrets
 import logging
 import shutil
 import threading
-from datetime import date as date_type, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Union
@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from fiskr.config import config, PROJECT_ROOT
 from fiskr import capabilities as caps
+from fiskr import parametrage
 from fiskr import rarete
 from fiskr import univers
 from fiskr.quality import evaluate_and_clean
@@ -213,11 +214,9 @@ def _entity_search_blob(ent: Dict[str, Any]) -> str:
     return strip_accents(" | ".join(p for p in parts if p)).upper()
 
 
-def _valeur_de_cache(valeur):
-    """Une colonne telle que le cache de criblage doit la porter : serialisable."""
-    if isinstance(valeur, (datetime, date_type)):
-        return valeur.isoformat()
-    return valeur
+# Une colonne telle que le cache de criblage doit la porter : serialisable. Une
+# seule definition, que le re-criblage lit aussi (fiskr.database).
+from fiskr.database import valeur_de_criblage as _valeur_de_cache
 
 
 def load_watchlist_cache(db: Session):
@@ -232,8 +231,10 @@ def load_watchlist_cache(db: Session):
     # un demon recharge apres la coupure de `adjust.dob` la voyait toujours
     # active, et rebatissait son index avec. Les cles de l'index dependent de
     # ces deux reglages : ils sont relus ICI, avant de batir quoi que ce soit.
-    caps.invalidate_context()
-    resource_tables.invalidate_context()
+    # Les equivalences, contenu compris : seule l'activation etait relue, et
+    # une equivalence approuvee dans un autre processus n'atteignait jamais
+    # celui-ci (fiskr/parametrage.py).
+    parametrage.relire(db)
     univers.invalider()
 
     # Les lots READY des types WATCHLIST_* : la definition de l'univers vit
@@ -497,8 +498,11 @@ def run_resource_mining(db, started_by: str = "système",
             if resources_active(db):
                 # Meme lecon que le reglage d'activation : l'index des fiches
                 # listees fige ses cles de blocking, il doit etre reconstruit
-                # pour que les nouvelles equivalences aient un effet
-                load_watchlist_cache(db)
+                # pour que les nouvelles equivalences aient un effet. Et dans
+                # TOUS les processus : la fouille tourne dans le demon, qui
+                # rechargeait le seul cache qu'il ne sert pas ; l'epoque est le
+                # canal qui previent les processus web (fiskr/parametrage.py).
+                _refresh_production_cache(db)
         progress_registry.update(token, phase="DONE", kind="mining", label=label,
                                  started_by=started_by,
                                  processed=report["candidates"],
@@ -4860,6 +4864,46 @@ def _insert_manual_entity(db: Session, snap: Snapshot, payload: "WatchlistEntity
     snap.record_count += 1
     return {"entity_id": ent_dict["entity_id"], "primary_name": report["cleansed_name"]}
 
+def _recribler_contre_les_fiches(db: Session, entity_pks: List[int], *, geste: str,
+                                 reference_avant: Optional[str], username: str,
+                                 label: str) -> Dict[str, Any]:
+    """
+    Apres une correction ou un ajout manuel de fiches listees : soumet le
+    re-criblage du referentiel contre CES fiches (travail `entity_rescreen`,
+    fiskr.rescreen.recribler_apres_un_geste_manuel). Rend ce que l'endpoint
+    en dit : le jeton du travail, ou pourquoi aucun n'est parti.
+
+    Le re-criblage ne partait que d'une mise en production de lot : une fiche
+    corrigee pour porter la date de naissance d'un client, un homonyme ajoute
+    a la main, ne rencontraient personne avant un lookback.
+    """
+    if not entity_pks:
+        return {"submitted": False, "reason": "aucune fiche à confronter"}
+    if not auto_rescreen_enabled(db):
+        return {"submitted": False,
+                "reason": "re-criblage automatique désactivé (ingestion.auto_rescreen) : "
+                          "la fiche ne rencontrera les clients qu'au prochain lookback"}
+    if db.query(Snapshot.snapshot_id).filter(Snapshot.file_type == "CLIENT_BASE",
+                                             Snapshot.status == "READY").first() is None:
+        return {"submitted": False, "reason": "aucun référentiel clients en production"}
+    token = f"entity_rescreen-{uuid.uuid4().hex[:8]}"
+    job = _submit_job("entity_rescreen", token=token, label=label,
+                      params={"entity_pks": [int(pk) for pk in entity_pks], "geste": geste,
+                              "reference_avant": reference_avant, "username": username},
+                      started_by=username)
+    rendu = {"submitted": True, "job_token": token, "status": job.status}
+    if job.status == "ERROR":
+        rendu["error"] = job.error
+    return rendu
+
+
+def _reference_avant_le_geste(db: Session) -> str:
+    """L'empreinte de l'univers AVANT un geste manuel, lue avant toute
+    ecriture : c'est d'elle que le re-criblage prolonge la couverture."""
+    from fiskr.rescreen import reference_de_l_univers
+    return reference_de_l_univers(db)[1]
+
+
 @app.post("/api/watchlist/entity")
 async def create_watchlist_entity(
     payload: WatchlistEntityCreate,
@@ -4870,8 +4914,10 @@ async def create_watchlist_entity(
     Ajout manuel d'UNE entite. Sans list_type : snapshot generique historique
     (manual-watchlist). Avec list_type : snapshot d'ajouts manuels dedie a
     cette liste — l'entite compte alors dans cette liste (filtres, seuils de
-    cut-off, libelles d'alertes). Indexee immediatement dans le moteur.
+    cut-off, libelles d'alertes). Indexee immediatement dans le moteur, puis
+    le referentiel clients est recrible contre elle (`rescreen`).
     """
+    reference_avant = _reference_avant_le_geste(db)
     snap = _manual_snapshot_for(db, payload.list_type)
     result = _insert_manual_entity(db, snap, payload)
     db.commit()
@@ -4882,13 +4928,26 @@ async def create_watchlist_entity(
     # restait invisible du demon : un liste saisi manuellement n'etait pas
     # crible par les campagnes.
     _refresh_production_cache(db)
+    rescreen = _recribler_contre_les_fiches(
+        db, _pks_des_ajouts(db, snap.snapshot_id, [result["entity_id"]]),
+        geste="ajout", reference_avant=reference_avant,
+        username=current_user["username"],
+        label=f"Re-criblage — fiche {result['entity_id']} ajoutée")
     return {
         "message": "Entité ajoutée avec succès.",
         "entity_id": result["entity_id"],
         "primary_name": result["primary_name"],
         "list_type": snap.file_type,
         "snapshot_id": snap.snapshot_id,
+        "rescreen": rescreen,
     }
+
+
+def _pks_des_ajouts(db: Session, snapshot_id: str, entity_ids: List[str]) -> List[int]:
+    """Cles des fiches que l'ajout manuel vient d'inserer dans son lot."""
+    return [pk for (pk,) in db.query(WatchlistEntity.id).filter(
+        WatchlistEntity.snapshot_id == snapshot_id,
+        WatchlistEntity.entity_id.in_(entity_ids)).all()] if entity_ids else []
 
 class WatchlistEntityBatchCreate(BaseModel):
     list_type: Optional[str] = None
@@ -4905,14 +4964,15 @@ async def create_watchlist_entities_batch(
     """
     Ajout manuel PAR LOT vers la meme liste cible. Chaque ligne passe le
     quality gate individuellement : les refus n'empechent pas les autres
-    d'entrer (ils sont restitues ligne par ligne). Un seul commit et un seul
-    rechargement du cache pour tout le lot.
+    d'entrer (ils sont restitues ligne par ligne). Un seul commit, un seul
+    rechargement du cache et un seul re-criblage pour tout le lot.
     """
     if not payload.entities:
         raise HTTPException(status_code=400, detail="Aucune entité fournie.")
     if len(payload.entities) > MANUAL_BATCH_MAX:
         raise HTTPException(status_code=400,
                             detail=f"Au plus {MANUAL_BATCH_MAX} entités par lot.")
+    reference_avant = _reference_avant_le_geste(db)
     snap = _manual_snapshot_for(db, payload.list_type)
     added, rejected = [], []
     for index, entity in enumerate(payload.entities):
@@ -4932,14 +4992,21 @@ async def create_watchlist_entities_batch(
         # restait invisible du demon : un liste saisi manuellement n'etait pas
         # crible par les campagnes.
         _refresh_production_cache(db)
+        rescreen = _recribler_contre_les_fiches(
+            db, _pks_des_ajouts(db, snap.snapshot_id, [a["entity_id"] for a in added]),
+            geste="ajout", reference_avant=reference_avant,
+            username=current_user["username"],
+            label=f"Re-criblage — {len(added)} fiche(s) ajoutée(s) à {snap.file_type}")
     else:
         db.rollback()
+        rescreen = {"submitted": False, "reason": "aucune fiche ajoutée"}
     return {
         "message": f"{len(added)} entité(s) ajoutée(s), {len(rejected)} refusée(s).",
         "added": added,
         "rejected": rejected,
         "list_type": snap.file_type,
         "snapshot_id": snap.snapshot_id,
+        "rescreen": rescreen,
     }
 
 # ------------------ PATCH DE VALEURS D'UNE FICHE LISTEE ------------------
@@ -5070,6 +5137,13 @@ class WatchlistEntityPatch(BaseModel):
     countries: Optional[Dict[str, Any]] = None
     aliases: Optional[Dict[str, Any]] = None
     alternative_addresses: Optional[List[str]] = None
+    # Documents d'identite : ce que le moteur compare en premier (correspondance
+    # certaine sur le passeport, puis la CNI). Corriger une fiche pour y porter
+    # le numero qu'une source publie apres coup n'etait pas exprimable : le
+    # champ, absent du modele, etait ignore sans un mot (« Aucune modification »).
+    # [{"number": ..., "issuing_country": ...}], comme a l'ingestion.
+    passport_documents: Optional[List[Dict[str, Any]]] = None
+    national_id_documents: Optional[List[Dict[str, Any]]] = None
     # Champs etendus scalaires
     bic_swift: Optional[str] = None
     tax_id: Optional[str] = None
@@ -5114,8 +5188,10 @@ async def patch_watchlist_entity(
     Modifie les valeurs d'une fiche listee en production (snapshot READY, non
     exclue). Chaque champ modifie est journalise dans watchlist_entity_changes
     (qui, quand, ancienne -> nouvelle valeur), le checksum de version est
-    recalcule et le cache de criblage est recharge immediatement.
+    recalcule, le cache de criblage est recharge immediatement, et le
+    referentiel clients est recrible contre la fiche corrigee (`rescreen`).
     """
+    reference_avant = _reference_avant_le_geste(db)
     row = db.query(WatchlistEntity).filter(WatchlistEntity.id == entity_pk).first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fiche introuvable.")
@@ -5133,6 +5209,11 @@ async def patch_watchlist_entity(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le nom principal ne peut pas être vide.")
     if "entity_type" in fields and fields["entity_type"] not in ("I", "E", "V", "O"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="entity_type doit être I, E, V ou O.")
+    for champ in ("passport_documents", "national_id_documents"):
+        if fields.get(champ) and any(not str((d or {}).get("number") or "").strip()
+                                     for d in fields[champ]):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Chaque document d'identité porte un numéro (number).")
 
     def _journal_value(value):
         if value is None or isinstance(value, str):
@@ -5195,6 +5276,13 @@ async def patch_watchlist_entity(
     # restait invisible du demon : un liste saisi manuellement n'etait pas
     # crible par les campagnes.
     _refresh_production_cache(db)
+    # Tout changement, comme le re-criblage post-delta re-crible toute fiche
+    # dont l'empreinte a change : c'est aussi ce qui rend la couverture exacte
+    # (l'univers a change d'empreinte, les clients ne sont couverts contre lui
+    # qu'une fois confrontes a la fiche nouvelle).
+    rescreen = _recribler_contre_les_fiches(
+        db, [row.id], geste="correction", reference_avant=reference_avant,
+        username=reviewer["username"], label=f"Re-criblage — fiche {row.entity_id} corrigée")
     db.refresh(row)
 
     return {
@@ -5202,6 +5290,7 @@ async def patch_watchlist_entity(
         "changed_fields": changed_fields,
         "official_reference_date_touched": date_touched,
         "entity": _serialize_watchlist_entity(row, snap),
+        "rescreen": rescreen,
     }
 
 
@@ -7814,6 +7903,8 @@ _OPERATION_LINKS = {
     "lookback": "#screening/alerts-screening",
     # Le resultat d'un import de referentiel se lit sur la carte de couverture
     "client_screening": "#screening/screening-batch",
+    # Le re-criblage contre une fiche corrigee ou ajoutee : ses alertes
+    "entity_rescreen": "#screening/alerts-screening",
     "mining": "#alerts/alerts-resources",
     "engine_simulation": "#alerts/alerts-blocking",
     "resource_simulation": "#alerts/alerts-resources",

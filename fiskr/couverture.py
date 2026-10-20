@@ -83,7 +83,8 @@ def clients_en_production(db) -> int:
 
 # Les travaux qui, en cours, vont changer la couverture d'eux-mêmes : tant que
 # l'un d'eux tourne ou attend, un écart n'est pas encore un manquement.
-TRAVAUX_DE_CRIBLAGE = ("client_screening", "lookback", "approve", "sync", "ingest")
+TRAVAUX_DE_CRIBLAGE = ("client_screening", "lookback", "approve", "sync", "ingest",
+                       "entity_rescreen")
 
 
 def _contre_la_version_en_production(db, snap_ids, plafond: int) -> Dict[str, Any]:

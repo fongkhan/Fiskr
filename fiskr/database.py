@@ -28,6 +28,14 @@ class Snapshot(Base):
     reviewed_by = Column(String(100), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     review_comment = Column(Text, nullable=True)
+    # Quand l'approbation a ete notifiee (`snapshot_approved`) : UNE approbation,
+    # UNE notification, meme si le travail qui la suit se rejoue (remis en file
+    # apres un arret du demon, relance a la main). Posee dans la transaction
+    # meme qui ecrit la ligne du journal des notifications (fiskr/tasks.py).
+    # Sur le lot et non sur le dossier d'homologation, qui n'est jamais
+    # reecrit ; un lot n'est approuve qu'une fois (PENDING_REVIEW -> READY).
+    # NULL : approbation anterieure a ce suivi, ou pas encore notifiee.
+    approval_notified_at = Column(DateTime, nullable=True)
     # Dernier cahier de tests (backtest) execute sur ce snapshot candidat :
     # rapport archive avec le snapshot, auditable apres promotion
     backtest_report = Column(JSON, nullable=True)
@@ -2059,6 +2067,23 @@ CLES_HORS_EMPREINTE = frozenset({
     "modified_by", "modified_at", "excluded", "exclusion_justification",
     "exclusion_file_name", "exclusion_file_path", "excluded_by", "excluded_at",
 })
+
+
+def valeur_de_criblage(valeur):
+    """
+    Une colonne de fiche telle qu'un criblage doit la porter : serialisable.
+
+    La fiche rencontree finit dans l'arbre de decision, que la colonne JSON du
+    journal d'audit refuse brute : une date y voyage en ISO 8601, comme l'API
+    la rendrait. Le cache de criblage (fiskr.api) le faisait seul ; le
+    re-criblage (fiskr.rescreen) copiait les colonnes telles quelles, et un
+    lookback qui rencontrait une fiche corrigee a la main (`modified_at`)
+    finissait en ECHEC, sans ligne d'audit.
+    """
+    from datetime import date
+    if isinstance(valeur, (datetime, date)):
+        return valeur.isoformat()
+    return valeur
 
 # Toutes les formes de guillemet et d'apostrophe rencontrees dans les sources
 # (typographiques, accents graves employes en translitteration, pleine
