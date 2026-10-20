@@ -172,6 +172,48 @@ MESSAGES: Dict[str, Dict[str, str]] = {
     "Configuration importée.": {
         "en": "Configuration imported.", "de": "Konfiguration importiert.",
         "es": "Configuración importada.", "zh": "配置已导入。", "ar": "تم استيراد الإعدادات."},
+    "Fichier déjà importé (même empreinte SHA-256) : rien n'a été réimporté.": {
+        "en": "File already imported (same SHA-256 fingerprint): nothing was re-imported.",
+        "de": "Datei bereits importiert (gleicher SHA-256-Fingerabdruck): nichts wurde erneut importiert.",
+        "es": "Archivo ya importado (misma huella SHA-256): no se ha vuelto a importar nada.",
+        "zh": "文件已导入过（SHA-256 指纹相同）：未重新导入任何内容。",
+        "ar": "الملف مستورد مسبقاً (البصمة SHA-256 نفسها): لم يُعَد استيراد أي شيء."},
+    "Compte utilisateur mis à jour.": {
+        "en": "User account updated.", "de": "Benutzerkonto aktualisiert.",
+        "es": "Cuenta de usuario actualizada.", "zh": "用户账户已更新。", "ar": "تم تحديث حساب المستخدم."},
+    # Décision et priorité d'alerte : le statut et la priorité se disent par
+    # leur libellé (narrative.ALERT_STATUS_LABELS, database.ALERT_PRIORITY_LABELS).
+    "Décision validée, alerte close — faux positif.": {
+        "en": "Decision validated, alert closed — false positive.",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — Fehlalarm.",
+        "es": "Decisión validada, alerta cerrada — falso positivo.",
+        "zh": "决定已确认，警报已关闭——误报。", "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي كاذب."},
+    "Décision validée, alerte close — vrai positif confirmé.": {
+        "en": "Decision validated, alert closed — confirmed true positive.",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — bestätigter echter Treffer.",
+        "es": "Decisión validada, alerta cerrada — verdadero positivo confirmado.",
+        "zh": "决定已确认，警报已关闭——确认真阳性。", "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد."},
+    "Alerte déjà close — faux positif.": {
+        "en": "Alert already closed — false positive.", "de": "Alarm bereits geschlossen — Fehlalarm.",
+        "es": "Alerta ya cerrada — falso positivo.", "zh": "警报已关闭——误报。", "ar": "التنبيه مغلق مسبقاً — إيجابي كاذب."},
+    "Alerte déjà close — vrai positif confirmé.": {
+        "en": "Alert already closed — confirmed true positive.", "de": "Alarm bereits geschlossen — bestätigter echter Treffer.",
+        "es": "Alerta ya cerrada — verdadero positivo confirmado.", "zh": "警报已关闭——确认真阳性。", "ar": "التنبيه مغلق مسبقاً — إيجابي حقيقي مؤكد."},
+    "Alerte déjà close par règle anti-faux positif.": {
+        "en": "Alert already closed by an anti-false-positive rule.", "de": "Alarm bereits durch eine Anti-Fehlalarm-Regel geschlossen.",
+        "es": "Alerta ya cerrada por una regla anti falsos positivos.", "zh": "警报已被防误报规则关闭。", "ar": "التنبيه مغلق مسبقاً بقاعدة مكافحة الإنذارات الكاذبة."},
+    "Priorité passée à basse.": {
+        "en": "Priority set to low.", "de": "Priorität auf niedrig gesetzt.",
+        "es": "Prioridad cambiada a baja.", "zh": "优先级已改为低。", "ar": "غُيّرت الأولوية إلى منخفضة."},
+    "Priorité passée à moyenne.": {
+        "en": "Priority set to medium.", "de": "Priorität auf mittel gesetzt.",
+        "es": "Prioridad cambiada a media.", "zh": "优先级已改为中。", "ar": "غُيّرت الأولوية إلى متوسطة."},
+    "Priorité passée à haute.": {
+        "en": "Priority set to high.", "de": "Priorität auf hoch gesetzt.",
+        "es": "Prioridad cambiada a alta.", "zh": "优先级已改为高。", "ar": "غُيّرت الأولوية إلى عالية."},
+    "Priorité passée à critique.": {
+        "en": "Priority set to critical.", "de": "Priorität auf kritisch gesetzt.",
+        "es": "Prioridad cambiada a crítica.", "zh": "优先级已改为紧急。", "ar": "غُيّرت الأولوية إلى حرجة."},
     # Transmission du projet de declaration de soupcon (TRACFIN)
     "Alerte introuvable.": {
         "en": "Alert not found.", "de": "Alarm nicht gefunden.",
@@ -199,6 +241,19 @@ MESSAGES: Dict[str, Dict[str, str]] = {
 
 # ---- Gabarits regex pour les messages a variables ----
 TEMPLATES = [
+    # Vrai positif sur une liste de gel : la validation annonce la mesure
+    # ouverte au registre (api._message_de_mesure).
+    (re.compile(r"^Décision validée, alerte close — vrai positif confirmé\. Mesure de gel #(\d+) ouverte : "
+                r"déclaration à la DG Trésor due immédiatement \(Criblage → Registre des gels\)\.$"), {
+        "en": "Decision validated, alert closed — confirmed true positive. Freeze measure #{0} opened: "
+              "the declaration to the DG Trésor is due immediately (Screening → Freeze register).",
+        "de": "Entscheidung bestätigt, Alarm geschlossen — bestätigter echter Treffer. Einfrierungsmaßnahme #{0} "
+              "eröffnet: die Meldung an die DG Trésor ist sofort fällig (Screening → Register der Einfrierungen).",
+        "es": "Decisión validada, alerta cerrada — verdadero positivo confirmado. Medida de congelación #{0} "
+              "abierta: la declaración a la DG Trésor es exigible de inmediato (Cribado → Registro de congelaciones).",
+        "zh": "决定已确认，警报已关闭——确认真阳性。已开立冻结措施 #{0}：须立即向 DG Trésor 申报（筛查 → 冻结登记册）。",
+        "ar": "تمت المصادقة على القرار وأُغلق التنبيه — إيجابي حقيقي مؤكد. فُتح تدبير التجميد رقم {0}: "
+              "التصريح للمديرية العامة للخزينة واجب فوراً (الفحص ← سجل التجميد)."}),
     (re.compile(r"^Compte temporairement verrouillé après trop d'échecs\. Réessayez dans (\d+) minute\(s\)\.$"), {
         "en": "Account temporarily locked after too many failures. Try again in {0} minute(s).",
         "de": "Konto nach zu vielen Fehlversuchen vorübergehend gesperrt. Erneut versuchen in {0} Minute(n).",
@@ -228,9 +283,12 @@ TEMPLATES = [
     (re.compile(r"^Vue « (.+) » supprimée\.$"), {
         "en": "View “{0}” deleted.", "de": "Ansicht „{0}“ gelöscht.",
         "es": "Vista «{0}» eliminada.", "zh": "视图“{0}”已删除。", "ar": "حُذفت طريقة العرض «{0}»."}),
-    (re.compile(r"^Priorité passée à (\S+)\.$"), {
-        "en": "Priority set to {0}.", "de": "Priorität gesetzt auf {0}.",
-        "es": "Prioridad cambiada a {0}.", "zh": "优先级已改为 {0}。", "ar": "غُيّرت الأولوية إلى {0}."}),
+    (re.compile(r"^Utilisateur '(.+)' créé avec succès\.$"), {
+        "en": "User '{0}' created successfully.", "de": "Benutzer '{0}' erfolgreich angelegt.",
+        "es": "Usuario '{0}' creado con éxito.", "zh": "用户“{0}”创建成功。", "ar": "تم إنشاء المستخدم '{0}' بنجاح."}),
+    (re.compile(r"^Utilisateur '(.+)' supprimé avec succès\.$"), {
+        "en": "User '{0}' deleted successfully.", "de": "Benutzer '{0}' erfolgreich gelöscht.",
+        "es": "Usuario '{0}' eliminado con éxito.", "zh": "用户“{0}”删除成功。", "ar": "تم حذف المستخدم '{0}' بنجاح."}),
 ]
 
 

@@ -50,7 +50,7 @@ from fiskr.database import (
     SyncReport, Alert, AlertEvent, AlertFollower, ALERT_OPEN_STATUSES, ALERT_CLOSED_STATUSES, WhitelistPair,
     WatchlistNote, CsvColumnMapping,
     WatchlistEntityChange, FpRule, FpRuleChange, FpRuleTest,
-    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES,
+    AlertAttachment, AdminAuditLog, ALERT_PRIORITIES, ALERT_PRIORITY_LABELS,
     EntityRelationship, RELATION_TYPES, refresh_source_relationships,
     BatchCampaign, BatchResult, ApiKey, SavedView, UserDashboard, AppSetting, HookDelivery,
     NotificationDelivery, LearnedEquivalence
@@ -82,7 +82,7 @@ from fiskr.sync import (
     run_pep_sync, run_ofsi_sync, run_seco_sync, run_ofac_nonsdn_sync, run_csl_sync,
     run_canada_sync, run_dfat_sync, run_hk_sfc_sync, run_amf_sync, run_worldbank_sync,
     OPENSANCTIONS_RUNNERS,
-    get_sync_config, EURLEX_ARCHIVE_DIR,
+    get_sync_config, motif_hors_planification, EURLEX_ARCHIVE_DIR,
     EXTENDED_ENTITY_FIELDS, extended_entity_kwargs as _extended_entity_kwargs,
     _supersede_previous_snapshots, _latest_ready_snapshot,
     _truncate_delta_details
@@ -94,7 +94,7 @@ from fiskr.transactions import (parse_iso20022_payment, screen_payment_message,
                                 MessageTropVolumineux, MessageSansPartieCriblable,
                                 MAX_PARTIES_PAR_MESSAGE)
 from fiskr.adverse_media import search_adverse_media
-from fiskr.narrative import generate_alert_narrative
+from fiskr.narrative import generate_alert_narrative, ALERT_STATUS_LABELS
 from fiskr.auth import (
     get_current_user, require_admin, require_reviewer, require_blocking, require_fprules,
     require_fprules_lecture, require_blocking_lecture, require_roles, create_access_token, decode_access_token, parse_roles, normalize_roles,
@@ -102,7 +102,7 @@ from fiskr.auth import (
     generate_totp_secret, verify_totp, totp_provisioning_uri, require_admin_or_auditor
 )
 from fiskr.settings import (
-    require_approval_enabled, exclusion_requirements, alert_four_eyes_required,
+    require_approval_enabled, require_approval_setting, exclusion_requirements, alert_four_eyes_required,
     whitelist_requirements, auto_rescreen_enabled,
     backtest_max_gap_pct, backtest_required,
     get_setting_with_source, set_setting,
@@ -350,13 +350,13 @@ def _cron_sync_tick(tick=None) -> None:
         # Etat EFFECTIF (reglage a chaud > config.yaml) : l'interrupteur et les
         # sources actives se pilotent depuis l'application, sans redemarrage
         sync_cfg = get_sync_config(db)
-        if not sync_cfg.get("auto_enabled"):
+        if motif_hors_planification(sync_cfg):
             return
         schedules = sync_schedules(db)
     finally:
         db.close()
     for source, expr in schedules.items():
-        if not sync_cfg.get(source, {}).get("enabled"):
+        if motif_hors_planification(sync_cfg, source):
             continue
         try:
             if not cron_matches(expr, tick):
@@ -3636,7 +3636,7 @@ async def preview_ingest(
             CsvColumnMapping.headers_fingerprint == empreinte).first()
         for brut in parse_csv_file(str(chemin), delimiter=delimiter,
                                    mapping_dict=correspondance or None):
-            item = ensure_parsed_name(dict(brut))
+            item = ensure_parsed_name(_normaliser_ligne_csv(file_type, dict(brut)))
             report = evaluate_and_clean(item)
             if report["is_valid"]:
                 acceptees += 1
@@ -3688,15 +3688,52 @@ async def preview_ingest(
         except Exception:
             pass
 
-# Champs que l'import LIT réellement, par type de fichier. Dérivés du Quality
-# Gate, qui les nomme déjà dans ses messages de refus : les recopier ici
-# serait une seconde source de vérité, vouée à diverger.
-_APERCU_CHAMPS = {
-    "CLIENT_BASE": ("client_id", "client_type", "client_first_name", "client_last_name",
-                    "client_company_name", "client_dob", "nationality", "residence"),
-    "WATCHLIST_EU": ("entity_id", "entity_type", "primary_name", "nationality",
-                     "birth_date", "origin"),
+# Correspondance UNIQUE des colonnes CSV : pour chaque champ que l'import lit,
+# les autres en-têtes qu'il accepte à sa place. L'aperçu (champs affichés),
+# son assistant (champs proposés), la validation d'une correspondance et
+# l'import lisent tous CETTE table, au travers de `_normaliser_ligne_csv`.
+#
+# Il y en avait deux. L'aperçu proposait `birth_date` et montrait la date
+# « retenue » ; l'import ne lisait que `dates_of_birth` ou `dob`. Une liste UE
+# de 25 fiches est entrée en production avec 25 dates de naissance vides — et
+# chaque alerte disait « Pas de comparaison DOB » : le criblage perdait son
+# premier discriminant d'homonymes, sous un aperçu qui affirmait l'inverse.
+# L'écart jouait aussi dans l'autre sens : l'import acceptait `id` et `dob`,
+# que l'aperçu montrait vides.
+_CHAMPS_CSV: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "CLIENT_BASE": {
+        "client_id": (), "client_type": (), "client_first_name": (),
+        "client_last_name": (), "client_company_name": (), "client_dob": (),
+        "nationality": (), "residence": (),
+    },
+    "WATCHLIST_EU": {
+        "entity_id": ("id",),
+        "entity_type": (),
+        "primary_name": (),
+        "nationality": (),
+        "dates_of_birth": ("dob", "birth_date"),
+        "origin": (),
+    },
 }
+
+# Champs attendus par type, dans l'ordre d'affichage : DÉRIVÉS de la table.
+_APERCU_CHAMPS = {t: tuple(champs) for t, champs in _CHAMPS_CSV.items()}
+
+
+def _normaliser_ligne_csv(file_type: str, ligne: Dict[str, Any]) -> Dict[str, Any]:
+    """Remplit chaque champ attendu depuis le premier en-tête accepté qui porte
+    une valeur. Appelée à l'identique par l'aperçu et par l'import : ce que
+    l'aperçu montre est ce que l'import écrit."""
+    for champ, autres in _CHAMPS_CSV.get(file_type, {}).items():
+        if str(ligne.get(champ) or "").strip():
+            continue
+        for entete in autres:
+            valeur = str(ligne.get(entete) or "").strip()
+            if valeur:
+                ligne[champ] = valeur
+                break
+    return ligne
+
 
 def _apercu_champs_compris(file_type: str, item: Dict[str, Any]) -> Dict[str, str]:
     """Ce que le moteur a retenu de la ligne, champ par champ. Une valeur vide
@@ -3784,8 +3821,11 @@ def ingest_snapshot(
         exists = db.query(Snapshot).filter(Snapshot.file_hash == fhash).first()
         if exists:
             # Snapshot already loaded (possibly pending review or rejected), reuse it.
+            # Dit comme tel : l'écran annonçait « importé avec succès » sur un
+            # fichier dont rien n'avait été réimporté (et en anglais).
             return {
-                "message": "Snapshot with this hash already uploaded.",
+                "message": "Fichier déjà importé (même empreinte SHA-256) : rien n'a été réimporté.",
+                "already_imported": True,
                 "snapshot_id": exists.snapshot_id,
                 "record_count": exists.record_count,
                 "status": exists.status
@@ -3916,8 +3956,8 @@ def _cribler_le_referentiel_importe(db: Session, snapshot_id: str,
     modifies partent au criblage (travail `client_screening`), et le message
     d'import dit ce qui se passe — ou pourquoi rien ne se passe.
 
-    L'import ne criblait personne et annoncait « Successfully imported 406
-    items » ; l'accueil disait « Rien ne vous attend ». Un client arrive apres la
+    L'import ne criblait personne et annoncait, en anglais, 406 elements
+    importes ; l'accueil disait « Rien ne vous attend ». Un client arrive apres la
     derniere mise a jour des listes n'etait confronte a rien.
     """
     from fiskr.rescreen import lots_en_production
@@ -4171,8 +4211,9 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
                                         mapping_dict=column_mapping or None):
                     # Moteur de detection des noms : colonnes explicites ou
-                    # decoupage du nom principal pour les individus (PP/I)
-                    item = ensure_parsed_name(item)
+                    # decoupage du nom principal pour les individus (PP/I).
+                    # En-têtes acceptés résolus d'abord, comme dans l'aperçu.
+                    item = ensure_parsed_name(_normaliser_ligne_csv(file_type, item))
                     report = evaluate_and_clean(item)
                     if not report["is_valid"]:
                         rejets.ajouter(report)
@@ -4189,7 +4230,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     elif not isinstance(aliases, dict):
                         aliases = {"high_priority": [], "low_priority": []}
                         
-                    dob = item.get("dates_of_birth") or item.get("dob")
+                    dob = item.get("dates_of_birth")
                     dob_arr = [dob] if dob else []
                     
                     countries = {
@@ -4204,7 +4245,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                     alt_addrs_csv = parse_multi_value(item, "alternative_addresses", "client_alternative_addresses")
                     db_ent = WatchlistEntity(
                         snapshot_id=snap_id,
-                        entity_id=item.get("entity_id") or item.get("id") or str(uuid.uuid4())[:8],
+                        entity_id=item.get("entity_id") or str(uuid.uuid4())[:8],
                         entity_type=etype,
                         primary_name=report["cleansed_name"],
                         individual_name_parsed=parsed_csv,
@@ -4238,6 +4279,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
             # Client base CSV
             for item in parse_csv_file(str(temp_file_path), delimiter=delimiter,
                                         mapping_dict=column_mapping or None):
+                item = _normaliser_ligne_csv(file_type, item)
                 report = evaluate_and_clean(item)
                 if not report["is_valid"]:
                     rejets.ajouter(report)
@@ -4350,7 +4392,7 @@ def _ingest_parse_and_finalize(db: Session, snap: Snapshot, temp_file_path,
                 "Importé par": username, "Snapshot": snap_id,
             })
         else:
-            message = f"Successfully imported {record_count} items."
+            message = f"{record_count} fiches importées et mises en production."
             emit(db, "list_import_done", {
                 "Liste": file_type, "Fichier": original_filename, "Fiches": record_count,
                 "Importé par": username, "Snapshot": snap_id,
@@ -7616,14 +7658,22 @@ async def get_sync_configuration(
     cfg["automation_sources"] = sync_automation_sources(db)
     schedules = sync_schedules(db)
     cfg["schedules"] = schedules
-    next_runs = {}
+    # Une date seulement pour ce que le planificateur lancera VRAIMENT (même
+    # condition que lui) ; à défaut, le motif, que l'écran nomme.
+    next_runs, sans_prochaine = {}, {}
     for source, expr in schedules.items():
+        next_runs[source] = None
+        motif = motif_hors_planification(cfg, source)
+        if motif:
+            sans_prochaine[source] = motif
+            continue
         try:
             occurrence = cron_next_run(expr)
             next_runs[source] = occurrence.isoformat() if occurrence else None
         except CronError:
-            next_runs[source] = None
+            sans_prochaine[source] = "CRON_INVALIDE"
     cfg["next_runs"] = next_runs
+    cfg["next_run_missing_reason"] = sans_prochaine
     # Synchronisations en cours d'execution (le front peut alors interroger
     # GET /api/progress?id=sync:<source> pour afficher la progression) —
     # lues dans la file de travaux : elles y sont quel que soit le processus
@@ -7637,6 +7687,7 @@ async def get_sync_configuration(
 @app.get("/api/progress")
 async def get_operation_progress(
     id: str = Query(..., description="Jeton de progression (UUID d'ingestion, sync:<source> ou snapshot_id)"),
+    expected: bool = Query(False, description="Le client vient de créer ce jeton et la requête qui l'alimentera est en vol : « pas encore connu » est alors un état normal (200, status PENDING), pas une opération inconnue."),
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -7646,7 +7697,13 @@ async def get_operation_progress(
     alimente quand l'operation tourne dans CE processus), puis la ligne de la
     file de travaux persistee (jobs — seul canal qui traverse les processus
     et les redemarrages, elle porte aussi le rapport final `result`), puis
-    les colonnes persistees du Snapshot (imports historiques)."""
+    les colonnes persistees du Snapshot (imports historiques).
+
+    `expected` : le suivi d'un import fabrique son jeton AVANT d'envoyer le
+    fichier, et le serveur ne le connait qu'une fois le televersement recu —
+    chaque import produisait donc un 404 en console, pour un etat parfaitement
+    normal. Le client qui sait avoir cree le jeton le dit ; sans ce drapeau, un
+    jeton inconnu reste un 404 franc (faute de frappe, operation expiree)."""
     state = progress_registry.get(id)
     if state is not None:
         return {"id": id, **state}
@@ -7670,6 +7727,9 @@ async def get_operation_progress(
             "error": "Import en erreur (voir la table des snapshots)" if status == "ERROR" else None,
             "updated_at": None,
         }
+    if expected:
+        return {"id": id, "status": "PENDING", "phase": None, "processed": 0,
+                "total": None, "pct": None, "updated_at": None}
     raise HTTPException(status_code=404, detail="Operation inconnue ou expiree")
 
 
@@ -8434,7 +8494,7 @@ class ExclusionRemoveRequest(BaseModel):
     entity_ids: List[int]
 
 def _settings_payload(db: Session) -> Dict[str, Any]:
-    approval = get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
+    approval = require_approval_setting(db)
     justif = get_setting_with_source(db, SETTING_EXCLUSION_JUSTIFICATION_REQUIRED, True)
     evidence = get_setting_with_source(db, SETTING_EXCLUSION_FILE_REQUIRED, False)
     four_eyes = get_setting_with_source(db, SETTING_ALERT_FOUR_EYES, True)
@@ -11168,7 +11228,7 @@ def _get_open_alert(db: Session, alert_id: int) -> Alert:
     if not alert:
         raise HTTPException(status_code=404, detail="Alerte introuvable.")
     if alert.status in ALERT_CLOSED_STATUSES:
-        raise HTTPException(status_code=409, detail=f"Alerte déjà close ({alert.status}).")
+        raise HTTPException(status_code=409, detail=f"Alerte déjà {ALERT_STATUS_LABELS.get(alert.status, alert.status)}.")
     return alert
 
 def _log_alert_event(db: Session, alert_id: int, username: str, action: str, detail: str = "") -> None:
@@ -13743,9 +13803,12 @@ async def validate_alert_decision(
         mesure = _close_alert(db, alert, alert.proposed_decision, username,
                               comment or alert.proposal_comment)
         _log_alert_event(db, alert.id, username, "VALIDATED", comment or "Décision validée.")
-        message = f"Décision validée, alerte clôturée ({alert.status})." + _message_de_mesure(mesure)
+        # Le statut se dit par son libellé : le toast affichait
+        # « (CLOSED_FALSE_POSITIVE) » au milieu d'une phrase en français.
+        libelle = ALERT_STATUS_LABELS.get(alert.status, alert.status)
+        message = f"Décision validée, alerte {libelle}." + _message_de_mesure(mesure)
         event_key, extra = "alert_decision_validated", {
-            "Validée par": username, "Statut": alert.status,
+            "Validée par": username, "Statut": libelle,
             "Commentaire": comment or "—",
         }
     else:
@@ -13801,11 +13864,13 @@ async def set_alert_priority(
     old_priority = alert.priority or "—"
     alert.priority = new_priority
     alert.due_at = compute_due_at(db, new_priority, alert.created_at)
+    # Libellés, pas codes : la phrase s'affiche dans l'historique et le toast.
+    libelle = ALERT_PRIORITY_LABELS[new_priority]
     _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
-                     f"Priorité {old_priority} → {new_priority}.")
+                     f"Priorité {ALERT_PRIORITY_LABELS.get(old_priority, old_priority)} → {libelle}.")
     db.commit()
-    _notifier_les_suiveurs(db, alert, f"Priorité passée à {new_priority}", current_user["username"])
-    return {"message": f"Priorité passée à {new_priority}.", **_alert_summary(alert)}
+    _notifier_les_suiveurs(db, alert, f"Priorité passée à {libelle}", current_user["username"])
+    return {"message": f"Priorité passée à {libelle}.", **_alert_summary(alert)}
 
 class AlertSnoozeRequest(BaseModel):
     until: Optional[str] = None   # ISO 8601 ; None = réveiller maintenant
@@ -13942,7 +14007,8 @@ async def bulk_alert_action(
             alert.priority = new_priority
             alert.due_at = compute_due_at(db, new_priority, alert.created_at)
             _log_alert_event(db, alert.id, current_user["username"], "PRIORITY_CHANGED",
-                             f"Priorité {old_priority} → {new_priority} (action en masse).")
+                             f"Priorité {ALERT_PRIORITY_LABELS.get(old_priority, old_priority)} → "
+                             f"{ALERT_PRIORITY_LABELS[new_priority]} (action en masse).")
         updated.append(alert_id)
     db.commit()
     if updated and action == "assign":

@@ -48,7 +48,7 @@ Réponse :
 
 ```json
 {
-  "message": "Successfully imported 6 items.",
+  "message": "6 fiches importées et mises en production.",
   "snapshot_id": "51ef6305-9a37-4780-9488-7aeffb9ef0d7",
   "record_count": 6,
   "status": "READY",
@@ -159,7 +159,7 @@ Une ligne est rejetée si :
 fichier identique ne recrée rien :
 
 ```json
-{"message": "Snapshot with this hash already uploaded.", "snapshot_id": "...", "status": "READY"}
+{"message": "Fichier déjà importé (même empreinte SHA-256) : rien n'a été réimporté.", "already_imported": true, "snapshot_id": "...", "status": "READY"}
 ```
 
 Pour rejouer un import, le contenu doit changer (ne serait-ce qu'une colonne

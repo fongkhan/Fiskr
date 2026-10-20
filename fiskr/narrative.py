@@ -32,6 +32,9 @@ ALERT_STATUS_LABELS = {
     "ESCALATED": "escaladée",
     "CLOSED_CONFIRMED": "close — vrai positif confirmé",
     "CLOSED_FALSE_POSITIVE": "close — faux positif",
+    # Absent jusqu'ici : le narratif d'une alerte close par règle, et les
+    # messages de l'API qui lisent aussi cette table, citaient le code brut.
+    "CLOSED_BY_RULE": "close par règle anti-faux positif",
 }
 
 

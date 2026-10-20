@@ -348,9 +348,23 @@ def bump_watchlist_epoch(db) -> int:
     return epoch
 
 
+def require_approval_setting(db) -> Dict[str, Any]:
+    """
+    Mode homologation, valeur et provenance : base d'abord, sinon config.yaml,
+    sinon NON. C'est la seule lecture du réglage, et le seul endroit où son
+    défaut est écrit.
+
+    La mise en service le relisait avec son propre défaut (oui) : sur une
+    installation neuve, sans ligne en base et avec `require_approval: false`
+    dans config.yaml, l'écran affichait « Homologation des lots — Vérifié »
+    pendant que le premier import passait directement en production.
+    """
+    return get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)
+
+
 def require_approval_enabled(db) -> bool:
-    """True si le mode homologation est actif (base d'abord, sinon config.yaml)."""
-    return bool(get_setting_with_source(db, SETTING_REQUIRE_APPROVAL, False)["value"])
+    """True si le mode homologation est actif — ce que l'import applique."""
+    return bool(require_approval_setting(db)["value"])
 
 
 def alert_four_eyes_required(db) -> bool:

@@ -255,7 +255,9 @@
  }
  const response = await fetch("/api/auth/login", {
  method: "POST",
- headers: { "Content-Type": "application/json" },
+ // La langue de la page, pas celle du navigateur (cf. apiFetch, app.js).
+ headers: { "Content-Type": "application/json",
+ "Accept-Language": window.fiskrI18n ? fiskrI18n.currentLang() : "fr" },
  body: JSON.stringify(body)
  });
 

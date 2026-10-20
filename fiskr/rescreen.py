@@ -505,7 +505,7 @@ def cribler_les_clients_nouveaux_ou_modifies(
     d'identification a CHANGE. Les autres ne sont pas recribles.
 
     Un import ne criblait personne : il lancait un controle de completude,
-    l'interface disait « Successfully imported 406 items », l'accueil « Rien ne
+    l'interface annonçait en anglais 406 éléments importés, l'accueil « Rien ne
     vous attend ». Et le re-criblage ne compare qu'aux fiches LISTEES qui
     changent : un client arrive apres la derniere mise en production d'une
     liste n'etait confronte a rien. Lignes directrices conjointes DGT/ACPR sur

@@ -577,8 +577,11 @@ function toggleSidebar(force) {
 async function apiFetch(url, options = {}) {
  const { silent, ...fetchOptions } = options;
  // Langue active envoyée au backend : les messages detail/message des
- // réponses JSON arrivent traduits (fiskr/apimessages.py)
- if (window.fiskrI18n && fiskrI18n.currentLang() !== "fr") {
+ // réponses JSON arrivent traduits (fiskr/apimessages.py). Français compris :
+ // sans l'en-tête, le navigateur envoie le sien — mesuré en Chromium
+ // « en-US » — et une interface en français recevait ses toasts en anglais
+ // (« User 'marie' created successfully. »).
+ if (window.fiskrI18n) {
  fetchOptions.headers = { ...(fetchOptions.headers || {}),
  "Accept-Language": fiskrI18n.currentLang() };
  }
@@ -959,6 +962,69 @@ const STATUS_LABELS = {
 
 function statusLabel(status) {
  return STATUS_LABELS[status] || status || "—";
+}
+
+// Même principe, un vocabulaire par table : chaque écran qui affiche un de ces
+// codes passe par ici. Mesuré dans la modale d'alerte : l'historique montrait
+// CREATED, PROPOSED, REDETECTED bruts et l'explication du score les clés
+// `dob`, `gender`, `geography` — au milieu d'une interface en français.
+
+// Événements de l'historique d'une alerte (alert_events.action). Un test
+// (tests/test_libelles_derives.py) relève les actions que le serveur écrit et
+// exige un libellé pour chacune.
+const ALERT_EVENT_LABELS = {
+ CREATED: "Création", REDETECTED: "Re-détection", RULE_SUPPRESSED: "Clôture par règle",
+ ASSIGNED: "Assignation", COMMENT: "Commentaire", ESCALATED: "Escalade",
+ PROPOSED: "Décision proposée", VALIDATED: "Décision validée", RETURNED: "Renvoi en analyse",
+ PRIORITY_CHANGED: "Priorité modifiée", SNOOZED: "Mise en attente", WOKEN: "Réveil",
+ SLA_OVERDUE: "Échéance SLA dépassée", CHECKLIST: "Checklist d'instruction",
+ ATTACHMENT: "Pièce jointe", NARRATIVE: "Narratif généré",
+ STR_DRAFT_GENERATED: "Projet de déclaration généré", STR_DRAFT_SENT: "Projet de déclaration envoyé",
+ GEL_OUVERT: "Mesure de gel ouverte", GEL_MIS_A_JOUR: "Mesure de gel mise à jour",
+ GEL_DECLARE: "Gel déclaré à la DG Trésor", GEL_LEVE: "Gel levé",
+ GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
+ GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
+ WHITELIST_STALE: "Liste blanche à réexaminer",
+};
+
+function alertEventLabel(action) {
+ return ALERT_EVENT_LABELS[action] || action || "—";
+}
+
+// Ajustements du score (decision_tree.adjustments, fiskr/scoring.py).
+const ADJUSTMENT_LABELS = { dob: "Date de naissance", gender: "Genre", geography: "Géographie" };
+
+function adjustmentLabel(cle) {
+ return ADJUSTMENT_LABELS[cle] || cle;
+}
+
+// Rôles (fiskr/auth.py). La barre latérale et la liste des comptes tenaient
+// chacune la leur : « Analyste Conformité » d'un côté, « ANALYSTE USER » de
+// l'autre, et `BLOCKING` / `RULES` bruts pour les rôles que la seconde
+// ignorait.
+const ROLE_LABELS = {
+ admin: "Administrateur", reviewer: "Réviseur", user: "Analyste",
+ blocking: "Paramétrage blocking", rules: "Règles faux positifs", auditor: "Auditeur (lecture seule)",
+};
+
+function roleLabel(role) {
+ return ROLE_LABELS[role] || role;
+}
+
+// Destinataires de notification qui ne sont pas des rôles (fiskr/events.py).
+const NOTIF_PSEUDO_AUDIENCE_LABELS = {
+ assignee: "analyste assigné", actor: "auteur de l'action",
+ followers: "suiveurs du dossier", mentioned: "personnes citées",
+};
+
+// Les lectures réservées, dans les termes du serveur (fiskr/auth.py,
+// require_roles : l'administrateur passe toujours). Taire un 403 ne le rend
+// pas silencieux : le navigateur l'inscrit en console à chaque page. Mesuré :
+// /api/setup/status pour tout compte non administrateur, /api/fprules pour un
+// réviseur à chaque « Examiner ». L'interface n'appelle que ce que le rôle lit.
+function peutLire(...roles) {
+ const r = userRoles(currentUser);
+ return r.includes("admin") || roles.some(x => r.includes(x));
 }
 
 // ------------------ ACCESSIBILITÉ (modales, onglets) ------------------
@@ -2085,9 +2151,12 @@ let _setupDejaOuvert = false;
 
 async function rafraichirMiseEnService() {
  const cible = document.getElementById("setup-checks");
+ // Même porte que le serveur (require_admin_or_auditor) : un autre rôle
+ // ne l'appelle pas du tout, plutôt que de recevoir un 403 à chaque page.
+ if (!peutLire("auditor")) return null;
  try {
  const reponse = await apiFetch("/api/setup/status", { silent: true });
- if (!reponse.ok) return null;          // 403 pour un non-admin : normal
+ if (!reponse.ok) return null;
  const etat = await reponse.json();
  majBandeauMiseEnService(etat);
  if (cible) cible.innerHTML = rendreControles(etat);
@@ -2283,10 +2352,10 @@ document.addEventListener("DOMContentLoaded", () => {
  restaurerBrouillonDeSession();
  initDropZones();
  // Check authentication and load user info
- checkAuthUser();
- // Mise en service : après l'authentification (l'état est réservé à
- // l'administrateur), une seule fois, sans bloquer le reste du chargement.
- setTimeout(verifierMiseEnService, 1200);
+ // Mise en service : APRÈS l'authentification (l'état est réservé à
+ // l'administrateur et à l'auditeur — il faut connaître le rôle avant
+ // d'appeler), une seule fois, sans bloquer le reste du chargement.
+ checkAuthUser().then(() => setTimeout(verifierMiseEnService, 1200));
  initListTypeControls();
  // Le bouton d'aperçu suit le type de fichier sélectionné, dès l'arrivée.
  if (document.getElementById("ingest-file-type")) toggleSsieOptions();
@@ -2478,8 +2547,9 @@ async function checkAuthUser() {
  userEl.title = `Connecté en tant que @${data.user.username}`;
  }
  if (roleEl) {
- const labels = { admin: "Administrateur (ACPR/AMF)", reviewer: "Réviseur Homologation", user: "Analyste Conformité", blocking: "Paramétrage Blocking", rules: "Règles Faux Positifs", auditor: "Auditeur (lecture seule)" };
- roleEl.textContent = roles.map(r => labels[r] || r).join(" / ") || "Analyste Conformité";
+ // Un nœud par rôle : l'i18n traduit chaque libellé, pas leur assemblage.
+ roleEl.innerHTML = (roles.length ? roles : ["user"])
+  .map(r => `<span>${escapeHtml(roleLabel(r))}</span>`).join(" / ");
  }
  if (navUsersItem) {
  navUsersItem.classList.toggle("hidden", !isAdmin);
@@ -2493,6 +2563,10 @@ async function checkAuthUser() {
  // commande dans cet écran.
  const adminLogBtn = document.getElementById("sub-btn-audit-admin");
  if (adminLogBtn) adminLogBtn.classList.toggle("hidden", !(isAdmin || isAuditor));
+ // Mise en service : même lecteurs que le journal. Ouverte à un autre rôle,
+ // elle promettait « chaque point ci-dessous est vérifié » au-dessus du vide.
+ const setupBtn = document.getElementById("sub-btn-guide-setup");
+ if (setupBtn) setupBtn.classList.toggle("hidden", !(isAdmin || isAuditor));
  // Carte des réglages (dans l'onglet Paramètres) et actions de revue (reviewer ou admin)
  const settingsCard = document.getElementById("review-settings-card");
  if (settingsCard) settingsCard.classList.toggle("hidden", !isAdmin);
@@ -3447,9 +3521,13 @@ function startProgressPolling(token, barPrefix, intervalMs = 1500) {
  const tick = async () => {
  if (stopped) return;
  try {
- const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(token)}`);
+ // `expected` : ce jeton vient d'être créé ici, et le serveur ne le
+ // connaît qu'une fois le fichier reçu — « pas encore connu » est normal
+ // (PENDING), pas un 404 en console à chaque import.
+ const resp = await apiFetch(`/api/progress?id=${encodeURIComponent(token)}&expected=1`);
  if (resp.ok) {
  const p = await resp.json();
+ if (p.status === "PENDING") return; // garde « Préparation… »
  if (phaseEl) phaseEl.textContent = PROGRESS_PHASE_LABELS[p.phase] || p.phase || "En cours…";
  if (countEl) {
  let txt = "";
@@ -3577,6 +3655,12 @@ async function handleIngestion(event) {
  }
  
  let data = await response.json();
+ // Fichier déjà connu (même empreinte) : rien n'a été importé, et le dire
+ // « importé avec succès » serait affirmer ce qui n'a pas eu lieu.
+ if (data.already_imported) {
+  showToast(data.message, "info", 8000);
+  return;
+ }
  // 202 : l'upload est fini, mais le parsing, le Quality Gate, la
  // persistance et le re-criblage continuent en tâche de fond (démon
  // travailleur). On suit le jeton jusqu'au rapport final — l'écran
@@ -3872,6 +3956,25 @@ async function fetchSyncConfig() {
 // mise en garde de régulateur n'ont pas la même conséquence).
 let _lastSourceState = null; // {source: {enabled, next}}, pour re-render sans refetch
 
+// Pas de date pour ce qui ne tournera pas. Le serveur ne donne une prochaine
+// récupération qu'aux sources que le planificateur lancera vraiment, et le
+// motif pour les autres (fiskr/sync.motif_hors_planification) : l'écran
+// affichait « prochaine : 20/10/2026 06:00 » pour des sources désactivées,
+// synchronisation automatique coupée.
+const MOTIFS_SANS_PROCHAINE = {
+ AUTO_COUPEE: "synchronisation automatique coupée",
+ SOURCE_DESACTIVEE: "source désactivée",
+ CRON_INVALIDE: "expression cron invalide",
+};
+
+function prochaineRecuperationHtml(cfg, source) {
+ const quand = (cfg.next_runs || {})[source];
+ if (quand) return `<span>prochaine :</span> ${escapeHtml(formatDateTime(quand))}`;
+ const motif = (cfg.next_run_missing_reason || {})[source];
+ if (!motif) return "<span>prochaine :</span> —";
+ return `<span>aucune récupération planifiée :</span> <span>${escapeHtml(MOTIFS_SANS_PROCHAINE[motif] || motif)}</span>`;
+}
+
 function renderSourcesTable(cfg) {
  if (cfg) _lastSourceState = cfg;
  cfg = _lastSourceState;
@@ -3881,7 +3984,6 @@ function renderSourcesTable(cfg) {
  const search = (document.getElementById("sources-search")?.value || "").trim().toLowerCase();
  const familyFilter = document.getElementById("sources-family-filter")?.value || "";
  const stateFilter = document.getElementById("sources-state-filter")?.value || "";
- const nextRuns = cfg.next_runs || {};
 
  const rows = [];
  for (const [family, familyLabel] of Object.entries(SOURCE_FAMILIES)) {
@@ -3898,7 +4000,6 @@ function renderSourcesTable(cfg) {
  for (const s of inFamily) {
  const enabled = (cfg[s.key] || {}).enabled;
  const state = sourceStateCell(s.alias); // état vivant (sync en cours/terminée)
- const nextRun = nextRuns[s.key] ? formatDateTime(nextRuns[s.key]) : "—";
  // Compacité : la description passe en infobulle, la ligne tient
  // sur une hauteur de texte — 25 sources se parcourent sans friction.
  rows.push(`<tr>
@@ -3906,7 +4007,7 @@ function renderSourcesTable(cfg) {
  <td>${enabled
  ? '<span class="status-badge no_match" title="Participe aux synchronisations planifiées">activée</span>'
  : '<span class="status-badge" style="opacity: 0.6;" title="Exclue des synchronisations planifiées — le bouton Synchroniser reste disponible">désactivée</span>'}</td>
- <td><div id="src-state-${s.key}">${state}</div><div class="section-desc" style="font-size: 0.72rem; margin-top: 0.1rem;">prochaine : ${escapeHtml(nextRun)}</div></td>
+ <td><div id="src-state-${s.key}">${state}</div><div class="section-desc" style="font-size: 0.72rem; margin-top: 0.1rem;">${prochaineRecuperationHtml(cfg, s.key)}</div></td>
  <td><button class="btn btn-primary" style="padding: 0.25rem 0.6rem; font-size: 0.78rem;"
  onclick="startSourceSync('${s.alias}')">Synchroniser</button></td>
  </tr>`);
@@ -3956,7 +4057,6 @@ function renderCronSchedules(cfg) {
  const tbody = document.querySelector("#cron-schedules-table tbody");
  if (!tbody || !cfg) return;
  const schedules = cfg.schedules || {};
- const nextRuns = cfg.next_runs || {};
  const origins = cfg.automation_sources || {};
 
  const autoBox = document.getElementById("sync-auto-enabled");
@@ -3986,7 +4086,7 @@ function renderCronSchedules(cfg) {
  <td><input type="text" id="cron-${source}" value="${escapeHtml(schedules[source] || "")}"
  style="font-family: monospace; max-width: 200px;"
  title="Expression cron 5 champs : minute heure jour mois jour-de-semaine"></td>
- <td>${nextRuns[source] ? formatDateTime(nextRuns[source]) : "—"}</td>
+ <td style="font-size: 0.82rem;">${prochaineRecuperationHtml(cfg, source)}</td>
  <td id="cron-state-${source}">${sourceStateCell(source)}</td>
  </tr>`;
  }).join("");
@@ -5055,11 +5155,13 @@ async function viewAuditLogDetail(logId) {
  if (tree.hard_match_triggered) {
  adjHtml = `<p style="color:var(--color-warning); font-weight:700"> HARD MATCH déclenché : ${escapeHtml(tree.hard_match_details)}</p>`;
  } else if (tree && tree.adjustments) {
+ // Libellés lus dans ADJUSTMENT_LABELS ; chaque champ du moteur reste nommé
+ // et échappé un par un (garde-fou XSS de tests/test_security.py).
  adjHtml = `
  <ul>
- <li>Date de Naissance : <strong>${escapeHtml(tree.adjustments.dob.score)} points</strong> (${escapeHtml(tree.adjustments.dob.description)})</li>
- <li>Genre : <strong>${escapeHtml(tree.adjustments.gender.score)} points</strong> (${escapeHtml(tree.adjustments.gender.description)})</li>
- <li>Géographie : <strong>${escapeHtml(tree.adjustments.geography.score)} points</strong> (${escapeHtml(tree.adjustments.geography.description)})</li>
+ <li><span>${escapeHtml(adjustmentLabel("dob"))}</span> : <strong>${escapeHtml(tree.adjustments.dob.score)} points</strong> (${escapeHtml(tree.adjustments.dob.description)})</li>
+ <li><span>${escapeHtml(adjustmentLabel("gender"))}</span> : <strong>${escapeHtml(tree.adjustments.gender.score)} points</strong> (${escapeHtml(tree.adjustments.gender.description)})</li>
+ <li><span>${escapeHtml(adjustmentLabel("geography"))}</span> : <strong>${escapeHtml(tree.adjustments.geography.score)} points</strong> (${escapeHtml(tree.adjustments.geography.description)})</li>
  </ul>
  `;
  }
@@ -5068,9 +5170,9 @@ async function viewAuditLogDetail(logId) {
  content.innerHTML = `
  <div class="modal-section">
  <h4>Informations Générales</h4>
- <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.85rem">
+ <div class="details-grid" style="gap: 1rem; margin-top: 0; font-size: 0.85rem">
  <div>Horodatage : <strong>${escapeHtml(dateStr)}</strong></div>
- <div>Statut : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${log.status}</strong></div>
+ <div>Statut : <strong style="color:${log.status === 'ALERT' ? 'var(--color-alert)' : 'var(--color-safe)'}">${escapeHtml(statusLabel(log.status))}</strong></div>
  <div>Watchlist : <strong><code>${escapeHtml(log.watchlist_id)}</code> - ${escapeHtml(log.watchlist_name)}</strong></div>
  <div>Client : <strong>${escapeHtml(log.client_name)} (${log.client_type})</strong></div>
  <div>Liste d'origine : ${listTypeBadge(log.list_type)}</div>
@@ -5082,7 +5184,7 @@ async function viewAuditLogDetail(logId) {
  
  <div class="modal-section">
  <h4>Analyse Algorithmique</h4>
- <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.85rem">
+ <div class="details-grid" style="gap: 1rem; margin-top: 0; font-size: 0.85rem">
  <div>Score Textuel : <strong>${log.base_score.toFixed(1)}%</strong></div>
  <div>Score Final : <strong>${log.final_score.toFixed(1)}%</strong></div>
  </div>
@@ -5749,10 +5851,11 @@ function renderUsersTable(users) {
  reviewer: 'background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--color-warning); font-weight: 600;',
  user: 'background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.3); color: #38bdf8; font-weight: 600;'
  };
- const badgeLabels = { admin: "ADMINISTRATEUR", reviewer: "RÉVISEUR", user: "ANALYSTE USER", auditor: "AUDITEUR (LECTURE SEULE)" };
- const roleBadge = userRoles(u).map(r =>
- `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block;">${badgeLabels[r] || escapeHtml(r.toUpperCase())}</span>`
- ).join("") || `<span style="${badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem;">ANALYSTE USER</span>`;
+ // Majuscules par la feuille de style, libellé par ROLE_LABELS : la
+ // traduction porte sur le libellé, pas sur une casse figée dans le texte.
+ const roleBadge = (userRoles(u).length ? userRoles(u) : ["user"]).map(r =>
+ `<span style="${badgeStyles[r] || badgeStyles.user} padding: 0.25rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-right: 4px; display: inline-block; text-transform: uppercase;">${escapeHtml(roleLabel(r))}</span>`
+ ).join("");
 
  const dateFormatted = u.created_at ? new Date(u.created_at).toLocaleDateString(uiLocale(), { hour: "2-digit", minute: "2-digit" }) : "N/A";
  const isSelf = currentUser && currentUser.id === u.id;
@@ -5869,6 +5972,9 @@ async function handleSaveUser(event) {
  }
 
  closeUserModal();
+ // La modale se fermait sans un mot : on ne savait pas, sans relire la
+ // liste, si le compte était créé. Le serveur dit ce qu'il a fait.
+ showToast(data.message, "success");
  fetchUsersList();
  if (currentUser && currentUser.id === parseInt(editId, 10)) {
  checkAuthUser();
@@ -5892,6 +5998,7 @@ async function deleteUserAccount(userId, username) {
  return;
  }
 
+ showToast(data.message, "success");
  fetchUsersList();
  } catch (err) {
  console.error("Delete user error:", err);
@@ -6206,10 +6313,10 @@ function renderNotificationsCatalog() {
  const badge = ev.urgency === "immediate"
  ? '<span class="notif-badge notif-badge-now">immédiat</span>'
  : '<span class="notif-badge notif-badge-digest">récap</span>';
- const audience = (ev.audience || []).map(a => ({
- assignee: "analyste assigné", actor: "auteur de l'action",
- admin: "admin", reviewer: "reviewer", rules: "rôle règles", user: "analystes",
- }[a] || a)).join(", ");
+ // Les rôles se nomment par ROLE_LABELS ; seuls les destinataires qui ne
+ // sont pas des rôles (fiskr/events.PSEUDO_AUDIENCES) ont un libellé ici —
+ // `followers` et `mentioned` s'affichaient bruts.
+ const audience = (ev.audience || []).map(a => NOTIF_PSEUDO_AUDIENCE_LABELS[a] || roleLabel(a)).join(", ");
  return `
  <label class="notif-row">
  <input type="checkbox" class="notif-event" data-event="${escapeHtml(ev.key)}" ${enabled[ev.key] ? "checked" : ""}>
@@ -7019,11 +7126,11 @@ async function fetchTestPanels(selectSnapshotId = null) {
 }
 
 // Règles anti-FP candidates proposées au cahier de tests (canal criblage) :
-// brouillons en tête, puis en validation, puis actives. Silencieux si le
-// compte n'a pas le rôle `rules` (403) — le select reste sur « Aucune ».
+// brouillons en tête, puis en validation, puis actives. Sans le rôle `rules`,
+// pas d'appel (peutLire) — le select reste sur « Aucune ».
 async function fetchBacktestCandidateRules() {
  const select = document.getElementById("backtest-candidate-rule");
- if (!select) return;
+ if (!select || !peutLire("rules")) return;
  try {
  const response = await apiFetch("/api/fprules?channel=SCREENING", { silent: true });
  if (!response.ok) return;
@@ -7933,12 +8040,12 @@ async function openAlertModal(alertId) {
 
  const adjustments = ((a.decision_tree || {}).adjustments) || {};
  const adjRows = Object.entries(adjustments).map(([k, v]) =>
- `<tr><td>${escapeHtml(k)}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`
+ `<tr><td>${escapeHtml(adjustmentLabel(k))}</td><td>${v.score > 0 ? "+" : ""}${v.score}</td><td>${escapeHtml(v.description || "")}</td></tr>`
  ).join("");
 
  const eventsHtml = (a.events || []).map(e => `
  <div style="border-left: 2px solid var(--border-color); padding: 0.35rem 0 0.35rem 0.75rem; margin-left: 0.25rem;">
- <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+ <small style="color: var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString(uiLocale()) : ""} — <strong>@${escapeHtml(e.username)}</strong> · <span>${escapeHtml(alertEventLabel(e.action))}</span></small>
  ${e.detail ? `<div style="font-size: 0.85rem;">${marquerLesCitations(e.detail)}</div>` : ""}
  </div>
  `).join("");
@@ -8009,7 +8116,7 @@ async function openAlertModal(alertId) {
  <a class="btn btn-sm btn-secondary" href="/api/alerts/${a.id}/report" target="_blank" title="Rapport imprimable (ACPR/FED)"> Rapport</a>
  </span>
  </p>
- <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score (decision tree)</h3>
+ <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
  <table><thead><tr><th>Ajustement</th><th>Impact</th><th>Détail</th></tr></thead><tbody>${adjRows || '<tr><td colspan="3" style="color: var(--text-muted);">Hard match ou aucun ajustement.</td></tr>'}</tbody></table>
  </div>
@@ -9049,6 +9156,7 @@ const DASHBOARD_WIDGETS = {
  go: "switchTab('screening'); switchSubTab('screening', 'alerts-whitelist')" },
  "tile-rules": { cat: "kpi", icon: uiIcon("grid"), title: "Règles actives", sub: "anti-faux positifs",
  fetchValue: async () => {
+ if (!peutLire("rules")) return "—";
  const r = await apiFetch("/api/fprules", { silent: true });
  if (!r.ok) return "—";
  return ((await r.json()).items || []).filter(x => x.status === "ACTIVE" && x.enabled).length;
@@ -13590,7 +13698,7 @@ function renderCasefile(cf) {
 
  const eventsHtml = (cf.events || []).slice(-15).map(e => `
  <div style="border-left: 2px solid var(--border-color); padding: 0.3rem 0 0.3rem 0.7rem;">
- <small style="color: var(--text-muted);">${e.timestamp ? formatDateTime(e.timestamp) : ""} — <strong>@${escapeHtml(e.username)}</strong> · ${escapeHtml(e.action)}</small>
+ <small style="color: var(--text-muted);">${e.timestamp ? formatDateTime(e.timestamp) : ""} — <strong>@${escapeHtml(e.username)}</strong> · <span>${escapeHtml(alertEventLabel(e.action))}</span></small>
  ${e.detail ? `<div style="font-size: 0.83rem;">${escapeHtml(e.detail)}</div>` : ""}
  </div>`).join("");
 

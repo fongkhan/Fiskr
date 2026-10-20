@@ -298,7 +298,7 @@ def open_or_redetect_alerts(db, correspondances: Sequence[Dict[str, Any]], *,
         if regle is not None:
             evenements.append(AlertEvent(
                 alert_id=alerte.id, username="fp-rule", action="RULE_SUPPRESSED",
-                detail=(f"Auto-clôturée CLOSED_BY_RULE par la règle « {regle.name} » "
+                detail=(f"Auto-clôturée par la règle anti-faux positif « {regle.name} » "
                         f"(#{regle.id} v{regle.version}).")))
         correspondance.pop("_alerte", None)
         correspondance.pop("_regle", None)

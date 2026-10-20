@@ -503,9 +503,10 @@ def _fraicheur_des_listes(db) -> Dict[str, Any]:
 
 
 def _homologation(db) -> Dict[str, Any]:
-    from fiskr.settings import get_setting, SETTING_REQUIRE_APPROVAL
-    exige = get_setting(db, SETTING_REQUIRE_APPROVAL, True)
-    if exige:
+    # Ce que l'import APPLIQUE, pas une relecture du réglage avec un défaut à
+    # soi : un « Vérifié » ne sort que de la condition que le moteur teste.
+    from fiskr.settings import require_approval_enabled
+    if require_approval_enabled(db):
         return _controle("homologation", "Listes", "Homologation des lots", OK,
                          "Un lot ingéré passe par une revue avant production.",
                          lien="#watchlist-mgmt/watchlist-review")

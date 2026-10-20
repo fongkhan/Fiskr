@@ -283,6 +283,26 @@ def _apply_hot_sync_settings(db, cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+# Pourquoi le planificateur ne lancera PAS une source. Une seule définition,
+# lue par le planificateur (api._cron_sync_tick) ET par l'écran des sources
+# (GET /api/sync/config) : celui-ci annonçait « prochaine : 20/10/2026 06:00 »
+# pour des sources désactivées, synchronisation automatique coupée — la date
+# était calculée sur la seule expression cron, sans la condition qui décide.
+HORS_PLAN_AUTO_COUPEE = "AUTO_COUPEE"
+HORS_PLAN_SOURCE_DESACTIVEE = "SOURCE_DESACTIVEE"
+
+
+def motif_hors_planification(cfg: Dict[str, Any], source: Optional[str] = None) -> Optional[str]:
+    """None si le planificateur lancera la source (ou, sans source, s'il
+    planifie quoi que ce soit) ; sinon le motif. `cfg` est la configuration
+    EFFECTIVE (get_sync_config(db), réglages à chaud compris)."""
+    if not cfg.get("auto_enabled"):
+        return HORS_PLAN_AUTO_COUPEE
+    if source is not None and not (cfg.get(source) or {}).get("enabled"):
+        return HORS_PLAN_SOURCE_DESACTIVEE
+    return None
+
+
 def get_sync_config(db=None) -> Dict[str, Any]:
     """
     Configuration de synchronisation (config.yaml, section sync) avec defauts.

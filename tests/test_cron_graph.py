@@ -16,7 +16,8 @@ from fiskr.api import app
 from fiskr.auth import get_current_user
 from fiskr.cron import CronError, cron_matches, next_run, parse_cron
 from fiskr.database import get_db, AppSetting, EntityRelationship, Snapshot, WatchlistEntity, AdminAuditLog
-from fiskr.settings import SETTING_REQUIRE_APPROVAL, SETTING_SYNC_SCHEDULES
+from fiskr.settings import (SETTING_REQUIRE_APPROVAL, SETTING_SYNC_SCHEDULES,
+                            SETTING_SYNC_AUTO_ENABLED, SETTING_SYNC_SOURCES_ENABLED)
 
 
 # ====================================================================
@@ -82,6 +83,7 @@ def _cleanup_db():
     try:
         db.query(AppSetting).filter(AppSetting.key.in_([
             SETTING_SYNC_SCHEDULES, SETTING_REQUIRE_APPROVAL,
+            SETTING_SYNC_AUTO_ENABLED, SETTING_SYNC_SOURCES_ENABLED,
         ])).delete(synchronize_session=False)
         db.query(EntityRelationship).filter(
             EntityRelationship.from_entity_id.like("CG-%")
@@ -116,8 +118,17 @@ def test_sync_schedules_roundtrip_and_validation(client):
     assert cfg["schedules"]["ofac"] == "0 */4 * * *"
     # Les autres sources retombent sur l'horaire global quotidien (M H * * *)
     assert cfg["schedules"]["un"].endswith("* * *")
-    # next_runs expose une prochaine occurrence par source
+    # RÉÉCRIT (lot `interface`) : ce test attendait une prochaine occurrence
+    # pour OFAC sans condition — c'est-à-dire, avec la configuration par défaut
+    # (synchronisation automatique coupée), une date pour une source que le
+    # planificateur ne lancera jamais. Il épinglait le défaut. Une date n'est
+    # due qu'à ce qui tournera ; sinon, le motif.
+    assert cfg["next_runs"]["ofac"] is None
+    assert cfg["next_run_missing_reason"]["ofac"] == "AUTO_COUPEE"
+    client.put("/api/settings/sync", json={"auto_enabled": True, "sources_enabled": {"ofac": True}})
+    cfg = client.get("/api/sync/config").json()
     assert cfg["next_runs"]["ofac"] is not None
+    assert "ofac" not in cfg["next_run_missing_reason"]
 
     # Chaine vide = retour au defaut
     client.put("/api/settings/sync", json={"schedules": {"ofac": ""}})

@@ -534,6 +534,9 @@ class Alert(Base):
     checklist_state = Column(JSON, nullable=True)
 
 ALERT_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+# Libellés des messages serveur (« Priorité passée à haute. ») — le code brut
+# s'affichait tel quel dans un toast en français.
+ALERT_PRIORITY_LABELS = {"LOW": "basse", "MEDIUM": "moyenne", "HIGH": "haute", "CRITICAL": "critique"}
 
 class AlertAttachment(Base):
     """Piece jointe d'une alerte (justificatif d'instruction) : stockage
