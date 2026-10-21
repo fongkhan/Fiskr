@@ -1031,6 +1031,7 @@ const ALERT_EVENT_LABELS = {
  PPE_DOSSIER_OUVERT: "Dossier PPE ouvert", PPE_NON_DECLAREE: "PPE non déclarée par le SI amont",
  PPE_DOSSIER_INSTRUIT: "Dossier PPE instruit", PPE_PIECE_ORIGINE: "Pièce de l'origine des fonds",
  PPE_DECISION: "Décision sur la relation (PPE)", PPE_DECISION_EN_RETARD: "Décision PPE en retard",
+ PPE_REVUE: "Revue de vigilance renforcée (PPE)", PPE_REVUE_ECHUE: "Revue PPE échue",
 };
 
 function alertEventLabel(action) {
@@ -3020,7 +3021,8 @@ function toggleManualFormFields() {
  const passportGroup = document.getElementById("manual-passport-group");
  const passportCountryGroup = document.getElementById("manual-passport-country-group");
  const nationalIdGroup = document.getElementById("manual-national-id-group");
- 
+ const nationalIdCountryGroup = document.getElementById("manual-national-id-country-group");
+
  // Default: Hide all specific groups
  if (individualFields) individualFields.classList.add("hidden");
  
@@ -3030,12 +3032,14 @@ function toggleManualFormFields() {
  if (passportGroup) passportGroup.classList.add("hidden");
  if (passportCountryGroup) passportCountryGroup.classList.add("hidden");
  if (nationalIdGroup) nationalIdGroup.classList.add("hidden");
- 
+ if (nationalIdCountryGroup) nationalIdCountryGroup.classList.add("hidden");
+
  if (type === "I") {
  if (individualFields) individualFields.classList.remove("hidden");
  if (passportGroup) passportGroup.classList.remove("hidden");
  if (passportCountryGroup) passportCountryGroup.classList.remove("hidden");
  if (nationalIdGroup) nationalIdGroup.classList.remove("hidden");
+ if (nationalIdCountryGroup) nationalIdCountryGroup.classList.remove("hidden");
  } else if (type === "E") {
  if (leiGroup) leiGroup.classList.remove("hidden");
  } else if (type === "V") {
@@ -3146,7 +3150,8 @@ async function handleManualEntity(event) {
  const passportNum = document.getElementById("manual-passport-num").value.trim();
  const passportCountry = document.getElementById("manual-passport-country").value.trim();
  const nationalId = document.getElementById("manual-national-id").value.trim();
- 
+ const nationalIdCountry = document.getElementById("manual-national-id-country").value.trim();
+
  // Extra
  const gender = document.getElementById("manual-gender").value;
  const dateOfDeath = document.getElementById("manual-date-of-death").value.trim();
@@ -3180,7 +3185,11 @@ async function handleManualEntity(event) {
  gender: gender || "U",
  aircraft_tail_number: aircraft || null,
  passport_documents: passportNum ? `${passportNum}` : null,
+ // Le pays saisi était lu puis jeté : le serveur écrivait « XX » et le hard
+ // match (numéro ET pays) ne rapprochait jamais ce passeport d'un client.
+ passport_issuing_country: passportNum && passportCountry ? passportCountry : null,
  national_id_documents: nationalId ? `${nationalId}` : null,
+ national_id_issuing_country: nationalId && nationalIdCountry ? nationalIdCountry : null,
  place_of_birth: placeOfBirth || null,
  address: address || null,
  city: city || null,
@@ -3214,6 +3223,9 @@ async function handleManualEntity(event) {
  
  const data = await response.json();
  showToast(`Entité ajoutée avec succès ! ID : ${data.entity_id}`, "success");
+ if ((data.documents_sans_pays || []).length) {
+ showToast("Document enregistré sans pays émetteur : il ne déclenchera aucune correspondance exacte (hard match). Le nom reste comparé.", "warning");
+ }
  
  // Reset form
  document.getElementById("manual-entity-form").reset();
@@ -4865,8 +4877,10 @@ async function handleScreening(event) {
  client_lei_number: lei || null,
  transaction_vessel_imo: imo || null,
  transaction_aircraft_registration: aircraft || null,
- client_passport_documents: passportNum ? [{ "number": passportNum, "issuing_country": passportCountry || "XX" }] : [],
- client_national_id_documents: nationalId ? [{ "number": nationalId, "issuing_country": "XX" }] : [],
+ // Sans pays saisi, le document part SANS pays : « XX » n'est pas un pays,
+ // et le hard match ne rapproche que des documents au pays établi.
+ client_passport_documents: passportNum ? [{ "number": passportNum, "issuing_country": passportCountry ? passportCountry.toUpperCase() : null }] : [],
+ client_national_id_documents: nationalId ? [{ "number": nationalId, "issuing_country": null }] : [],
  client_other_id_documents: [],
  
  // Add new fields to payload
@@ -9254,6 +9268,45 @@ function _etapeDecisionPPE(d, vocab, isReviewer, auditeur) {
   <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerDecisionPPE(${d.id}, ${d.alert_id})">Enregistrer la décision</button>`;
 }
 
+// Revue de vigilance renforcée (R.561-20-2 3°) d'une relation acceptée : les
+// revues tenues, puis le geste qui tient la suivante. Signalée échue à
+// l'écran, elle n'avait aucun geste — un dossier décidé ne se réécrit plus.
+function _etapeRevuePPE(d, vocab, isReviewer, auditeur) {
+ const accepte = (vocab.decisions || []).some(x => x.code === d.decision && x.accepte);
+ if (d.statut !== "DECIDE" || !accepte) return "";
+ const tenues = (d.revues || []).map(r => `<li>${formatDate(r.le)} · @${escapeHtml(r.par || "")} · <strong>${escapeHtml(r.conclusion_label || r.conclusion || "")}</strong>${r.reference ? ` · <span>réf.</span> ${escapeHtml(r.reference)}` : ""}<br>${escapeHtml(r.motif || "")}</li>`).join("");
+ const historique = tenues ? `<ul style="list-style: none; margin: 0.3rem 0; font-size: 0.85rem;">${tenues}</ul>` : "";
+ if (!d.prochaine_revue_le) {
+  return `${historique}<p style="font-size: 0.85rem; color: var(--text-muted);">La relation a pris fin à la dernière revue : plus de revue à tenir.</p>`;
+ }
+ const echeance = d.revue_en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;"><span>Revue échue depuis plus que le délai</span> (<span>seuil</span> ${d.seuil_jours} j) : ${formatDate(d.prochaine_revue_le)}.</p>`
+  : d.revue_echue
+   ? `<p style="color: var(--color-warning); font-weight: 600; font-size: 0.85rem;"><span>Revue échue le</span> ${formatDate(d.prochaine_revue_le)}.</p>`
+   : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>Prochaine revue</span> : ${formatDate(d.prochaine_revue_le)}.</p>`;
+ const moi = currentUser ? currentUser.username : "";
+ if (!isReviewer || auditeur) {
+  return `${historique}${echeance}<p style="font-size: 0.82rem; color: var(--text-muted);">La revue revient à une personne habilitée (rôle réviseur) qui n'a pas instruit l'alerte.</p>`;
+ }
+ if ((d.instruit_par || []).includes(moi)) {
+  return `${historique}${echeance}<p style="font-size: 0.82rem; color: var(--text-muted);">Vous avez proposé ou validé la confirmation : la revue revient à une autre personne habilitée.</p>`;
+ }
+ return `${historique}${echeance}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="ppe-conclusion-${d.id}">Conclusion de la revue</label>
+    <select id="ppe-conclusion-${d.id}">${_options(vocab.conclusions_de_revue || [], "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-le-${d.id}">Revue tenue le</label>
+    <input type="datetime-local" id="ppe-revue-le-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-suivante-${d.id}">Revue suivante</label>
+    <input type="date" id="ppe-revue-suivante-${d.id}" value="${_dansUnAn()}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-reference-${d.id}">Référence</label>
+    <input type="text" id="ppe-revue-reference-${d.id}" maxlength="255" placeholder="Comité, procès-verbal…"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-revue-motif-${d.id}">Motif de la revue</label>
+   <textarea id="ppe-revue-motif-${d.id}" rows="2" maxlength="4000" placeholder="Ce qui a été revu, et sur quelles pièces"></textarea></div>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerRevuePPE(${d.id}, ${d.alert_id})">Enregistrer la revue</button>`;
+}
+
 function _blocDossierPPE(d, vocab, isReviewer, auditeur) {
  const liens = _liensPPE(d.liens_source);
  const nonDeclaree = d.ppe_non_declaree
@@ -9275,6 +9328,7 @@ function _blocDossierPPE(d, vocab, isReviewer, auditeur) {
   ${echue}
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Instruction</h4>${_etapeInstructionPPE(d, vocab, auditeur)}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Décision d'entrer ou de rester en relation</h4>${_etapeDecisionPPE(d, vocab, isReviewer, auditeur)}
+  ${(revue => revue ? `<h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Revue de vigilance renforcée</h4>${revue}` : "")(_etapeRevuePPE(d, vocab, isReviewer, auditeur))}
  </div>`;
 }
 
@@ -9353,6 +9407,20 @@ async function enregistrerDecisionPPE(dossierId, alertId) {
  }, alertId);
 }
 
+async function enregistrerRevuePPE(dossierId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${dossierId}`)?.value || "";
+ const payload = { conclusion: valeur("ppe-conclusion"), motif: valeur("ppe-revue-motif"),
+  reference: valeur("ppe-revue-reference") };
+ if (valeur("ppe-revue-le")) payload.revue_le = new Date(valeur("ppe-revue-le")).toISOString();
+ // La revue suivante ne vaut que pour un maintien : le serveur l'ignore pour
+ // une fin de relation
+ if (valeur("ppe-revue-suivante")) payload.prochaine_revue_le = new Date(valeur("ppe-revue-suivante") + "T12:00:00").toISOString();
+ if (!await confirmDialog("Enregistrer cette revue ? Elle s'ajoute au dossier et ne se réécrit plus.")) return;
+ await _ppeRequete(`/api/ppe/${dossierId}/revue`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
 function _parametresDesDossiersPPE() {
  const params = new URLSearchParams();
  const statut = document.getElementById("ppe-statut-filter")?.value;
@@ -9376,7 +9444,8 @@ function _afficherSyntheseDesDossiersPPE(s) {
   <span><strong>${s.decided}</strong> <span>décidé(s)</span></span>
   <span><span>Délai moyen confirmation → décision</span> : <strong>${formatDuree(s.avg_decision_delay_seconds)}</strong></span>
   ${s.undeclared_by_upstream ? `<span style="color: var(--color-alert);"><strong>${s.undeclared_by_upstream}</strong> <span>PPE non déclarée(s) par le SI amont</span></span>` : ""}
-  ${s.decided_late ? `<span style="color: var(--color-warning);"><strong>${s.decided_late}</strong> <span>décidé(s) hors délai</span></span>` : ""}`;
+  ${s.decided_late ? `<span style="color: var(--color-warning);"><strong>${s.decided_late}</strong> <span>décidé(s) hors délai</span></span>` : ""}
+  ${s.reviews_due ? `<span style="color: ${s.reviews_overdue ? "var(--color-alert)" : "var(--color-warning)"};"><strong>${s.reviews_due}</strong> <span>revue(s) de vigilance renforcée échue(s)</span>${s.reviews_overdue ? ` (<strong>${s.reviews_overdue}</strong> <span>au-delà du délai</span>)` : ""}</span>` : ""}`;
 }
 
 async function fetchDossiersPPE() {
@@ -9730,6 +9799,13 @@ async function fetchWhitelist(page = null) {
  }
 }
 
+// L'identité qu'une paire couvre (fiskr/parties.py) : une partie liée du
+// client, ou le client lui-même — rien n'est alors ajouté.
+function partieDeLaPaire(p) {
+ if (p.partie_liee_id === null || p.partie_liee_id === undefined) return "";
+ return `<br><small><span>Partie liée du client</span> : <strong>${escapeHtml(p.partie_nom || "#" + p.partie_liee_id)}</strong></small>`;
+}
+
 function renderWhitelistTable(items) {
  const tbody = document.querySelector("#whitelist-table tbody");
  if (!tbody) return;
@@ -9756,7 +9832,7 @@ function renderWhitelistTable(items) {
  // attend une décision.
  tbody.innerHTML = items.map(p => `
  <tr ${p.state !== "ACTIVE" && p.state !== "STALE" ? 'style="opacity: 0.55;"' : ""}>
- <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
+ <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small>${partieDeLaPaire(p)}</td>
  <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(p.list_type)}</td>
  <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? (p.evidence_file_present === false
@@ -12670,6 +12746,16 @@ function campaignStatusBadge(status) {
  return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>`;
 }
 
+// Parties liées des clients d'une campagne (fiskr/parties.py), comptées à
+// part des lignes du fichier. Rien pour une campagne antérieure (null) ou
+// sans partie : une absence ne s'affiche pas comme un zéro mesuré.
+function partiesDeLaCampagne(c) {
+ if (!c.parties_screened) return "";
+ const refusees = c.parties_rejected_count
+  ? ` · <span style="color: var(--color-alert);">${c.parties_rejected_count} <span>refusée(s) par le contrôle qualité</span></span>` : "";
+ return `<br><small title="Bénéficiaires effectifs, mandataires, dirigeants et associés des clients du fichier, criblés avec eux."><strong style="color: ${c.parties_alert_count ? "var(--color-alert)" : "var(--text-muted)"};">${c.parties_alert_count}</strong> <span>partie(s) liée(s) en alerte</span> / ${c.parties_screened} <span>criblée(s)</span>${refusees}</small>`;
+}
+
 async function fetchBatchCampaigns() {
  const tbody = document.querySelector("#batch-campaigns-table tbody");
  if (!tbody) return;
@@ -12688,7 +12774,7 @@ async function fetchBatchCampaigns() {
  <td>${c.trigger === "inbox" ? '<span class="badge-secondary"> CFT</span>' : '<span class="badge-secondary">Manuel</span>'}</td>
  <td>${campaignStatusBadge(c.status)}${c.error_message ? `<br><small style="color: var(--color-alert);">${escapeHtml(c.error_message)}</small>` : ""}</td>
  <td>${c.processed_clients} / ${c.total_clients}</td>
- <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong></td>
+ <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong>${partiesDeLaCampagne(c)}</td>
  <td title="Correspondances au-dessus du seuil, liste blanche et règles comprises. Entre parenthèses : les alertes réellement ouvertes — l'écart est ce que le dispositif a absorbé.">${c.hits_count ?? "—"}${typeof c.opened_count === "number" ? ` <small style="color: var(--text-muted);">(${c.opened_count} ouverte(s))</small>` : ""}</td>
  <td>${c.rejected_count || 0}</td>
  <td>${formatDateTime(c.created_at)}</td>
@@ -12746,7 +12832,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  const rows = (c.results || []).map(r => `
  <tr>
  <td>${escapeHtml(r.client_id || "—")}</td>
- <td><strong>${escapeHtml(r.client_name || "—")}</strong></td>
+ <td><strong>${escapeHtml(r.client_name || "—")}</strong>${r.partie_liee_id ? `<br><small style="color: var(--text-muted);"><span>Partie liée du client</span> : ${escapeHtml(r.via_partie || "#" + r.partie_liee_id)}</small>` : ""}</td>
  <td>${escapeHtml(statusLabel(r.status))}</td>
  <td>${r.final_score !== null && r.final_score !== undefined ? r.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${r.watchlist_name ? `${escapeHtml(r.watchlist_name)}<br><small style="color: var(--text-muted);">${escapeHtml(r.watchlist_entity_id || "")}</small>` : (r.error ? `<small style="color: var(--color-alert);">${escapeHtml(r.error)}</small>` : "—")}</td>
@@ -12759,6 +12845,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  ${c.processed_clients}/${c.total_clients} client(s) criblé(s) ·
  <strong style="color: var(--color-alert);">${c.alert_count} client(s) en alerte</strong>${c.hits_count ? ` · <strong>${c.hits_count} correspondance(s)</strong>` : ""}${typeof c.opened_count === "number" ? ` · <strong>${c.opened_count} alerte(s) ouverte(s)</strong>` : ""} ·
  ${c.no_match_count} sans match · ${c.rejected_count} rejet(s) quality gate
+ ${partiesDeLaCampagne(c)}
  </p>
  <div class="filter-bar" style="margin-bottom: 0.5rem;">
  <button class="btn btn-sm ${statusFilter === "" ? "btn-secondary" : ""}" style="${statusFilter === "" ? "" : "background: var(--surface-3);"}" onclick="openBatchCampaign(${c.id}, '')">Tous (${c.results_total})</button>
@@ -13742,7 +13829,7 @@ async function openClient360(clientId) {
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `
- <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.state === "STALE" && p.stale_reason_label ? " (" + escapeHtml(p.stale_reason_label) + ")" : ""}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
+ <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.state === "STALE" && p.stale_reason_label ? " (" + escapeHtml(p.stale_reason_label) + ")" : ""}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}${partieDeLaPaire(p)}</li>`).join("");
 
  body.innerHTML = `
  ${kycHtml}

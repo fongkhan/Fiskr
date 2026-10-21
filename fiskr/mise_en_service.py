@@ -954,6 +954,23 @@ def _dossiers_ppe(db) -> Dict[str, Any]:
             "une personne habilitée (rôle réviseur) qui n'a pas instruit l'alerte.", lien,
             constat_public=f"{len(en_retard)} dossier(s) PPE sans décision plus de {seuil} "
                            f"jours après la confirmation.")
+    # La revue de vigilance renforcee datee a la decision (R.561-20-2 3°) : la
+    # notification part a l'echeance ; echue depuis plus que le delai, la
+    # relation court sans la vigilance que le texte exige (`ppe.revue_en_retard`).
+    from fiskr.ppe import revues_en_retard
+    revues = revues_en_retard(db)
+    if revues:
+        noms = ", ".join(f"#{d.id} {d.client_name} × {d.watchlist_name}" for d in revues[:5])
+        return _controle(
+            "ppe", "Criblage", titre, BLOQUANT,
+            f"{len(revues)} dossier(s) PPE dont la revue de vigilance renforcée est échue depuis "
+            f"plus de {seuil} jours : {noms}{' …' if len(revues) > 5 else ''}. La relation court "
+            f"sans la revue datée à la décision (CMF R.561-20-2 3°).",
+            "Ouvrez chaque dossier et enregistrez sa revue : maintien de la relation, avec la "
+            "revue suivante datée, ou fin de la relation — par une personne habilitée (rôle "
+            "réviseur) qui n'a pas instruit l'alerte.", lien,
+            constat_public=f"{len(revues)} dossier(s) PPE dont la revue de vigilance renforcée "
+                           f"est échue depuis plus de {seuil} jours.")
     if orphelines:
         return _controle(
             "ppe", "Criblage", titre, ATTENTION,
@@ -962,7 +979,8 @@ def _dossiers_ppe(db) -> Dict[str, Any]:
             "Ouvrez leur dossier PPE depuis l'alerte : sans lui, rien ne portera la décision.",
             lien)
     return _controle("ppe", "Criblage", titre, OK,
-                     f"Aucun dossier PPE sans décision au-delà de {seuil} jours.", lien=lien)
+                     f"Aucun dossier PPE sans décision ni revue échue au-delà de {seuil} jours.",
+                     lien=lien)
 
 
 # Fenetre d'observation des echecs de synchronisation : assez large pour

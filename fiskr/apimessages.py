@@ -322,6 +322,19 @@ TEMPLATES = [
     (re.compile(r"^Alerte assignée à (\S+)\.$"), {
         "en": "Alert assigned to {0}.", "de": "Alarm zugewiesen an {0}.",
         "es": "Alerta asignada a {0}.", "zh": "警报已指派给 {0}。", "ar": "أسند التنبيه إلى {0}."}),
+    # Proposition unitaire sur l'alerte d'un collegue (api._ecart_de_la_proposition)
+    (re.compile(r"^Assignée à un autre analyste \(@(\S+)\) : c'est à son assigné de la proposer\. "
+                r"Pour la reprendre, assignez-la-vous \(« M'assigner »\) : la reprise est tracée\.$"), {
+        "en": "Assigned to another analyst (@{0}): it is for its assignee to propose it. To take it "
+              "over, assign it to yourself (“Assign to me”): the takeover is recorded.",
+        "de": "Einem anderen Analysten zugewiesen (@{0}): der Zugewiesene schlägt die Entscheidung "
+              "vor. Zum Übernehmen weisen Sie ihn sich zu („Mir zuweisen“): die Übernahme wird "
+              "protokolliert.",
+        "es": "Asignada a otro analista (@{0}): le corresponde a su asignado proponerla. Para "
+              "retomarla, asígnesela («Asignarme»): la reasignación queda registrada.",
+        "zh": "已指派给其他分析员（@{0}）：应由其负责人提议。如需接手，请指派给自己（“指派给我”）：接手会被记录。",
+        "ar": "مسندة إلى محلل آخر (@{0}): على المسند إليه أن يقترحها. لاستلامها، أسندها إلى نفسك "
+              "(«أسند إلي»): يُسجَّل الاستلام."}),
     (re.compile(r"^(\d+) alerte\(s\) mise\(s\) à jour, (\d+) ignorée\(s\)\.$"), {
         "en": "{0} alert(s) updated, {1} skipped.",
         "de": "{0} Alarm(e) aktualisiert, {1} übersprungen.",

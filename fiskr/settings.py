@@ -179,6 +179,9 @@ def gel_declaration_delai_heures(db) -> int:
 # publication ACPR « Les personnes politiquement exposees », juillet 2024),
 # puis les presenter a la personne habilitee. Au-dela d'un mois, le dossier
 # n'attend plus une instruction : il attend que quelqu'un s'en saisisse.
+# Le meme delai borne la revue de vigilance renforcee echue (fiskr/ppe.py,
+# `revue_en_retard`) : la revue est le meme travail — interroger le client,
+# renouveler les pieces, decider du maintien avec la personne habilitee.
 SETTING_PPE_DELAI = "ppe.decision_delai_jours"
 DEFAULT_PPE_DELAI_JOURS = 30
 # Bornes : en dessous d'un jour, chaque confirmation sonnerait avant que le

@@ -302,6 +302,30 @@ def compute_base_score(s1: str, s2: str, config: dict) -> float:
 
 # ------------------ HARD MATCH SÉQUENCE ------------------
 
+# Ce que les lecteurs de listes ecrivent quand la source ne donne pas le pays
+# emetteur d'un document (fiskr/ingest.py, fiskr/ssie.py) — et ce que l'ajout
+# manuel de fiche ecrivait pour TOUT passeport, le pays saisi a l'ecran etant
+# lu puis jete. Ce n'est pas un pays.
+PAYS_EMETTEUR_INCONNU = "XX"
+
+
+def pays_emetteur_etabli(valeur: Any) -> str:
+    """
+    Pays emetteur d'un passeport ou d'une piece d'identite, s'il est ETABLI :
+    code ISO2 en majuscules, ou "" quand il est absent ou n'est que le
+    marqueur « XX ».
+
+    Le hard match compare numero ET pays : un numero de passeport n'est unique
+    que dans le pays qui l'emet. Deux pays inconnus ne sont pas un meme pays :
+    « XX » = « XX » (ou vide = vide) n'etablit pas que deux documents de meme
+    numero sont le meme document. Un document sans pays etabli ne declenche
+    donc jamais de correspondance exacte — ni contre un pays, ni contre un
+    autre document sans pays ; le nom, lui, reste compare par le score.
+    """
+    code = str(valeur or "").strip().upper()
+    return "" if code == PAYS_EMETTEUR_INCONNU else code
+
+
 def check_hard_matches(client: dict, watchlist: dict,
                        channel: str = caps.CHANNEL_SCREENING) -> Tuple[bool, str]:
     """
@@ -362,12 +386,13 @@ def check_hard_matches(client: dict, watchlist: dict,
     if not isinstance(w_passports, list): w_passports = []
     for cp in c_passports:
         cp_num = clean_doc_num(cp.get("number", ""))
-        cp_country = (cp.get("issuing_country") or "").strip().upper()
-        if not cp_num:
+        # Sans pays etabli, pas de correspondance exacte (`pays_emetteur_etabli`)
+        cp_country = pays_emetteur_etabli(cp.get("issuing_country"))
+        if not cp_num or not cp_country:
             continue
         for wp in w_passports:
             wp_num = clean_doc_num(wp.get("number", ""))
-            wp_country = (wp.get("issuing_country") or "").strip().upper()
+            wp_country = pays_emetteur_etabli(wp.get("issuing_country"))
             if cp_num == wp_num and cp_country == wp_country:
                 return True, f"Hard Match Priorité 2 : Passeport identique ({cp_num} - {cp_country})"
 
@@ -394,12 +419,12 @@ def check_hard_matches(client: dict, watchlist: dict,
     if not isinstance(w_nid, list): w_nid = []
     for cn in c_nid:
         cn_num = clean_doc_num(cn.get("number", ""))
-        cn_country = (cn.get("issuing_country") or "").strip().upper()
-        if not cn_num:
+        cn_country = pays_emetteur_etabli(cn.get("issuing_country"))
+        if not cn_num or not cn_country:
             continue
         for wn in w_nid:
             wn_num = clean_doc_num(wn.get("number", ""))
-            wn_country = (wn.get("issuing_country") or "").strip().upper()
+            wn_country = pays_emetteur_etabli(wn.get("issuing_country"))
             if cn_num == wn_num and cn_country == wn_country:
                 return True, f"Hard Match Priorité 4 : Carte Nationale d'Identité identique ({cn_num} - {cn_country})"
 

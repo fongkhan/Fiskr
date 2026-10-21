@@ -25,6 +25,13 @@ l'alerte s'ouvre avec un evenement WHITELIST_STALE qui dit ce qui a change. La
 paire n'est pas supprimee — son historique reste ; on la reconduit (nouvelles
 empreintes, journalisees) ou on la retire.
 
+La paire couvre l'IDENTITE qu'elle a vue : le client, ou l'une de ses parties
+liees (`partie_liee_id`, fiskr/parties.py). Cle (client, fiche) seule, la paire
+posee sur le mandataire homonyme d'un client etait lue pour le client : son
+empreinte n'etait pas celle de la decision, la paire passait « a reexaminer »
+et n'absorbait plus rien, pas meme le mandataire. Une paire sans partie — toutes
+celles d'avant — est celle du client lui-meme.
+
 Une paire SANS empreinte (posee avant ce suivi) est a reexaminer, elle aussi :
 rien ne permet d'etablir que rien n'a change depuis sa decision, et absorber
 une alerte est un verdict qui ne sort que d'une condition etablie. Aucune
@@ -290,16 +297,22 @@ def examiner_la_paire(db, paire, fiche: Dict[str, Any], empreinte: str) -> Optio
     if nouveau:
         paire.stale_since = datetime.utcnow()
     paire.stale_reason = motif
+    notification = {
+        "Paire": paire.id, "Client": paire.client_name or paire.client_id,
+        "Fiche listée": paire.watchlist_name or paire.watchlist_entity_id,
+        "Liste": paire.list_type or "—", "Motif": MOTIFS_DE_REEXAMEN[motif],
+    }
+    if getattr(paire, "partie_liee_id", None) is not None:
+        # La paire d'une partie liee : c'est son identite qui a change
+        from fiskr.database import PartieLiee
+        partie = db.get(PartieLiee, paire.partie_liee_id)
+        notification["Partie liée"] = partie.nom if partie is not None else f"#{paire.partie_liee_id}"
     return {
         "pair_id": paire.id, "motif": motif, "nouveau": nouveau,
         "detail": detail_de_reexamen(db, paire, fiche, motif),
         # Charge utile composee AVANT le commit (apres, chaque attribut relu
         # coute un SELECT).
-        "notification": {
-            "Paire": paire.id, "Client": paire.client_name or paire.client_id,
-            "Fiche listée": paire.watchlist_name or paire.watchlist_entity_id,
-            "Liste": paire.list_type or "—", "Motif": MOTIFS_DE_REEXAMEN[motif],
-        },
+        "notification": notification,
     }
 
 
@@ -313,9 +326,16 @@ def notifier_les_bascules(db, reexamens) -> None:
 
 # ------------------ CE QUE LA DECISION COUVRE ------------------
 
-def empreintes_de_reference(db, client_id: str, entity_id: str) -> Dict[str, Any]:
+def empreintes_de_reference(db, client_id: str, entity_id: str,
+                            partie_liee_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Empreintes que pose une decision (creation ou reconduction) sur ce couple.
+
+    `partie_liee_id` : la decision porte sur une PARTIE LIEE du client
+    (fiskr/parties.py) — son criblage journalise, son identite. Sans elle, le
+    dernier criblage du couple etait celui de la partie OU du client, selon
+    l'ordre du passage : une paire posee depuis l'alerte du client pouvait
+    porter l'empreinte de son mandataire.
 
     1. Le DERNIER criblage journalise du couple : c'est ce que l'analyste a
        devant lui — l'alerte qu'il clot en faux positif, ou celle que la paire
@@ -340,6 +360,8 @@ def empreintes_de_reference(db, client_id: str, entity_id: str) -> Dict[str, Any
     ligne = db.query(AuditTrail.id, AuditTrail.decision_tree).filter(
         AuditTrail.client_id == client_id,
         AuditTrail.watchlist_id == entity_id,
+        AuditTrail.partie_liee_id.is_(None) if partie_liee_id is None
+        else AuditTrail.partie_liee_id == partie_liee_id,
     ).order_by(AuditTrail.id.desc()).first()
     if ligne is not None:
         arbre = ligne[1] or {}
@@ -359,7 +381,14 @@ def empreintes_de_reference(db, client_id: str, entity_id: str) -> Dict[str, Any
         ).order_by(Snapshot.uploaded_at.desc()).first()
         fiche_vue = trouvee[0] if trouvee else None
 
-    if not client_vu:
+    if not client_vu and partie_liee_id is not None:
+        # L'identite de la partie telle qu'elle est criblee (profil de partie)
+        from fiskr.database import PartieLiee
+        from fiskr.parties import profil_de_criblage
+        partie = db.get(PartieLiee, partie_liee_id)
+        if partie is not None and partie.client_id == client_id:
+            client_vu = empreinte_client(profil_de_criblage(partie))
+    elif not client_vu:
         rangee = db.query(ClientEntity).join(
             Snapshot, Snapshot.snapshot_id == ClientEntity.snapshot_id
         ).filter(
@@ -375,7 +404,11 @@ def empreintes_de_reference(db, client_id: str, entity_id: str) -> Dict[str, Any
     if not fiche_vue:
         manque.append(f"la fiche listée {entity_id} n'est ni en production ni en homologation, "
                       f"et aucun criblage journalisé de ce couple ne dit quelle version a été vue")
-    if not client_vu:
+    if not client_vu and partie_liee_id is not None:
+        manque.append(f"la partie liée #{partie_liee_id} n'est pas une partie du client "
+                      f"{client_id}, ou n'a jamais été criblée contre cette fiche : rien ne dit "
+                      f"quelle identité la décision couvre")
+    elif not client_vu:
         manque.append(f"le client {client_id} n'a jamais été criblé contre cette fiche et ne "
                       f"figure dans aucun référentiel : rien ne dit quelle identité la décision "
                       f"couvre — criblez-le d'abord")

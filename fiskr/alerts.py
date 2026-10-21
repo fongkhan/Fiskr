@@ -169,10 +169,20 @@ def prendre_la_suivante(db, username: str, channel: Optional[str] = None) -> Opt
         ecartees.append(candidat.id)
 
 
-def is_whitelisted(db, client_id: Optional[str], entity_id: Optional[str]) -> Optional[WhitelistPair]:
+def _de_cette_identite(partie_liee_id: Optional[int]):
+    """La paire couvre l'identite qu'elle a vue : une partie liee du client,
+    ou le client lui-meme (NULL — toutes les paires anterieures)."""
+    if partie_liee_id is None:
+        return WhitelistPair.partie_liee_id.is_(None)
+    return WhitelistPair.partie_liee_id == partie_liee_id
+
+
+def is_whitelisted(db, client_id: Optional[str], entity_id: Optional[str],
+                   partie_liee_id: Optional[int] = None) -> Optional[WhitelistPair]:
     """
     Retourne la paire de liste blanche ACTIVE (non revoquee, non expiree)
-    pour ce couple client x liste, ou None.
+    pour ce couple client x liste, ou None. `partie_liee_id` : la paire d'une
+    partie liee du client (fiskr/parties.py) ; absent, celle du client.
     """
     if not client_id or not entity_id:
         return None
@@ -180,13 +190,14 @@ def is_whitelisted(db, client_id: Optional[str], entity_id: Optional[str]) -> Op
     return db.query(WhitelistPair).filter(
         WhitelistPair.client_id == client_id,
         WhitelistPair.watchlist_entity_id == entity_id,
+        _de_cette_identite(partie_liee_id),
         WhitelistPair.revoked_at.is_(None),
         (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
     ).first()
 
 
 def whitelisted_pairs(db, client_id: Optional[str],
-                      entity_ids) -> Dict[str, WhitelistPair]:
+                      entity_ids, partie_liee_id: Optional[int] = None) -> Dict[str, WhitelistPair]:
     """
     Paires de liste blanche ACTIVES pour ce client, indexees par fiche listee.
 
@@ -194,6 +205,10 @@ def whitelisted_pairs(db, client_id: Optional[str],
     de correspondances qu'il en trouve au-dessus du seuil — 2 976 pour un nom
     tres courant, mesure en production. Une requete par correspondance aurait
     remis un N+1 sur le chemin le plus chaud de l'application.
+
+    `partie_liee_id` : le profil crible est une partie liee du client ; seules
+    SES paires s'appliquent. Celle du client ne la couvre pas, et la sienne ne
+    couvre pas le client : deux identites, deux decisions.
     """
     ids = [e for e in dict.fromkeys(entity_ids) if e]
     if not client_id or not ids:
@@ -202,6 +217,7 @@ def whitelisted_pairs(db, client_id: Optional[str],
     lignes = db.query(WhitelistPair).filter(
         WhitelistPair.client_id == client_id,
         WhitelistPair.watchlist_entity_id.in_(ids),
+        _de_cette_identite(partie_liee_id),
         WhitelistPair.revoked_at.is_(None),
         (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
     ).all()

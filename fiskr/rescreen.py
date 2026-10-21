@@ -316,9 +316,11 @@ def _screen_clients_against(db, changed_entities: List[Dict[str, Any]],
             paires_franchies.update(
                 (client_ref, (h.get("watchlist_entity") or {}).get("entity_id"))
                 + ((partie["id"],) if partie else ()) for h in hits)
+        # Sur une partie liee, ce sont SES paires (client, fiche, partie)
         paires = whitelisted_pairs(
             db, client_ref,
-            [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits])
+            [(h.get("watchlist_entity") or {}).get("entity_id") for h in hits],
+            partie_liee_id=partie["id"] if partie else None)
         # Identification du client telle que CE criblage l'a vue : journalisee
         # avec chaque decision, c'est ce qu'une paire posee depuis cette
         # alerte couvrira (fiskr.empreintes).

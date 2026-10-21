@@ -798,6 +798,13 @@ class DossierPPE(Base):
     prochaine_revue_le = Column(DateTime, nullable=True)
     # Retard de decision signale une fois (notification immediate)
     retard_signale_le = Column(DateTime, nullable=True)
+    # Revue echue signalee une fois par echeance (notification immediate,
+    # fiskr/ppe.py `detecter_revues_echues`) ; levee par la revue suivante
+    revue_signalee_le = Column(DateTime, nullable=True)
+    # Revues de vigilance renforcee tenues apres la decision, dans l'ordre :
+    # [{le, par, conclusion, motif, reference, prochaine_revue_le}]. La
+    # decision ne se reecrit pas ; chaque revue s'ajoute a la suite.
+    revues = Column(JSON, nullable=True)
 
 
 class AdminAuditLog(Base):
@@ -1140,6 +1147,14 @@ class BatchCampaign(Base):
     opened_count = Column(Integer, nullable=True, default=0)
     no_match_count = Column(Integer, default=0)
     rejected_count = Column(Integer, default=0)      # lignes refusees par le quality gate
+    # Parties liees des clients de la campagne (fiskr/parties.py), criblees
+    # avec eux, comptees A PART : les compteurs ci-dessus restent ceux des
+    # lignes du fichier. `hits_count` et `opened_count` comptent tout ce que la
+    # campagne a trouve et ouvert, parties comprises — c'est le travail produit.
+    # NULL sur les campagnes anterieures : elles n'en criblaient aucune.
+    parties_screened = Column(Integer, nullable=True)
+    parties_alert_count = Column(Integer, nullable=True)
+    parties_rejected_count = Column(Integer, nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)
@@ -1160,6 +1175,10 @@ class BatchResult(Base):
     audit_id = Column(Integer, nullable=True)
     alert_id = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)              # motif de rejet quality gate
+    # Resultat d'une PARTIE LIEE du client de la ligne (fiskr/parties.py) :
+    # laquelle, et la chaine qui la rattache. NULL : le client lui-meme.
+    partie_liee_id = Column(Integer, nullable=True)
+    via_partie = Column(Text, nullable=True)
 
 class SavedView(Base):
     """
@@ -1363,6 +1382,12 @@ class WhitelistPair(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     client_id = Column(String(100), nullable=False, index=True)
     watchlist_entity_id = Column(String(100), nullable=False, index=True)
+    # L'identite que la decision a vue (fiskr/parties.py) : une partie liee du
+    # client, ou NULL pour le client lui-meme — ce que sont toutes les paires
+    # anterieures. Cle (client, fiche) seule, la paire posee sur le mandataire
+    # homonyme d'un client etait lue pour le client : empreinte differente,
+    # « a reexaminer », et plus rien d'absorbe, pas meme le mandataire.
+    partie_liee_id = Column(Integer, nullable=True)
     client_name = Column(String(1000), nullable=True)
     watchlist_name = Column(String(1000), nullable=True)
     # Type de liste d'origine du liste (NULL sur les paires anterieures)
@@ -1768,6 +1793,22 @@ def init_db():
                 ("total_hint", "INTEGER"),
                 ("phase", "VARCHAR(30)"),
             ],
+            # Parties liees criblees par les campagnes (fiskr/parties.py) :
+            # NULL sur les campagnes et resultats existants (aucune partie)
+            "batch_campaigns": [
+                ("parties_screened", "INTEGER"),
+                ("parties_alert_count", "INTEGER"),
+                ("parties_rejected_count", "INTEGER"),
+            ],
+            "batch_results": [
+                ("partie_liee_id", "INTEGER"),
+                ("via_partie", "TEXT"),
+            ],
+            # Revue de vigilance renforcee d'un dossier PPE (fiskr/ppe.py)
+            "ppe_dossiers": [
+                ("revue_signalee_le", "TIMESTAMP"),
+                ("revues", "JSON"),
+            ],
             "watchlist_entities": [
                 ("excluded", "BOOLEAN"),
                 ("exclusion_justification", "TEXT"),
@@ -1872,6 +1913,9 @@ def init_db():
                 ("fingerprinted_at", "TIMESTAMP"),
                 ("stale_since", "TIMESTAMP"),
                 ("stale_reason", "VARCHAR(30)"),
+                # Partie liee couverte (fiskr/parties.py) : NULL sur les paires
+                # existantes, qui sont celles du client lui-meme
+                ("partie_liee_id", "INTEGER"),
             ],
             "users": [
                 ("failed_login_count", "INTEGER"),

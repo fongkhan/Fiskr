@@ -52,11 +52,21 @@ def _fmt_date(value) -> str:
     return str(value)
 
 
-def compose_deterministic_narrative(alert, audit, events: List[Any]) -> str:
+def compose_deterministic_narrative(alert, audit, events: List[Any],
+                                    partie: Optional[Dict[str, Any]] = None) -> str:
     """
     Assemble le narratif depuis les seules donnees tracees (alerte + audit +
     historique). Chaque phrase est justifiable par un champ en base.
+
+    `partie` : la partie liee du client sur laquelle porte la correspondance
+    (fiskr/parties.py, `partie_de_l_alerte`). Absente, elle est relue de
+    l'alerte et de l'arbre journalise ; sans elle, le narratif d'une alerte
+    nee sur un beneficiaire effectif disait que « le profil » du client avait
+    correspondu.
     """
+    if partie is None:
+        from fiskr.parties import partie_de_l_alerte
+        partie = partie_de_l_alerte(None, alert, audit)
     tree: Dict[str, Any] = (audit.decision_tree if audit is not None else None) or {}
     wl_entity = tree.get("watchlist_entity") or {}
     lines: List[str] = []
@@ -71,10 +81,21 @@ def compose_deterministic_narrative(alert, audit, events: List[Any]) -> str:
     )
     origin = wl_entity.get("_list_type") or ""
     origin_txt = f" (liste {origin})" if origin else ""
+    if partie:
+        from fiskr.parties import phrase_de_la_partie
+        engage = partie.get("peut_engager_les_fonds")
+        lines.append(
+            f"La correspondance ne porte pas sur le client lui-même mais sur une partie "
+            f"liée : {phrase_de_la_partie(partie)}"
+            + ("" if engage is None else
+               (", qui peut engager les fonds du client" if engage
+                else ", qui ne peut pas engager les fonds du client"))
+            + f". C'est son identité qui a été comparée ({partie.get('chaine') or 'rattachement non tracé'})."
+        )
     lines.append(
-        f"Le profil a présenté une correspondance avec la personne listée "
-        f"« {alert.watchlist_name} » (identifiant {alert.watchlist_entity_id}){origin_txt}, "
-        f"avec un score final de {alert.final_score:.1f} %."
+        f"{'Cette partie' if partie else 'Le profil'} a présenté une correspondance avec la "
+        f"personne listée « {alert.watchlist_name} » (identifiant {alert.watchlist_entity_id})"
+        f"{origin_txt}, avec un score final de {alert.final_score:.1f} %."
     )
     if audit is not None and audit.watchlist_version:
         from fiskr import univers
@@ -185,13 +206,14 @@ def _llm_rewrite(draft: str, model: str) -> Optional[str]:
         return None
 
 
-def generate_alert_narrative(alert, audit, events: List[Any]) -> Tuple[str, bool]:
+def generate_alert_narrative(alert, audit, events: List[Any],
+                             partie: Optional[Dict[str, Any]] = None) -> Tuple[str, bool]:
     """
     Genere le narratif d'une alerte. Retourne (texte, llm_utilise).
     Le composeur deterministe fournit toujours un resultat ; la reformulation
     LLM n'est tentee que si elle est activee et configuree.
     """
-    draft = compose_deterministic_narrative(alert, audit, events)
+    draft = compose_deterministic_narrative(alert, audit, events, partie)
     cfg = get_narrative_config()
     if cfg["llm_enabled"]:
         rewritten = _llm_rewrite(draft, cfg["llm_model"])

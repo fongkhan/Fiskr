@@ -258,6 +258,15 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
         urgency=IMMEDIATE, link="#screening/alerts-ppe",
     ),
+    "ppe_revue_echue": Event(
+        # IMMEDIAT : la revue de vigilance renforcee datee a la decision
+        # (R.561-20-2 3°) a atteint sa date. Elle n'etait signalee qu'a
+        # l'ecran, que personne n'ouvre pour cela. Une fois par echeance : la
+        # revue suivante en fixe une autre.
+        label="Dossier PPE : revue de vigilance renforcée échue",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-ppe",
+    ),
     "alert_mentioned": Event(
         label="Vous êtes cité dans un commentaire d'alerte",
         category=CATEGORY_SCREENING, audience=(AUDIENCE_MENTIONED,),

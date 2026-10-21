@@ -101,7 +101,8 @@ gel:
 # Personnes politiquement exposees : toute confirmation sur une liste PEP ouvre
 # un dossier PPE (CMF L.561-10 1°, R.561-20-2) — decision d'entrer ou de rester
 # en relation par une personne habilitee, origine du patrimoine et des fonds,
-# vigilance renforcee.
+# vigilance renforcee. Le meme delai borne la revue echue : notifiee des son
+# echeance, elle bloque la mise en service au-dela.
 ppe:
   decision_delai_jours: 30      # au-dela : notification immediate + controle de mise en service (1 a 90)
 

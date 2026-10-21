@@ -54,9 +54,12 @@ CE QUI EST FAIT
 - Chaque partie est criblee par le MEME cœur que son client (journal d'audit,
   liste blanche, regles, alertes), a chaque fois que le client l'est : temps
   reel, re-criblage apres mise a jour de liste, lookback, clients nouveaux ou
-  modifies. L'alerte est celle du CLIENT — c'est sa relation qui est en cause
+  modifies, campagnes batch (les parties de chaque client du fichier, comptees
+  a part). L'alerte est celle du CLIENT — c'est sa relation qui est en cause
   — et nomme la partie : « via le beneficiaire effectif X (35 %) du client
-  ACME ».
+  ACME ». Le rapport d'alerte, le dossier d'investigation, le narratif et les
+  projets de declaration la decrivent (`partie_de_l_alerte`) ; une paire de
+  liste blanche couvre l'identite qu'elle a vue, client ou partie.
 - Les parties confirmees (vrai positif sur le perimetre SANCTION) sont lues
   pour dire si le client est REPUTE DETENU (cumul >= 50 %, §131) ou CONTROLE
   (une partie designee peut engager ses fonds, §133, §144) par une personne
@@ -128,8 +131,6 @@ La regle de calcul, LUE (et ou elle ne dit rien) :
 
 CE QUI N'EST PAS FAIT
 ---------------------
-- Les campagnes de criblage batch ne criblent pas les parties : elles criblent
-  des profils deposes par fichier, sans referentiel derriere eux.
 - Une chaine declaree APRES la confirmation de la personne designee n'ouvre
   aucune mesure d'elle-meme : le point de decision reste la confirmation
   (fiskr/gels.py, `ouvrir_si_due`). La vue 360 calcule en direct et le dit.
@@ -689,6 +690,102 @@ def vue(partie: PartieLiee) -> Dict[str, Any]:
         "mise_a_jour_le": partie.updated_at.isoformat() if partie.updated_at else None,
         "retiree_le": partie.retiree_le.isoformat() if partie.retiree_le else None,
     }
+
+
+# ------------------------------------------------------------ pieces et declarations
+
+def partie_de_l_alerte(db, alert, audit=None) -> Optional[Dict[str, Any]]:
+    """
+    La partie liee sur laquelle porte une alerte, telle que la decrivent les
+    pieces imprimables (rapport d'alerte, dossier d'investigation, narratif)
+    et les projets de declaration (TRACFIN, DG Tresor) : qui, a quel titre,
+    quelle detention, quel pouvoir sur les fonds, pour quel client. None : la
+    correspondance porte sur le client lui-meme.
+
+    Ces pieces ne le disaient pas : une alerte nee « via le beneficiaire
+    effectif X (35 %) du client ACME » s'imprimait comme une correspondance
+    entre ACME et la personne listee — la declaration aurait decrit une
+    identite qui n'a pas ete comparee.
+
+    Ce que le CRIBLAGE a vu fait foi : l'arbre journalise fige la partie
+    (`contexte`) et l'identite comparee avec la decision. Une declaration
+    decrit la correspondance instruite, pas la partie telle que la source l'a
+    redeclaree depuis. La ligne actuelle complete ce que l'arbre ne porte pas
+    et dit si la source a retire la partie. `db` peut manquer (narratif) : la
+    ligne n'est alors pas lue.
+    """
+    if alert is None or getattr(alert, "partie_liee_id", None) is None:
+        return None
+    arbre = (getattr(audit, "decision_tree", None) or {}) if audit is not None else {}
+    criblee = arbre.get("partie_liee") or {}
+    ligne = db.get(PartieLiee, alert.partie_liee_id) if db is not None else None
+    identite = arbre.get("client_identification") or (ligne.identite if ligne is not None else None) or {}
+    roles = list(criblee.get("roles") or (ligne.roles if ligne is not None else None) or [])
+    pourcentage = (criblee.get("pourcentage_detention") if "pourcentage_detention" in criblee
+                   else (ligne.pourcentage_detention if ligne is not None else None))
+    engage = (criblee.get("peut_engager_les_fonds") if "peut_engager_les_fonds" in criblee
+              else (ligne.peut_engager_les_fonds if ligne is not None else None))
+    pays = identite.get("client_countries") or {}
+    return {
+        "partie_liee_id": alert.partie_liee_id,
+        "partie_id": criblee.get("partie_id") or (ligne.partie_id if ligne is not None else None),
+        "nom": criblee.get("nom") or (ligne.nom if ligne is not None else None)
+               or nom_d_affichage(identite) or None,
+        "roles": roles,
+        "roles_libelles": [ROLES.get(r, r) for r in roles],
+        "pourcentage_detention": pourcentage,
+        "peut_engager_les_fonds": None if engage is None else bool(engage),
+        "client_id": alert.client_id,
+        "client_name": criblee.get("client_name") or alert.client_name,
+        "chaine": getattr(alert, "via_partie", None) or criblee.get("chaine"),
+        "type": identite.get("client_type"),
+        "date_naissance": identite.get("client_dob"),
+        "nationalites": list(pays.get("nationality") or []) if isinstance(pays, dict) else [],
+        "retiree_le": (ligne.retiree_le.isoformat()
+                       if ligne is not None and ligne.retiree_le else None),
+    }
+
+
+def rubriques_de_la_partie(partie: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """(libelle, valeur) d'une partie, dans l'ordre ou chaque piece les
+    imprime : une seule definition pour le rapport, le dossier et les deux
+    projets de declaration."""
+    if not partie:
+        return []
+    pct = partie.get("pourcentage_detention")
+    engage = partie.get("peut_engager_les_fonds")
+    rubriques = [
+        ("Partie liée", partie.get("nom") or "—"),
+        ("Rôle(s)", ", ".join(partie.get("roles_libelles") or []) or "—"),
+        ("Détention", _pourcentage_lisible(pct) if pct is not None else "non renseignée"),
+        ("Peut engager les fonds du client",
+         "non renseigné" if engage is None else ("oui" if engage else "non")),
+        ("Client", f"{partie.get('client_name') or '—'} ({partie.get('client_id') or '—'})"),
+        ("Rattachement", partie.get("chaine") or "—"),
+    ]
+    if partie.get("date_naissance"):
+        rubriques.append(("Date de naissance", str(partie["date_naissance"])))
+    if partie.get("nationalites"):
+        rubriques.append(("Nationalité(s)", ", ".join(str(n) for n in partie["nationalites"])))
+    if partie.get("retiree_le"):
+        rubriques.append(("Retirée par la source le", partie["retiree_le"][:10]))
+    return rubriques
+
+
+def phrase_de_la_partie(partie: Optional[Dict[str, Any]]) -> str:
+    """La partie en une phrase, pour un narratif ou un resume de declaration :
+    « Viktor ZOLOTAREV, bénéficiaire effectif (35 %) du client ACME »."""
+    if not partie:
+        return ""
+    qualite = " et ".join(l.lower() for l in partie.get("roles_libelles") or []) or "partie liée"
+    precisions = []
+    if partie.get("pourcentage_detention") is not None:
+        precisions.append(_pourcentage_lisible(partie["pourcentage_detention"]))
+    if partie.get("peut_engager_les_fonds"):
+        precisions.append("peut engager les fonds")
+    suite = f" ({', '.join(precisions)})" if precisions else ""
+    return (f"« {partie.get('nom') or '—'} », {qualite}{suite} du client "
+            f"« {partie.get('client_name') or partie.get('client_id') or '—'} »")
 
 
 # ------------------------------------------------------------ detention reputee

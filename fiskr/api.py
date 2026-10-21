@@ -704,6 +704,14 @@ def _notification_batch_tick(tick=None) -> None:
         except Exception as e:
             db.rollback()
             logger.error(f"Détection des dossiers PPE sans décision impossible : {e}")
+        # Revues de vigilance renforcee echues : signalees a l'ecran seulement,
+        # elles attendaient que quelqu'un ouvre le registre. Une fois par
+        # echeance (fiskr/ppe.py).
+        try:
+            dossiers_ppe.detecter_revues_echues(db)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Détection des revues PPE échues impossible : {e}")
         batch_cfg = notification_batch_settings(db)
         if not batch_cfg["enabled"]:
             return
@@ -3069,10 +3077,12 @@ def screen_client_profile(db: Session, client_dict: Dict[str, Any], username: st
 
         # Liste blanche client x liste : la suppression n'est JAMAIS
         # silencieuse, le journal porte la decision avec le statut WHITELISTED.
-        # Lue en UNE requete pour tout le lot.
+        # Lue en UNE requete pour tout le lot. Sur une partie liee, ce sont
+        # SES paires : celle du client ne couvre pas son mandataire homonyme.
         paires = whitelisted_pairs(
             db, client_ref,
-            [(m.get("watchlist_entity") or {}).get("entity_id") for m in hits])
+            [(m.get("watchlist_entity") or {}).get("entity_id") for m in hits],
+            partie_liee_id=(partie or {}).get("id"))
 
         # Regles anti-faux positifs chargees UNE fois pour tout le lot
         from fiskr.fprules import active_rules
@@ -3329,23 +3339,46 @@ def cribler_un_profil(db: Session, client_dict: Dict[str, Any], username: str,
     _ensure_watchlist_cache(db)
     resultat = screen_client_profile(db, client_dict, username, requested_lists)
     # Meme cache, meme univers que le client : les parties sont criblees ici,
-    # sous la garantie de fraicheur que cette fonction vient de prendre. Une
-    # partie que le contrôle qualite refuse est dite NON criblee — jamais
-    # « aucune correspondance » — et n'empeche pas les autres de l'etre.
+    # sous la garantie de fraicheur que cette fonction vient de prendre.
     resultat["parties"] = []
-    for ctx, profil in _parties_a_cribler(db, client_dict):
+    for ctx, r, refus in _cribler_les_parties(db, client_dict, username, requested_lists):
+        if r is None:
+            resultat["parties"].append({
+                "partie": ctx, "performed": False, "reason": "QUALITY_GATE_REJECTED",
+                "summary": "NON criblée : identité refusée par le contrôle qualité.",
+                "detail": refus})
+            continue
+        resultat["parties"].append(_resume_du_criblage_de_partie(ctx, r))
+    return resultat
+
+
+def _cribler_les_parties(db: Session, client_dict: Dict[str, Any], username: str,
+                         requested_lists: Optional[List[str]] = None
+                         ) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]], Any]]:
+    """
+    Crible chaque partie active du client (fiskr/parties.py) par le cœur
+    partage, `screen_client_profile` : (contexte, resultat, None), ou
+    (contexte, None, motif) pour une partie que le contrôle qualite refuse —
+    dite NON criblee, jamais « aucune correspondance », et qui n'empeche pas
+    les autres de l'etre. Le criblage unitaire et les campagnes batch passent
+    par ici : une seule facon de cribler une relation.
+    """
+    sortie = []
+    a_cribler = _parties_a_cribler(db, client_dict)
+    if a_cribler:
+        # La garantie de fraicheur du cache, comme tout chemin qui crible : une
+        # lecture d'AppSetting quand l'appelant vient de la prendre.
+        _ensure_watchlist_cache(db)
+    for ctx, profil in a_cribler:
         try:
             r = screen_client_profile(db, profil, username, requested_lists, partie=ctx)
         except HTTPException as exc:
             if exc.status_code != status.HTTP_400_BAD_REQUEST:
                 raise
-            resultat["parties"].append({
-                "partie": ctx, "performed": False, "reason": "QUALITY_GATE_REJECTED",
-                "summary": "NON criblée : identité refusée par le contrôle qualité.",
-                "detail": exc.detail})
+            sortie.append((ctx, None, exc.detail))
             continue
-        resultat["parties"].append(_resume_du_criblage_de_partie(ctx, r))
-    return resultat
+        sortie.append((ctx, r, None))
+    return sortie
 
 
 def _parties_a_cribler(db: Session, client_dict: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -4931,7 +4964,12 @@ class WatchlistEntityCreate(BaseModel):
     aircraft_tail_number: Optional[str] = None
     passport_documents: Optional[str] = None
     national_id_documents: Optional[str] = None
-    
+    # Pays emetteur (ISO2) des passeports et des pieces d'identite saisis : le
+    # hard match compare numero ET pays (fiskr/scoring.py). Absent : documents
+    # enregistres SANS pays — jamais sous « XX » — et la reponse le dit.
+    passport_issuing_country: Optional[str] = None
+    national_id_issuing_country: Optional[str] = None
+
     # New fields requested
     place_of_birth: Optional[str] = None
     address: Optional[str] = None
@@ -5000,8 +5038,11 @@ def _insert_manual_entity(db: Session, snap: Snapshot, payload: "WatchlistEntity
     residence_list = [c.strip().upper() for c in payload.residence.split(",") if c.strip()] if payload.residence else []
     alt_addrs = [a.strip() for a in payload.alternative_addresses.split(";") if a.strip()] if payload.alternative_addresses else []
 
-    passport_list = [{"number": num.strip(), "issuing_country": "XX"} for num in payload.passport_documents.split(",") if num.strip()] if payload.passport_documents else []
-    national_id_list = [{"number": num.strip(), "issuing_country": "XX"} for num in payload.national_id_documents.split(",") if num.strip()] if payload.national_id_documents else []
+    passport_list = _documents_saisis(payload.passport_documents,
+                                      payload.passport_issuing_country, "passeport")
+    national_id_list = _documents_saisis(payload.national_id_documents,
+                                         payload.national_id_issuing_country,
+                                         "pièce d'identité")
 
     from fiskr.ingest import categorize_aliases
     raw_aliases = [{"name": name, "type": "Strong"} for name in aliases_list]
@@ -5098,7 +5139,39 @@ def _insert_manual_entity(db: Session, snap: Snapshot, payload: "WatchlistEntity
     )
     db.add(db_ent)
     snap.record_count += 1
-    return {"entity_id": ent_dict["entity_id"], "primary_name": report["cleansed_name"]}
+    return {"entity_id": ent_dict["entity_id"], "primary_name": report["cleansed_name"],
+            # Ce que la fiche ne pourra pas rapprocher par correspondance
+            # exacte : dit a la saisie, pas decouvert le jour ou elle manque
+            "documents_sans_pays": [d["number"] for d in passport_list + national_id_list
+                                    if not d.get("issuing_country")]}
+
+
+def _documents_saisis(numeros: Optional[str], pays: Optional[str], libelle: str) -> List[Dict[str, Any]]:
+    """
+    Passeports ou pieces d'identite d'un ajout manuel : numeros separes par
+    des virgules, un pays emetteur commun (ISO2).
+
+    L'ajout manuel ecrivait « XX » pour TOUT document : le formulaire demandait
+    le pays du passeport, l'ecran le lisait, et rien ne l'envoyait. Le hard
+    match comparant numero ET pays, aucune fiche saisie a la main ne
+    rapprochait jamais un client par son passeport. Le pays est desormais
+    enregistre tel que saisi ; absent, le document est enregistre SANS pays —
+    jamais sous un marqueur qui se ferait passer pour un code — et il ne
+    declenche pas de correspondance exacte (`scoring.pays_emetteur_etabli`).
+    « XX » saisi a la main est refuse : c'est ce marqueur-la.
+    """
+    from fiskr.scoring import PAYS_EMETTEUR_INCONNU
+    liste = [n.strip() for n in (numeros or "").split(",") if n.strip()]
+    code = (pays or "").strip().upper() or None
+    if code == PAYS_EMETTEUR_INCONNU:
+        raise HTTPException(status_code=400, detail=(
+            f"« {PAYS_EMETTEUR_INCONNU} » n'est pas un pays : laissez le pays émetteur du "
+            f"{libelle} vide s'il est inconnu."))
+    if code is not None and not re.fullmatch(r"[A-Z]{2}", code):
+        raise HTTPException(status_code=400, detail=(
+            f"Pays émetteur du {libelle} illisible (« {pays} ») : code ISO à deux lettres "
+            f"attendu, par exemple FR."))
+    return [{"number": numero, "issuing_country": code} for numero in liste]
 
 def _recribler_contre_les_fiches(db: Session, entity_pks: List[int], *, geste: str,
                                  reference_avant: Optional[str], username: str,
@@ -5176,6 +5249,9 @@ async def create_watchlist_entity(
         "list_type": snap.file_type,
         "snapshot_id": snap.snapshot_id,
         "rescreen": rescreen,
+        # Documents enregistres sans pays emetteur : aucune correspondance
+        # exacte ne partira d'eux, le nom reste compare (fiskr/scoring.py)
+        "documents_sans_pays": result["documents_sans_pays"],
     }
 
 
@@ -6197,16 +6273,64 @@ def _campaign_summary(c: BatchCampaign) -> Dict[str, Any]:
         "opened_count": c.opened_count,
         "no_match_count": c.no_match_count,
         "rejected_count": c.rejected_count,
+        # Parties liees des clients, criblees avec eux et comptees a part
+        # (fiskr/parties.py). `None` : campagne anterieure, aucune criblee.
+        "parties_screened": c.parties_screened,
+        "parties_alert_count": c.parties_alert_count,
+        "parties_rejected_count": c.parties_rejected_count,
         "created_by": c.created_by,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "finished_at": c.finished_at.isoformat() if c.finished_at else None,
     }
+
+def _resultat_de_campagne(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    La ligne de resultat d'un profil crible (client ou partie liee).
+
+    Le sort se derive de TOUTES ses correspondances : la liste blanche
+    n'efface que la paire qu'elle couvre. Lu sur la seule meilleure, un client
+    dont la meilleure etait blanchie partait en « sans correspondance » alors
+    qu'une autre venait d'ouvrir une alerte — et le filtre ALERT de la
+    campagne restait vide.
+    """
+    retenue = result.get("best_alert")
+    if retenue:
+        return {
+            "status": "ALERT", "final_score": retenue["final_score"],
+            "watchlist_entity_id": retenue["entity_id"],
+            "watchlist_name": retenue["primary_name"],
+            "list_type": retenue["list_type"],
+            "audit_id": retenue["audit_trail_id"],
+            "alert_id": retenue["alert_id"],
+        }
+    best = result.get("best_match") or {}
+    wl_entity = best.get("watchlist_entity") or {}
+    return {
+        "status": best.get("status") or "NO_MATCH",
+        "final_score": best.get("final_score"),
+        "watchlist_entity_id": wl_entity.get("entity_id"),
+        "watchlist_name": wl_entity.get("primary_name"),
+        "list_type": wl_entity.get("_list_type"),
+        "audit_id": result.get("audit_trail_id"),
+        "alert_id": result.get("alert_id"),
+    }
+
 
 def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                         username: str, requested_lists: Optional[List[str]]) -> None:
     """Corps de la campagne (thread dedie, session DB propre)."""
     from fiskr.database import SessionLocal
     db = SessionLocal()
+
+    def _compter_les_correspondances(result: Dict[str, Any]) -> None:
+        # Deux chiffres, deux questions. `hits` compte ce que le criblage a
+        # TROUVE au-dessus du seuil ; `opened`, ce qu'il a reellement OUVERT —
+        # la liste blanche et les regles ont absorbe la difference. Client et
+        # parties liees : le meme compte, lu sur ce que le criblage a ecrit.
+        resume = result.get("hits") or {}
+        campaign.hits_count = (campaign.hits_count or 0) + int(resume.get("hits", 0))
+        campaign.opened_count = (campaign.opened_count or 0) + int(resume.get("opened", 0))
+
     try:
         campaign = db.query(BatchCampaign).filter(BatchCampaign.id == campaign_id).first()
         if campaign is None:
@@ -6220,52 +6344,24 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         # defaut ne concerne aucun d'eux. La campagne echoue une seule fois,
         # en disant pourquoi.
         exiger_un_univers(requested_lists)
+        campaign.parties_screened = campaign.parties_screened or 0
+        campaign.parties_alert_count = campaign.parties_alert_count or 0
+        campaign.parties_rejected_count = campaign.parties_rejected_count or 0
         for profile in profiles:
+            nom_client = profile.get("client_company_name") or profile.get("client_last_name")
             try:
                 result = screen_client_profile(db, profile, username, requested_lists)
-                best = result.get("best_match") or {}
-                wl_entity = best.get("watchlist_entity") or {}
-                # Le sort d'un client se derive de TOUTES ses correspondances :
-                # la liste blanche n'efface que la paire qu'elle couvre. Lu sur
-                # la seule meilleure, un client dont la meilleure etait blanchie
-                # partait en « sans correspondance » alors qu'une autre venait
-                # d'ouvrir une alerte — et le filtre ALERT de la campagne
-                # restait vide.
-                retenue = result.get("best_alert")
-                if retenue:
-                    resultat_client = {
-                        "status": "ALERT", "final_score": retenue["final_score"],
-                        "watchlist_entity_id": retenue["entity_id"],
-                        "watchlist_name": retenue["primary_name"],
-                        "list_type": retenue["list_type"],
-                        "audit_id": retenue["audit_trail_id"],
-                        "alert_id": retenue["alert_id"],
-                    }
-                else:
-                    resultat_client = {
-                        "status": best.get("status") or "NO_MATCH",
-                        "final_score": best.get("final_score"),
-                        "watchlist_entity_id": wl_entity.get("entity_id"),
-                        "watchlist_name": wl_entity.get("primary_name"),
-                        "list_type": wl_entity.get("_list_type"),
-                        "audit_id": result.get("audit_trail_id"),
-                        "alert_id": result.get("alert_id"),
-                    }
+                resultat_client = _resultat_de_campagne(result)
                 result_status = resultat_client["status"]
+                nom_client = ((result.get("client_quality_report") or {}).get("cleansed_name")
+                              or nom_client)
                 db.add(BatchResult(
                     campaign_id=campaign_id,
                     client_id=profile.get("client_id"),
-                    client_name=(result.get("client_quality_report") or {}).get("cleansed_name")
-                                or profile.get("client_company_name") or profile.get("client_last_name"),
+                    client_name=nom_client,
                     **resultat_client,
                 ))
-                # Deux chiffres, deux questions. `hits` compte ce que le
-                # criblage a TROUVE au-dessus du seuil ; `opened`, ce qu'il a
-                # reellement OUVERT — la liste blanche et les regles ont
-                # absorbe la difference.
-                resume = result.get("hits") or {}
-                campaign.hits_count = (campaign.hits_count or 0) + int(resume.get("hits", 0))
-                campaign.opened_count = (campaign.opened_count or 0) + int(resume.get("opened", 0))
+                _compter_les_correspondances(result)
                 if result_status == "ALERT":
                     campaign.alert_count += 1
                 else:
@@ -6275,11 +6371,32 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
                 db.add(BatchResult(
                     campaign_id=campaign_id,
                     client_id=profile.get("client_id"),
-                    client_name=profile.get("client_company_name") or profile.get("client_last_name"),
+                    client_name=nom_client,
                     status="REJECTED",
                     error=json.dumps(gate_error.detail, ensure_ascii=False, default=str),
                 ))
                 campaign.rejected_count += 1
+            # Les parties liees du client (fiskr/parties.py), par le meme chemin
+            # que le criblage unitaire : une campagne sur le referentiel ne
+            # criblait que les lignes du fichier — le beneficiaire effectif
+            # liste d'ACME n'y ressortait pas. Criblees meme si la ligne du
+            # client est refusee : leur identite est celle du referentiel, pas
+            # celle du fichier. Comptees a part.
+            for ctx, r, refus in _cribler_les_parties(db, profile, username, requested_lists):
+                campaign.parties_screened += 1
+                commun = {"campaign_id": campaign_id, "client_id": profile.get("client_id"),
+                          "client_name": ctx.get("client_name") or nom_client,
+                          "partie_liee_id": ctx["id"], "via_partie": ctx.get("chaine")}
+                if r is None:
+                    db.add(BatchResult(**commun, status="REJECTED",
+                                       error=json.dumps(refus, ensure_ascii=False, default=str)))
+                    campaign.parties_rejected_count += 1
+                    continue
+                ligne = _resultat_de_campagne(r)
+                db.add(BatchResult(**commun, **ligne))
+                _compter_les_correspondances(r)
+                if ligne["status"] == "ALERT":
+                    campaign.parties_alert_count += 1
             campaign.processed_clients += 1
             if campaign.processed_clients % 25 == 0:
                 db.commit()
@@ -6288,6 +6405,8 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
         db.commit()
         logger.info(f"Campagne batch #{campaign_id} terminée : "
                     f"{campaign.alert_count} client(s) en alerte, "
+                    f"{campaign.parties_alert_count} partie(s) liée(s) en alerte sur "
+                    f"{campaign.parties_screened} criblée(s), "
                     f"{campaign.hits_count or 0} correspondance(s) trouvée(s), "
                     f"{campaign.opened_count or 0} alerte(s) ouverte(s), "
                     f"sur {campaign.processed_clients} client(s).")
@@ -6296,6 +6415,9 @@ def _run_batch_campaign(campaign_id: int, profiles: List[Dict[str, Any]],
             "Campagne": f"#{campaign.id} {campaign.name}",
             "Déclencheur": campaign.trigger, "Clients criblés": campaign.processed_clients,
             "Clients en alerte": campaign.alert_count,
+            "Parties liées criblées": campaign.parties_screened,
+            "Parties liées en alerte": campaign.parties_alert_count,
+            "Parties liées refusées (contrôle qualité)": campaign.parties_rejected_count,
             "Correspondances trouvées": campaign.hits_count or 0,
             "Alertes ouvertes": campaign.opened_count or 0,
             "Sans correspondance": campaign.no_match_count,
@@ -6426,6 +6548,8 @@ async def get_batch_campaign(
                 "watchlist_entity_id": r.watchlist_entity_id, "watchlist_name": r.watchlist_name,
                 "list_type": r.list_type, "audit_id": r.audit_id, "alert_id": r.alert_id,
                 "error": r.error,
+                # Ligne d'une partie liee du client (NULL : le client lui-meme)
+                "partie_liee_id": r.partie_liee_id, "via_partie": r.via_partie,
             }
             for r in rows
         ],
@@ -6444,12 +6568,15 @@ async def export_batch_campaign_csv(
     rows = db.query(BatchResult).filter(BatchResult.campaign_id == campaign_id) \
              .order_by(BatchResult.id.asc()).limit(_EXPORT_MAX_ROWS).all()
     header = ["client_id", "client", "statut", "score", "fiche_listee_id", "fiche_listee",
-              "liste", "audit_id", "alerte_id", "motif_rejet"]
+              "liste", "audit_id", "alerte_id", "motif_rejet",
+              # Ligne d'une partie liee du client (vides : le client lui-meme)
+              "partie_liee_id", "rattachement_partie"]
     data = [
         [r.client_id or "", r.client_name or "", r.status,
          f"{r.final_score:.1f}" if r.final_score is not None else "",
          r.watchlist_entity_id or "", r.watchlist_name or "", r.list_type or "",
-         r.audit_id or "", r.alert_id or "", r.error or ""]
+         r.audit_id or "", r.alert_id or "", r.error or "",
+         r.partie_liee_id or "", r.via_partie or ""]
         for r in rows
     ]
     return _csv_response(f"fiskr_campagne_{campaign_id}.csv", header, data)
@@ -7355,6 +7482,7 @@ async def get_client_overview(
     # mesure s'ouvre. L'ecran le dit — la mesure, ou son absence.
     en_vigueur = registre_des_gels.mesure_de_detention_en_vigueur(db, client_id)
     detention["mesure_en_vigueur"] = en_vigueur.id if en_vigueur is not None else None
+    noms_paires = _noms_des_parties_des_paires(db, pairs)
 
     return {
         "client_id": client_id,
@@ -7371,7 +7499,7 @@ async def get_client_overview(
             for r in audits
         ],
         "alerts": [_alert_summary(a) for a in alerts],
-        "whitelist_pairs": [_whitelist_summary(p) for p in pairs],
+        "whitelist_pairs": [_whitelist_summary(p, noms_paires) for p in pairs],
         "parties": [{
             **parties_liees.vue(p),
             "alertes_ouvertes": sum(1 for a in alertes_par_partie.get(p.id, [])
@@ -12023,9 +12151,13 @@ async def get_alert_casefile(
         (EntityRelationship.from_entity_id == alert.watchlist_entity_id)
         | (EntityRelationship.to_entity_id == alert.watchlist_entity_id)).count()
     inherited = compute_inherited_risk(db, alert.watchlist_entity_id, max_depth=2)
+    from fiskr.parties import partie_de_l_alerte
 
     return {
         **_alert_summary(alert),
+        # Partie liee du client sur laquelle porte la correspondance (None :
+        # le client lui-meme) — qui, a quel titre, quelle detention
+        "partie_liee": partie_de_l_alerte(db, alert, audit),
         "decision_tree": audit.decision_tree if audit else None,
         "events": [
             {"timestamp": e.timestamp.isoformat() if e.timestamp else None,
@@ -12478,6 +12610,14 @@ async def print_alert_casefile(
         f"<p>Criblages antérieurs : {context['screenings']} — autres alertes : "
         f"{context['other_alerts']} — paires de liste blanche : {context['whitelist_pairs']}</p>"
         if context else "<p>Partie de transaction (pas de dossier client).</p>")
+    from fiskr.parties import rubriques_de_la_partie
+    partie = casefile.get("partie_liee")
+    partie_html = (
+        "<h2>Partie liée du client en cause</h2><p>La correspondance porte sur une partie "
+        "liée du client, non sur le client lui-même.</p><table><tbody>"
+        + "".join(f"<tr><th>{esc(libelle)}</th><td>{esc(valeur)}</td></tr>"
+                  for libelle, valeur in rubriques_de_la_partie(partie))
+        + "</tbody></table>") if partie else ""
 
     html = f"""<!DOCTYPE html>
 <html lang="fr"><head><meta charset="utf-8">
@@ -12496,6 +12636,7 @@ th {{ background: #f0f0f0; }} ul {{ margin: 0.5rem 0 0 1.2rem; }} .sub {{ color:
  ({esc(casefile['watchlist_entity_id'])}) — score {casefile['final_score']:.1f} % —
  statut {esc(casefile['status'])} — priorité {esc(casefile['priority'])} —
  généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC.</p>
+{partie_html}
 <h2>Checklist d'instruction</h2><ul>{checklist_html}</ul>
 <h2>Contexte client</h2>{context_html}
 <h2>Relations de la fiche listée</h2>
@@ -12548,11 +12689,17 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
 
     listed_entity = tree.get("watchlist_entity") or {}
     inherited = compute_inherited_risk(db, alert.watchlist_entity_id, max_depth=2)
+    # Correspondance sur une partie liee du client (fiskr/parties.py) : le
+    # projet disait « entre ACME et la personne listee » — ce n'est pas ACME
+    # qui a ete comparee, c'est son beneficiaire effectif.
+    from fiskr.parties import partie_de_l_alerte, phrase_de_la_partie
+    partie = partie_de_l_alerte(db, alert, audit)
+    compare = phrase_de_la_partie(partie) if partie else f"« {alert.client_name} »"
 
     adjustments = tree.get("adjustments") or {}
     motifs = {
         "resume": (
-            f"Correspondance de criblage entre « {alert.client_name} » et la personne/entité "
+            f"Correspondance de criblage entre {compare} et la personne/entité "
             f"listée « {alert.watchlist_name} » ({alert.list_type or 'liste inconnue'}), "
             f"score final {float(alert.final_score or 0):.1f} %."
         ),
@@ -12585,6 +12732,9 @@ def _build_str_draft(db: Session, alert: Alert, username: str) -> Dict[str, Any]
             "liste": alert.list_type, "score": alert.final_score,
         },
         "personne_concernee": person,
+        # La partie liee du client qui a correspondu (None : le client
+        # lui-meme) : role, detention, pouvoir d'engager les fonds
+        "partie_liee_en_cause": partie,
         "personne_listee": {
             "entity_id": alert.watchlist_entity_id,
             "nom": alert.watchlist_name,
@@ -12709,6 +12859,15 @@ def _render_str_draft_html(alert: Alert, draft: Dict[str, Any], generated_by: st
                            "partie_en_cause": "Partie en cause",
                            "role_partie": "Rôle de la partie"})
         + "</tbody></table>") if operation else ""
+    from fiskr.parties import rubriques_de_la_partie
+    partie_html = (
+        "<h2>2 bis. Partie liée du client en cause</h2><p class=\"sub\">La correspondance porte "
+        "sur une partie liée du client (bénéficiaire effectif, mandataire, dirigeant ou "
+        "associé), non sur le client lui-même : c'est son identité qui a été comparée.</p>"
+        "<table><tbody>"
+        + "".join(f"<tr><th>{escape(libelle)}</th><td>{esc(valeur)}</td></tr>"
+                  for libelle, valeur in rubriques_de_la_partie(draft.get("partie_liee_en_cause")))
+        + "</tbody></table>") if draft.get("partie_liee_en_cause") else ""
 
     html = f"""<!DOCTYPE html>
 <html lang="fr"><head><meta charset="utf-8">
@@ -12740,6 +12899,7 @@ th {{ background: #f0f0f0; width: 220px; }}
     "segment": "Segment", "secteur_activite": "Secteur d'activité",
     "notation_risque": "Notation de risque", "ppe_declare": "PPE auto-déclaré",
     "entree_en_relation": "Entrée en relation", "reference_interne": "Référence interne"})}</tbody></table>
+{partie_html}
 <h2>3. Personne / entité listée</h2>
 <table><tbody>{rows(listed, {"nom": "Nom sur la liste", "entity_id": "Identifiant",
     "liste": "Liste d'origine", "programmes": "Programmes de sanctions",
@@ -13052,6 +13212,7 @@ def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[st
                      "type_message": tree.get("message_type"),
                      "partie_en_cause": alert.client_name,
                      "role_partie": tree.get("party_role")}
+    from fiskr.parties import partie_de_l_alerte
 
     return {
         "type": "PROJET_DECLARATION_GEL",
@@ -13103,6 +13264,10 @@ def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[st
                                 else SimpleNamespace(client_id=mesure.client_id,
                                                      client_name=mesure.client_name))
             if alert is not None else {"nom_complet": mesure.client_name}),
+        # La partie liee du client dont l'alerte porte la mesure (None : le
+        # client lui-meme) — y compris une suspension ouverte « dans le doute »
+        # (LD §144), qui n'a pas de fondement de detention a citer
+        "partie_liee_en_cause": partie_de_l_alerte(db, alert, audit),
         "operation_concernee": operation,
         # Client repute detenu ou controle par ses parties liees
         # (fiskr/parties.py) : le fondement et le calcul fige a l'ouverture
@@ -13183,6 +13348,14 @@ def _render_gel_draft_html(mesure: MesureDeGel, draft: Dict[str, Any], generated
                            "type_message": "Type de message", "partie_en_cause": "Partie en cause",
                            "role_partie": "Rôle de la partie"})
         + "</tbody></table>") if operation else ""
+    from fiskr.parties import rubriques_de_la_partie
+    partie_html = (
+        "<h2>Partie liée du client en cause</h2><p class=\"sub\">La correspondance porte sur "
+        "une partie liée du client (bénéficiaire effectif, mandataire, dirigeant ou associé), "
+        "non sur le client lui-même.</p><table><tbody>"
+        + "".join(f"<tr><th>{escape(libelle)}</th><td>{esc(valeur)}</td></tr>"
+                  for libelle, valeur in rubriques_de_la_partie(draft.get("partie_liee_en_cause")))
+        + "</tbody></table>") if draft.get("partie_liee_en_cause") else ""
     detention = draft.get("detention_ou_controle")
     detention_html = (
         "<h2>Détention ou contrôle par une personne désignée (LD DGT/ACPR §131, §133, §144)</h2>"
@@ -13243,6 +13416,7 @@ th {{ background: #f0f0f0; width: 240px; }}
     "adresse": "Adresse", "ville": "Ville", "pays": "Pays", "nationalites": "Nationalité(s)",
     "iban": "IBAN", "bic": "BIC", "entree_en_relation": "Entrée en relation",
     "reference_interne": "Référence interne"})}</tbody></table>
+{partie_html}
 {detention_html}
 {operation_html}
 <h2>5. Traitement de l'alerte</h2>
@@ -13434,6 +13608,14 @@ class PPEDecisionRequest(BaseModel):
     prochaine_revue_le: Optional[str] = None
 
 
+class PPERevueRequest(BaseModel):
+    conclusion: str
+    motif: str = Field(..., max_length=4000)
+    reference: Optional[str] = Field(None, max_length=255)
+    revue_le: Optional[str] = None
+    prochaine_revue_le: Optional[str] = None
+
+
 def _registre_ppe_filtre(db: Session, statut: Optional[str], list_type: Optional[str],
                          q: Optional[str]):
     """Filtres des dossiers PPE, partages par l'ecran et l'export CSV."""
@@ -13621,6 +13803,34 @@ async def record_ppe_decision(
             **dossiers_ppe.serialiser(db, dossier)}
 
 
+@app.post("/api/ppe/{dossier_id}/revue")
+async def record_ppe_review(
+    dossier_id: int,
+    payload: PPERevueRequest,
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Revue de vigilance renforcee d'une relation acceptee (R.561-20-2 3°) :
+    maintien avec la revue suivante datee, ou fin de la relation. Memes
+    personnes que la decision — reviewer ou admin, jamais celui qui a propose
+    ou valide la confirmation. La decision ne se reecrit pas : la revue
+    s'ajoute a la suite, et leve le signalement de l'echeance tenue.
+    """
+    dossier = _dossier_ppe_ou_404(db, dossier_id)
+    try:
+        dossiers_ppe.enregistrer_revue(
+            db, dossier, username=reviewer["username"], conclusion=payload.conclusion,
+            motif=payload.motif, reference=payload.reference, revue_le=payload.revue_le,
+            prochaine_revue_le=payload.prochaine_revue_le)
+    except dossiers_ppe.RefusPPE as refus:
+        db.rollback()
+        raise _refus_ppe(refus)
+    db.commit()
+    return {"message": f"Revue enregistrée au dossier PPE #{dossier.id}.",
+            **dossiers_ppe.serialiser(db, dossier)}
+
+
 @app.get("/api/export/ppe.csv")
 async def export_ppe_csv(
     statut: Optional[str] = Query(None),
@@ -13646,7 +13856,9 @@ async def export_ppe_csv(
               "ppe_non_declaree", "origine_fonds", "origine_patrimoine", "pieces_origine",
               "confirmee_le", "proposee_par", "confirmee_par", "decision", "decision_motif",
               "decision_reference", "decidee_le", "decidee_par", "delai_decision_jours",
-              "prochaine_revue_le"]
+              "prochaine_revue_le",
+              # Revue de vigilance renforcee (fiskr/ppe.py)
+              "revue_echue", "derniere_revue_le", "derniere_revue_conclusion", "revues_tenues"]
     data = []
     for d in rows:
         delai = delai_de_decision_ppe_secondes(d.ouvert_le, d.decidee_le)
@@ -13663,6 +13875,10 @@ async def export_ppe_csv(
             iso(d.decidee_le), d.decidee_par or "",
             f"{delai / 86400:.1f}" if (delai is not None and d.decidee_le) else "",
             iso(d.prochaine_revue_le),
+            "oui" if dossiers_ppe.revue_echue(d, maintenant) else "non",
+            (d.revues[-1].get("le") or "") if d.revues else "",
+            (d.revues[-1].get("conclusion") or "") if d.revues else "",
+            len(d.revues or []),
         ])
     return _csv_response(f"fiskr_dossiers_ppe_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
                          header, data)
@@ -15031,11 +15247,13 @@ def _preparer_la_paire_de_l_alerte(db: Session, alert: Alert, utilisateur: Dict[
     if not alert.client_id:
         raise HTTPException(status_code=400, detail=(
             "Cette alerte ne porte pas d'identifiant client : aucune paire ne peut la mémoriser."))
+    # L'alerte d'une partie liee (fiskr/parties.py) pose la paire de CETTE
+    # partie : c'est son identite que le faux positif a examinee
     return _preparer_une_paire(
         db, utilisateur["username"], alert.client_id, alert.watchlist_entity_id,
         justification=(demande.justification or "").strip() or motivation,
         expires_at=demande.expires_at, client_name=alert.client_name,
-        watchlist_name=alert.watchlist_name)
+        watchlist_name=alert.watchlist_name, partie_liee_id=alert.partie_liee_id)
 
 
 def _poser_la_paire_de_l_alerte(db: Session, alert: Alert, paire: Optional[WhitelistPair],
@@ -15045,10 +15263,16 @@ def _poser_la_paire_de_l_alerte(db: Session, alert: Alert, paire: Optional[White
     if paire is None:
         return ""
     db.flush()   # identifiant de la paire, pour le journal de l'alerte
-    _log_alert_event(db, alert.id, username, "WHITELISTED",
-                     f"Paire de liste blanche #{paire.id} posée à la validation : ce couple "
-                     f"client × fiche ne rouvrira pas d'alerte tant que la fiche et "
-                     f"l'identification du client restent celles de cette décision.")
+    if paire.partie_liee_id is not None:
+        detail = (f"Paire de liste blanche #{paire.id} posée à la validation : cette partie "
+                  f"liée × fiche ne rouvrira pas d'alerte tant que la fiche et l'identité de "
+                  f"la partie restent celles de cette décision. Elle ne couvre ni le client "
+                  f"lui-même, ni ses autres parties.")
+    else:
+        detail = (f"Paire de liste blanche #{paire.id} posée à la validation : ce couple "
+                  f"client × fiche ne rouvrira pas d'alerte tant que la fiche et "
+                  f"l'identification du client restent celles de cette décision.")
+    _log_alert_event(db, alert.id, username, "WHITELISTED", detail)
     return f" Paire de liste blanche #{paire.id} posée."
 
 
@@ -15064,6 +15288,27 @@ def _valider_la_decision_proposee(db: Session, decision: Optional[str],
         raise HTTPException(status_code=400, detail="Un commentaire est obligatoire pour proposer une décision.")
     _refuser_un_motif_de_l_autre_decision(db, decision, commentaire)
     return decision, commentaire
+
+
+def _ecart_de_la_proposition(alert: Alert, username: str) -> Optional[str]:
+    """
+    Pourquoi `username` ne propose pas de decision sur cette alerte ouverte —
+    un code de `_ECARTS_EN_MASSE` —, ou None. UNE regle pour l'action unitaire
+    et l'action en masse : la masse ecartait l'alerte assignee a un collegue,
+    l'unitaire la laissait passer — le meme geste, deux verites.
+
+    Aucun passe-droit pour le reviseur ni l'administrateur. Reprendre une
+    alerte est deja un geste ouvert a tous : « M'assigner » (`/assign`, sans
+    tiers) remplace l'assigne quel qu'il soit, trace ASSIGNED et signale aux
+    suiveurs. Proposer par-dessus l'assignation ferait la meme reprise sans en
+    laisser la trace ; seul l'administrateur assigne a un TIERS, et cela ne
+    l'autorise pas a instruire a la place de l'assigne.
+    """
+    if alert.status == "PENDING_VALIDATION":
+        return "EN_ATTENTE_DE_VALIDATION"
+    if alert.assigned_to and alert.assigned_to != username:
+        return "ASSIGNEE_A_UN_AUTRE"
+    return None
 
 
 def _enregistrer_la_proposition(db: Session, alert: Alert, decision: str, comment: str,
@@ -15127,11 +15372,17 @@ async def propose_alert_decision(
     reviewer DIFFERENT ; sinon la proposition clot directement l'alerte.
     """
     alert = _get_open_alert(db, alert_id)
-    if alert.status == "PENDING_VALIDATION":
-        raise HTTPException(status_code=409, detail="Une décision est déjà en attente de validation.")
+    username = current_user["username"]
+    ecart = _ecart_de_la_proposition(alert, username)
+    if ecart == "ASSIGNEE_A_UN_AUTRE":
+        raise HTTPException(status_code=409, detail=(
+            f"Assignée à un autre analyste (@{alert.assigned_to}) : c'est à son assigné de la "
+            f"proposer. Pour la reprendre, assignez-la-vous (« M'assigner ») : la reprise est "
+            f"tracée."))
+    if ecart is not None:
+        raise HTTPException(status_code=409, detail=_ECARTS_EN_MASSE[ecart])
     decision, comment = _valider_la_decision_proposee(db, payload.decision, payload.comment)
 
-    username = current_user["username"]
     four_eyes = alert_four_eyes_required(db)
     paire = None
     if payload.whitelist is not None:
@@ -15452,11 +15703,13 @@ async def bulk_alert_action(
             sous_plancher.append(alert_id)
             continue
         if action == "propose":
-            if alert.status == "PENDING_VALIDATION":
-                skipped.append(_ecart(alert_id, "EN_ATTENTE_DE_VALIDATION"))
+            # Meme regle que la proposition unitaire (`_ecart_de_la_proposition`)
+            code = _ecart_de_la_proposition(alert, moi)
+            if code == "ASSIGNEE_A_UN_AUTRE":
+                skipped.append(_ecart(alert_id, code, assigned_to=alert.assigned_to))
                 continue
-            if alert.assigned_to and alert.assigned_to != moi:
-                skipped.append(_ecart(alert_id, "ASSIGNEE_A_UN_AUTRE", assigned_to=alert.assigned_to))
+            if code is not None:
+                skipped.append(_ecart(alert_id, code))
                 continue
             if decision == "FALSE_POSITIVE" and est_sanction(alert.list_type, surcharges):
                 if not four_eyes:
@@ -15938,6 +16191,18 @@ async def alert_report(
         f"{(' : ' + escape(att.comment)) if att.comment else ''}</li>"
         for att in attachments
     ) or "<li>Aucune pièce jointe.</li>"
+    # Correspondance sur une partie liee du client (fiskr/parties.py) : le
+    # rapport imprimait ACME face a la personne listee, sans dire que c'etait
+    # son beneficiaire effectif qui avait ete compare.
+    from fiskr import parties as parties_liees
+    partie = parties_liees.partie_de_l_alerte(db, alert, audit)
+    partie_html = (
+        "<h2>1 bis. Partie liée du client en cause</h2>"
+        "<p>La correspondance porte sur une partie liée du client, non sur le client "
+        "lui-même : c'est son identité qui a été comparée à la fiche listée.</p><table>"
+        + "".join(field(libelle, valeur)
+                  for libelle, valeur in parties_liees.rubriques_de_la_partie(partie))
+        + "</table>") if partie else ""
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="fr"><head><meta charset="utf-8">
@@ -15969,6 +16234,7 @@ document de travail issu du journal d'audit immuable (audit #{alert.audit_id}).<
 {field("Liste", alert.list_type)}{field("Score final", f"{alert.final_score:.1f} %")}
 {field("Créée le", dt(alert.created_at))}{field("Assignée à", alert.assigned_to)}
 </table>
+{partie_html}
 
 <h2>2. Décision</h2>
 <table>
@@ -16018,7 +16284,9 @@ async def generate_narrative(
     audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first()
     events = db.query(AlertEvent).filter(AlertEvent.alert_id == alert_id) \
                .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
-    narrative, llm_used = generate_alert_narrative(alert, audit, events)
+    from fiskr.parties import partie_de_l_alerte
+    narrative, llm_used = generate_alert_narrative(alert, audit, events,
+                                                   partie=partie_de_l_alerte(db, alert, audit))
     _log_alert_event(
         db, alert.id, current_user["username"], "NARRATIVE",
         f"Projet de narratif généré ({'reformulation LLM' if llm_used else 'composeur déterministe'})."
@@ -16040,7 +16308,17 @@ class RescreenRunRequest(BaseModel):
 class WhitelistReconductRequest(BaseModel):
     comment: str
 
-def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
+def _noms_des_parties_des_paires(db: Session, paires) -> Dict[int, str]:
+    """Noms des parties liees couvertes par ces paires, en une requete."""
+    ids = sorted({p.partie_liee_id for p in paires if p.partie_liee_id is not None})
+    if not ids:
+        return {}
+    return {pid: nom for pid, nom in db.query(PartieLiee.id, PartieLiee.nom).filter(
+        PartieLiee.id.in_(ids)).all()}
+
+
+def _whitelist_summary(pair: WhitelistPair, noms_de_parties: Optional[Dict[int, str]] = None
+                       ) -> Dict[str, Any]:
     from fiskr.empreintes import MOTIFS_DE_REEXAMEN, motif_en_attente
     now = datetime.utcnow()
     motif = motif_en_attente(pair)
@@ -16059,6 +16337,11 @@ def _whitelist_summary(pair: WhitelistPair) -> Dict[str, Any]:
         "id": pair.id,
         "client_id": pair.client_id,
         "client_name": pair.client_name,
+        # L'identite couverte : une partie liee du client, ou le client
+        # lui-meme (NULL) — fiskr/parties.py
+        "partie_liee_id": pair.partie_liee_id,
+        "partie_nom": (noms_de_parties or {}).get(pair.partie_liee_id)
+                      if pair.partie_liee_id is not None else None,
         "watchlist_entity_id": pair.watchlist_entity_id,
         "watchlist_name": pair.watchlist_name,
         "list_type": pair.list_type,
@@ -16090,6 +16373,7 @@ async def create_whitelist_pair(
     expires_at: Optional[str] = Form(None),
     client_name: Optional[str] = Form(None),
     watchlist_name: Optional[str] = Form(None),
+    partie_liee_id: Optional[int] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     reviewer: Dict[str, Any] = Depends(require_reviewer)
@@ -16098,13 +16382,14 @@ async def create_whitelist_pair(
     Met une paire client x liste en liste blanche (« Good Guys ») : les
     alertes futures de cette paire sont supprimees de facon TRACEE (statut
     WHITELISTED dans le journal d'audit). Justification et piece jointe
-    exigees selon les reglages modulaires.
+    exigees selon les reglages modulaires. `partie_liee_id` : la paire couvre
+    cette partie liee du client (fiskr/parties.py), pas le client lui-meme.
     """
     piece_fournie = file is not None and bool(file.filename)
     pair = _preparer_une_paire(db, reviewer["username"], client_id, watchlist_entity_id,
                                justification=justification, expires_at=expires_at,
                                client_name=client_name, watchlist_name=watchlist_name,
-                               piece_fournie=piece_fournie)
+                               piece_fournie=piece_fournie, partie_liee_id=partie_liee_id)
     # La piece s'ecrit APRES tous les refus (aucun fichier orphelin sur le
     # disque pour une pose refusee), et toujours bornee.
     if piece_fournie:
@@ -16117,13 +16402,15 @@ async def create_whitelist_pair(
     db.commit()
     db.refresh(pair)
     _annoncer_la_paire(db, pair, reviewer["username"])
-    return {"message": "Paire mise en liste blanche.", **_whitelist_summary(pair)}
+    return {"message": "Paire mise en liste blanche.",
+            **_whitelist_summary(pair, _noms_des_parties_des_paires(db, [pair]))}
 
 
 def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_entity_id: str, *,
                         justification: Optional[str] = None, expires_at: Optional[str] = None,
                         client_name: Optional[str] = None, watchlist_name: Optional[str] = None,
-                        piece_fournie: bool = False) -> WhitelistPair:
+                        piece_fournie: bool = False,
+                        partie_liee_id: Optional[int] = None) -> WhitelistPair:
     """
     LE flux de pose d'une paire — justification, piece, echeance, empreintes
     de ce que la decision couvre (fiskr.empreintes) —, partage par l'ecran
@@ -16133,14 +16420,24 @@ def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_en
     paire est ajoutee a la session, pas validee : l'appelant commit, et
     joint la piece s'il en a une (`piece_fournie` ne decide que du refus quand
     le reglage l'exige).
+
+    `partie_liee_id` : la paire couvre une PARTIE LIEE du client
+    (fiskr/parties.py), pas le client lui-meme — c'est l'identite que la
+    decision a examinee. Une partie d'un autre client est refusee.
     """
     from fiskr.empreintes import empreintes_de_reference, motif_en_attente, poser_les_empreintes
     client_id = (client_id or "").strip()
     watchlist_entity_id = (watchlist_entity_id or "").strip()
     if not client_id or not watchlist_entity_id:
         raise HTTPException(status_code=400, detail="client_id et watchlist_entity_id sont requis.")
+    if partie_liee_id is not None:
+        partie = db.get(PartieLiee, partie_liee_id)
+        if partie is None or partie.client_id != client_id:
+            raise HTTPException(status_code=400, detail=(
+                f"La partie #{partie_liee_id} n'est pas une partie liée du client {client_id} : "
+                f"une paire couvre une identité de la relation qu'elle nomme."))
 
-    existante = is_whitelisted(db, client_id, watchlist_entity_id)
+    existante = is_whitelisted(db, client_id, watchlist_entity_id, partie_liee_id)
     if existante:
         if motif_en_attente(existante) is not None:
             raise HTTPException(status_code=409, detail=(
@@ -16165,7 +16462,7 @@ def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_en
     # Ce que la decision couvre (fiskr.empreintes) : une paire qui ne le sait
     # pas couvrirait toute version future de la fiche et du client — refus
     # franc, AVANT d'ecrire la piece sur le disque.
-    reference = empreintes_de_reference(db, client_id, watchlist_entity_id)
+    reference = empreintes_de_reference(db, client_id, watchlist_entity_id, partie_liee_id)
     if reference["manque"]:
         raise HTTPException(status_code=409, detail=(
             "Impossible d'établir ce que cette décision couvre : "
@@ -16185,6 +16482,7 @@ def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_en
     pair = WhitelistPair(
         client_id=client_id,
         watchlist_entity_id=watchlist_entity_id,
+        partie_liee_id=partie_liee_id,
         client_name=(client_name or "").strip() or None,
         watchlist_name=(watchlist_name or "").strip() or None,
         list_type=list_type,
@@ -16327,9 +16625,10 @@ async def list_whitelist_pairs(
                 .offset((page - 1) * page_size).limit(page_size).all()
     stale_total = db.query(WhitelistPair).filter(
         *en_vigueur, filtre_a_reexaminer(WhitelistPair)).count()
+    noms = _noms_des_parties_des_paires(db, rows)
     return {"total": total, "page": page, "page_size": page_size,
             "stale_total": stale_total,
-            "items": [_whitelist_summary(p) for p in rows]}
+            "items": [_whitelist_summary(p, noms) for p in rows]}
 
 @app.post("/api/whitelist/{pair_id}/reconduct")
 async def reconduct_whitelist_pair(
@@ -16365,7 +16664,8 @@ async def reconduct_whitelist_pair(
     comment = (payload.comment or "").strip()
     if not comment:
         raise HTTPException(status_code=400, detail="Un motif est requis pour reconduire une paire.")
-    reference = empreintes_de_reference(db, pair.client_id, pair.watchlist_entity_id)
+    reference = empreintes_de_reference(db, pair.client_id, pair.watchlist_entity_id,
+                                        pair.partie_liee_id)
     if reference["manque"]:
         raise HTTPException(status_code=409, detail=(
             "Impossible d'établir ce que cette décision couvre : "
@@ -16390,7 +16690,7 @@ async def reconduct_whitelist_pair(
         "Motif du réexamen": MOTIFS_DE_REEXAMEN[motif], "Commentaire": comment,
     })
     return {"message": "Paire reconduite : elle couvre de nouveau ce couple.",
-            **_whitelist_summary(pair)}
+            **_whitelist_summary(pair, _noms_des_parties_des_paires(db, [pair]))}
 
 @app.post("/api/whitelist/{pair_id}/revoke")
 async def revoke_whitelist_pair(
@@ -16420,7 +16720,8 @@ async def revoke_whitelist_pair(
         "Fiche listée": pair.watchlist_name or pair.watchlist_entity_id,
         "Liste": pair.list_type or "—", "Par": reviewer["username"], "Motif": comment,
     })
-    return {"message": "Paire révoquée : les alertes de ce couple reprendront.", **_whitelist_summary(pair)}
+    return {"message": "Paire révoquée : les alertes de ce couple reprendront.",
+            **_whitelist_summary(pair, _noms_des_parties_des_paires(db, [pair]))}
 
 @app.get("/api/whitelist/evidence/{pair_id}")
 async def download_whitelist_evidence(

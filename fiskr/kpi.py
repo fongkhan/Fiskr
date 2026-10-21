@@ -175,7 +175,7 @@ def decision_ppe_en_retard(statut: Optional[str], ouvert_le: Optional[datetime],
 def synthese_des_dossiers_ppe(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
     """Les dossiers PPE, tels que le pilotage les lit."""
     from fiskr.database import DossierPPE
-    from fiskr.ppe import STATUT_A_DECIDER, STATUT_DECIDE
+    from fiskr.ppe import STATUT_A_DECIDER, STATUT_DECIDE, revue_en_retard, revues_echues
     from fiskr.settings import ppe_decision_delai_jours
 
     now = maintenant or datetime.utcnow()
@@ -184,7 +184,12 @@ def synthese_des_dossiers_ppe(db, maintenant: Optional[datetime] = None) -> Dict
                       DossierPPE.ppe_non_declaree).all()
     delais = [delai_de_decision_ppe_secondes(o, d) for _s, o, d, _n in lignes if d is not None]
     delais = [d for d in delais if d is not None]
+    # Revues de vigilance renforcee (fiskr/ppe.py) : echues, et echues depuis
+    # plus que le delai — celles-la bloquent la mise en service
+    echues = revues_echues(db, now)
     return {
+        "reviews_due": len(echues),
+        "reviews_overdue": sum(1 for d in echues if revue_en_retard(d, seuil, now)),
         "to_decide": sum(1 for s, _o, _d, _n in lignes if s == STATUT_A_DECIDER),
         "overdue": sum(1 for s, o, d, _n in lignes
                        if decision_ppe_en_retard(s, o, d, seuil, now)),
