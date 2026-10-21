@@ -170,7 +170,7 @@ def _date_de_l_alerte():
 
 
 def _alertes_cloturees(db, depuis: datetime, *colonnes):
-    from fiskr.database import DossierPPE, MesureDeGel
+    from fiskr.database import DeclarationHomonymie, DossierPPE, MesureDeGel
     # Une alerte qui porte une mesure de gel est le DOSSIER de cette mesure :
     # la piece de declaration a la DG Tresor est une piece jointe de l'alerte,
     # et le registre la reference (cle etrangere). La purger effacerait la
@@ -181,13 +181,20 @@ def _alertes_cloturees(db, depuis: datetime, *colonnes):
     # Meme raison pour le dossier PPE (fiskr/ppe.py) : l'origine des fonds et la
     # decision de la direction sont des pieces de l'alerte, et le dossier la
     # reference par cle etrangere.
+    # Et pour la declaration d'homonymie (fiskr/homonymie.py) : les echanges
+    # avec la DG Tresor « se conservent dans tous les cas » (LD DGT/ACPR §168)
+    # — piece d'envoi, reponse, information de la decision sont des pieces de
+    # l'alerte, que la declaration reference par cle etrangere. Une alerte EN
+    # ATTENTE de la DG Tresor n'est, elle, pas close : la purge ne la voit pas.
     tenues_par_un_gel = db.query(MesureDeGel.alert_id)
     tenues_par_un_dossier_ppe = db.query(DossierPPE.alert_id)
+    tenues_par_une_homonymie = db.query(DeclarationHomonymie.alert_id)
     return db.query(*colonnes).filter(
         Alert.status.in_(ALERT_CLOSED_STATUSES),
         _date_de_l_alerte() < depuis,
         ~Alert.id.in_(tenues_par_un_gel),
         ~Alert.id.in_(tenues_par_un_dossier_ppe),
+        ~Alert.id.in_(tenues_par_une_homonymie),
     )
 
 

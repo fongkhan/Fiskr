@@ -164,6 +164,40 @@ def gel_declaration_delai_heures(db) -> int:
     return heures if bas <= heures <= haut else DEFAULT_GEL_DELAI_HEURES
 
 
+# Delai (heures) au-dela duquel une declaration d'homonymie preparee mais NON
+# TRANSMISE a la DG Tresor leve une notification immediate et un controle de
+# mise en service BLOQUANT (fiskr/homonymie.py).
+#
+# Le texte ne donne pas de chiffre : « dans les plus brefs delais » (LD
+# DGT/ACPR du 18 mars 2026, §167 — les memes mots que la declaration de gel,
+# §182). Vingt-quatre heures, parce que le doute ne se declare qu'une fois
+# « toutes les diligences necessaires » faites : les pieces que la DG Tresor
+# attend (copie de pieces d'identite, message SWIFT, demandes au client) sont
+# deja au dossier, et il reste a reporter le projet dans son classeur et a
+# l'envoyer — une journee ouvree. Pendant ce temps, sur un flux, l'operation
+# est suspendue (§162) et personne n'a saisi la seule autorite qui peut
+# trancher. Le delai court depuis la declaration du doute dans Fiskr.
+SETTING_HOMONYMIE_DELAI = "homonymie.transmission_delai_heures"
+DEFAULT_HOMONYMIE_DELAI_HEURES = 24
+# Bornes : en dessous d'une heure, chaque doute sonnerait avant qu'on ait
+# ouvert le formulaire ; au-dela de cinq jours, « les plus brefs delais » ne
+# decrirait plus ce qui s'est passe.
+HOMONYMIE_DELAI_BORNES_HEURES = (1, 120)
+
+
+def homonymie_transmission_delai_heures(db) -> int:
+    """Delai de transmission d'une declaration d'homonymie (heures), borne.
+    Une valeur illisible retombe sur le defaut : jamais sur « aucun delai »."""
+    valeur = get_setting_with_source(db, SETTING_HOMONYMIE_DELAI,
+                                     DEFAULT_HOMONYMIE_DELAI_HEURES)["value"]
+    try:
+        heures = int(valeur)
+    except (TypeError, ValueError):
+        return DEFAULT_HOMONYMIE_DELAI_HEURES
+    bas, haut = HOMONYMIE_DELAI_BORNES_HEURES
+    return heures if bas <= heures <= haut else DEFAULT_HOMONYMIE_DELAI_HEURES
+
+
 # Delai (jours) au-dela duquel un dossier PPE sans decision d'entrer ou de
 # rester en relation leve une notification immediate et un controle de mise
 # en service BLOQUANT (fiskr/ppe.py).

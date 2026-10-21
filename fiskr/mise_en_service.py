@@ -907,6 +907,61 @@ def _declarations_de_gel(db) -> Dict[str, Any]:
         "Aucune mesure de gel en attente de déclaration au registre.", lien=lien)
 
 
+def _declarations_d_homonymie(db) -> Dict[str, Any]:
+    """
+    Les doutes d'homonymie declares dans Fiskr ont-ils ete transmis a la DG
+    Tresor ?
+
+    La declaration est due « dans les plus brefs delais » (LD DGT/ACPR du
+    18 mars 2026, §167), et une defaillance de declaration a la DG Tresor est
+    un incident que §100 nomme. Preparee et non transmise au-dela du delai :
+    BLOQUANT. L'ATTENTE de la reponse n'y figure pas, a dessein : la DG Tresor
+    a son rythme, et un controle qui la reprocherait a l'organisme sonnerait
+    pour rien — elle se lit au registre. Meme definition du retard que la
+    notification (fiskr/kpi.py).
+    """
+    from fiskr.database import DeclarationHomonymie
+    from fiskr.homonymie import STATUT_A_DECIDER, STATUT_A_TRANSMETTRE, non_transmises_en_retard
+    from fiskr.settings import homonymie_transmission_delai_heures
+    seuil = homonymie_transmission_delai_heures(db)
+    lien = "#screening/alerts-gels"
+    titre = "Déclarations d'homonymie à la DG Trésor"
+    en_retard = non_transmises_en_retard(db)
+    if en_retard:
+        noms = ", ".join(f"#{d.id} {d.client_name} × {d.watchlist_name}" for d in en_retard[:5])
+        return _controle(
+            "homonymies", "Criblage", titre, BLOQUANT,
+            f"{len(en_retard)} déclaration(s) d'homonymie préparée(s) et non transmise(s) à la DG "
+            f"Trésor plus de {seuil} h après le doute : {noms}{' …' if len(en_retard) > 5 else ''}. "
+            f"Elle est due « dans les plus brefs délais » (LD DGT/ACPR §167), et l'alerte ne peut "
+            f"se clore sans la réponse.",
+            "Reportez le projet dans le formulaire de la DG Trésor, envoyez-le à "
+            "homonymies-gels@dgtresor.gouv.fr, puis enregistrez la transmission avec sa pièce "
+            "(copie du courriel envoyé).", lien,
+            constat_public=f"{len(en_retard)} déclaration(s) d'homonymie non transmise(s) à la "
+                           f"DG Trésor plus de {seuil} h après le doute.")
+    a_transmettre = db.query(DeclarationHomonymie).filter(
+        DeclarationHomonymie.statut == STATUT_A_TRANSMETTRE).count()
+    a_decider = db.query(DeclarationHomonymie).filter(
+        DeclarationHomonymie.statut == STATUT_A_DECIDER).count()
+    if a_transmettre or a_decider:
+        constats = []
+        if a_transmettre:
+            constats.append(f"{a_transmettre} déclaration(s) d'homonymie à transmettre, encore "
+                            f"dans le délai de {seuil} h.")
+        if a_decider:
+            constats.append(f"{a_decider} doute(s) persistant(s) après la réponse de la DG Trésor : "
+                            f"la décision d'exécuter ou non, de geler ou non, revient à "
+                            f"l'organisme (LD §167).")
+        return _controle(
+            "homonymies", "Criblage", titre, ATTENTION, " ".join(constats),
+            "Transmettez les déclarations préparées ; faites décider les doutes persistants par "
+            "un réviseur, avec la position Tracfin.", lien)
+    return _controle("homonymies", "Criblage", titre, OK,
+                     "Aucune déclaration d'homonymie en attente de transmission ni de décision.",
+                     lien=lien)
+
+
 def _dossiers_ppe(db) -> Dict[str, Any]:
     """
     Les PPE confirmees ont-elles leur decision d'entrer ou de rester en
@@ -1037,7 +1092,8 @@ _CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production, _sources_de_
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
-                   _declarations_de_gel, _dossiers_ppe, _pieces_probantes, _smtp)
+                   _declarations_de_gel, _declarations_d_homonymie, _dossiers_ppe,
+                   _pieces_probantes, _smtp)
 _CONTROLES_SANS_BASE = (_secrets, _index_de_performance, _url_publique)
 
 
@@ -1097,9 +1153,11 @@ _CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
 # pas un detail d'ecran. Son comptage est borne (PLAFOND_DE_COMPTAGE).
 # Les dossiers PPE aussi : quelques lectures d'index (dossiers sans decision,
 # PPE confirmees sans dossier, filtrees en SQL sur les types PEP), et leur
-# constat public ne nomme personne.
+# constat public ne nomme personne. Les declarations d'homonymie de meme : une
+# lecture d'index sur le statut, un constat public sans nom.
 _CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
-                          _fraicheur_des_listes, _declarations_de_gel, _dossiers_ppe,
+                          _fraicheur_des_listes, _declarations_de_gel,
+                          _declarations_d_homonymie, _dossiers_ppe,
                           _couverture_du_criblage)
 
 

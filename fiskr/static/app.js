@@ -987,7 +987,8 @@ function initSortableTables() {
 const STATUS_LABELS = {
  // Alertes
  OPEN: "Ouverte", IN_PROGRESS: "En cours", ESCALATED: "Escaladée",
- PENDING_VALIDATION: "À valider (4 yeux)", CLOSED_CONFIRMED: "Vrai positif",
+ PENDING_VALIDATION: "À valider (4 yeux)", PENDING_DGT: "Attente DG Trésor",
+ CLOSED_CONFIRMED: "Vrai positif",
  CLOSED_FALSE_POSITIVE: "Faux positif", CLOSED_BY_RULE: "Close par règle",
  // Snapshots
  READY: "En production", PENDING_REVIEW: "En homologation", SUPERSEDED: "Remplacé",
@@ -1025,6 +1026,11 @@ const ALERT_EVENT_LABELS = {
  GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
  GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
  DETENTION_REPUTEE: "Client réputé détenu ou contrôlé", DETENTION_NON_ETABLIE: "Détention ou contrôle non établi",
+ HOMONYMIE_DECLAREE: "Doute d'homonymie déclaré", HOMONYMIE_TRANSMISE: "Déclaration d'homonymie transmise",
+ HOMONYMIE_ECHANGE: "Échange avec la DG Trésor", HOMONYMIE_REPONSE: "Réponse de la DG Trésor",
+ HOMONYMIE_DECISION: "Décision sur le doute persistant", HOMONYMIE_TERMINEE: "Déclaration d'homonymie terminée",
+ HOMONYMIE_ABANDONNEE: "Déclaration d'homonymie abandonnée",
+ HOMONYMIE_NON_TRANSMISE: "Déclaration d'homonymie non transmise dans le délai",
  WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
  DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
  LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
@@ -2901,6 +2907,7 @@ function switchSubTab(sectionId, subTabId) {
  fetchSavedViews("SCREENING");
  } else if (subTabId === "alerts-gels") {
  fetchGels();
+ fetchHomonymies();
  } else if (subTabId === "alerts-ppe") {
  fetchDossiersPPE();
  } else if (subTabId === "alerts-filtering") {
@@ -6347,6 +6354,8 @@ async function fetchIngestionSettings() {
  }
  const gelDelayEl = document.getElementById("setting-gel-delay");
  if (gelDelayEl) gelDelayEl.value = ingestionSettings.gel_declaration_delay_hours ?? "";
+ const homonymieDelayEl = document.getElementById("setting-homonymie-delay");
+ if (homonymieDelayEl) homonymieDelayEl.value = ingestionSettings.homonymy_transmission_delay_hours ?? "";
  const ppeDelayEl = document.getElementById("setting-ppe-delay");
  if (ppeDelayEl) ppeDelayEl.value = ingestionSettings.ppe_decision_delay_days ?? "";
  // Notifications : l'écran est généré depuis le catalogue du serveur
@@ -6476,6 +6485,9 @@ async function saveIngestionSettings() {
  // bornes est refusée par le serveur avec la raison.
  ...(document.getElementById("setting-gel-delay")?.value
    ? { gel_declaration_delay_hours: parseInt(document.getElementById("setting-gel-delay").value, 10) }
+   : {}),
+ ...(document.getElementById("setting-homonymie-delay")?.value
+   ? { homonymy_transmission_delay_hours: parseInt(document.getElementById("setting-homonymie-delay").value, 10) }
    : {}),
  ...(document.getElementById("setting-ppe-delay")?.value
    ? { ppe_decision_delay_days: parseInt(document.getElementById("setting-ppe-delay").value, 10) }
@@ -8396,6 +8408,7 @@ function alertStatusBadge(status) {
  IN_PROGRESS: ["#38bdf8", "EN COURS"],
  ESCALATED: ["var(--color-alert)", "ESCALADÉE"],
  PENDING_VALIDATION: ["#c084fc", "À VALIDER (4-YEUX)"],
+ PENDING_DGT: ["var(--color-warning)", "ATTENTE DG TRÉSOR"],
  CLOSED_CONFIRMED: ["var(--color-alert)", "VRAI POSITIF"],
  CLOSED_FALSE_POSITIVE: ["var(--success-soft-text)", "FAUX POSITIF"],
  CLOSED_BY_RULE: ["#94a3b8", "CLÔTURÉE PAR RÈGLE"],
@@ -8503,7 +8516,14 @@ async function openAlertModal(alertId) {
  actionsHtml += a.following_me
  ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">★ Suivi — ne plus suivre</button>`
  : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">☆ Suivre ce dossier</button>`;
- if (a.status !== "PENDING_VALIDATION") {
+ if (a.status === "PENDING_DGT") {
+ // Doute d'homonymie déclaré : l'instruction est faite, l'alerte attend la
+ // DG Trésor. Ni proposition ni escalade — seule sa réponse la clôt (le
+ // serveur le refuse de toute façon) ; on peut encore commenter et suivre.
+ actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
+ actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
+ actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">En attente de la DG Trésor : l'alerte se clôt à l'enregistrement de sa réponse (déclaration d'homonymie ci-dessous).</span>`;
+ } else if (a.status !== "PENDING_VALIDATION") {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
  actionsHtml += a.snoozed
@@ -8528,7 +8548,8 @@ async function openAlertModal(alertId) {
  actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
  // Faux positif avere : proposer la mise en liste blanche (reviseurs)
  // (sauf si la paire a été posée à la validation : un second clic serait refusé)
- if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer && !(a.events || []).some(e => e.action === "WHITELISTED")) {
+ // ni si la DG Trésor n'a pas établi l'homonymie (doute persistant : LD §169)
+ if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer && !a.homonymie_liste_blanche_refus && !(a.events || []).some(e => e.action === "WHITELISTED")) {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="openWhitelistModal('${escapeHtml(a.client_id || "")}', '${escapeHtml(a.watchlist_entity_id)}', '${escapeHtml(a.client_name)}', '${escapeHtml(a.watchlist_name)}')"> Mettre en liste blanche</button>`;
  }
  }
@@ -8585,6 +8606,7 @@ async function openAlertModal(alertId) {
  </div>
  ${actionsHtml}
  ${blocMesuresDeGel(a, isReviewer)}
+ ${blocDeclarationsHomonymie(a, isReviewer)}
  ${blocDossiersPPE(a, isReviewer)}
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
  <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()"> Générer un narratif</button>
@@ -9169,6 +9191,370 @@ async function fetchGels() {
    </tr>`).join("");
  } catch (e) {
   tableError("#gels-table", 11);
+ }
+}
+
+// ------------------ DOUTE D'HOMONYMIE (déclaration à la DG Trésor) ------------------
+// Une alerte du périmètre SANCTION qu'on ne peut ni lever ni confirmer se
+// déclare à la DG Trésor (LD DGT/ACPR §167, fiskr/homonymie.py) : elle attend
+// sa réponse, et seule la réponse enregistrée la clôt — par le chemin de
+// clôture existant. Rien ne part tout seul vers la DG Trésor : l'écran
+// prépare, l'humain transmet puis joint la pièce. Le vocabulaire (issues,
+// décisions, rubriques du formulaire) vient du serveur : une seule définition.
+
+function badgeStatutHomonymie(d) {
+ // Ce qui demande une action est dit À CÔTÉ du statut ; l'attente longue se
+ // voit sans crier : la DG Trésor a son rythme.
+ if (d.non_transmise_en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">Non transmise hors délai</span>`;
+ const longue = d.attente_longue ? ` <span class="status-badge warning" style="white-space: nowrap;">Attente longue</span>` : "";
+ const classe = { A_TRANSMETTRE: "warning", A_DECIDER: "alert", TERMINEE: "no_match" }[d.statut] || "";
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(d.statut_label)}</span>${longue}`;
+}
+
+function _lienPieceHomonymie(piece) {
+ if (!piece) return "—";
+ if (piece.file_present === false || !piece.file_name) {
+  return `<span style="text-decoration: line-through; color: var(--text-muted);">${escapeHtml(piece.file_name || "#" + piece.id)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`;
+ }
+ return `<a href="/api/alerts/attachments/${piece.id}" target="_blank" style="color: var(--color-accent);">${escapeHtml(piece.file_name)}</a>`;
+}
+
+function _formulaireDuDoute(a, vocab) {
+ const champs = (vocab.champs_operation || []).map(c => `
+  <div class="form-group" style="margin: 0; flex: 1 1 200px;"><label for="hom-op-${c.code}-${a.id}">${escapeHtml(c.label)}</label>
+   <input type="text" id="hom-op-${c.code}-${a.id}" maxlength="500"></div>`).join("");
+ return `<details style="margin-top: 0.5rem;">
+  <summary style="cursor: pointer; font-size: 0.85rem; font-weight: 600;">Je ne peux ni lever ni confirmer cette alerte : déclarer le doute à la DG Trésor</summary>
+  <p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.4rem 0;">Après toutes les diligences, l'alerte qui ne peut toujours pas être levée se déclare « dans les plus brefs délais » à la DG Trésor (LD DGT/ACPR §167). Elle attendra sa réponse : rien ne la clôturera sans elle.</p>
+  <div class="form-group" style="margin: 0.4rem 0 0;"><label for="hom-diligences-${a.id}">Bilan des recherches effectuées</label>
+   <textarea id="hom-diligences-${a.id}" rows="3" maxlength="8000" placeholder="Pièces demandées au client, sources consultées (JORF, registre national, RCS…), éléments comparés"></textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-mesures-${a.id}">Mesures prises pendant le doute</label>
+   <textarea id="hom-mesures-${a.id}" rows="2" maxlength="4000" placeholder="Opération suspendue, entrée en relation différée… (selon votre procédure)"></textarea>
+   <small style="color: var(--text-muted); display: block;">Sur un flux, l'opération reste suspendue jusqu'à la réponse (LD §162). Sur la base, les LD n'imposent pas de gel conservatoire : votre procédure en décide (§87).</small></div>
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; margin-top: 0.5rem;">
+   <div class="form-group" style="margin: 0;"><label for="hom-role-${a.id}">Rôle de l'opérateur</label>
+    <select id="hom-role-${a.id}"><option value="">—</option>${_options(vocab.roles_operateur, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-objet-${a.id}">Objet de l'homonymie</label>
+    <select id="hom-objet-${a.id}"><option value="">—</option>${_options(vocab.objets, "")}</select></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-commentaire-${a.id}">Commentaire</label>
+   <textarea id="hom-commentaire-${a.id}" rows="2" maxlength="4000"></textarea></div>
+  <details style="margin-top: 0.5rem;"><summary style="cursor: pointer; font-size: 0.82rem;">Opération concernée (le cas échéant)</summary>
+   <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem;">${champs}</div></details>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="declarerDouteHomonymie(${a.id})">Déclarer le doute d'homonymie</button>
+ </details>`;
+}
+
+function _etapeTransmissionHomonymie(d, vocab, isReviewer, auditeur) {
+ const formulaire = vocab.formulaire || {};
+ const liens = `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.4rem;">
+  <a class="btn btn-sm btn-secondary" href="/api/homonymies/${d.id}/draft/print" target="_blank" title="Projet aux rubriques du formulaire de la DG Trésor — à reporter dans le classeur officiel">Projet de déclaration d'homonymie</a>
+  <a class="btn btn-sm" style="background: var(--surface-3);" href="${escapeHtml(formulaire.url || "")}" target="_blank" rel="noopener">Formulaire officiel (.xlsx)</a>
+  <small><span>À adresser à</span> <strong>${escapeHtml(vocab.adresse_dgt || "")}</strong></small>
+ </div>`;
+ if (d.statut === "ABANDONNEE") {
+  return `<p style="font-size: 0.85rem;"><span>Abandonnée le</span> <strong>${formatDateTime(d.abandonnee_le)}</strong> · @${escapeHtml(d.abandonnee_par || "")} — ${escapeHtml(d.motif_abandon || "")}</p>`;
+ }
+ if (d.statut !== "A_TRANSMETTRE") {
+  const attente = d.statut === "TRANSMISE"
+   ? `<br><span>En attente de la réponse depuis</span> <strong>${formatDuree(d.attente_secondes)}</strong>${d.attente_longue ? ` — <span>attente longue : une relance se consigne comme échange (nouvelle saisine)</span>` : ""}`
+   : "";
+  return `${liens}<p style="font-size: 0.85rem;"><span>Transmise le</span> <strong>${formatDateTime(d.transmise_le)}</strong> · @${escapeHtml(d.transmise_par || "")}
+   ${d.reference ? ` · <span>réf.</span> ${escapeHtml(d.reference)}` : ""}
+   · <span>délai depuis le doute</span> : <strong>${formatDuree(d.delai_transmission_secondes)}</strong><br>
+   <span>Pièce de transmission</span> : ${_lienPieceHomonymie(d.piece_transmission)}${attente}</p>`;
+ }
+ const delai = d.non_transmise_en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;">Délai de transmission dépassé : <span>${formatDuree(d.delai_transmission_secondes)}</span> (<span>seuil</span> ${d.seuil_heures} h).</p>`
+  : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>À transmettre dans les plus brefs délais — délai écoulé</span> : ${formatDuree(d.delai_transmission_secondes)} (<span>seuil</span> ${d.seuil_heures} h).</p>`;
+ const abandon = auditeur ? "" : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="abandonnerHomonymie(${d.id}, ${d.alert_id})">Abandonner (avant transmission)</button>`;
+ if (!isReviewer || auditeur) {
+  return `${liens}${delai}<p style="font-size: 0.82rem; color: var(--text-muted);">L'enregistrement de la transmission est réservé aux réviseurs.</p>${abandon}`;
+ }
+ return `${liens}${delai}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="hom-transmise-${d.id}">Transmise le</label>
+    <input type="datetime-local" id="hom-transmise-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-reference-${d.id}">Référence</label>
+    <input type="text" id="hom-reference-${d.id}" maxlength="255" placeholder="Référence ou objet du courriel"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-piece-envoi-${d.id}">Pièce de transmission</label>
+    <input type="file" id="hom-piece-envoi-${d.id}" title="Copie du courriel envoyé à la DG Trésor avec le formulaire, ou accusé de réception"></div>
+   <button class="btn btn-sm btn-primary" onclick="enregistrerTransmissionHomonymie(${d.id}, ${d.alert_id})">Enregistrer la transmission</button>
+   ${abandon}
+  </div>`;
+}
+
+function _etapeEchangesHomonymie(d, vocab, auditeur) {
+ const liste = (d.echanges || []).map(e => `<li>${formatDateTime(e.le)} — <span>${escapeHtml(e.sens_label || e.sens)}</span> — ${escapeHtml(e.objet)} — ${_lienPieceHomonymie(e.piece)} <small style="color: var(--text-muted);">@${escapeHtml(e.par || "")}</small></li>`).join("");
+ const html = `<ul style="list-style: none; margin: 0.3rem 0; font-size: 0.85rem;">${liste || `<li style="color: var(--text-muted);">Aucun échange consigné.</li>`}</ul>`;
+ if (auditeur || !["TRANSMISE", "A_DECIDER"].includes(d.statut)) return html;
+ return `${html}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="hom-sens-${d.id}">Sens</label>
+    <select id="hom-sens-${d.id}">${_options(vocab.sens, "RECU")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-echange-le-${d.id}">Le</label>
+    <input type="datetime-local" id="hom-echange-le-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0; flex: 1 1 220px;"><label for="hom-echange-objet-${d.id}">Objet</label>
+    <input type="text" id="hom-echange-objet-${d.id}" maxlength="1000" placeholder="Demande de complément, pièce envoyée, relance…"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-echange-piece-${d.id}">Pièce</label>
+    <input type="file" id="hom-echange-piece-${d.id}" title="Le courriel reçu ou envoyé"></div>
+   <button class="btn btn-sm btn-secondary" onclick="consignerEchangeHomonymie(${d.id}, ${d.alert_id})">Consigner l'échange</button>
+  </div>`;
+}
+
+function _etapeReponseHomonymie(d, vocab, isReviewer, auditeur) {
+ if (d.reponse_le) {
+  return `<p style="font-size: 0.85rem;"><strong>${escapeHtml(d.issue_label || d.issue || "")}</strong> · <span>reçue le</span> ${formatDateTime(d.reponse_le)} · @${escapeHtml(d.reponse_par || "")}
+   ${d.reponse_resume ? `<br>${escapeHtml(d.reponse_resume)}` : ""}<br>
+   <span>Pièce de la réponse</span> : ${_lienPieceHomonymie(d.piece_reponse)}</p>`;
+ }
+ if (d.statut !== "TRANSMISE") {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">Possible une fois la déclaration transmise.</p>`;
+ }
+ if (!isReviewer || auditeur) {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">L'enregistrement de la réponse est réservé aux réviseurs.</p>`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0; flex: 1 1 320px;"><label for="hom-issue-${d.id}">Issue</label>
+    <select id="hom-issue-${d.id}"><option value="">—</option>${_options(vocab.issues, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-recue-${d.id}">Reçue le</label>
+    <input type="datetime-local" id="hom-recue-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-piece-reponse-${d.id}">Pièce de la réponse</label>
+    <input type="file" id="hom-piece-reponse-${d.id}" title="Courriel de réponse de la DG Trésor"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-resume-${d.id}">Résumé de la réponse</label>
+   <input type="text" id="hom-resume-${d.id}" maxlength="4000"></div>
+  <small style="color: var(--text-muted); display: block;">Homonyme : clôture en faux positif motivée par la réponse. Même personne : confirmation, et la mesure de gel s'ouvre. Doute persistant : la décision revient à l'organisme.</small>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerReponseHomonymie(${d.id}, ${d.alert_id})">Enregistrer la réponse</button>`;
+}
+
+function _etapeDecisionHomonymie(d, vocab, isReviewer, auditeur) {
+ if (d.decision) {
+  return `<p style="font-size: 0.85rem;"><strong>${escapeHtml(d.decision_label || d.decision)}</strong> · ${formatDateTime(d.decidee_le)} · @${escapeHtml(d.decidee_par || "")}<br>
+   ${escapeHtml(d.decision_motif || "")}
+   ${d.vigilance ? `<br><span>Vigilance adaptée</span> : ${escapeHtml(d.vigilance)}` : ""}
+   <br><span>Tracfin</span> : <span>${escapeHtml(d.tracfin_label || "")}</span> — ${escapeHtml(d.tracfin_detail || "")}
+   ${d.piece_information ? `<br><span>Information de la DG Trésor</span> : ${_lienPieceHomonymie(d.piece_information)}` : ""}</p>`;
+ }
+ if (!isReviewer || auditeur) {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">La décision revient à un réviseur : exécuter ou non, geler ou non (LD §167).</p>`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="hom-decision-${d.id}">Décision</label>
+    <select id="hom-decision-${d.id}"><option value="">—</option>${_options(vocab.decisions, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-tracfin-${d.id}">Tracfin</label>
+    <select id="hom-tracfin-${d.id}"><option value="">—</option>${_options(vocab.tracfin, "")}</select></div>
+   <div class="form-group" style="margin: 0; flex: 1 1 260px;"><label for="hom-tracfin-detail-${d.id}">Référence ou justification</label>
+    <input type="text" id="hom-tracfin-detail-${d.id}" maxlength="1000" placeholder="Référence de la déclaration de soupçon, ou pourquoi L.561-15 ne s'applique pas"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-motif-${d.id}">Motif de la décision</label>
+   <textarea id="hom-motif-${d.id}" rows="2" maxlength="4000"></textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-vigilance-${d.id}">Vigilance adaptée (sans gel)</label>
+   <textarea id="hom-vigilance-${d.id}" rows="2" maxlength="4000"></textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-piece-info-${d.id}">Information de la DG Trésor (sans gel)</label>
+   <input type="file" id="hom-piece-info-${d.id}" title="Courriel informant la DG Trésor de la décision"></div>
+  <small style="color: var(--text-muted); display: block;">Sans gel : vigilance adaptée et pièce prouvant l'information de la DG Trésor. Avec gel : la déclaration de la mesure de gel informe la DG Trésor.</small>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerDecisionHomonymie(${d.id}, ${d.alert_id})">Enregistrer la décision</button>`;
+}
+
+function _blocDeclarationHomonymie(d, vocab, isReviewer, auditeur) {
+ return `<div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem;">
+  <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+   <strong><span>Déclaration d'homonymie</span> #${d.id}</strong> ${badgeStatutHomonymie(d)}
+   <small style="color: var(--text-muted);"><span>doute déclaré le</span> ${formatDateTime(d.preparee_le)} · @${escapeHtml(d.preparee_par || "")} · <span>${escapeHtml(d.saisine_label || "")}</span></small>
+  </div>
+  <p style="font-size: 0.82rem; margin: 0 0 0.4rem;"><span>Bilan des recherches effectuées</span> : ${escapeHtml(d.diligences || "")}
+   ${d.mesures_conservatoires ? `<br><span>Mesures prises pendant le doute</span> : ${escapeHtml(d.mesures_conservatoires)}` : ""}</p>
+  <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Projet et transmission à la DG Trésor</h4>${_etapeTransmissionHomonymie(d, vocab, isReviewer, auditeur)}
+  ${d.statut === "ABANDONNEE" ? "" : `
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Échanges avec la DG Trésor</h4>${_etapeEchangesHomonymie(d, vocab, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Réponse de la DG Trésor</h4>${_etapeReponseHomonymie(d, vocab, isReviewer, auditeur)}`}
+  ${d.issue === "DOUTE_PERSISTANT" ? `<h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">4. Décision de l'organisme (doute persistant)</h4>${_etapeDecisionHomonymie(d, vocab, isReviewer, auditeur)}` : ""}
+ </div>`;
+}
+
+function blocDeclarationsHomonymie(a, isReviewer) {
+ const declarations = a.homonymies || [];
+ if (!declarations.length && !a.homonymie_possible) return "";
+ const vocab = a.homonymie_vocabulaire || {};
+ const auditeur = userRoles(currentUser).includes("auditor");
+ const formulaire = a.homonymie_possible && !auditeur ? _formulaireDuDoute(a, vocab) : "";
+ return `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Doute d'homonymie (DG Trésor)</h3>
+  ${declarations.map(d => _blocDeclarationHomonymie(d, vocab, isReviewer, auditeur)).join("")}
+  ${formulaire}
+ </div>`;
+}
+
+async function _homonymieRequete(url, options, alertId) {
+ try {
+  const response = await apiFetch(url, options);
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  showToast(data.message, "success");
+  if (alertId) openAlertModal(alertId);
+  refreshAlertQueues();
+  rafraichirSiAffichee("screening", "alerts-gels", () => { fetchGels(); fetchHomonymies(); });
+  return data;
+ } catch (e) {
+  showToast("Erreur réseau de communication.", "error");
+  return null;
+ }
+}
+
+async function declarerDouteHomonymie(alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${alertId}`)?.value ?? "";
+ const operation = {};
+ ((currentAlertData?.homonymie_vocabulaire || {}).champs_operation || []).forEach(c => {
+  const v = valeur(`hom-op-${c.code}`).trim();
+  if (v) operation[c.code] = v;
+ });
+ await _homonymieRequete(`/api/alerts/${alertId}/homonymie`, {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+   diligences: valeur("hom-diligences"), mesures_conservatoires: valeur("hom-mesures"),
+   commentaire: valeur("hom-commentaire"), role_operateur: valeur("hom-role"),
+   objet_homonymie: valeur("hom-objet"), operation,
+  }),
+ }, alertId);
+}
+
+// Formulaire avec pièce : le serveur refuse sans elle, l'écran le dit avant
+function _formAvecPiece(idPiece, message) {
+ const fichier = document.getElementById(idPiece)?.files?.[0];
+ if (!fichier && message) { showToast(message, "error"); return null; }
+ const form = new FormData();
+ if (fichier) form.append("file", fichier);
+ return form;
+}
+
+function _dateSaisie(id) {
+ const v = document.getElementById(id)?.value;
+ return v ? new Date(v).toISOString() : "";
+}
+
+async function enregistrerTransmissionHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-piece-envoi-${id}`, "Joignez la pièce de transmission : copie du courriel envoyé à la DG Trésor, ou accusé de réception.");
+ if (!form) return;
+ const quand = _dateSaisie(`hom-transmise-${id}`);
+ if (quand) form.append("transmise_le", quand);
+ form.append("reference", document.getElementById(`hom-reference-${id}`)?.value || "");
+ await _homonymieRequete(`/api/homonymies/${id}/transmission`, { method: "POST", body: form }, alertId);
+}
+
+async function consignerEchangeHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-echange-piece-${id}`, "Joignez la pièce de l'échange : le courriel reçu ou envoyé.");
+ if (!form) return;
+ form.append("sens", document.getElementById(`hom-sens-${id}`)?.value || "");
+ form.append("objet", document.getElementById(`hom-echange-objet-${id}`)?.value || "");
+ const quand = _dateSaisie(`hom-echange-le-${id}`);
+ if (quand) form.append("le", quand);
+ await _homonymieRequete(`/api/homonymies/${id}/echanges`, { method: "POST", body: form }, alertId);
+}
+
+async function enregistrerReponseHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-piece-reponse-${id}`, "Joignez la pièce de la réponse : le courriel de la DG Trésor.");
+ if (!form) return;
+ const issue = document.getElementById(`hom-issue-${id}`)?.value || "";
+ form.append("issue", issue);
+ const quand = _dateSaisie(`hom-recue-${id}`);
+ if (quand) form.append("recue_le", quand);
+ form.append("resume", document.getElementById(`hom-resume-${id}`)?.value || "");
+ if (issue && issue !== "DOUTE_PERSISTANT"
+  && !await confirmDialog("Enregistrer cette réponse ? Elle clôt l'alerte : faux positif si la DG Trésor confirme l'homonymie, vrai positif — et mesure de gel — si elle confirme la même personne.")) return;
+ await _homonymieRequete(`/api/homonymies/${id}/reponse`, { method: "POST", body: form }, alertId);
+}
+
+async function enregistrerDecisionHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-piece-info-${id}`, null);
+ for (const [cle, champ] of [["decision", "hom-decision"], ["motif", "hom-motif"], ["vigilance", "hom-vigilance"],
+  ["tracfin", "hom-tracfin"], ["tracfin_detail", "hom-tracfin-detail"]]) {
+  form.append(cle, document.getElementById(`${champ}-${id}`)?.value || "");
+ }
+ if (!await confirmDialog("Enregistrer cette décision ? Elle clôt l'alerte.")) return;
+ await _homonymieRequete(`/api/homonymies/${id}/decision`, { method: "POST", body: form }, alertId);
+}
+
+async function abandonnerHomonymie(id, alertId) {
+ const motif = await promptDialog("Abandonner la déclaration d'homonymie", {
+  message: "Seule une déclaration non transmise s'abandonne. L'alerte retourne à l'instruction ; le motif est inscrit à son journal.",
+  textarea: true,
+  placeholder: "Ex. passeport reçu, l'alerte se lève sans la DG Trésor…",
+ });
+ if (motif === null) return;
+ await _homonymieRequete(`/api/homonymies/${id}/abandon`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ motif }),
+ }, alertId);
+}
+
+function _parametresDesHomonymies() {
+ const params = new URLSearchParams();
+ const statut = document.getElementById("homonymies-statut-filter")?.value;
+ const recherche = (document.getElementById("homonymies-recherche")?.value || "").trim();
+ if (statut) params.set("statut", statut);
+ if (recherche) params.set("q", recherche);
+ return params;
+}
+
+function exportHomonymiesCsv() {
+ window.open(`/api/export/homonymies.csv?${_parametresDesHomonymies().toString()}`, "_blank");
+}
+
+function _afficherSyntheseDesHomonymies(s) {
+ const el = document.getElementById("homonymies-synthese");
+ if (!el || !s) return;
+ // L'attente longue s'affiche, elle ne se colore pas en alerte : la DG
+ // Trésor a son rythme. La transmission hors délai, elle, est un défaut.
+ el.innerHTML = `
+  <span><strong>${s.to_transmit}</strong> <span>à transmettre</span></span>
+  <span style="${s.overdue ? "color: var(--color-alert); font-weight: 600;" : ""}"><strong>${s.overdue}</strong> <span>non transmise(s) hors délai</span> (<span>seuil</span> ${s.threshold_hours} h)</span>
+  <span><strong>${s.awaiting_reply}</strong> <span>en attente de réponse</span>${s.long_wait ? ` (<span>dont</span> ${s.long_wait} <span>depuis plus de</span> ${s.long_wait_days} j)` : ""}</span>
+  <span><strong>${s.to_decide}</strong> <span>doute(s) persistant(s) à décider</span></span>
+  <span><strong>${s.closed}</strong> <span>terminée(s)</span></span>
+  <span><span>Attente moyenne de la réponse</span> : <strong>${formatDuree(s.avg_reply_delay_seconds)}</strong></span>`;
+}
+
+async function fetchHomonymies() {
+ const tbody = document.querySelector("#homonymies-table tbody");
+ if (!tbody) return;
+ tableLoading("#homonymies-table", 11);
+ const params = _parametresDesHomonymies();
+ const filtre = params.toString() !== "";
+ params.set("page_size", "200");
+ try {
+  const response = await apiFetch(`/api/homonymies?${params.toString()}`);
+  if (!response.ok) { tableError("#homonymies-table", 11); return; }
+  const data = await response.json();
+  // Les statuts viennent du serveur ; les deux filtres d'état restent en tête
+  const select = document.getElementById("homonymies-statut-filter");
+  if (select && !select.dataset.vocabulaire) {
+   select.insertAdjacentHTML("beforeend", _options((data.vocabulaire || {}).statuts, ""));
+   select.dataset.vocabulaire = "1";
+  }
+  _afficherSyntheseDesHomonymies(data.synthese);
+  const total = document.getElementById("homonymies-total");
+  if (total) total.textContent = data.total > data.items.length ? `${data.items.length} / ${data.total}` : "";
+  if (!data.items.length) {
+   tableEmpty("#homonymies-table", 11, filtre ? "Aucune déclaration pour ces filtres." : "Aucune déclaration d'homonymie au registre.", "",
+    filtre ? "" : "Une déclaration s'ouvre depuis une alerte du périmètre SANCTION qu'on ne peut ni lever ni confirmer.");
+   return;
+  }
+  tbody.innerHTML = data.items.map(d => `
+   <tr>
+    <td>#${d.id}</td>
+    <td>${formatDateTime(d.preparee_le)}</td>
+    <td>${escapeHtml(d.client_name)}</td>
+    <td>${escapeHtml(d.watchlist_name)}</td>
+    <td>${d.list_type ? listTypeBadge(d.list_type) : "—"}</td>
+    <td><span>${escapeHtml(d.saisine_label || "")}</span></td>
+    <td>${badgeStatutHomonymie(d)}</td>
+    <td>${d.transmise_le ? formatDateTime(d.transmise_le) : "—"}</td>
+    <td>${d.attente_secondes != null ? formatDuree(d.attente_secondes) : "—"}</td>
+    <td>${d.issue_court ? `<span title="${escapeHtml(d.issue_label || "")}">${escapeHtml(d.issue_court)}</span>` : "—"}</td>
+    <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${d.alert_id})" title="Ouvrir l'alerte et les étapes de la déclaration">Ouvrir</button></td>
+   </tr>`).join("");
+ } catch (e) {
+  tableError("#homonymies-table", 11);
  }
 }
 
@@ -10109,7 +10495,7 @@ function renderListsBarChart(containerId, byType) {
 const _DONUT_STATUS_COLORS = {
  OPEN: "var(--color-warning)", IN_PROGRESS: "var(--color-primary)",
  ESCALATED: "var(--color-alert)", PENDING_VALIDATION: "var(--color-secondary)",
- CLOSED_CONFIRMED: "#b91c1c", CLOSED_FALSE_POSITIVE: "var(--color-safe)",
+ PENDING_DGT: "#b45309", CLOSED_CONFIRMED: "#b91c1c", CLOSED_FALSE_POSITIVE: "var(--color-safe)",
  CLOSED_BY_RULE: "var(--text-muted)",
 };
 

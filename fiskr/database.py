@@ -582,7 +582,9 @@ class Alert(Base):
     """
     Alerte de criblage : objet de travail avec cycle de vie et decision 4-yeux.
     OPEN -> IN_PROGRESS (assignee) -> PENDING_VALIDATION (decision proposee)
-    -> CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE ; ESCALATED en derivation.
+    -> CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE ; ESCALATED en derivation ;
+    PENDING_DGT quand le doute d'homonymie est declare a la DG Tresor
+    (fiskr/homonymie.py) — seule sa reponse enregistree l'en fait sortir.
     Le journal immuable reste compliance_audit_trail (audit_id).
     """
     __tablename__ = "alerts"
@@ -740,6 +742,84 @@ class MesureDeGel(Base):
     # NULL : vrai positif sur le client lui-meme.
     fondement = Column(String(30), nullable=True)
     detention = Column(JSON, nullable=True)
+
+
+class DeclarationHomonymie(Base):
+    """
+    Registre des declarations d'homonymie a la DG Tresor (fiskr/homonymie.py),
+    frere du registre des gels : une alerte du perimetre SANCTION qu'on ne
+    peut ni lever ni confirmer (LD DGT/ACPR du 18 mars 2026, §167). Avant lui,
+    une alerte se closait en faux positif ou en vrai positif ; le doute n'avait
+    ni forme, ni piece, ni attente. La ligne s'ouvre au doute, « a
+    transmettre », passe « transmise » sur la piece d'envoi, et se termine sur
+    la reponse de la DG Tresor — piece jointe, datee (§168).
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "homonymie_declarations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    statut = Column(String(20), nullable=False, default="A_TRANSMETTRE", index=True)
+    # Saisine initiale ou nouvelle saisine (rubrique du formulaire de la DG
+    # Tresor) : derivee du registre — une declaration anterieure sur le meme
+    # couple client x fiche fait de celle-ci une relance.
+    saisine = Column(String(20), nullable=False, default="INITIALE")
+    # Identite figee a l'ouverture : le registre se lit sans rejouer l'alerte
+    client_id = Column(String(100), nullable=True, index=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    list_type = Column(String(30), nullable=True)
+    channel = Column(String(20), nullable=True)
+    # Statut de l'alerte avant le doute, rendu si la declaration est abandonnee
+    # avant transmission
+    statut_alerte_avant = Column(String(30), nullable=True)
+    # Le doute : diligences (« bilan des recherches effectuees », rubrique du
+    # formulaire, exigee par §167), mesures conservatoires declarees, et les
+    # rubriques que le formulaire demande a l'organisme
+    preparee_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    preparee_par = Column(String(100), nullable=False)
+    diligences = Column(Text, nullable=False)
+    mesures_conservatoires = Column(Text, nullable=True)
+    commentaire = Column(Text, nullable=True)
+    role_operateur = Column(String(30), nullable=True)
+    objet_homonymie = Column(String(20), nullable=True)
+    operation = Column(JSON, nullable=True)
+    # Transmission (hors de Fiskr) et la piece qui la prouve
+    transmise_le = Column(DateTime, nullable=True)
+    transmise_par = Column(String(100), nullable=True)
+    reference = Column(String(255), nullable=True)
+    piece_transmission_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    # Retard de transmission signale une fois (notification immediate)
+    retard_signale_le = Column(DateTime, nullable=True)
+    # Echanges intermediaires avec la DG Tresor (§168) : [{le, sens, objet,
+    # piece_id, par}] — chacun appuye d'une piece jointe de l'alerte
+    echanges = Column(JSON, nullable=True)
+    # Reponse de la DG Tresor : date, issue (une des trois de §167), resume,
+    # piece (son courriel), et qui l'a enregistree
+    reponse_le = Column(DateTime, nullable=True)
+    reponse_par = Column(String(100), nullable=True)
+    issue = Column(String(20), nullable=True)
+    reponse_resume = Column(Text, nullable=True)
+    piece_reponse_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    # Doute persistant : la decision revient a l'organisme (§167) — geler ou
+    # non, motif, vigilance adaptee, Tracfin, et l'information de la DG Tresor
+    decision = Column(String(20), nullable=True)
+    decision_motif = Column(Text, nullable=True)
+    vigilance = Column(Text, nullable=True)
+    tracfin = Column(String(20), nullable=True)
+    tracfin_detail = Column(Text, nullable=True)
+    piece_information_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    decidee_le = Column(DateTime, nullable=True)
+    decidee_par = Column(String(100), nullable=True)
+    # Fin : alerte close par le chemin existant (`_close_alert`), ou abandon
+    # AVANT transmission (motif obligatoire, ligne conservee)
+    terminee_le = Column(DateTime, nullable=True)
+    abandonnee_le = Column(DateTime, nullable=True)
+    abandonnee_par = Column(String(100), nullable=True)
+    motif_abandon = Column(Text, nullable=True)
 
 
 class DossierPPE(Base):
@@ -902,7 +982,19 @@ def log_admin_action(db, username, action, target=None,
                          before=before, after=after, detail=detail))
 
 
-ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
+# Doute d'homonymie declare a la DG Tresor (fiskr/homonymie.py) : l'alerte
+# « ne peut toujours pas etre levee » (LD DGT/ACPR du 18 mars 2026, §167). Elle
+# n'est pas close — rien ne la clot sans la reponse enregistree —, mais son
+# instruction est faite : elle attend la DG Tresor, pas l'analyste.
+ALERT_STATUS_ATTENTE_DGT = "PENDING_DGT"
+ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION",
+                       ALERT_STATUS_ATTENTE_DGT)
+# Ce que l'analyste a encore a instruire : les ouvertes, moins l'attente de la
+# DG Tresor. Une echeance SLA ne s'y « depasse » pas — la DG Tresor a son
+# rythme, et le seul delai qui reste a l'organisme (transmettre la
+# declaration) a son propre controle. Sans cette distinction, chaque doute
+# declare finissait en rouge dans la file et en « retard SLA » au courriel.
+ALERT_WORK_STATUSES = tuple(s for s in ALERT_OPEN_STATUSES if s != ALERT_STATUS_ATTENTE_DGT)
 # CLOSED_CONFIRMED clot l'INSTRUCTION, pas l'affaire : sur une liste du
 # perimetre SANCTION, la suite (gel, declaration DG Tresor, levee) vit dans
 # le registre des mesures de gel (MesureDeGel, fiskr/gels.py).

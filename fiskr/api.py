@@ -151,13 +151,17 @@ from fiskr.settings import (
 from fiskr import resources as resource_tables
 from fiskr import country_risk
 from fiskr import gels as registre_des_gels
+from fiskr import homonymie as registre_des_homonymies
 from fiskr import ppe as dossiers_ppe
-from fiskr.database import DossierPPE, MesureDeGel
+from fiskr.database import (DossierPPE, MesureDeGel, DeclarationHomonymie,
+                            ALERT_STATUS_ATTENTE_DGT, ALERT_WORK_STATUSES)
 from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
                             gel_declaration_delai_heures, perimeter_overrides,
                             SETTING_PPE_DELAI, PPE_DELAI_BORNES_JOURS, ppe_decision_delai_jours,
                             SETTING_PRESTATAIRES_DEFAILLANTS, prestataires_defaillants_criteres,
-                            valider_criteres_prestataires)
+                            valider_criteres_prestataires,
+                            SETTING_HOMONYMIE_DELAI, HOMONYMIE_DELAI_BORNES_HEURES,
+                            homonymie_transmission_delai_heures)
 from fiskr.retention import (preview_retention, run_retention,
                              conservees_au_titre_de_la_relation)
 from fiskr import conservation
@@ -421,8 +425,10 @@ def build_kpi_digest(db) -> Dict[str, Any]:
         "Alertes ouvertes — criblage": open_q.filter(
             (Alert.channel == "SCREENING") | (Alert.channel.is_(None))).count(),
         "Alertes ouvertes — filtrage": open_q.filter(Alert.channel == "FILTERING").count(),
+        # Une alerte en attente de la DG Tresor n'est pas « en retard » :
+        # c'est la DG Tresor qu'elle attend (ALERT_WORK_STATUSES)
         "Alertes en retard SLA": db.query(Alert).filter(
-            Alert.status.in_(ALERT_OPEN_STATUSES), Alert.due_at.isnot(None),
+            Alert.status.in_(ALERT_WORK_STATUSES), Alert.due_at.isnot(None),
             Alert.due_at < now).count(),
         "Décisions en attente 4-yeux": db.query(Alert).filter(
             Alert.status == "PENDING_VALIDATION").count(),
@@ -609,8 +615,10 @@ def _detect_overdue_alerts(db) -> int:
     n'est jamais signalee deux fois.
     """
     now = datetime.utcnow()
+    # Pas d'echeance SLA « depassee » sur une alerte qui attend la DG Tresor :
+    # l'analyste n'a plus rien a y faire, l'avertir crierait au loup
     overdue = db.query(Alert).filter(
-        Alert.status.in_(ALERT_OPEN_STATUSES),
+        Alert.status.in_(ALERT_WORK_STATUSES),
         Alert.due_at.isnot(None),
         Alert.due_at < now,
     ).all()
@@ -714,6 +722,13 @@ def _notification_batch_tick(tick=None) -> None:
         except Exception as e:
             db.rollback()
             logger.error(f"Détection des revues PPE échues impossible : {e}")
+        # Declarations d'homonymie preparees et non transmises : meme cadence —
+        # elles sont dues « dans les plus brefs delais » (LD §167)
+        try:
+            registre_des_homonymies.detecter_retards(db)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Détection des déclarations d'homonymie non transmises impossible : {e}")
         batch_cfg = notification_batch_settings(db)
         if not batch_cfg["enabled"]:
             return
@@ -2501,6 +2516,7 @@ _PORTABLE_SETTINGS = {
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
     SETTING_GEL_DELAI, SETTING_PPE_DELAI, SETTING_PRESTATAIRES_DEFAILLANTS,
+    SETTING_HOMONYMIE_DELAI,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
     # Synchronisation automatique : les cles de source sont universelles,
@@ -8001,7 +8017,10 @@ async def get_sidebar_counters(
         _compte(and_(ouverte, or_(Alert.channel == "SCREENING", Alert.channel.is_(None)))),
         _compte(and_(ouverte, Alert.channel == "FILTERING")),
         _compte(Alert.status == "PENDING_VALIDATION"),
-        _compte(and_(ouverte, Alert.due_at.isnot(None), Alert.due_at < datetime.utcnow())),
+        # En retard SLA : meme definition que la file (`_alert_summary`) — une
+        # alerte en attente de la DG Tresor n'y est pas
+        _compte(and_(Alert.status.in_(ALERT_WORK_STATUSES), Alert.due_at.isnot(None),
+                     Alert.due_at < datetime.utcnow())),
     ).one()
     return {
         "open_alerts": int(open_alerts),
@@ -9111,6 +9130,7 @@ class IngestionSettingsUpdate(BaseModel):
     alert_sla_hours: Optional[Dict[str, int]] = None
     # Delai de declaration d'une mesure de gel a la DG Tresor (heures)
     gel_declaration_delay_hours: Optional[int] = None
+    homonymy_transmission_delay_hours: Optional[int] = None
     # Delai de decision d'un dossier PPE par une personne habilitee (jours)
     ppe_decision_delay_days: Optional[int] = None
     # Prestataires defaillants (2023/1113, art. 8 §2) : periode, seuils,
@@ -9176,6 +9196,7 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "quality_min_score_pct": quality_min_score_pct(db),
         "alert_sla_hours": alert_sla_hours(db),
         "gel_declaration_delay_hours": gel_declaration_delai_heures(db),
+        "homonymy_transmission_delay_hours": homonymie_transmission_delai_heures(db),
         "ppe_decision_delay_days": ppe_decision_delai_jours(db),
         "prestataires_defaillants": {k: v for k, v in prestataires_defaillants_criteres(db).items()
                                      if k not in ("erreur", "source")},
@@ -9239,6 +9260,7 @@ async def update_ingestion_settings(
               payload.quality_min_score_pct, payload.alert_sla_hours,
               payload.gel_declaration_delay_hours, payload.ppe_decision_delay_days,
               payload.prestataires_defaillants,
+              payload.homonymy_transmission_delay_hours,
               payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
@@ -9297,6 +9319,16 @@ async def update_ingestion_settings(
             raise HTTPException(status_code=400,
                                 detail=f"Délai de déclaration d'un gel : entre {bas} et {haut} heures.")
         set_setting(db, SETTING_GEL_DELAI, int(payload.gel_declaration_delay_hours),
+                    updated_by=admin_user["username"])
+    if payload.homonymy_transmission_delay_hours is not None:
+        bas, haut = HOMONYMIE_DELAI_BORNES_HEURES
+        if not (bas <= payload.homonymy_transmission_delay_hours <= haut):
+            # Meme refus franc que le delai de gel : hors bornes, la lecture
+            # retomberait en silence sur le defaut
+            raise HTTPException(status_code=400, detail=(
+                f"Délai de transmission d'une déclaration d'homonymie : entre {bas} et "
+                f"{haut} heures."))
+        set_setting(db, SETTING_HOMONYMIE_DELAI, int(payload.homonymy_transmission_delay_hours),
                     updated_by=admin_user["username"])
     if payload.ppe_decision_delay_days is not None:
         bas, haut = PPE_DELAI_BORNES_JOURS
@@ -12032,10 +12064,11 @@ def _alert_summary(alert: Alert) -> Dict[str, Any]:
         "decision_comment": alert.decision_comment,
         "priority": alert.priority,
         "due_at": alert.due_at.isoformat() if alert.due_at else None,
-        # En retard = echeance depassee ET toujours ouverte
+        # En retard = echeance depassee ET encore a instruire : une alerte en
+        # attente de la DG Tresor (doute d'homonymie) ne l'est plus
         "overdue": bool(
             alert.due_at and alert.due_at < datetime.utcnow()
-            and alert.status in ALERT_OPEN_STATUSES
+            and alert.status in ALERT_WORK_STATUSES
         ),
         "snoozed_until": alert.snoozed_until.isoformat() if alert.snoozed_until else None,
         # En attente = echeance de report future ET alerte ouverte : un report
@@ -13682,6 +13715,692 @@ async def export_gels_csv(
                          header, data)
 
 
+# ------------------ DECLARATIONS D'HOMONYMIE (DG TRESOR, LD §167) ------------------
+# L'alerte qu'on ne peut ni lever ni confirmer (fiskr/homonymie.py) : le doute,
+# sa declaration a la DG Tresor, ses echanges, sa reponse — et la cloture que
+# la reponse commande, par `_close_alert`. Memes motifs que le registre des
+# gels : lecture auditeur comprise, pieces jointes de l'alerte, refus francs,
+# aucune transmission automatique.
+
+HOMONYMIE_DISCLAIMER = (
+    "PROJET généré par Fiskr à partir de l'alerte, du journal d'audit et du registre des "
+    "déclarations d'homonymie. Il se reporte dans le formulaire officiel de la DG Trésor "
+    "(classeur .xlsx), se relit, se complète et se transmet par un humain — aucune "
+    "transmission automatique n'est effectuée. La déclaration ne passe « transmise » qu'à "
+    "l'enregistrement de la pièce de transmission."
+)
+
+
+def _declaration_ou_404(db: Session, declaration_id: int) -> DeclarationHomonymie:
+    declaration = db.query(DeclarationHomonymie).filter(
+        DeclarationHomonymie.id == declaration_id).first()
+    if declaration is None:
+        raise HTTPException(status_code=404, detail="Déclaration d'homonymie introuvable.")
+    return declaration
+
+
+def _alerte_de_la_declaration(db: Session, declaration: DeclarationHomonymie) -> Alert:
+    alert = db.query(Alert).filter(Alert.id == declaration.alert_id).first()
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    return alert
+
+
+class HomonymieDeclarationRequest(BaseModel):
+    # « Bilan des recherches effectuees en amont de la declaration » (rubrique
+    # du formulaire de la DG Tresor) — exige
+    diligences: str = Field(..., max_length=8000)
+    mesures_conservatoires: Optional[str] = Field(None, max_length=4000)
+    commentaire: Optional[str] = Field(None, max_length=4000)
+    role_operateur: Optional[str] = None
+    objet_homonymie: Optional[str] = None
+    # « Sur quelle operation porte l'alerte ? » : type, objet, emetteur,
+    # beneficiaire, montant, date (fiskr/homonymie.CHAMPS_OPERATION)
+    operation: Optional[Dict[str, str]] = None
+
+
+class HomonymieAbandonRequest(BaseModel):
+    motif: str = Field(..., max_length=4000)
+
+
+def _homonymies_filtrees(db: Session, statut: Optional[str], list_type: Optional[str],
+                         q: Optional[str]):
+    """Filtres du registre, partages par l'ecran et l'export CSV."""
+    query = db.query(DeclarationHomonymie)
+    if statut:
+        code = statut.strip().upper()
+        if code == registre_des_homonymies.FILTRE_NON_TRANSMISE_HORS_DELAI:
+            # La definition du retard est celle de fiskr/kpi.py, lue telle quelle
+            ids = [d.id for d in registre_des_homonymies.non_transmises_en_retard(db)]
+            query = query.filter(DeclarationHomonymie.id.in_(ids or [-1]))
+        elif code == registre_des_homonymies.FILTRE_ATTENTE_LONGUE:
+            # Meme definition que `homonymie.attente_longue`
+            limite = datetime.utcnow() - timedelta(days=registre_des_homonymies.ATTENTE_LONGUE_JOURS)
+            query = query.filter(DeclarationHomonymie.statut == registre_des_homonymies.STATUT_TRANSMISE,
+                                 DeclarationHomonymie.transmise_le < limite)
+        elif code in registre_des_homonymies.STATUTS:
+            query = query.filter(DeclarationHomonymie.statut == code)
+        else:
+            raise HTTPException(status_code=400, detail="Statut de déclaration d'homonymie inconnu.")
+    query = _apply_list_type_filter(query, DeclarationHomonymie.list_type, list_type)
+    if q and q.strip():
+        motif = f"%{q.strip()[:100]}%"
+        query = query.filter(DeclarationHomonymie.client_name.ilike(motif)
+                             | DeclarationHomonymie.watchlist_name.ilike(motif)
+                             | DeclarationHomonymie.client_id.ilike(motif))
+    return query
+
+
+@app.post("/api/alerts/{alert_id}/homonymie")
+async def declare_homonymy_doubt(
+    alert_id: int,
+    payload: HomonymieDeclarationRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Doute d'homonymie (LD DGT/ACPR §167) sur une alerte OUVERTE du perimetre
+    SANCTION : l'alerte passe en attente de la DG Tresor (PENDING_DGT) — ni
+    close, ni dans la file ordinaire — et la declaration s'ouvre « a
+    transmettre ». Le bilan des diligences est exige.
+    """
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable.")
+    try:
+        declaration = registre_des_homonymies.declarer(
+            db, alert, username=current_user["username"], diligences=payload.diligences,
+            mesures_conservatoires=payload.mesures_conservatoires,
+            commentaire=payload.commentaire, role_operateur=payload.role_operateur,
+            objet_homonymie=payload.objet_homonymie, operation=payload.operation)
+    except registre_des_gels.RefusDeGel as refus:
+        db.rollback()
+        raise _refus_de_gel(refus)
+    db.commit()
+    _notifier_les_suiveurs(db, alert, "Doute d'homonymie déclaré (DG Trésor)",
+                           current_user["username"])
+    return {"message": (f"Doute d'homonymie déclaré : déclaration #{declaration.id} à transmettre "
+                        f"à la DG Trésor ({registre_des_homonymies.ADRESSE_DGT}). L'alerte attend "
+                        f"sa réponse."),
+            **registre_des_homonymies.serialiser(db, declaration)}
+
+
+@app.get("/api/homonymies")
+async def list_homonymy_declarations(
+    statut: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    alert_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Registre des declarations d'homonymie (lecture, auditeur compris) :
+    filtrable par statut, ou NON_TRANSMISE_HORS_DELAI (le defaut, qui sonne)
+    et ATTENTE_LONGUE (l'attente de la DG Tresor, qui ne sonne pas). Porte la
+    synthese (fiskr/kpi.py) et le vocabulaire de l'ecran.
+    """
+    from fiskr.kpi import synthese_des_homonymies
+    query = _homonymies_filtrees(db, statut, list_type, q)
+    if alert_id is not None:
+        query = query.filter(DeclarationHomonymie.alert_id == alert_id)
+    total = query.count()
+    lignes = query.order_by(DeclarationHomonymie.preparee_le.desc(), DeclarationHomonymie.id.desc()) \
+                  .offset((page - 1) * page_size).limit(page_size).all()
+    seuil = homonymie_transmission_delai_heures(db)
+    ids_pieces = registre_des_homonymies.pieces_de(lignes)
+    pieces = {p.id: p for p in db.query(AlertAttachment).filter(
+        AlertAttachment.id.in_(ids_pieces)).all()} if ids_pieces else {}
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [registre_des_homonymies.serialiser(db, d, seuil, pieces=pieces) for d in lignes],
+        "synthese": synthese_des_homonymies(db),
+        "vocabulaire": registre_des_homonymies.vocabulaire(),
+    }
+
+
+def _objet_derive(tree: Dict[str, Any], fiche: Optional[WatchlistEntity]) -> Optional[str]:
+    """L'objet de l'homonymie (nom ou alias), lu dans ce que le moteur a
+    compare : le nom de la fiche retenu par le criblage est-il son nom
+    principal ? Rien quand l'arbre ne le dit pas."""
+    retenu = (tree.get("best_watchlist_name") or "").strip()
+    if not retenu or fiche is None:
+        return None
+    # Meme definition de « meme nom » que la re-identification (casse,
+    # accents, ponctuation et ordre des mots ignores)
+    from fiskr.caducite import _nom_normalise
+    return "NOM" if _nom_normalise(retenu) == _nom_normalise(fiche.primary_name) else "ALIAS"
+
+
+def _build_homonymie_draft(db: Session, declaration: DeclarationHomonymie,
+                           username: str) -> Dict[str, Any]:
+    """
+    Projet de declaration d'homonymie, aux rubriques du « Formulaire de
+    declaration d'homonymie - DGT.xlsx » et dans leur ordre : qui alerte, sur
+    qui porte l'alerte, sur quelle operation, traitement de l'alerte. Construit
+    exclusivement depuis la declaration, l'alerte, son journal et la fiche en
+    production ; ce qui manque est nomme, jamais invente.
+    """
+    alert = db.query(Alert).filter(Alert.id == declaration.alert_id).first()
+    audit = db.query(AuditTrail).filter(AuditTrail.id == alert.audit_id).first() if alert else None
+    tree = (audit.decision_tree if audit else {}) or {}
+    fiche = registre_des_gels.fiche_en_production(db, declaration.watchlist_entity_id)
+    nom_parse = (fiche.individual_name_parsed if fiche is not None else None) or {}
+    alias = []
+    if fiche is not None:
+        for groupe in ("high_priority", "low_priority"):
+            alias += list(((fiche.aliases or {}).get(groupe)) or [])
+    declarant = _institution_config(db)
+    vocab = registre_des_homonymies
+    personne_morale = fiche is not None and fiche.entity_type not in ("I", None)
+    # Le registre national porte un identifiant unique ; Fiskr ne le connait
+    # que pour les fiches lues dans ce registre (« DGT-<IdRegistre> »)
+    id_registre = (declaration.watchlist_entity_id[4:]
+                   if (declaration.watchlist_entity_id or "").startswith("DGT-") else None)
+    objet = declaration.objet_homonymie or _objet_derive(tree, fiche)
+    pieces = db.query(AlertAttachment).filter(AlertAttachment.alert_id == declaration.alert_id) \
+               .order_by(AlertAttachment.uploaded_at.asc()).all()
+    events = db.query(AlertEvent).filter(AlertEvent.alert_id == declaration.alert_id) \
+               .order_by(AlertEvent.timestamp.asc(), AlertEvent.id.asc()).all()
+    operation = dict(declaration.operation or {})
+    if alert is not None and (alert.channel or "SCREENING") == "FILTERING":
+        operation.setdefault("reference_message", alert.client_id)
+        if tree.get("party_role"):
+            operation.setdefault("role_partie", tree.get("party_role"))
+
+    manquants = []
+    if not declaration.role_operateur:
+        manquants.append("rôle de l'opérateur (relation d'affaires, contrepartie, autre)")
+    if not objet:
+        manquants.append("objet de l'homonymie (nom ou alias)")
+    if not (fiche is not None and fiche.sanction_programs):
+        manquants.append("régime de sanction (à choisir dans la liste du formulaire)")
+    if id_registre is None:
+        manquants.append("numéro d'identification sur le registre national de gel des avoirs "
+                         "(gels-avoirs.dgtresor.gouv.fr) — la fiche n'en provient pas")
+    if not pieces:
+        manquants.append("pièces jointes (copie de pièces d'identité, message SWIFT… — LD §167)")
+    if not (declarant.get("name") and declarant.get("correspondent_name")
+            and (declarant.get("correspondent_email") or declarant.get("correspondent_phone"))):
+        manquants.append("déclarant et point de contact (Paramètres → Établissement déclarant)")
+
+    def iso(d):
+        return d.isoformat() if d else None
+
+    return {
+        "type": "PROJET_DECLARATION_HOMONYMIE",
+        "avertissement": HOMONYMIE_DISCLAIMER,
+        "fondement": "Lignes directrices conjointes DGT/ACPR sur le gel des avoirs du 18 mars 2026, §167-168.",
+        "genere_le": datetime.utcnow().isoformat() + "Z",
+        "genere_par": username,
+        "destinataire": vocab.ADRESSE_DGT,
+        # Les onglets du classeur, tels qu'il les nomme — coquille comprise
+        # (« Délaration PM ») : c'est l'onglet que le declarant cherchera
+        "formulaire": {**vocab.FORMULAIRE,
+                       "onglet": "Délaration PM" if personne_morale else "Déclaration PP"},
+        "declaration": {
+            "id": declaration.id, "alerte_id": declaration.alert_id,
+            "statut": declaration.statut,
+            "statut_libelle": vocab.STATUT_LABELS.get(declaration.statut),
+            "preparee_le": iso(declaration.preparee_le), "preparee_par": declaration.preparee_par,
+        },
+        # 1. Qui alerte ? (informations relatives au declarant)
+        "qui_alerte": {
+            "reference_declaration": f"FISKR-HOM-{declaration.id} (alerte #{declaration.alert_id})",
+            "declarant": declarant.get("name"),
+            "point_de_contact": " · ".join(x for x in (declarant.get("correspondent_name"),
+                                                       declarant.get("correspondent_email"),
+                                                       declarant.get("correspondent_phone")) if x),
+            "etablissement_concerne": None,
+            "role_operateur": vocab.ROLES_OPERATEUR.get(declaration.role_operateur or ""),
+        },
+        # 2. Sur qui porte l'alerte ? (regime de sanction et personne designee)
+        "sur_qui": {
+            "liste": declaration.list_type,
+            "regime": fiche.sanction_programs if fiche is not None else None,
+            "reference_designation": fiche.official_reference if fiche is not None else None,
+            "numero_registre_national": id_registre,
+            "identifiant_fiche": declaration.watchlist_entity_id,
+            "nom": nom_parse.get("last_name") or declaration.watchlist_name,
+            "prenoms": nom_parse.get("first_name"),
+            "alias": alias[:15],
+            "autres_elements": {
+                "dates_naissance": fiche.dates_of_birth if fiche is not None else None,
+                "lieu_naissance": fiche.place_of_birth if fiche is not None else None,
+                "nationalites": ((fiche.countries or {}).get("citizenship")
+                                 if fiche is not None else None),
+            },
+            "presente_dans_les_listes_en_production": fiche is not None,
+        },
+        # 3. Sur quelle operation porte l'alerte ? (homonyme et transaction)
+        "operation": {
+            "homonyme": _personne_concernee(db, alert) if alert is not None
+                        else {"nom_complet": declaration.client_name},
+            "objet_homonymie": vocab.OBJETS.get(objet or ""),
+            "objet_derive_du_criblage": declaration.objet_homonymie is None and objet is not None,
+            "nom_compare_par_le_moteur": tree.get("best_watchlist_name"),
+            "champs": {libelle: operation.get(cle) for cle, libelle in vocab.CHAMPS_OPERATION.items()},
+            "message": ({"reference_message": operation.get("reference_message"),
+                         "role_partie": operation.get("role_partie")}
+                        if "reference_message" in operation else None),
+            "via_partie": alert.via_partie if alert is not None else None,
+        },
+        # 4. Traitement de l'alerte et de la declaration d'homonymie
+        "traitement": {
+            "bilan_des_recherches": declaration.diligences,
+            "pieces_jointes": [{"nom": p.file_name, "le": iso(p.uploaded_at), "par": p.uploaded_by,
+                                "commentaire": p.comment} for p in pieces],
+            "commentaire": declaration.commentaire,
+            "mesures_conservatoires": declaration.mesures_conservatoires,
+            "saisine": vocab.SAISINES.get(declaration.saisine),
+            "date_de_declaration": iso(declaration.transmise_le),
+            "score_final": alert.final_score if alert else None,
+            "correspondance_exacte": bool(tree.get("hard_match_triggered", False)),
+        },
+        "informations_a_completer": manquants,
+        "chronologie": [
+            {"date": iso(e.timestamp), "par": e.username, "action": e.action, "detail": e.detail}
+            for e in events
+        ],
+    }
+
+
+def _render_homonymie_draft_html(declaration: DeclarationHomonymie, draft: Dict[str, Any],
+                                 generated_by: str) -> str:
+    """Projet de declaration d'homonymie en HTML autonome (impression -> PDF),
+    rubriques numerotees comme le formulaire de la DG Tresor."""
+    from html import escape
+
+    def esc(value):
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value) if value else None
+        return escape(str(value)) if value not in (None, "", []) else "—"
+
+    def rows(mapping: Dict[str, Any], labels: Dict[str, str]) -> str:
+        return "\n".join(f"<tr><th>{escape(label)}</th><td>{esc(mapping.get(key))}</td></tr>"
+                         for key, label in labels.items() if not isinstance(mapping.get(key), dict))
+
+    def date(value):
+        return esc((value or "")[:16].replace("T", " ") + (" UTC" if value else ""))
+
+    d = draft["declaration"]
+    qui, sur_qui, op, trait = (draft["qui_alerte"], draft["sur_qui"], draft["operation"],
+                               draft["traitement"])
+    homonyme = op["homonyme"] or {}
+    autres_listee = sur_qui.get("autres_elements") or {}
+    autres_homonyme = " · ".join(f"{escape(lib)} : {esc(homonyme.get(cle))}" for cle, lib in (
+        ("date_naissance", "date de naissance"), ("lieu_naissance", "lieu de naissance"),
+        ("nationalites", "nationalité(s)"), ("adresse", "adresse"), ("ville", "ville"),
+        ("pays", "pays"), ("raison_sociale", "raison sociale"),
+        ("identifiant_fiscal", "identifiant"), ("secteur_activite", "activité"),
+        ("reference_interne", "référence interne"))
+        if homonyme.get(cle)) or "—"
+    champs_html = "\n".join(f"<tr><th>{escape(lib)}</th><td>{esc(val)}</td></tr>"
+                            for lib, val in op["champs"].items())
+    message = op.get("message")
+    message_html = (f"<tr><th>Message de paiement</th><td>{esc(message.get('reference_message'))}"
+                    f" — rôle : {esc(message.get('role_partie'))}</td></tr>") if message else ""
+    pieces_html = "".join(
+        f"<li>{esc(p['nom'])} <span class=\"sub\">({date(p['le'])}, @{esc(p['par'])}"
+        f"{' — ' + escape(p['commentaire']) if p.get('commentaire') else ''})</span></li>"
+        for p in trait["pieces_jointes"]) or "<li>Aucune pièce jointe à l'alerte.</li>"
+    chrono_html = "\n".join(
+        f"<tr><td>{date(e['date'])}</td><td>@{esc(e['par'])}</td>"
+        f"<td>{esc(e['action'])}</td><td>{esc(e['detail'])}</td></tr>"
+        for e in draft["chronologie"])
+    manquants = draft["informations_a_completer"]
+    manquants_html = (
+        '<div class="banner missing">⚠ À compléter avant transmission : '
+        + escape(" ; ".join(manquants)) + ".</div>") if manquants else ""
+    absente = ("" if sur_qui["presente_dans_les_listes_en_production"] else
+               "<p class=\"sub\">⚠ La fiche n'est plus présente dans les listes en production : "
+               "vérifiez le registre national des gels avant de déclarer.</p>")
+    objet = esc(op["objet_homonymie"]) + (
+        f" <span class=\"sub\">(dérivé du criblage : nom comparé « {esc(op['nom_compare_par_le_moteur'])} »)</span>"
+        if op.get("objet_derive_du_criblage") else "")
+    formulaire = draft["formulaire"]
+
+    return f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Fiskr — Projet de déclaration d'homonymie — #{declaration.id}</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #111; margin: 2rem auto; max-width: 860px; }}
+h1 {{ font-size: 1.3rem; }} h2 {{ font-size: 1.02rem; margin-top: 1.4rem; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }}
+th, td {{ border: 1px solid #ccc; padding: 5px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #f0f0f0; width: 240px; }}
+.banner {{ border: 2px solid #b45309; background: #fef3c7; color: #7c2d12; padding: 0.7rem 1rem; border-radius: 6px; font-size: 0.9rem; margin: 1rem 0; }}
+.banner.missing {{ border-color: #b91c1c; background: #fee2e2; color: #7f1d1d; }}
+.sub {{ color: #555; }} .pre {{ white-space: pre-wrap; }}
+@media print {{ .no-print {{ display: none; }} body {{ margin: 0; }} }}
+</style></head><body>
+<button class="no-print" onclick="window.print()">🖨 Imprimer / PDF</button>
+<h1>Projet de déclaration d'homonymie (DG Trésor) — #{declaration.id}</h1>
+<p class="sub">Généré le {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC par @{esc(generated_by)} —
+alerte #{d['alerte_id']} — {esc(d['statut_libelle'])} — fondement : {esc(draft['fondement'])}</p>
+<div class="banner">⚠ {escape(HOMONYMIE_DISCLAIMER)}</div>
+{manquants_html}
+<h2>Destinataire et formulaire</h2>
+<p>Courriel : <strong>{esc(draft['destinataire'])}</strong> — formulaire officiel :
+<a href="{escape(formulaire['url'])}">{esc(formulaire['titre'])}</a>, onglet « {esc(formulaire['onglet'])} »,
+à adresser au format .xlsx avec les pièces jointes.</p>
+<h2>1. Qui alerte ? (déclarant)</h2>
+<table><tbody>{rows(qui, {"reference_declaration": "Référence de déclaration",
+    "declarant": "Déclarant (organisme)", "point_de_contact": "Point de contact",
+    "etablissement_concerne": "Établissement / opérateur concerné",
+    "role_operateur": "Rôle de cet opérateur"})}</tbody></table>
+<h2>2. Sur qui porte l'alerte ? (régime de sanction et personne désignée)</h2>
+<table><tbody>{rows(sur_qui, {"liste": "Liste d'origine", "regime": "Régime de sanction",
+    "reference_designation": "Référence de la désignation",
+    "numero_registre_national": "Numéro d'identification sur le registre national de gel",
+    "identifiant_fiche": "Identifiant de la fiche (Fiskr)", "nom": "Nom ou dénomination sociale",
+    "prenoms": "Prénom(s)", "alias": "Alias"})}
+<tr><th>Autres éléments d'identification</th><td>Date(s) de naissance : {esc(autres_listee.get('dates_naissance'))}
+ · lieu de naissance : {esc(autres_listee.get('lieu_naissance'))}
+ · nationalité(s) : {esc(autres_listee.get('nationalites'))}</td></tr></tbody></table>
+{absente}
+<h2>3. Sur quelle opération porte l'alerte ? (homonyme et transaction)</h2>
+<table><tbody>
+<tr><th>Nom / dénomination de l'homonyme</th><td>{esc(homonyme.get('nom') or homonyme.get('raison_sociale') or homonyme.get('nom_complet'))}</td></tr>
+<tr><th>Prénom(s) de l'homonyme</th><td>{esc(homonyme.get('prenom'))}</td></tr>
+<tr><th>Autres éléments d'identification de l'homonyme</th><td>{autres_homonyme}</td></tr>
+<tr><th>Objet de l'homonymie</th><td>{objet}</td></tr>
+{message_html}
+{champs_html}
+<tr><th>Partie liée</th><td>{esc(op.get('via_partie'))}</td></tr>
+</tbody></table>
+<h2>4. Traitement de l'alerte et de la déclaration d'homonymie</h2>
+<table><tbody>
+<tr><th>Bilan des recherches effectuées</th><td class="pre">{esc(trait['bilan_des_recherches'])}</td></tr>
+<tr><th>Liste des pièces jointes</th><td><ul>{pieces_html}</ul></td></tr>
+<tr><th>Commentaire</th><td class="pre">{esc(trait['commentaire'])}</td></tr>
+<tr><th>Mesures prises pendant le doute</th><td class="pre">{esc(trait['mesures_conservatoires'])}</td></tr>
+<tr><th>Saisine initiale ou nouvelle saisine</th><td>{esc(trait['saisine'])}</td></tr>
+<tr><th>Date de déclaration à la DG Trésor</th><td>{date(trait['date_de_declaration'])}</td></tr>
+<tr><th>Date et réponse de la DG Trésor</th><td class="sub">Cadre réservé à l'administration.</td></tr>
+</tbody></table>
+<h2>5. Chronologie de l'alerte (append-only)</h2>
+<table><thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
+<tbody>{chrono_html}</tbody></table>
+</body></html>"""
+
+
+# Ouverts a tout lecteur, auditeur compris : contrairement aux projets TRACFIN
+# et de gel, ces GET n'ecrivent rien au dossier — la transmission, elle, se
+# trace avec sa piece.
+@app.get("/api/homonymies/{declaration_id}/draft")
+async def get_homonymy_draft(
+    declaration_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Projet de declaration d'homonymie (JSON structure aux rubriques du
+    formulaire de la DG Tresor). AUCUNE transmission automatique."""
+    declaration = _declaration_ou_404(db, declaration_id)
+    return _build_homonymie_draft(db, declaration, current_user["username"])
+
+
+@app.get("/api/homonymies/{declaration_id}/draft/print")
+async def print_homonymy_draft(
+    declaration_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Projet de declaration d'homonymie en HTML autonome imprimable."""
+    declaration = _declaration_ou_404(db, declaration_id)
+    draft = _build_homonymie_draft(db, declaration, current_user["username"])
+    return HTMLResponse(content=_render_homonymie_draft_html(declaration, draft,
+                                                             current_user["username"]))
+
+
+@app.post("/api/homonymies/{declaration_id}/transmission")
+async def record_homonymy_transmission(
+    declaration_id: int,
+    file: Optional[UploadFile] = File(None),
+    transmise_le: Optional[str] = Form(None),
+    reference: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """La transmission faite hors de Fiskr, et la PIECE qui la prouve (copie du
+    courriel envoye, ou accuse de reception) — obligatoire, conservee comme
+    piece jointe de l'alerte. Statut TRANSMISE : l'attente de la reponse
+    commence."""
+    declaration = _declaration_ou_404(db, declaration_id)
+    try:
+        verifiee = registre_des_homonymies.verifier_transmission(db, declaration,
+                                                                 transmise_le=transmise_le)
+        if file is None or not (file.filename or "").strip():
+            raise registre_des_homonymies.RefusDHomonymie(
+                "La pièce de transmission est obligatoire (copie du courriel envoyé à la DG "
+                "Trésor avec le formulaire, ou accusé de réception).")
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    # La piece passe par le seul chemin d'une piece d'alerte (copie bornee,
+    # ligne, evenement) : l'inventaire des pieces probantes la voit
+    safe_name, target_path = _chemin_de_piece_d_alerte(declaration.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, declaration.alert_id, safe_name, target_path,
+        f"Transmission à la DG Trésor de la déclaration d'homonymie #{declaration.id}.",
+        reviewer["username"])
+    registre_des_homonymies.enregistrer_transmission(db, declaration, username=reviewer["username"],
+                                                     piece=piece, verifiee=verifiee,
+                                                     reference=reference)
+    db.commit()
+    return {"message": f"Transmission de la déclaration d'homonymie #{declaration.id} enregistrée.",
+            **registre_des_homonymies.serialiser(db, declaration)}
+
+
+@app.post("/api/homonymies/{declaration_id}/echanges")
+async def record_homonymy_exchange(
+    declaration_id: int,
+    file: Optional[UploadFile] = File(None),
+    sens: Optional[str] = Form(None),
+    objet: Optional[str] = Form(None),
+    le: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Un echange avec la DG Tresor pendant l'attente (demande de complement,
+    piece envoyee, relance) : date, sens, objet et piece — conserve (§168)."""
+    declaration = _declaration_ou_404(db, declaration_id)
+    try:
+        verifie = registre_des_homonymies.verifier_echange(declaration, sens=sens, objet=objet, le=le)
+        if file is None or not (file.filename or "").strip():
+            raise registre_des_homonymies.RefusDHomonymie(
+                "La pièce de l'échange est obligatoire (le courriel reçu ou envoyé).")
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    safe_name, target_path = _chemin_de_piece_d_alerte(declaration.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, declaration.alert_id, safe_name, target_path,
+        f"Échange avec la DG Trésor (déclaration d'homonymie #{declaration.id}).",
+        current_user["username"])
+    registre_des_homonymies.consigner_echange(db, declaration, username=current_user["username"],
+                                              piece=piece, verifie=verifie)
+    db.commit()
+    return {"message": f"Échange consigné sur la déclaration d'homonymie #{declaration.id}.",
+            **registre_des_homonymies.serialiser(db, declaration)}
+
+
+def _clore_depuis_la_dgt(db: Session, alert: Alert, declaration: DeclarationHomonymie,
+                         decision: str, commentaire: str, username: str) -> str:
+    """La cloture que la reponse (ou la decision sur un doute persistant)
+    commande, par le chemin unique : `_close_alert` — qui ouvre la mesure de
+    gel sur une confirmation, le dossier PPE s'il est du. Rend la phrase du
+    message."""
+    mesure = _close_alert(db, alert, decision, username, commentaire, reponse_de_la_dgt=True)
+    registre_des_homonymies.terminer(db, declaration, username=username,
+                                     mesure_id=mesure.id if mesure is not None else None)
+    libelle = ALERT_STATUS_LABELS.get(alert.status, alert.status)
+    return (f" Alerte {libelle}." + _message_de_mesure(mesure)
+            + _message_de_dossier_ppe(db, alert))
+
+
+@app.post("/api/homonymies/{declaration_id}/reponse")
+async def record_homonymy_reply(
+    declaration_id: int,
+    file: Optional[UploadFile] = File(None),
+    issue: Optional[str] = Form(None),
+    recue_le: Optional[str] = Form(None),
+    resume: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    La reponse de la DG Tresor (LD §167), enregistree par un reviseur, avec sa
+    piece. HOMONYME : cloture en faux positif motivee par la reponse.
+    MEME_PERSONNE : confirmation, qui ouvre la mesure de gel « a declarer ».
+    DOUTE_PERSISTANT : l'alerte attend la decision de l'organisme
+    (`/decision`). Rien n'est automatique.
+    """
+    declaration = _declaration_ou_404(db, declaration_id)
+    alert = _alerte_de_la_declaration(db, declaration)
+    try:
+        verifiee = registre_des_homonymies.verifier_reponse(db, declaration, issue=issue,
+                                                            recue_le=recue_le)
+        if file is None or not (file.filename or "").strip():
+            raise registre_des_homonymies.RefusDHomonymie(
+                "La pièce de la réponse est obligatoire (courriel de la DG Trésor).")
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    username = reviewer["username"]
+    safe_name, target_path = _chemin_de_piece_d_alerte(declaration.alert_id, file.filename)
+    copier_televersement_vers(target_path, file, "piece")
+    piece = _enregistrer_piece_d_alerte(
+        db, declaration.alert_id, safe_name, target_path,
+        f"Réponse de la DG Trésor à la déclaration d'homonymie #{declaration.id}.", username)
+    cloture = registre_des_homonymies.enregistrer_reponse(
+        db, declaration, username=username, piece=piece, verifiee=verifiee, resume=resume)
+    message = f"Réponse de la DG Trésor enregistrée (déclaration d'homonymie #{declaration.id})."
+    if cloture is None:
+        message += (" Doute persistant : la décision d'exécuter ou non, de geler ou non, revient à "
+                    "l'organisme (LD §167).")
+    else:
+        message += _clore_depuis_la_dgt(db, alert, declaration, cloture[0], cloture[1], username)
+    db.commit()
+    _notifier_les_suiveurs(db, alert, "Réponse de la DG Trésor enregistrée", username)
+    return {"message": message, **registre_des_homonymies.serialiser(db, declaration),
+            "alert": _alert_summary(alert)}
+
+
+@app.post("/api/homonymies/{declaration_id}/decision")
+async def record_homonymy_decision(
+    declaration_id: int,
+    file: Optional[UploadFile] = File(None),
+    decision: Optional[str] = Form(None),
+    motif: Optional[str] = Form(None),
+    vigilance: Optional[str] = Form(None),
+    tracfin: Optional[str] = Form(None),
+    tracfin_detail: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    reviewer: Dict[str, Any] = Depends(require_reviewer)
+):
+    """
+    Doute persistant (LD §167) : la decision de l'organisme. GELER : la
+    confirmation ouvre la mesure de gel, dont la declaration informe la DG
+    Tresor. NE_PAS_GELER : cloture sans suite de gel, vigilance adaptee, et la
+    piece qui prouve que la DG Tresor est informee. Position Tracfin exigee
+    dans les deux cas.
+    """
+    declaration = _declaration_ou_404(db, declaration_id)
+    alert = _alerte_de_la_declaration(db, declaration)
+    piece_fournie = file is not None and bool((file.filename or "").strip())
+    try:
+        verifiee = registre_des_homonymies.verifier_decision(
+            declaration, decision=decision, motif=motif, vigilance=vigilance, tracfin=tracfin,
+            tracfin_detail=tracfin_detail, piece_fournie=piece_fournie)
+    except registre_des_gels.RefusDeGel as refus:
+        raise _refus_de_gel(refus)
+    username = reviewer["username"]
+    piece = None
+    if piece_fournie:
+        safe_name, target_path = _chemin_de_piece_d_alerte(declaration.alert_id, file.filename)
+        copier_televersement_vers(target_path, file, "piece")
+        piece = _enregistrer_piece_d_alerte(
+            db, declaration.alert_id, safe_name, target_path,
+            f"Information de la DG Trésor de la décision (déclaration d'homonymie "
+            f"#{declaration.id}).", username)
+    cloture = registre_des_homonymies.enregistrer_decision(db, declaration, username=username,
+                                                           verifiee=verifiee, piece=piece)
+    message = (f"Décision enregistrée (déclaration d'homonymie #{declaration.id})."
+               + _clore_depuis_la_dgt(db, alert, declaration, cloture[0], cloture[1], username))
+    db.commit()
+    _notifier_les_suiveurs(db, alert, "Décision sur le doute persistant enregistrée", username)
+    return {"message": message, **registre_des_homonymies.serialiser(db, declaration),
+            "alert": _alert_summary(alert)}
+
+
+@app.post("/api/homonymies/{declaration_id}/abandon")
+async def abandon_homonymy_declaration(
+    declaration_id: int,
+    payload: HomonymieAbandonRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Abandon d'une declaration NON transmise (motif obligatoire) : l'alerte
+    retourne a l'instruction, la ligne reste au registre. Une declaration
+    transmise ne s'abandonne pas."""
+    declaration = _declaration_ou_404(db, declaration_id)
+    alert = _alerte_de_la_declaration(db, declaration)
+    try:
+        registre_des_homonymies.abandonner(db, declaration, alert,
+                                           username=current_user["username"], motif=payload.motif)
+    except registre_des_gels.RefusDeGel as refus:
+        db.rollback()
+        raise _refus_de_gel(refus)
+    db.commit()
+    return {"message": f"Déclaration d'homonymie #{declaration.id} abandonnée : l'alerte retourne à "
+                       f"l'instruction.",
+            **registre_des_homonymies.serialiser(db, declaration)}
+
+
+@app.get("/api/export/homonymies.csv")
+async def export_homonymies_csv(
+    statut: Optional[str] = Query(None),
+    list_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export CSV du registre des declarations d'homonymie (memes filtres que
+    l'ecran) : les echanges avec la DG Tresor qu'un controle demande (§168)."""
+    from fiskr.kpi import delai_de_declaration_secondes
+    vocab = registre_des_homonymies
+    rows = _homonymies_filtrees(db, statut, list_type, q) \
+        .order_by(DeclarationHomonymie.preparee_le.desc(), DeclarationHomonymie.id.desc()) \
+        .limit(_EXPORT_MAX_ROWS).all()
+    retard = {d.id for d in vocab.non_transmises_en_retard(db)}
+
+    def iso(x):
+        return x.isoformat() if x else ""
+
+    def heures(debut, fin):
+        delai = delai_de_declaration_secondes(debut, fin) if (debut and fin) else None
+        return f"{delai / 3600:.1f}" if delai is not None else ""
+
+    header = ["declaration", "alerte", "statut", "non_transmise_hors_delai", "saisine", "client_id",
+              "client", "fiche_listee_id", "fiche_listee", "liste", "preparee_le", "preparee_par",
+              "transmise_le", "transmise_par", "reference", "delai_transmission_heures",
+              "echanges", "reponse_le", "issue", "attente_reponse_heures", "decision",
+              "tracfin", "terminee_le", "abandonnee_le", "motif_abandon"]
+    data = [[
+        d.id, d.alert_id, d.statut, "oui" if d.id in retard else "non", d.saisine,
+        d.client_id or "", d.client_name, d.watchlist_entity_id, d.watchlist_name,
+        d.list_type or "", iso(d.preparee_le), d.preparee_par or "", iso(d.transmise_le),
+        d.transmise_par or "", d.reference or "", heures(d.preparee_le, d.transmise_le),
+        len(d.echanges or []), iso(d.reponse_le), d.issue or "",
+        heures(d.transmise_le, d.reponse_le), d.decision or "", d.tracfin or "",
+        iso(d.terminee_le), iso(d.abandonnee_le), d.motif_abandon or "",
+    ] for d in rows]
+    return _csv_response(f"fiskr_declarations_homonymie_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+                         header, data)
+
+
 # ------------------ DOSSIERS PPE (R.561-20-2) ------------------
 # Ce qui suit une PPE confirmee : qualite retenue, fonction et fin de fonction,
 # origine des fonds et du patrimoine, decision d'entrer ou de rester en
@@ -14781,7 +15500,8 @@ async def get_alerts_workload(
     responsable d'equipe pour repartir le travail.
     """
     now = datetime.utcnow()
-    query = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    # La charge de travail : une alerte qui attend la DG Tresor n'en est pas
+    query = db.query(Alert).filter(Alert.status.in_(ALERT_WORK_STATUSES))
     if channel:
         ch = channel.strip().upper()
         if ch == "SCREENING":
@@ -15001,6 +15721,15 @@ async def get_alert_detail(
         "ppe_du": dossiers_ppe.est_du(alert),
         "ppe_sans_dossier": dossiers_ppe.motif_sans_dossier(alert),
         "ppe_vocabulaire": dossiers_ppe.vocabulaire(),
+        # Le doute d'homonymie (fiskr/homonymie.py) : ses declarations a la DG
+        # Tresor, si CETTE alerte peut en recevoir une (perimetre SANCTION,
+        # ouverte), et pourquoi le couple ne se met pas en liste blanche
+        "homonymies": _homonymies_de_l_alerte(db, alert.id, attachments),
+        "homonymie_possible": registre_des_homonymies.motif_d_impossibilite(
+            alert, perimeter_overrides(db)) is None,
+        "homonymie_liste_blanche_refus": registre_des_homonymies.refus_de_liste_blanche(
+            db, alert.client_id, alert.watchlist_entity_id),
+        "homonymie_vocabulaire": registre_des_homonymies.vocabulaire(),
         # Client et personne listee cote a cote (fiskr/comparaison.py)
         "comparison": _comparaison_de_l_alerte(db, alert, audit),
         # Partie liee du client sur laquelle porte la correspondance, et ce que
@@ -15206,6 +15935,16 @@ def _mesures_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[s
     return [registre_des_gels.serialiser(db, m, seuil, pieces=pieces) for m in mesures]
 
 
+def _homonymies_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[str, Any]]:
+    declarations = db.query(DeclarationHomonymie).filter(
+        DeclarationHomonymie.alert_id == alert_id).order_by(DeclarationHomonymie.id.asc()).all()
+    if not declarations:
+        return []
+    seuil = homonymie_transmission_delai_heures(db)
+    pieces = {att.id: att for att in attachments}
+    return [registre_des_homonymies.serialiser(db, d, seuil, pieces=pieces) for d in declarations]
+
+
 def _dossiers_ppe_de_l_alerte(db: Session, alert_id: int, attachments) -> List[Dict[str, Any]]:
     dossiers = db.query(DossierPPE).filter(DossierPPE.alert_id == alert_id) \
                  .order_by(DossierPPE.id.asc()).all()
@@ -15278,6 +16017,7 @@ async def escalate_alert(
 ):
     """Escalade l'alerte (motif obligatoire)."""
     alert = _get_open_alert(db, alert_id)
+    _refuser_l_attente_dgt(alert)
     comment = (payload.comment or "").strip()
     if not comment:
         raise HTTPException(status_code=400, detail="Un motif est requis pour escalader une alerte.")
@@ -15293,8 +16033,16 @@ async def escalate_alert(
     _notifier_les_suiveurs(db, alert, "Escaladée", current_user["username"])
     return {"message": "Alerte escaladée.", **_alert_summary(alert)}
 
+def _refuser_l_attente_dgt(alert: Alert) -> None:
+    """Une alerte en attente de la DG Tresor (doute d'homonymie) ne se propose,
+    ne s'escalade ni ne se clot : seule la reponse enregistree l'en sort."""
+    motif = registre_des_homonymies.refus_en_attente(alert)
+    if motif:
+        raise HTTPException(status_code=409, detail=motif)
+
+
 def _close_alert(db: Session, alert: Alert, decision: str, username: str,
-                 comment: str) -> Optional[MesureDeGel]:
+                 comment: str, reponse_de_la_dgt: bool = False) -> Optional[MesureDeGel]:
     """
     Cloture d'une instruction — et, sur une liste de gel, ouverture de ce qui
     la suit. Une alerte DGT se closait exactement comme une alerte PEP : en
@@ -15309,7 +16057,14 @@ def _close_alert(db: Session, alert: Alert, decision: str, username: str,
     habilitee, origine des fonds et du patrimoine (R.561-20-2). Les deux
     obligations sont independantes : une liste PEP rangee SANCTION par
     l'exploitant ouvre l'une et l'autre.
+
+    Une alerte en attente de la DG Tresor (doute d'homonymie, fiskr/homonymie.py)
+    ne se clot ICI que depuis la reponse enregistree (`reponse_de_la_dgt`) :
+    la garde vit dans la cloture unique, pour mordre sur tout chemin, present
+    ou a venir.
     """
+    if not reponse_de_la_dgt:
+        _refuser_l_attente_dgt(alert)
     alert.status = "CLOSED_CONFIRMED" if decision == "CONFIRMED" else "CLOSED_FALSE_POSITIVE"
     alert.decided_by = username
     alert.decided_at = datetime.utcnow()
@@ -15412,6 +16167,8 @@ def _ecart_de_la_proposition(alert: Alert, username: str) -> Optional[str]:
     laisser la trace ; seul l'administrateur assigne a un TIERS, et cela ne
     l'autorise pas a instruire a la place de l'assigne.
     """
+    if alert.status == ALERT_STATUS_ATTENTE_DGT:
+        return "ATTENTE_DG_TRESOR"
     if alert.status == "PENDING_VALIDATION":
         return "EN_ATTENTE_DE_VALIDATION"
     if alert.assigned_to and alert.assigned_to != username:
@@ -15426,6 +16183,10 @@ def _enregistrer_la_proposition(db: Session, alert: Alert, decision: str, commen
     cloture directe si le 4-yeux est desactive). Rend (libelle, message,
     mesure de gel eventuelle). `precision` complete le journal (« proposition
     en masse »). L'appelant valide la transaction."""
+    # Avant tout : le 4-yeux poserait PENDING_VALIDATION et ferait sortir
+    # l'alerte de l'attente de la DG Tresor sans reponse (l'action en masse,
+    # qui passe aussi par ici, l'ecarte avant pour ne pas refuser tout le lot)
+    _refuser_l_attente_dgt(alert)
     # Proposer une decision, c'est instruire : une mise en attente encore
     # active n'a plus de sens et fausserait le classement de la file.
     if alert.snoozed_until:
@@ -15729,6 +16490,7 @@ _ECARTS_EN_MASSE = {
     "EN_ATTENTE_DE_VALIDATION": "Une décision est déjà en attente de validation.",
     "ASSIGNEE_A_UN_AUTRE": "Assignée à un autre analyste : c'est à son assigné de la proposer.",
     "SANCTION_SANS_QUATRE_YEUX": "Liste de gel (périmètre SANCTION) : sans validation 4-yeux, la proposer en masse la clôturerait sans second regard. À instruire à l'unité.",
+    "ATTENTE_DG_TRESOR": "Doute d'homonymie déclaré : l'alerte attend la réponse de la DG Trésor, elle ne se propose pas.",
 }
 
 
@@ -16080,7 +16842,9 @@ async def get_ma_journee(
     peut_valider = bool({"admin", "reviewer"} & set(roles))
     maintenant = datetime.utcnow()
 
-    ouvertes = db.query(Alert).filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+    # Ce qui attend CE lecteur : une alerte en attente de la DG Tresor
+    # n'attend plus personne ici (elle se lit au registre)
+    ouvertes = db.query(Alert).filter(Alert.status.in_(ALERT_WORK_STATUSES))
     rang = rang_de_priorite_sql()
 
     # 1. Mes alertes : celles qui me sont assignees, dans l'ordre de la file.
@@ -16544,6 +17308,13 @@ def _preparer_une_paire(db: Session, username: str, client_id: str, watchlist_en
             raise HTTPException(status_code=400, detail=(
                 f"La partie #{partie_liee_id} n'est pas une partie liée du client {client_id} : "
                 f"une paire couvre une identité de la relation qu'elle nomme."))
+
+    # Un couple que la DG Tresor examine, n'a pu departager ou a confirme n'est
+    # pas « etabli » homonyme (LD §169) : le memoriser ferait taire les
+    # criblages suivants sur une personne peut-etre designee
+    refus = registre_des_homonymies.refus_de_liste_blanche(db, client_id, watchlist_entity_id)
+    if refus:
+        raise HTTPException(status_code=409, detail=refus)
 
     existante = is_whitelisted(db, client_id, watchlist_entity_id, partie_liee_id)
     if existante:

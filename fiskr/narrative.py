@@ -30,6 +30,7 @@ ALERT_STATUS_LABELS = {
     "IN_PROGRESS": "en cours d'analyse",
     "PENDING_VALIDATION": "en attente de validation 4-yeux",
     "ESCALATED": "escaladée",
+    "PENDING_DGT": "en attente de la DG Trésor (doute d'homonymie déclaré)",
     "CLOSED_CONFIRMED": "close — vrai positif confirmé",
     "CLOSED_FALSE_POSITIVE": "close — faux positif",
     # Absent jusqu'ici : le narratif d'une alerte close par règle, et les

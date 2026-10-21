@@ -237,6 +237,17 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
         urgency=IMMEDIATE, link="#screening/alerts-gels",
     ),
+    "homonymie_non_transmise": Event(
+        # IMMEDIAT : un doute d'homonymie declare dans Fiskr mais pas a la DG
+        # Tresor, au-dela du delai — la declaration est due « dans les plus
+        # brefs delais » (LD DGT/ACPR 2026, §167), et sur un flux l'operation
+        # reste suspendue en attendant (§162). Une fois par declaration.
+        # L'attente de la REPONSE, elle, ne notifie pas : la DG Tresor a son
+        # rythme, et rien n'est a faire que relancer.
+        label="Déclaration d'homonymie non transmise à la DG Trésor dans le délai",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-gels",
+    ),
     "gel_radiation_a_examiner": Event(
         # IMMEDIAT : la fiche d'une mesure de gel en vigueur a disparu de sa
         # liste a la mise en production d'une version (fiskr/caducite.py). Un
