@@ -1957,6 +1957,16 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-10-21-homonymie-et-virements", date: "2026-10-21",
+ titre: "Le doute d'homonymie a sa procédure, et les virements sont mieux lus",
+ points: [
+ "Une correspondance qu'on ne peut ni lever ni confirmer se déclare à la DG Trésor : l'alerte attend sa réponse, et un retard de transmission vous est signalé.",
+ "Un prestataire qui omet régulièrement les informations requises sur les virements est repéré ; un virement lié à un territoire sous embargo est signalé à instruire.",
+ "Une détention indirecte au-delà du premier niveau est calculée, et la chaîne capitalistique vous est montrée.",
+ "L'historique des homologations compte aussi les décisions antérieures à leur dossier.",
+ ],
+ },
+ {
  id: "2026-10-21-parties-et-ppe", date: "2026-10-21",
  titre: "Les bénéficiaires effectifs criblés, et la suite d'une PPE",
  points: [
