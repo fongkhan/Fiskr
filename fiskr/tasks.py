@@ -624,6 +624,11 @@ def batch_campaign_task(ctx: jobs.JobContext, *, campaign_id: int, profiles_path
                 campaign.alert_count = 0
                 campaign.no_match_count = 0
                 campaign.rejected_count = 0
+                # Correspondances trouvees et alertes ouvertes : ajoutees apres
+                # cette reprise, elles n'y figuraient pas, et la campagne
+                # reprise les additionnait a celles de la tentative interrompue.
+                campaign.hits_count = 0
+                campaign.opened_count = 0
                 # Parties liees criblees avec leurs clients (fiskr/parties.py)
                 campaign.parties_screened = None
                 campaign.parties_alert_count = None
