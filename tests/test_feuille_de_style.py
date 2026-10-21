@@ -137,3 +137,30 @@ def test_la_feuille_est_syntaxiquement_equilibree():
     assert css.count("{") == css.count("}"), (
         f"{css.count('{')} accolades ouvrantes pour {css.count('}')} fermantes")
     assert len(re.findall(r"\{", css)) > 300, "feuille de style suspecte"
+
+
+# Types de champ qui ne sont pas des zones de saisie : la regle de base ne les
+# habille pas, et c'est voulu (une case a cocher a 100 % de large...).
+_TYPES_HORS_SAISIE = {"checkbox", "radio", "file", "hidden", "button", "submit",
+                      "reset", "image", "range", "color"}
+
+
+def test_chaque_type_de_champ_saisi_est_habille_par_la_feuille():
+    """Releve dans un vrai navigateur le 21 octobre 2026 : les criteres de
+    prestataire defaillant s'affichaient en petites cases blanches natives sur
+    le theme sombre. La regle de base des champs ne nommait que `text` et
+    `date` : 43 champs numeriques (reglages du moteur, de la gouvernance, de la
+    securite, de la conservation), les dates-heures des registres de gel,
+    d'homonymie et PPE, les e-mails et mots de passe n'avaient aucun style —
+    sans que rien ne casse. Tout type de champ saisi dans l'application doit
+    etre nomme par la regle de base."""
+    css = _css_sans_commentaires()
+    balisage = _lire("index.html") + _lire("app.js")
+    employes = set(re.findall(r'<input[^>]*?\btype="([a-z-]+)"', balisage))
+    habilles = set(re.findall(r'input\[type="([a-z-]+)"\]', css))
+    nus = sorted(employes - _TYPES_HORS_SAISIE - habilles)
+    assert employes & {"text", "number"}, "aucun champ trouve : balisage illisible ?"
+    assert not nus, (
+        "types de champ employes dans l'application sans regle de style : "
+        + ", ".join(nus) + " — ajoutez-les a la regle de base "
+        "(input[type=\"text\"], input[type=\"date\"], ...)")
