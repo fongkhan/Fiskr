@@ -807,6 +807,75 @@ class DossierPPE(Base):
     revues = Column(JSON, nullable=True)
 
 
+class ReceptionPrestataire(Base):
+    """
+    Ce qu'un message de paiement recu d'un prestataire portait : combien de
+    transferts, combien incomplets, lesquels, et ce qui leur manquait
+    (fiskr/prestataires.py). Une ligne par message et par prestataire impute.
+
+    Le reglement (UE) 2023/1113, art. 8 §2, oblige le prestataire du
+    beneficiaire a agir contre un prestataire qui « omet de maniere repetee »
+    les informations requises ; ses orientations (EBA/GL/2024/11, §67-68)
+    demandent de « documenter tous les transferts » incomplets et de juger la
+    repetition sur un POURCENTAGE par periode. Les transferts complets sont
+    donc comptes aussi : sans eux, pas de denominateur. Aucune donnee de
+    personne : un BIC de banque, des identifiants de message, des comptes.
+
+    Conservee comme le journal de criblage (fiskr/retention.py, famille
+    `audit_trail`, plancher legal de cinq ans de fiskr/conservation.py) ; le
+    reglement fixe la meme duree (art. 26 §1).
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "prestataires_receptions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    recu_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    # Prestataire impute : BIC sur 8 caracteres (l'etablissement, pas
+    # l'agence), a defaut LEI ; nom et pays tels que le message les donne
+    identifiant = Column(String(20), nullable=False, index=True)
+    bic = Column(String(11), nullable=True)
+    nom = Column(String(140), nullable=True)
+    pays = Column(String(2), nullable=True)
+    role = Column(String(20), nullable=False)          # InstgAgt | DbtrAgt
+    # Prestataire du donneur d'ordre, quand ce n'est pas lui qui transmet
+    prestataire_du_donneur_d_ordre = Column(String(20), nullable=True)
+    message_type = Column(String(10), nullable=False)
+    msg_id = Column(String(100), nullable=True)
+    transferts = Column(Integer, nullable=False, default=0)
+    incomplets = Column(Integer, nullable=False, default=0)
+    # {code de MANQUES (fiskr/transactions.py): nombre de transferts}
+    manques = Column(JSON, nullable=True)
+    # Identifiants de bout en bout des transferts incomplets (20 au plus)
+    transactions = Column(JSON, nullable=True)
+    filtre_par = Column(String(100), nullable=True)
+
+
+class PrestataireDefaillant(Base):
+    """
+    Un prestataire identifie comme defaillant : de son identification (seuils
+    franchis) a sa levee (repasse sous les seuils). La date d'identification
+    fait courir le delai du signalement a l'autorite — « au plus tard trois
+    mois apres » (EBA/GL/2024/11, §74) ; le constat fige ce qui a ete mesure.
+    Un nouvel episode s'ouvre s'il franchit de nouveau les seuils.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "prestataires_defaillants"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    identifiant = Column(String(20), nullable=False, index=True)
+    nom = Column(String(140), nullable=True)
+    pays = Column(String(2), nullable=True)
+    identifie_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    constat = Column(JSON, nullable=True)
+    notifie_le = Column(DateTime, nullable=True)
+    leve_le = Column(DateTime, nullable=True, index=True)
+    constat_levee = Column(JSON, nullable=True)
+
+
 class AdminAuditLog(Base):
     """Journal append-only des actions d'administration (utilisateurs,
     reglages, purges, revocations) : qui, quand, quoi, avant -> apres.

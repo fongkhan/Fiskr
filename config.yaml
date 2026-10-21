@@ -426,6 +426,41 @@ fprules:
 #              "KW", "LA", "LB", "MC", "NP", "PG", "SS", "SY", "VE", "VN",
 #              "VG", "YE"]
 
+# Territoires sous mesures restrictives de l'Union, lus dans les paiements
+# (verdict TERRITORY, fiskr/territoires.py) : Crimee et Sebastopol (reglement
+# (UE) n° 692/2014), zones non controlees de Donetsk et Louhansk (2022/263),
+# de Kherson et Zaporija (2022/1903). N'altere ni score ni statut de partie.
+# La table INTEGREE porte sa date (as_of) ; la ligne de front bouge : un
+# territoire fourni ici REMPLACE celui de meme code (les autres restent
+# integres), `CODE: null` le retire. Une entree illisible est refusee et
+# nommee (GET /api/embargo-territories, champ errors). Laisser commente = defaut.
+# territoires_sous_embargo:
+#   as_of: "2026-10-20"
+#   territoires:
+#     KHERSON_ZAPORIJIA:
+#       nom: "Zones non contrôlées par le gouvernement des oblasts de Kherson et de Zaporija"
+#       regime: "Règlement (UE) 2022/263 du Conseil, étendu par le règlement (UE) 2022/1903"
+#       depuis: "2022-10-07"
+#       lieux:
+#         - {nom: "Melitopol", variantes: ["Melitopol", "Мелітополь", "Мелитополь"]}
+#         # Formes ambigues : lues seulement dans une adresse UA ou RU
+#         - {nom: "Tokmak", variantes: [], ambigues: ["Tokmak", "Токмак"]}
+#         # Lieu repris par le gouvernement : couvert jusqu'au (exclu)
+#         - {nom: "Kherson", variantes: ["Kherson"], oblast: true, jusqu_au: "2022-11-11"}
+
+# Filtrage des paiements : prestataires de paiement defaillants (reglement
+# (UE) 2023/1113, art. 8 §2 ; fiskr/prestataires.py). Le texte et les
+# orientations de l'ABE (EBA/GL/2024/11, §67-68) ne donnent aucun chiffre :
+# le choix des defauts est justifie dans fiskr/settings.py. Reglable a chaud
+# (PUT /api/settings/ingestion, `prestataires_defaillants`).
+filtrage:
+  prestataires_defaillants:
+    fenetre_jours: 90          # periode glissante (7 a 365)
+    seuil_transferts: 5        # transferts incomplets au moins (2 a 1000)
+    seuil_taux_pct: 10         # ET au moins ce pourcentage des transferts recus (0 a 100)
+    politique: SIGNALER        # SIGNALER (art. 8 §2 a, minimum) | RETENIR (art. 8 §2 b)
+    bic_etablissement: []      # BIC de l'etablissement : ses pacs.008 sortants ne sont imputes a personne
+
 # Smart Sanctions Ingestion Engine (SSIE) - Connecteur XML generique agnostique
 # Les selecteurs de balises pivots sont surchargables lors de chaque import.
 ssie:

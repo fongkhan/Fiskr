@@ -336,6 +336,16 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_FILTERING, audience=("admin",),
         urgency=IMMEDIATE, link="#batch",
     ),
+    "prestataire_defaillant": Event(
+        # IMMEDIAT et une fois par identification (fiskr/prestataires.py) :
+        # l'art. 8 §2 du reglement (UE) 2023/1113 appelle des dispositions a
+        # l'egard du prestataire et une declaration a l'autorite, au plus tard
+        # trois mois apres l'identification (EBA/GL/2024/11, §74). Rien ne part
+        # pour un prestataire sous les seuils.
+        label="Prestataire de paiement défaillant : informations requises omises de manière répétée",
+        category=CATEGORY_FILTERING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#filtering/filtering-prestataires",
+    ),
 
     # ------------------ GOUVERNANCE & EXPLOITATION ------------------
     "kpi_digest": Event(

@@ -344,11 +344,21 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
 
     # 2. Journal de criblage : lignes expirees plus referencees par une alerte
     cutoff = cutoffs["audit_trail"]
+    receptions = 0
     if cutoff is not None:
         if archive_enabled:
             _archive_rows(archive_path, "compliance_audit_trail",
                           _purgeable_audit_query(db, cutoff).all())
         deleted["audit_trail"] = _purgeable_audit_query(db, cutoff).delete(synchronize_session=False)
+        # Ce que les prestataires ont transmis (fiskr/prestataires.py) suit le
+        # journal du filtrage dont il est tire : meme famille, meme limite, et
+        # le reglement (UE) 2023/1113 fixe la meme duree (art. 26 §1). Pas de
+        # client en relation derriere un BIC : le delai court depuis la ligne.
+        from fiskr.prestataires import receptions_purgeables
+        if archive_enabled:
+            _archive_rows(archive_path, "prestataires_receptions",
+                          receptions_purgeables(db, cutoff).all())
+        receptions = receptions_purgeables(db, cutoff).delete(synchronize_session=False)
 
     # 3. Rapports de synchronisation
     cutoff = cutoffs["sync_reports"]
@@ -378,19 +388,21 @@ def run_retention(db, username: str = "retention-scheduler") -> Dict[str, int]:
     # reglee sous cinq ans : ce n'est plus vrai — les familles probantes ne
     # purgent que des pieces dont les cinq ans depuis la fin de la relation
     # sont ecoules (cf. _cutoffs) — et le journal ne l'affirmera donc plus.
-    if any(deleted.values()):
+    if any(deleted.values()) or receptions:
         archived_to = str(archive_path) if archive_enabled and archive_path.exists() else None
         gardees = conservees_au_titre_de_la_relation(db, policy)
         db.add(AdminAuditLog(
             username=username, action="RETENTION_PURGE", target="retention",
-            after={**deleted, "policy": {f: policy[f] for f in RETENTION_FAMILIES},
+            after={**deleted, "prestataires_receptions": receptions,
+                   "policy": {f: policy[f] for f in RETENTION_FAMILIES},
                    "archive": archived_to, "pieces": pieces,
                    "plancher_legal": {
                        "article": "CMF L.561-12",
                        "delai_ecoule_avant": conservation.limite_legale().date().isoformat()},
                    "conservees_au_titre_de_la_relation": gardees},
             detail="Purge de rétention : " + ", ".join(
-                f"{family}={count}" for family, count in deleted.items() if count)
+                f"{family}={count}" for family, count in
+                list(deleted.items()) + [("prestataires_receptions", receptions)] if count)
                    + (f" — archivée dans {archived_to}" if archived_to else " — sans archive")
                    + (f" — {pieces['archivees']} pièce(s) jointe(s) copiée(s) dans l'archive"
                       if pieces["archivees"] else ""),

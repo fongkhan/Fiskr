@@ -2659,7 +2659,7 @@ async function checkAuthUser() {
  if (syncAutomationCard) syncAutomationCard.classList.toggle("hidden", !isAdmin);
  // Cartes de reglages issues de config.yaml : administration pure
  for (const cardId of ["institution-card", "security-access-card",
- "adverse-media-card", "llm-card", "batch-inbox-card"]) {
+ "adverse-media-card", "llm-card", "batch-inbox-card", "psp-criteres-card"]) {
  const card = document.getElementById(cardId);
  if (card) card.classList.toggle("hidden", !isAdmin);
  }
@@ -2907,6 +2907,8 @@ function switchSubTab(sectionId, subTabId) {
  fetchAlerts("FILTERING");
  populateAssigneeFilters();
  fetchSavedViews("FILTERING");
+ } else if (subTabId === "filtering-prestataires") {
+ fetchPrestataires();
  } else if (subTabId === "alerts-whitelist") {
  fetchWhitelist();
  } else if (subTabId === "alerts-blocking") {
@@ -10728,6 +10730,11 @@ function renderTransactionResult(data) {
  const verdictLine = document.getElementById("txn-verdict-line");
  if (data.verdict === "HIT") {
  verdictLine.innerHTML = `Verdict : <span class="status-badge alert">HIT — ${data.hits_count} partie(s) en alerte</span>`;
+ } else if (data.verdict === "TERRITORY" || data.verdict === "FAILING_PSP") {
+ // Ni correspondance de nom ni PASS : une décision attend (territoire sous
+ // mesures restrictives, prestataire défaillant). Libellé du serveur.
+ const classe = data.verdict === "TERRITORY" ? "alert" : "warning";
+ verdictLine.innerHTML = `Verdict : <span class="status-badge ${classe}">${escapeHtml(data.verdict)}</span> <small>${escapeHtml(data.verdict_label || "")}</small>`;
  } else if (data.verdict === "INCOMPLETE") {
  // Ni HIT ni PASS : le filtrage n'a pas pu établir le PASS. Le libellé est
  // celui du serveur (fiskr/transactions.py VERDICTS), jamais recopié ici.
@@ -10764,6 +10771,39 @@ function renderTransactionResult(data) {
  </ul>
  </div>` : "";
 
+ // Territoires sous mesures restrictives (fiskr/territoires.py) : nommés
+ // seulement quand il y en a — lieu tel qu'écrit, champ, partie, régime et
+ // date d'effet. Pas une correspondance de sanction : un signal à instruire.
+ const signaux = data.territory_signals || [];
+ document.getElementById("txn-territory-info").innerHTML = signaux.length ? `
+ <div class="card" style="border-left: 3px solid var(--color-alert); margin: 0.5rem 0; padding: 0.75rem 1rem;">
+ <strong>Territoires sous mesures restrictives de l'Union</strong> <small style="color:var(--text-muted)">Pas une correspondance de sanction : à instruire avant exécution</small>
+ <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${signaux.map(s => `
+ <li><strong>${escapeHtml(s.place)}</strong> <small><code>${escapeHtml(s.text || s.matched)}</code></small> — <span>${escapeHtml(s.territory_label)}</span>
+ <br><small><span>${escapeHtml(s.regime)}</span> · <span>en vigueur depuis le</span> ${escapeHtml(formatDate(s.in_force_since))} · <span>opération du</span> ${escapeHtml(formatDate(s.operation_date))}</small>
+ <br><small style="color:var(--text-muted)"><code>${escapeHtml(s.field)}</code>${s.role ? ` · <span>${escapeHtml(s.role)}</span>` : ""}${s.party ? ` · ${escapeHtml(s.party)}` : ""} · <code>${escapeHtml((s.transactions || []).join(", "))}</code></small></li>`).join("")}
+ </ul>
+ </div>` : "";
+
+ // Prestataire défaillant (art. 8 §2) : seulement s'il l'est, ou si une
+ // omission n'a pu être imputée à personne. Un prestataire sous les seuils
+ // ne dit rien ici — son compte se lit dans « Prestataires défaillants ».
+ const psp = data.payment_service_providers || {};
+ const defaillants = (psp.imputed || []).filter(p => p.failing || p.failing_before);
+ const nonImputes = psp.not_imputed || [];
+ document.getElementById("txn-psp-info").innerHTML = (defaillants.length || nonImputes.length) ? `
+ <div class="card" style="border-left: 3px solid var(--color-warning); margin: 0.5rem 0; padding: 0.75rem 1rem;">
+ ${defaillants.length ? `<strong>Prestataire défaillant</strong> <small style="color:var(--text-muted)">Règlement (UE) 2023/1113, art. 8 §2</small>
+ <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${defaillants.map(p => `
+ <li>${p.name ? `<strong>${escapeHtml(p.name)}</strong> ` : ""}<code>${escapeHtml(p.identifier)}</code> <small>${escapeHtml(p.country || "")}</small>
+ ${p.newly_identified ? ` <span class="status-badge alert" style="white-space: nowrap;">Identifié par ce message</span>` : ""}
+ <br><small><strong>${p.window.incomplete}</strong> <span>transfert(s) incomplet(s)</span> / <strong>${p.window.transfers}</strong> <span>reçu(s)</span> (${p.window.rate_pct} %) · <strong>${p.window.window_days}</strong> <span>jours glissants</span></small>
+ <br><small><span>Politique</span> : <span>${escapeHtml(psp.policy_label || "")}</span></small></li>`).join("")}
+ </ul>
+ <a href="#" onclick="switchSubTab('filtering', 'filtering-prestataires'); return false;"><small>Ouvrir le suivi des prestataires</small></a>` : ""}
+ ${nonImputes.map(n => `<div><small style="color:var(--text-muted)">${escapeHtml(n.label)} <code>${escapeHtml((n.transactions || []).join(", "))}</code></small></div>`).join("")}
+ </div>` : "";
+
  const tbody = document.querySelector("#txn-results-table tbody");
  tbody.innerHTML = parties.map(p => {
  let badge;
@@ -10789,6 +10829,117 @@ function renderTransactionResult(data) {
  <td>${p.alert_id ? `<a href="#" onclick="switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
  </tr>`;
  }).join("");
+}
+
+// ------------------ PRESTATAIRES DÉFAILLANTS (2023/1113, art. 8 §2) ------------------
+// Chaque pacs.008 filtré est imputé au prestataire qui le transmet
+// (fiskr/prestataires.py). L'écran ne liste que ceux qui ont omis : la
+// définition de la défaillance et les libellés viennent du serveur.
+
+function _badgePrestataire(p) {
+ if (p.episode_open) {
+ const echeance = p.report_overdue
+  ? `<br><small style="color: var(--color-alert); font-weight: 600;"><span>Signalement en retard</span> — <span>à signaler avant le</span> ${escapeHtml(formatDate(p.report_before))}</small>`
+  : `<br><small><span>à signaler avant le</span> ${escapeHtml(formatDate(p.report_before))}</small>`;
+ return `<span class="status-badge alert" style="white-space: nowrap;">Défaillant</span><br><small><span>identifié le</span> ${escapeHtml(formatDate(p.identified_on))}</small>${echeance}`;
+ }
+ if (p.failing) return `<span class="status-badge warning" style="white-space: nowrap;">Au-dessus des seuils</span>`;
+ return `<small style="color: var(--text-muted);">Sous les seuils</small>`;
+}
+
+async function fetchPrestataires() {
+ const tbody = document.querySelector("#psp-table tbody");
+ if (!tbody) return;
+ tableLoading("#psp-table", 10);
+ try {
+ const response = await apiFetch("/api/filtrage/prestataires");
+ if (!response.ok) { tableError("#psp-table", 10); return; }
+ const data = await response.json();
+ const c = data.criteria || {};
+ const criteres = document.getElementById("psp-criteres");
+ if (criteres) {
+  criteres.innerHTML = `
+  <span><span>Période</span> : <strong>${c.fenetre_jours}</strong> <span>jours glissants</span></span>
+  <span><span>Seuils</span> : <strong>${c.seuil_transferts}</strong> <span>transfert(s) incomplet(s)</span> <span>et</span> <strong>${c.seuil_taux_pct} %</strong> <span>des transferts reçus</span></span>
+  <span><span>Politique</span> : <span>${escapeHtml(data.policy_label || "")}</span></span>
+  ${(c.bic_etablissement || []).length ? "" : `<span style="color: var(--color-warning);">BIC de l'établissement non renseigné : un pacs.008 sortant serait imputé à l'établissement lui-même.</span>`}
+  ${data.criteria_error ? `<span style="color: var(--color-alert);"><span>Critères enregistrés illisibles, défauts appliqués</span> : ${escapeHtml(data.criteria_error)}</span>` : ""}`;
+ }
+ // Formulaire (admin) : l'état effectif servi par l'API
+ const politique = document.getElementById("psp-politique");
+ if (politique) {
+  politique.innerHTML = Object.entries(data.policies || {}).map(([code, libelle]) =>
+   `<option value="${escapeHtml(code)}"${code === c.politique ? " selected" : ""}>${escapeHtml(libelle)}</option>`).join("");
+ }
+ const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ""; };
+ setVal("psp-fenetre", c.fenetre_jours); setVal("psp-seuil", c.seuil_transferts);
+ setVal("psp-taux", c.seuil_taux_pct); setVal("psp-bics", (c.bic_etablissement || []).join(", "));
+ const items = data.items || [];
+ if (!items.length) {
+  tableEmpty("#psp-table", 10, "Aucun prestataire n'a transmis de transfert incomplet sur la période.", "",
+   "Chaque pacs.008 filtré est imputé au prestataire qui le transmet ; ceux qui omettent apparaissent ici.");
+  return;
+ }
+ tbody.innerHTML = items.map(p => `
+  <tr>
+  <td>${escapeHtml(p.name || "—")}</td>
+  <td><code>${escapeHtml(p.identifier)}</code></td>
+  <td>${escapeHtml(p.country || "—")}</td>
+  <td>${p.window.transfers}</td>
+  <td>${p.window.incomplete}</td>
+  <td>${p.window.rate_pct} %</td>
+  <td><small>${escapeHtml(formatDate(p.window.first_failure))} → ${escapeHtml(formatDate(p.window.last_failure))}</small></td>
+  <td><small>${(p.missing || []).map(m => `<span>${escapeHtml(m.label)}</span> (${m.count})`).join("<br>")}</small></td>
+  <td>${_badgePrestataire(p)}</td>
+  <td><button class="btn btn-sm btn-secondary" onclick="afficherManquementsPrestataire('${escapeHtml(p.identifier)}')">Détail</button></td>
+  </tr>`).join("");
+ } catch (e) {
+ tableError("#psp-table", 10);
+ }
+}
+
+async function afficherManquementsPrestataire(identifiant) {
+ const bloc = document.getElementById("psp-detail");
+ const tbody = document.querySelector("#psp-detail-table tbody");
+ if (!bloc || !tbody) return;
+ bloc.classList.remove("hidden");
+ document.getElementById("psp-detail-titre").innerHTML = `<span>Transferts incomplets reçus de</span> <code>${escapeHtml(identifiant)}</code>`;
+ tableLoading("#psp-detail-table", 6);
+ try {
+ const response = await apiFetch(`/api/filtrage/prestataires/${encodeURIComponent(identifiant)}/manquements`);
+ if (!response.ok) { tableError("#psp-detail-table", 6); return; }
+ const data = await response.json();
+ if (!(data.items || []).length) { tableEmpty("#psp-detail-table", 6, "Aucun transfert incomplet sur la période."); return; }
+ tbody.innerHTML = data.items.map(l => `
+  <tr>
+  <td>${escapeHtml(formatDateTime(l.received_at))}</td>
+  <td><small>${escapeHtml(l.message_type)} <code>${escapeHtml(l.msg_id || "—")}</code></small></td>
+  <td>${l.transfers}</td>
+  <td>${l.incomplete}</td>
+  <td><small>${(l.missing || []).map(m => `<span>${escapeHtml(m.label)}</span> (${m.count})`).join("<br>")}</small></td>
+  <td><small><code>${escapeHtml((l.transactions || []).join(", "))}</code></small></td>
+  </tr>`).join("");
+ } catch (e) {
+ tableError("#psp-detail-table", 6);
+ }
+}
+
+function exportSignalementPrestataires() {
+ // La pièce entière, côté serveur : une ligne par prestataire défaillant
+ window.open("/api/export/prestataires-defaillants.csv", "_blank");
+}
+
+function savePspCriteria() {
+ // Pas de repli silencieux : une valeur hors bornes est refusée par le
+ // serveur avec la raison, jamais ramenée sur une autre.
+ const nombre = id => document.getElementById(id)?.value;
+ saveSettingsFamily({ prestataires_defaillants: {
+ fenetre_jours: parseInt(nombre("psp-fenetre"), 10),
+ seuil_transferts: parseInt(nombre("psp-seuil"), 10),
+ seuil_taux_pct: parseFloat(nombre("psp-taux")),
+ politique: document.getElementById("psp-politique")?.value || "",
+ bic_etablissement: (document.getElementById("psp-bics")?.value || "").split(",").map(b => b.trim()).filter(Boolean),
+ } }, "Critères de défaillance enregistrés.").then(() => fetchPrestataires());
 }
 
 // ------------------ P3 : NARRATIF D'ALERTE & ADVERSE MEDIA ------------------

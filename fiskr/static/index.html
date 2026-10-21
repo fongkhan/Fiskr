@@ -1804,6 +1804,9 @@
  <button id="sub-btn-alerts-filtering" class="sub-tab-btn" onclick="switchSubTab('filtering', 'alerts-filtering')">
  Alertes <span id="alerts-filtering-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
  </button>
+ <button id="sub-btn-filtering-prestataires" class="sub-tab-btn" title="Prestataires qui omettent de manière répétée les informations requises (règlement (UE) 2023/1113, art. 8 §2)" onclick="switchSubTab('filtering', 'filtering-prestataires')">
+ Prestataires défaillants
+ </button>
  <button id="sub-btn-filtering-blocking" class="sub-tab-btn hidden" title="Paramétrage moteur" onclick="switchSubTab('filtering', 'filtering-blocking')">
  Paramétrage moteur
  </button>
@@ -1821,7 +1824,7 @@
 <div id="sub-sec-screening-transactions" class="sub-tab-content active">
  <div class="card">
  <h2>Filtrage Transactionnel ISO 20022</h2>
- <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques et intermédiaires — sont criblées contre les listes en production, sur leur nom ou leur identifiant exact (BIC, LEI), ainsi que le texte libre des informations de remise. Verdict <strong>HIT</strong>, <strong>INCOMPLETE</strong> (une partie n'a pu être criblée, ou une information obligatoire du règlement (UE) 2023/1113 manque) ou <strong>PASS</strong> ; chaque partie, criblée ou non, est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+ <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques et intermédiaires — sont criblées contre les listes en production, sur leur nom ou leur identifiant exact (BIC, LEI), ainsi que le texte libre des informations de remise ; adresses et remise sont aussi lues contre les territoires sous mesures restrictives de l'Union. Verdict <strong>HIT</strong>, <strong>TERRITORY</strong> (lien avec un territoire sous mesures restrictives : à instruire), <strong>FAILING_PSP</strong> (prestataire défaillant, politique renforcée), <strong>INCOMPLETE</strong> (une partie n'a pu être criblée, ou une information obligatoire du règlement (UE) 2023/1113 manque) ou <strong>PASS</strong> ; chaque partie, criblée ou non, est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
  <div class="form-row" style="align-items: flex-end;">
  <div class="form-group" style="flex: 1;">
  <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
@@ -1835,7 +1838,9 @@
  <hr>
  <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
  <p class="section-desc" id="txn-message-info"></p>
+ <div id="txn-territory-info"></div>
  <div id="txn-missing-info"></div>
+ <div id="txn-psp-info"></div>
  <div class="table-container max-height-table">
  <table id="txn-results-table">
  <thead>
@@ -1856,7 +1861,63 @@
  </div>
  </div>
  </div>
- 
+
+<!-- PRESTATAIRES DÉFAILLANTS (règlement (UE) 2023/1113, art. 8 §2) -->
+<div id="sub-sec-filtering-prestataires" class="sub-tab-content hidden">
+ <div class="grid-layout une-colonne">
+ <div class="card result-card">
+ <h2>Prestataires défaillants</h2>
+ <p class="section-desc">Prestataires de paiement qui omettent de manière répétée les informations requises sur le donneur d'ordre ou le bénéficiaire (règlement (UE) 2023/1113, art. 8 §2). Chaque pacs.008 filtré est imputé au prestataire qui le transmet — l'agent instructeur, à défaut la banque du donneur d'ordre. Au-delà des seuils, le prestataire est défaillant : avertissement et échéance, ou rejet de ses transferts, et signalement à l'autorité compétente au plus tard trois mois après l'identification (EBA/GL/2024/11 §74). Fiskr mesure, date et prépare le signalement ; la transmission reste humaine.</p>
+ <div id="psp-criteres" style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;"></div>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <button class="btn btn-sm btn-secondary" onclick="fetchPrestataires()">Actualiser</button>
+ <button class="btn btn-sm btn-secondary" onclick="exportSignalementPrestataires()" title="Une ligne par prestataire défaillant : nom, pays, fréquence, période, informations manquantes (EBA/GL/2024/11 §75)" style="margin-left: auto;">⬇ Signalement à l'autorité (CSV)</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="psp-table">
+ <thead>
+ <tr>
+ <th>Prestataire</th><th>BIC / LEI</th><th>Pays</th><th>Transferts reçus</th><th>Incomplets</th><th>Taux</th>
+ <th>Période des omissions</th><th>Informations manquantes</th><th>Statut</th><th>Détail</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <div id="psp-detail" class="hidden" style="margin-top: 1rem;">
+ <h3 id="psp-detail-titre" style="font-size: 0.95rem;"></h3>
+ <div class="table-container max-height-table">
+ <table id="psp-detail-table">
+ <thead>
+ <tr><th>Reçu le</th><th>Message</th><th>Transferts</th><th>Incomplets</th><th>Informations manquantes</th><th>Transactions</th></tr>
+ </thead>
+ <tbody></tbody>
+ </table>
+ </div>
+ </div>
+ </div>
+ <div class="card form-card hidden" id="psp-criteres-card">
+ <h2>Critères de défaillance (Admin)</h2>
+ <p class="section-desc">Ni le règlement ni les orientations de l'ABE ne donnent de chiffre : la procédure de l'établissement les fixe (EBA/GL/2024/11 §67). Le critère est un pourcentage de transferts incomplets sur une période (§68 a), avec un nombre minimal : une omission isolée n'est pas « répétée ».</p>
+ <div class="form-row" style="max-width: 760px;">
+ <div class="form-group"><label for="psp-fenetre">Période glissante (jours)</label><input type="number" id="psp-fenetre" min="7" max="365" step="1"></div>
+ <div class="form-group"><label for="psp-seuil">Transferts incomplets, au moins</label><input type="number" id="psp-seuil" min="2" max="1000" step="1"></div>
+ <div class="form-group"><label for="psp-taux">Et au moins (% des transferts reçus)</label><input type="number" id="psp-taux" min="0" max="100" step="0.1"></div>
+ </div>
+ <div class="form-group" style="max-width: 640px;">
+ <label for="psp-politique">Politique pour les transferts suivants d'un prestataire défaillant</label>
+ <select id="psp-politique"></select>
+ </div>
+ <div class="form-group" style="max-width: 480px;">
+ <label for="psp-bics">BIC de l'établissement (séparés par des virgules)</label>
+ <input type="text" id="psp-bics" placeholder="BNPAFRPP, BNPAFRPPXXX">
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Un pacs.008 dont l'instructeur est l'établissement lui-même est un message sortant : son omission n'est imputée à personne.</small>
+ </div>
+ <button class="btn btn-primary" onclick="savePspCriteria()">Enregistrer les critères</button>
+ </div>
+ </div>
+</div>
+
 <div id="sub-sec-alerts-filtering" class="sub-tab-content hidden">
  <div class="grid-layout une-colonne">
  <div class="card result-card">

@@ -155,7 +155,9 @@ from fiskr import ppe as dossiers_ppe
 from fiskr.database import DossierPPE, MesureDeGel
 from fiskr.settings import (SETTING_GEL_DELAI, GEL_DELAI_BORNES_HEURES,
                             gel_declaration_delai_heures, perimeter_overrides,
-                            SETTING_PPE_DELAI, PPE_DELAI_BORNES_JOURS, ppe_decision_delai_jours)
+                            SETTING_PPE_DELAI, PPE_DELAI_BORNES_JOURS, ppe_decision_delai_jours,
+                            SETTING_PRESTATAIRES_DEFAILLANTS, prestataires_defaillants_criteres,
+                            valider_criteres_prestataires)
 from fiskr.retention import (preview_retention, run_retention,
                              conservees_au_titre_de_la_relation)
 from fiskr import conservation
@@ -2498,7 +2500,7 @@ _PORTABLE_SETTINGS = {
     SETTING_AUTO_BACKTEST_ENABLED,
     SETTING_BLOCKING_SCREENING, SETTING_BLOCKING_FILTERING,
     SETTING_SYNC_SCHEDULES, SETTING_ALERT_SLA_HOURS, SETTING_NOTIFICATIONS,
-    SETTING_GEL_DELAI, SETTING_PPE_DELAI,
+    SETTING_GEL_DELAI, SETTING_PPE_DELAI, SETTING_PRESTATAIRES_DEFAILLANTS,
     SETTING_DIGEST, SETTING_RETENTION, SETTING_SCORE_THRESHOLDS,
     SETTING_ENGINE_CAPABILITIES,
     # Synchronisation automatique : les cles de source sont universelles,
@@ -3503,7 +3505,22 @@ async def screen_transaction_message(
 
     - `HIT` : au moins une correspondance en alerte (partie ou texte libre) ;
       chaque hit ouvre une alerte adjudicable ;
-    - `INCOMPLETE` : rien n'est en alerte, mais le filtrage ne peut pas établir
+    - `TERRITORY` : aucune correspondance de nom, mais le paiement est lié à
+      un territoire sous mesures restrictives de l'Union — adresse d'une
+      partie (ville, subdivision, lignes libres) ou informations de remise
+      qui nomment un lieu de Crimée, de Sébastopol ou des zones non contrôlées
+      de Donetsk, Louhansk, Kherson, Zaporija, à la date de l'opération
+      (`territory_signals` : lieu, régime, date d'effet, champ, partie ;
+      table : `GET /api/embargo-territories`). Ce n'est pas un HIT : un signal
+      à instruire, qui n'ouvre pas d'alerte et ne touche ni score ni statut ;
+    - `FAILING_PSP` : le prestataire qui transmet le transfert (`InstgAgt`, à
+      défaut `DbtrAgt`) est identifié comme omettant de manière répétée les
+      informations requises (règlement (UE) 2023/1113, art. 8 §2) et la
+      politique renforcée est choisie : transfert à retenir jusqu'à décision.
+      Avec la politique par défaut (signaler), le verdict reste celui du
+      message et `payment_service_providers` dit que le prestataire est
+      défaillant ;
+    - `INCOMPLETE` : rien de ce qui précède, mais le filtrage ne peut pas établir
       un PASS — une partie n'a pu être comparée à rien (statut
       `NOT_SCREENED`, motif dans `not_screened_label`), ou une information
       obligatoire du règlement (UE) 2023/1113 manque (`missing_information`,
@@ -3511,12 +3528,15 @@ async def screen_transaction_message(
       numéros de compte) quand tous les prestataires de la chaîne sont établis
       dans l'Union ou l'EEE d'après leur BIC, art. 4 sinon, et le manque dit
       pourquoi (`general_rule_reasons`) ;
-    - `PASS` : toutes les parties criblées sans correspondance, message complet.
+    - `PASS` : toutes les parties criblées sans correspondance, message complet,
+      aucun signal territorial.
 
     Chaque partie, criblée ou non, est tracée dans le journal d'audit. Une
     partie sans nom est rapprochée sur son identifiant exact (BIC, LEI). Un
     message dont aucune partie ne porte de nom ni d'identifiant exact est
-    refusé (422) : un verdict n'y porterait sur rien.
+    refusé (422) : un verdict n'y porterait sur rien. Chaque pacs.008 est
+    consigné par prestataire (transferts reçus, incomplets) : c'est la mesure
+    de la défaillance (`GET /api/filtrage/prestataires`).
     """
     requested_lists = None
     if screening_lists and screening_lists.strip():
@@ -3572,6 +3592,59 @@ async def screen_transaction_message(
             "Criblé par": current_user["username"],
         })
     return result
+
+
+@app.get("/api/filtrage/prestataires")
+async def failing_payment_service_providers(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Suivi des prestataires de paiement défaillants (règlement (UE) 2023/1113,
+    art. 8 §2) : chaque prestataire qui a transmis au moins un transfert
+    incomplet sur la période glissante, ou dont un épisode de défaillance est
+    ouvert — transferts reçus, incomplets, pourcentage, première et dernière
+    omission, informations manquantes, date d'identification et échéance du
+    signalement (trois mois, EBA/GL/2024/11 §74). Critères et politique en
+    vigueur joints (réglables : `PUT /api/settings/ingestion`,
+    `prestataires_defaillants`). Lecture, auditeur compris.
+    """
+    from fiskr import prestataires
+    return prestataires.suivi(db)
+
+
+@app.get("/api/filtrage/prestataires/{identifiant}/manquements")
+async def failing_psp_omissions(
+    identifiant: str,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Les messages incomplets reçus d'un prestataire (BIC sur 8 caractères ou
+    LEI) sur la période glissante, du plus récent au plus ancien : message,
+    transferts, informations manquantes, identifiants de bout en bout."""
+    from fiskr import prestataires
+    return {"identifier": identifiant.strip().upper(),
+            "items": prestataires.manquements(db, identifiant.strip().upper())}
+
+
+@app.get("/api/export/prestataires-defaillants.csv")
+async def export_failing_psp_report(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Signalement à l'autorité compétente des prestataires défaillants (art. 8
+    §2 ; contenu : EBA/GL/2024/11 §75) — une ligne par prestataire dont un
+    épisode est ouvert : nom, pays, fréquence, période, informations
+    manquantes ; les motifs donnés par le prestataire et les dispositions
+    prises sont des colonnes à compléter. Aucun envoi automatique : l'export
+    est la pièce, la transmission reste humaine.
+    """
+    from fiskr import prestataires
+    entete, lignes = prestataires.signalement(db)
+    return _csv_response(
+        f"fiskr_signalement_prestataires_defaillants_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+        entete, lignes)
 
 
 @app.get("/api/adverse-media")
@@ -8622,6 +8695,23 @@ async def country_risk_assess(
     return {"country_risk": country_risk.assess(codes)}
 
 
+@app.get("/api/embargo-territories")
+async def embargo_territories_reference(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Table datée des territoires sous mesures restrictives de l'Union que lit
+    le filtrage des paiements (verdict `TERRITORY`) : Crimée et Sébastopol
+    (règlement (UE) n° 692/2014), zones non contrôlées par le gouvernement des
+    oblasts de Donetsk, Louhansk (règlement (UE) 2022/263), Kherson et Zaporija
+    (règlement (UE) 2022/1903). Chaque lieu porte ses formes (variantes,
+    translittérations), ses formes ambiguës (lues seulement dans une adresse
+    UA ou RU) et sa date d'effet. Surchargeable à chaud par le bloc
+    `territoires_sous_embargo` de config.yaml ; une entrée illisible y est
+    refusée et nommée dans `errors`.
+    """
+    from fiskr import territoires
+    return territoires.reference()
+
+
 @app.get("/api/worker/status")
 async def worker_status(
     db: Session = Depends(get_db),
@@ -9023,6 +9113,9 @@ class IngestionSettingsUpdate(BaseModel):
     gel_declaration_delay_hours: Optional[int] = None
     # Delai de decision d'un dossier PPE par une personne habilitee (jours)
     ppe_decision_delay_days: Optional[int] = None
+    # Prestataires defaillants (2023/1113, art. 8 §2) : periode, seuils,
+    # politique, BIC de l'etablissement — fusion cle par cle, bornes verifiees
+    prestataires_defaillants: Optional[Dict[str, Any]] = None
     # Motifs de cloture proposes aux analystes ([] = aucune suggestion) :
     # {"motif", "decisions"} — une simple chaine (ancien client) est classee
     # comme a la migration (fiskr/settings.py, `motifs_de_cloture`)
@@ -9084,6 +9177,8 @@ def _settings_payload(db: Session) -> Dict[str, Any]:
         "alert_sla_hours": alert_sla_hours(db),
         "gel_declaration_delay_hours": gel_declaration_delai_heures(db),
         "ppe_decision_delay_days": ppe_decision_delai_jours(db),
+        "prestataires_defaillants": {k: v for k, v in prestataires_defaillants_criteres(db).items()
+                                     if k not in ("erreur", "source")},
         "alert_close_reasons": alert_close_reasons(db),
         "notification_events": notification_events(db),
         "digest": digest_settings(db),
@@ -9143,6 +9238,7 @@ async def update_ingestion_settings(
     extras = (payload.backtest_max_gap_pct, payload.auto_backtest_panel,
               payload.quality_min_score_pct, payload.alert_sla_hours,
               payload.gel_declaration_delay_hours, payload.ppe_decision_delay_days,
+              payload.prestataires_defaillants,
               payload.alert_close_reasons,
               payload.notification_events, payload.digest,
               payload.resource_fields, payload.resource_mining,
@@ -9210,6 +9306,18 @@ async def update_ingestion_settings(
             raise HTTPException(status_code=400,
                                 detail=f"Délai de décision d'un dossier PPE : entre {bas} et {haut} jours.")
         set_setting(db, SETTING_PPE_DELAI, int(payload.ppe_decision_delay_days),
+                    updated_by=admin_user["username"])
+    if payload.prestataires_defaillants is not None:
+        actuels = {k: v for k, v in prestataires_defaillants_criteres(db).items()
+                   if k not in ("erreur", "source")}
+        try:
+            # Refus franc, comme les delais : hors bornes, la lecture
+            # retomberait sur le defaut et l'ecran dirait autre chose que ce
+            # que l'administrateur a cru enregistrer.
+            criteres = valider_criteres_prestataires({**actuels, **payload.prestataires_defaillants})
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        set_setting(db, SETTING_PRESTATAIRES_DEFAILLANTS, criteres,
                     updated_by=admin_user["username"])
     if payload.alert_close_reasons is not None:
         bruts = [m for m in payload.alert_close_reasons
