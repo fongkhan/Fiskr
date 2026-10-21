@@ -8549,6 +8549,7 @@ async function openAlertModal(alertId) {
  </p>
  ${bandeauCaduciteHtml(a)}
  ${blocPartieLiee(a, roles.includes("auditor"))}
+ ${blocChaineDeDetentionHtml(a.partie_liee ? a.detention : null)}
  ${blocComparaison(a)}
  <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
@@ -8612,6 +8613,46 @@ function blocDetentionHtml(d) {
  // un cumul nul ne dit rien à personne.
  if (!(d.parties || []).length) return "";
  return `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.3rem 0;"><span>Détention cumulée des parties confirmées</span> : ${escapeHtml(_pourcentageLisible(d.cumul_pct))} · <span>seuil</span> ${escapeHtml(_pourcentageLisible(d.seuil_pct))}</p>`;
+}
+
+// Chaîne de détention au-delà du premier niveau (fiskr/parties.py) : ACME ←
+// 60 % HOLDCO ← 70 % X. Le chemin, ce qu'il établit (cascade : une société
+// réputée détenue compte pour sa participation entière), le produit montré à
+// côté (aucun texte ne le fixe), et ce que le calcul n'a pas pu trancher.
+// Rien quand la relation n'a qu'un niveau et que tout est dit au-dessus.
+function blocChaineDeDetentionHtml(d, options) {
+ if (!d) return "";
+ const avecStructure = !(options && options.structure === false);
+ const structure = d.structure || [];
+ const indirecte = structure.some(s => s.niveau > 1 || s.partie_client_id);
+ const chaines = (d.chaines || []).filter(c => (c.niveau || 1) > 1);
+ const signaux = d.signalements || [];
+ // Calcul en direct, décision à la confirmation : réputé détenu sans mesure
+ // au registre se dit (null : aucune ; absent : la mesure elle-même).
+ const sansMesure = d.reputee && d.mesure_en_vigueur === null;
+ if (!indirecte && !chaines.length && !signaux.length && !sansMesure) return "";
+ const pct = v => v == null ? "" : `${escapeHtml(_pourcentageLisible(v))} `;
+ const lignesChaines = chaines.map(c => {
+  const bloquante = (c.etapes || []).slice(0, -1).find(e => !e.qualification);
+  const verdict = c.compte
+   ? `<strong style="color: var(--color-alert);">retenue</strong>`
+   : `<span>non retenue</span> — <strong>${escapeHtml(bloquante ? bloquante.nom : "")}</strong> <span>ni réputée détenue ni réputée contrôlée</span>`;
+  return `<li>${escapeHtml(c.racine || "")} ${(c.etapes || []).map(e => `← ${pct(e.pourcentage_detention)}<strong>${escapeHtml(e.nom)}</strong>`).join(" ")} (<span>personne désignée</span>) · ${verdict}${c.produit_pct != null ? ` · <span>par multiplication</span> ${escapeHtml(_pourcentageLisible(c.produit_pct))}` : ""}</li>`;
+ }).join("");
+ const lignesStructure = avecStructure && indirecte ? structure.map(s => `
+  <li style="padding-left: ${(s.niveau - 1) * 1.1}rem;">${s.niveau > 1 ? "← " : ""}${pct(s.pourcentage_detention)}<strong>${escapeHtml(s.nom)}</strong>${s.peut_engager_les_fonds ? ` · <span>peut engager les fonds</span>` : ""}${s.partie_client_id ? ` · <span>client du référentiel</span> ${escapeHtml(s.partie_client_id)}` : ""}${s.qualification_label ? ` · <em>${escapeHtml(s.qualification_label)}</em>` : ""}</li>`).join("") : "";
+ const cumul = chaines.length || indirecte
+  ? `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.2rem 0;"><span>Détention directe</span> ${pct(d.cumul_direct_pct)}· <span>par la chaîne</span> ${pct(d.cumul_indirect_pct)}· <span>par multiplication</span> ${pct(d.multiplication_pct)}· <span>seuil</span> ${pct(d.seuil_pct)}</p>`
+  : "";
+ const lignesSignaux = signaux.map(s => `<div class="anomaly-item warning" style="font-size: 0.82rem; overflow-wrap: anywhere;"><span>${escapeHtml(s.libelle)}</span>${s.texte ? ` — ${escapeHtml(s.texte)}` : ""}</div>`).join("");
+ return `<div style="margin: 0.5rem 0; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px;">
+  <p style="font-size: 0.88rem; font-weight: 600; margin: 0 0 0.3rem;">Chaîne de détention</p>
+  ${sansMesure ? `<div class="anomaly-item" style="color: var(--color-alert); font-size: 0.82rem;">Aucune mesure en vigueur au registre à ce titre.</div>` : ""}
+  ${cumul}
+  ${lignesChaines ? `<ul style="list-style: none; margin: 0 0 0.4rem; font-size: 0.82rem; overflow-wrap: anywhere;">${lignesChaines}</ul>` : ""}
+  ${lignesStructure ? `<p style="font-size: 0.8rem; color: var(--text-muted); margin: 0.3rem 0 0.2rem;">Structure déclarée</p><ul style="list-style: none; margin: 0; font-size: 0.82rem; overflow-wrap: anywhere;">${lignesStructure}</ul>` : ""}
+  ${lignesSignaux}
+ </div>`;
 }
 
 function blocPartieLiee(a, auditeur) {
@@ -8948,6 +8989,7 @@ function _blocMesure(m, vocab, isReviewer, auditeur) {
    <small style="color: var(--text-muted);"><span>ouverte à la confirmation</span> · ${formatDateTime(m.ouverte_le)} · @${escapeHtml(m.ouverte_par || "")}</small>
   </div>
   ${m.fondement ? `<p style="font-size: 0.85rem; color: var(--color-alert); font-weight: 600; margin: 0 0 0.4rem;">${escapeHtml(m.fondement_label || "")}</p>` : ""}
+  ${m.fondement ? blocChaineDeDetentionHtml(m.detention, {structure: false}) : ""}
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${m.radiation_a_examiner ? `
@@ -13707,6 +13749,7 @@ async function openClient360(clientId) {
  <div class="modal-section">
  <h4><span>Parties liées</span> (${(d.parties || []).length})</h4>
  ${blocDetentionHtml(d.detention)}
+ ${blocChaineDeDetentionHtml(d.detention)}
  ${partiesHtml ? `<div class="table-container" style="max-height: 190px;"><table>
  <thead><tr><th>Rôle</th><th>Nom</th><th>Naissance</th><th>Détention</th><th>Peut engager les fonds</th><th>Alertes ouvertes</th></tr></thead>
  <tbody>${partiesHtml}</tbody></table></div>`

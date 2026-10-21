@@ -14,6 +14,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional, Dict, Any, Tuple, Union
 
 from fastapi import FastAPI, Depends, HTTPException, Query, status, UploadFile, File, Form, Response, Request
@@ -3357,7 +3358,7 @@ def _parties_a_cribler(db: Session, client_dict: Dict[str, Any]) -> List[Tuple[D
     nom_client = parties_liees.nom_d_affichage(client_dict) or client_id
     sortie = []
     for partie in actives:
-        sortie.append((parties_liees.contexte(partie, nom_client),
+        sortie.append((parties_liees.contexte(partie, nom_client, actives),
                        parties_liees.profil_de_criblage(partie)))
     return sortie
 
@@ -3837,6 +3838,11 @@ _CHAMPS_CSV["CLIENT_PARTIES"] = {
     **{champ: autres for champ, autres in _CHAMPS_CSV["CLIENT_BASE"].items() if champ != "client_id"},
     "pourcentage_detention": ("ownership_pct",),
     "peut_engager_les_fonds": ("can_commit_funds",),
+    # Chaine de detention (fiskr/parties.py) : la personne morale du jeu dont
+    # la ligne est la partie (vide : le client), et le client du referentiel
+    # que la partie EST.
+    "partie_de": ("party_of",),
+    "partie_client_id": ("party_client_id",),
 }
 
 # Champs attendus par type, dans l'ordre d'affichage : DÉRIVÉS de la table.
@@ -4104,7 +4110,8 @@ def _partie_de_la_ligne(item: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]],
     try:
         lue = parties_liees.lire_une_partie(
             identite, roles=item.get("role"), pourcentage=item.get("pourcentage_detention"),
-            peut_engager=item.get("peut_engager_les_fonds"), partie_id=item.get("partie_id"))
+            peut_engager=item.get("peut_engager_les_fonds"), partie_id=item.get("partie_id"),
+            partie_de=item.get("partie_de"), partie_client_id=item.get("partie_client_id"))
     except parties_liees.RefusDePartie as refus:
         return None, [str(refus)]
     return lue, []
@@ -7343,6 +7350,11 @@ async def get_client_overview(
                                     Alert.partie_liee_id.isnot(None)).all():
         alertes_par_partie.setdefault(a.partie_liee_id, []).append(a)
     detention = parties_liees.evaluer_la_detention(db, client_id, perimeter_overrides(db))
+    # Calcul en direct, decision a la confirmation (fiskr/gels.py) : une chaine
+    # declaree apres la confirmation rend le client repute detenu sans qu'une
+    # mesure s'ouvre. L'ecran le dit — la mesure, ou son absence.
+    en_vigueur = registre_des_gels.mesure_de_detention_en_vigueur(db, client_id)
+    detention["mesure_en_vigueur"] = en_vigueur.id if en_vigueur is not None else None
 
     return {
         "client_id": client_id,
@@ -13082,8 +13094,15 @@ def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[st
             "date_du_gel": iso(mesure.date_effet),
             "precisions": mesure.precisions,
         },
-        "personne_concernee": _personne_concernee(db, alert) if alert is not None
-                              else {"nom_complet": mesure.client_name},
+        # La personne dont les avoirs sont en cause : le client de la MESURE.
+        # Il differe de celui de l'alerte quand la chaine de detention passe
+        # par un autre client (fiskr/parties.py, `partie_client_id`) — la
+        # declaration nommerait sinon la holding a la place d'ACME.
+        "personne_concernee": (
+            _personne_concernee(db, alert if alert.client_id == mesure.client_id
+                                else SimpleNamespace(client_id=mesure.client_id,
+                                                     client_name=mesure.client_name))
+            if alert is not None else {"nom_complet": mesure.client_name}),
         "operation_concernee": operation,
         # Client repute detenu ou controle par ses parties liees
         # (fiskr/parties.py) : le fondement et le calcul fige a l'ouverture
@@ -13094,9 +13113,15 @@ def _build_gel_draft(db: Session, mesure: MesureDeGel, username: str) -> Dict[st
             "parties": [
                 f"{p.get('nom')}"
                 + (f" — {p['pourcentage_detention']:g} %" if p.get("pourcentage_detention") else "")
+                + (f" de {p['partie_de']}" if p.get("partie_de") else "")
                 + (" — peut engager les fonds" if p.get("peut_engager_les_fonds") else "")
                 + f" — {', '.join(p.get('personnes_designees') or [])}"
                 for p in (mesure.detention or {}).get("parties") or []],
+            # Au-dela du premier niveau : chaque chemin, et s'il compte
+            # (fiskr/parties.py, « LA CHAINE DE DETENTION »)
+            "chaines": [
+                c.get("texte", "") + ("" if c.get("compte") else f" — non retenue ({c.get('motif')})")
+                for c in (mesure.detention or {}).get("chaines") or [] if (c.get("niveau") or 1) > 1],
         } if mesure.fondement else None),
         "traitement_alerte": {
             "score_final": alert.final_score if alert else None,
@@ -13163,7 +13188,8 @@ def _render_gel_draft_html(mesure: MesureDeGel, draft: Dict[str, Any], generated
         "<h2>Détention ou contrôle par une personne désignée (LD DGT/ACPR §131, §133, §144)</h2>"
         "<table><tbody>"
         + rows(detention, {"fondement": "Fondement", "cumul_pct": "Détention cumulée (%)",
-                           "seuil_pct": "Seuil (%)", "parties": "Parties liées confirmées"})
+                           "seuil_pct": "Seuil (%)", "parties": "Parties liées confirmées",
+                           "chaines": "Chaîne de détention"})
         + "</tbody></table>") if detention else ""
     listee = draft["personne_listee"]
     absente = ("" if listee["presente_dans_les_listes_en_production"] else
@@ -14088,6 +14114,12 @@ class HookPartieLiee(BaseModel):
     identite: Dict[str, Any]
     pourcentage_detention: Optional[float] = None
     peut_engager_les_fonds: Optional[bool] = None
+    # Chaine de detention (fiskr/parties.py) : `partie_de`, le partie_id d'une
+    # personne morale de la MEME liste dont celle-ci est la partie (la
+    # detention porte sur elle) ; `partie_client_id`, le client du referentiel
+    # que cette partie EST. Absents : premier niveau, comme avant.
+    partie_de: Optional[str] = Field(None, max_length=100)
+    partie_client_id: Optional[str] = Field(None, max_length=100)
 
 
 HookClientUpsert.model_rebuild()
@@ -14233,8 +14265,10 @@ async def hook_client_upsert(
             try:
                 parties_lues = [parties_liees.lire_une_partie(
                     p.identite, roles=p.roles, pourcentage=p.pourcentage_detention,
-                    peut_engager=p.peut_engager_les_fonds, partie_id=p.partie_id)
+                    peut_engager=p.peut_engager_les_fonds, partie_id=p.partie_id,
+                    partie_de=p.partie_de, partie_client_id=p.partie_client_id)
                     for p in payload.parties]
+                parties_liees.verifier_la_structure(payload.client_id, parties_lues)
             except parties_liees.RefusDePartie as refus:
                 raise HTTPException(status_code=422, detail=f"Partie liée refusée : {refus}")
         avertissements: List[str] = []
@@ -14665,10 +14699,16 @@ def _partie_de_l_alerte(db: Session, alert: Alert, audit: Optional[AuditTrail]) 
     ligne = db.get(PartieLiee, alert.partie_liee_id)
     vue = parties_liees.vue(ligne) if ligne is not None else None
     vue_criblee = ((audit.decision_tree or {}).get("partie_liee") if audit else None) or {}
-    detention = parties_liees.evaluer_la_detention(db, alert.client_id, surcharges)
+    detention = parties_liees.evaluer_la_detention(db, alert.client_id, surcharges,
+                                                   alert.client_name)
     from fiskr.perimeters import est_sanction
+    # Le geste du doute reste ouvert tant qu'aucune mesure ne tient ce client
+    # a ce titre — y compris quand la chaine, declaree apres la confirmation,
+    # le rend repute detenu sans qu'une mesure se soit ouverte.
+    en_vigueur = registre_des_gels.mesure_de_detention_en_vigueur(db, alert.client_id)
+    detention["mesure_en_vigueur"] = en_vigueur.id if en_vigueur is not None else None
     doute = (alert.status == "CLOSED_CONFIRMED" and est_sanction(alert.list_type, surcharges)
-             and not detention["reputee"]
+             and (not detention["reputee"] or en_vigueur is None)
              and not db.query(MesureDeGel.id).filter(MesureDeGel.alert_id == alert.id).first())
     return {
         "partie_liee": {

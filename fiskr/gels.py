@@ -42,8 +42,9 @@ mandataire, dirigeant, associe — fiskr/parties.py) n'ouvre pas de mesure a lui
 seul (§144). Il en ouvre une quand les parties confirmees rendent le client
 repute detenu (50 % cumules, §131 : gel) ou controle (une partie designee peut
 engager ses fonds, §133 et §144 : suspension et interrogation de la DG
-Tresor) — voir `ouvrir_si_detention`. La mesure porte son fondement et le
-calcul qui l'etablit ; le registre la met en avant.
+Tresor) — voir `ouvrir_si_detention`. Le cumul suit la chaine de detention
+au-dela du premier niveau (fiskr/parties.py). La mesure porte son fondement
+et le calcul qui l'etablit, chemins compris ; le registre la met en avant.
 
 CE QUI N'EST PAS FAIT
 ---------------------
@@ -168,11 +169,17 @@ def fiche_en_production(db, entity_id: Optional[str]) -> Optional[WatchlistEntit
 
 
 def _ouvrir(db, alert: Alert, type_action: str, username: str,
-            depuis: Optional[datetime]) -> MesureDeGel:
+            depuis: Optional[datetime], client_id: Optional[str] = None,
+            client_name: Optional[str] = None) -> MesureDeGel:
+    """`client_id` : le client dont les avoirs sont en cause, quand ce n'est
+    pas celui de l'alerte — un client repute detenu par la chaine de detention
+    d'un AUTRE client (fiskr/parties.py, `partie_client_id`)."""
     fiche = fiche_en_production(db, alert.watchlist_entity_id)
+    autre = client_id is not None and client_id != alert.client_id
     mesure = MesureDeGel(
         alert_id=alert.id, type_action=type_action, statut=STATUT_A_DECLARER,
-        client_id=alert.client_id, client_name=alert.client_name,
+        client_id=client_id if autre else alert.client_id,
+        client_name=(client_name or client_id) if autre else alert.client_name,
         watchlist_entity_id=alert.watchlist_entity_id,
         watchlist_name=alert.watchlist_name, list_type=alert.list_type,
         programmes=(fiche.sanction_programs if fiche is not None else None),
@@ -183,9 +190,10 @@ def _ouvrir(db, alert: Alert, type_action: str, username: str,
     db.flush()
     db.add(AlertEvent(
         alert_id=alert.id, username=username, action="GEL_OUVERT",
-        detail=(f"Mesure de gel #{mesure.id} ouverte ({ACTIONS[type_action]}) : "
-                f"déclaration à la DG Trésor due immédiatement "
-                f"(CMF L.562-4, R.562-3 ; LD DGT/ACPR §182).")))
+        detail=(f"Mesure de gel #{mesure.id} ouverte ({ACTIONS[type_action]})"
+                + (f" pour le client {mesure.client_name}" if autre else "")
+                + " : déclaration à la DG Trésor due immédiatement "
+                  "(CMF L.562-4, R.562-3 ; LD DGT/ACPR §182).")))
     return mesure
 
 
@@ -201,11 +209,18 @@ def ouvrir_si_due(db, alert: Alert, username: str) -> Optional[MesureDeGel]:
     from fiskr.settings import perimeter_overrides
     if alert.partie_liee_id is not None:
         return ouvrir_si_detention(db, alert, username)
-    if not est_due(alert, perimeter_overrides(db)):
+    surcharges = perimeter_overrides(db)
+    if not est_due(alert, surcharges):
         return None
     if db.query(MesureDeGel.id).filter(MesureDeGel.alert_id == alert.id).first():
         return None
-    return _ouvrir(db, alert, ACTION_PAR_DEFAUT, username, alert.decided_at)
+    mesure = _ouvrir(db, alert, ACTION_PAR_DEFAUT, username, alert.decided_at)
+    # Le client lui-meme est designe : les clients dont une partie EST ce
+    # client (fiskr/parties.py, `partie_client_id`) le comptent desormais dans
+    # leur chaine de detention — meme decision, ici.
+    db.flush()
+    _suites_dans_les_chaines(db, alert, username, surcharges)
+    return mesure
 
 
 # ------------------------------------------------------------ detention reputee
@@ -244,8 +259,14 @@ def ouvrir_si_detention(db, alert: Alert, username: str) -> Optional[MesureDeGel
       seconde.
     Ni l'un ni l'autre : rien n'est ouvert (§144, actionnaire minoritaire).
     En cas de doute, l'analyste ouvre lui-meme la suspension (`ouvrir`).
+
+    AU-DELA DU PREMIER NIVEAU : le cumul est celui de la chaine de detention
+    (fiskr/parties.py, « LA CHAINE DE DETENTION ») — directe et indirecte, au
+    MEME point de decision. Et quand le client de l'alerte est lui-meme une
+    partie d'autres clients (la holding est cliente), ceux-ci sont decides ici
+    aussi (`_suites_dans_les_chaines`) : la mesure porte LEUR nom et CETTE
+    alerte, celle qui a etabli la personne designee.
     """
-    from fiskr import parties as parties_liees
     from fiskr.perimeters import est_sanction
     from fiskr.settings import perimeter_overrides
     surcharges = perimeter_overrides(db)
@@ -255,16 +276,33 @@ def ouvrir_si_detention(db, alert: Alert, username: str) -> Optional[MesureDeGel
     # cela, l'evaluation relirait CETTE alerte encore ouverte, et le 25 % qui
     # franchit le seuil ne serait jamais compte.
     db.flush()
-    evaluation = parties_liees.evaluer_la_detention(db, alert.client_id, surcharges)
-    phrase = parties_liees.phrase_de_detention(evaluation, alert.client_name)
+    mesure = _decider_la_detention(db, alert, username, surcharges,
+                                   alert.client_id, alert.client_name, dans_une_chaine=False)
+    _suites_dans_les_chaines(db, alert, username, surcharges)
+    return mesure
+
+
+def _decider_la_detention(db, alert: Alert, username: str, surcharges: Optional[Dict[str, str]],
+                          client_id: Optional[str], client_name: Optional[str], *,
+                          dans_une_chaine: bool) -> Optional[MesureDeGel]:
+    """La decision pour UN client, au vu de l'evaluation de sa chaine
+    (fiskr/parties.py) : la mesure, ou pourquoi il n'y en a pas. Pour le
+    client de l'alerte, l'historique le dit toujours ; pour un client dont la
+    chaine passe par lui (`dans_une_chaine`), seulement ce qui demande une
+    action — une mesure, ou un calcul qui n'a pas pu trancher."""
+    from fiskr import parties as parties_liees
+    evaluation = parties_liees.evaluer_la_detention(db, client_id, surcharges, client_name)
+    phrase = parties_liees.phrase_de_detention(evaluation, client_name or client_id)
     if not evaluation["reputee"]:
+        if dans_une_chaine and not evaluation["signalements"]:
+            return None
         db.add(AlertEvent(
             alert_id=alert.id, username=username, action="DETENTION_NON_ETABLIE",
             detail=(f"{phrase} Pas de gel des avoirs du client à ce titre (LD §144). En cas "
                     f"de doute sur le contrôle, suspendez et interrogez la DG Trésor : "
                     f"mesure « suspension d'une mise à disposition ».")))
         return None
-    deja = mesure_de_detention_en_vigueur(db, alert.client_id)
+    deja = mesure_de_detention_en_vigueur(db, client_id)
     if deja is not None:
         db.add(AlertEvent(
             alert_id=alert.id, username=username, action="DETENTION_REPUTEE",
@@ -273,7 +311,7 @@ def ouvrir_si_detention(db, alert: Alert, username: str) -> Optional[MesureDeGel
         return None
     detention = evaluation["fondement"] == parties_liees.FONDEMENT_DETENTION
     mesure = _ouvrir(db, alert, "GEL" if detention else "SUSPENSION_MISE_A_DISPOSITION",
-                     username, alert.decided_at)
+                     username, alert.decided_at, client_id=client_id, client_name=client_name)
     mesure.fondement = evaluation["fondement"]
     mesure.detention = evaluation
     geste = ("geler les avoirs du client et déclarer le gel à la DG Trésor (LD §131, §180-182)"
@@ -283,7 +321,28 @@ def ouvrir_si_detention(db, alert: Alert, username: str) -> Optional[MesureDeGel
     db.add(AlertEvent(
         alert_id=alert.id, username=username, action="DETENTION_REPUTEE",
         detail=f"{phrase} Mesure de gel #{mesure.id} ouverte : {geste}."))
+    db.flush()
     return mesure
+
+
+def _suites_dans_les_chaines(db, alert: Alert, username: str,
+                             surcharges: Optional[Dict[str, str]]) -> List[MesureDeGel]:
+    """
+    Le client de l'alerte EST une partie d'autres clients (fiskr/parties.py,
+    `partie_client_id` : la holding est cliente) : ce vrai positif peut les
+    rendre reputes detenus ou controles. Meme decision que pour lui
+    (`_decider_la_detention`), client par client, de proche en proche — la
+    mesure porte le client dont les avoirs sont en cause et cette alerte.
+    """
+    from fiskr import parties as parties_liees
+    ouvertes = []
+    for client_id in parties_liees.clients_detenus_par(db, alert.client_id):
+        mesure = _decider_la_detention(db, alert, username, surcharges, client_id,
+                                       parties_liees.nom_du_client(db, client_id),
+                                       dans_une_chaine=True)
+        if mesure is not None:
+            ouvertes.append(mesure)
+    return ouvertes
 
 
 def ouvrir(db, alert: Alert, type_action: str, username: str) -> MesureDeGel:

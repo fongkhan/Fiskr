@@ -317,6 +317,14 @@ class PartieLiee(Base):
     nom = Column(String(1000), nullable=False)
     pourcentage_detention = Column(Float, nullable=True)
     peut_engager_les_fonds = Column(Boolean, nullable=False, default=False)
+    # Chaine capitalistique (fiskr/parties.py, « LA CHAINE DE DETENTION ») :
+    # `partie_de` est le partie_id d'une personne morale du MEME jeu dont
+    # cette ligne est la partie — la detention et le pouvoir d'engager les
+    # fonds portent alors sur elle, pas sur le client ; NULL : le client.
+    # `partie_client_id` dit que la partie EST ce client du referentiel :
+    # ses propres parties continuent la chaine.
+    partie_de = Column(String(100), nullable=True)
+    partie_client_id = Column(String(100), nullable=True)
     # IMPORT (fichier de parties liees) | WEBHOOK (client-upsert)
     source = Column(String(20), nullable=False)
     source_ref = Column(String(100), nullable=True)
@@ -1842,6 +1850,11 @@ def init_db():
             ],
             "review_records": [
                 ("backtest_validity", "JSON"),
+            ],
+            "parties_liees": [
+                # Chaine capitalistique au-dela du premier niveau (fiskr/parties.py)
+                ("partie_de", "VARCHAR(100)"),
+                ("partie_client_id", "VARCHAR(100)"),
             ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),

@@ -344,10 +344,13 @@ def examiner_les_caduques(db, file_type: str, fiches: List[Dict[str, Any]],
         return 0
     clients = _clients_du_referentiel(db, {a.client_id for a in candidates if a.client_id})
     from fiskr.database import PartieLiee
-    from fiskr.parties import contexte, profil_de_criblage
+    from fiskr.parties import contexte, parties_actives, profil_de_criblage
     ids_parties = sorted({a.partie_liee_id for a in candidates if a.partie_liee_id is not None})
     parties = {p.id: p for p in db.query(PartieLiee).filter(
         PartieLiee.id.in_(ids_parties)).all()} if ids_parties else {}
+    # Les jeux des clients concernes : une partie de holding se dit « de
+    # HOLDCO, associe du client ACME » (fiskr/parties.py, `contexte`).
+    jeux = parties_actives(db, {p.client_id for p in parties.values()}) if parties else {}
     wl_version, wl_hash = production_watchlist_reference(db)
     now = maintenant or datetime.utcnow()
     caduques = 0
@@ -362,7 +365,7 @@ def examiner_les_caduques(db, file_type: str, fiches: List[Dict[str, Any]],
             # confrontee, rien ne mesure qu'elle passe sous le seuil.
             if ligne_partie is None or ligne_partie.retiree_le is not None:
                 continue
-            partie = contexte(ligne_partie, alerte.client_name)
+            partie = contexte(ligne_partie, alerte.client_name, jeux.get(ligne_partie.client_id))
             profil = profil_de_criblage(ligne_partie)
         fiche = par_id[alerte.watchlist_entity_id]
         score = match_entities(profil, fiche, config)
