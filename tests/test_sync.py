@@ -405,26 +405,50 @@ def test_api_sync_run_refuses_a_second_run_of_the_same_source(client, monkeypatc
 def test_api_sync_run_answers_202_without_waiting(client, monkeypatch):
     """
     Le POST rend la main tout de suite : il ne doit PAS attendre la fin du
-    cycle. On le prouve en rendant le cycle lent — la reponse arrive avant.
+    cycle. On le prouve par l'ORDRE, pas au chronometre : le cycle reste tenu
+    ouvert tant que la reponse n'est pas arrivee. Un POST qui l'attendrait ne
+    repondrait qu'apres l'expiration de cette tenue — et le cycle serait alors
+    deja fini a la reponse.
     Force le mode `thread` : la suite tourne en `eager` (execution inline),
     qui attend par construction — c'est le mode de production qu'on teste ici.
+
+    Reecrit le 21 octobre 2026, et le dit : la version precedente exigeait un
+    POST de moins d'une seconde contre un cycle de 1,5 s. En CI, le demarrage
+    du fil a pris 2,4 s : a ce stade de la suite, le processus porte deux
+    millions d'objets et une collecte complete du ramasse-miettes dure 1,5 a
+    2,5 s (mesure, sur master comme sur cette branche) — il suffit qu'elle
+    tombe pendant le POST. L'assertion tombait, et la
+    restauration du monkeypatch rendait au fil, encore vivant, le VRAI
+    synchroniseur OFAC — telechargement et ingestion reels dans la base de
+    test, qui ont ralenti tout le reste de la suite (15 s par test) jusqu'a
+    l'expiration du job CI. Ce que le test verifie est inchange ; il ne rend
+    plus la main avant que son fil ait appele le faux cycle.
     """
-    import time as _time
+    import threading
     from fiskr import api as api_module
 
     monkeypatch.setenv("FISKR_JOBS_MODE", "thread")
+    tenue = threading.Event()
+    termine = threading.Event()
 
     def _slow_sync(db, **kwargs):
-        _time.sleep(1.5)
-        return SyncReport(source="OFAC", status="NO_CHANGE", added_count=0,
-                          modified_count=0, removed_count=0)
+        try:
+            tenue.wait(10)
+            return SyncReport(source="OFAC", status="NO_CHANGE", added_count=0,
+                              modified_count=0, removed_count=0)
+        finally:
+            termine.set()
 
     monkeypatch.setitem(api_module._SYNC_RUNNERS, "ofac", _slow_sync)
-    started = _time.monotonic()
-    response = client.post("/api/sync/run", json={"source": "OFAC"})
-    elapsed = _time.monotonic() - started
-    assert response.status_code == 202, response.text
-    assert elapsed < 1.0, f"la requête a attendu le cycle ({elapsed:.2f} s)"
+    try:
+        response = client.post("/api/sync/run", json={"source": "OFAC"})
+        assert response.status_code == 202, response.text
+        assert not termine.is_set(), "la requête a attendu la fin du cycle"
+    finally:
+        # Quoi qu'il arrive au-dessus : le fil doit avoir appele le FAUX cycle
+        # avant que le monkeypatch ne soit defait.
+        tenue.set()
+        assert termine.wait(30), "le cycle n'a jamais été appelé"
     state = wait_for_job(client, response.json()["job_token"])
     assert state["status"] == "DONE", state
 
