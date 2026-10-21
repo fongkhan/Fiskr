@@ -20,6 +20,12 @@ identifiant exact (BIC, LEI) n'est pas « sans correspondance » : elle est
 NON CRIBLEE, tracee comme telle, et interdit le PASS — de meme qu'un message
 auquel manque une information obligatoire du reglement (UE) 2023/1113. Le
 verdict est alors INCOMPLETE, avec la liste nommee de ce qui manque.
+
+Deux lectures hors du moteur de score s'y ajoutent : le lien avec un
+territoire sous mesures restrictives de l'Union (fiskr/territoires.py,
+verdict TERRITORY) et l'imputation de chaque omission au prestataire qui
+transmet le virement (fiskr/prestataires.py, art. 8 §2 ; verdict FAILING_PSP
+sous la politique renforcee).
 """
 import logging
 import re
@@ -132,16 +138,29 @@ def lei_comparable(lei: str) -> str:
     return propre if len(propre) == 20 else ""
 
 
-def _adresse(elem) -> Dict[str, str]:
+def _lieux(postal) -> List[Tuple[str, str]]:
+    """Champs de l'adresse qui nomment un LIEU, tels qu'ecrits, pour la lecture
+    des territoires sous mesures restrictives (fiskr/territoires.py) : ville,
+    localite, district, subdivision, lignes libres. Pas StrtNm : un nom de rue
+    n'est pas un domicile (« boulevard de Sebastopol »)."""
+    if postal is None:
+        return []
+    from fiskr.territoires import CHAMPS_ADRESSE
+    return [(champ, (c.text or "").strip()) for c in postal
+            for champ in (_local(c),) if champ in CHAMPS_ADRESSE and (c.text or "").strip()]
+
+
+def _adresse(elem) -> Dict[str, Any]:
     """Adresse postale (PstlAdr) : pays, ville, lignes libres."""
     postal = _child(elem, "PstlAdr")
     if postal is None:
-        return {"country": "", "town": "", "address": ""}
+        return {"country": "", "town": "", "address": "", "lieux": []}
     lines = [(c.text or "").strip() for c in postal if _local(c) == "AdrLine"]
     return {
         "country": _child_text(postal, "Ctry").upper(),
         "town": _child_text(postal, "TwnNm"),
         "address": ", ".join(l for l in lines if l),
+        "lieux": _lieux(postal),
     }
 
 
@@ -218,6 +237,7 @@ def _extract_party(elem, role_tag: str, container=None) -> Optional[Dict[str, An
         "birth_date": _child_text(birth, "BirthDt"),
         "birth_city": _child_text(birth, "CityOfBirth"),
         "birth_country": _child_text(birth, "CtryOfBirth").upper(),
+        "lieux": adresse["lieux"],
         "is_agent": False,
     }
 
@@ -253,6 +273,9 @@ def _extract_agent(elem, role_tag: str) -> Optional[Dict[str, Any]]:
         "birth_date": "",
         "birth_city": "",
         "birth_country": "",
+        # L'adresse d'une banque se lit aussi : un agent etabli a Simferopol
+        # lie le paiement au territoire autant qu'un beneficiaire.
+        "lieux": _lieux(_child(fin, "PstlAdr")),
         "is_agent": True,
     }
 
@@ -333,6 +356,10 @@ def parse_iso20022_payment(content: bytes) -> Dict[str, Any]:
         for pmt_inf in (c for c in message_elem if _local(c) == "PmtInf"):
             batch_parties: List[Dict[str, Any]] = list(header_parties)
             _collect_parties(pmt_inf, batch_parties)
+            # ReqdExctnDt : date seule (pain.001.001.03) ou <Dt>/<DtTm> (.09+)
+            execution = (_child_text(pmt_inf, "ReqdExctnDt", "Dt")
+                         or _child_text(pmt_inf, "ReqdExctnDt", "DtTm")
+                         or _child_text(pmt_inf, "ReqdExctnDt"))
             for tx in (c for c in pmt_inf if _local(c) == "CdtTrfTxInf"):
                 parties = list(batch_parties)
                 _collect_parties(tx, parties)
@@ -342,18 +369,24 @@ def parse_iso20022_payment(content: bytes) -> Dict[str, Any]:
                     "amount": amount,
                     "currency": currency,
                     "remittance": _remise(tx),
+                    "operation_date": execution,
+                    "operation_date_source": "ReqdExctnDt" if execution else "",
                     "parties": parties,
                 })
     else:  # pacs.008 : les parties sont toutes portees par chaque CdtTrfTxInf
+        reglement_lot = _child_text(grp_hdr, "IntrBkSttlmDt") if grp_hdr is not None else ""
         for tx in (c for c in message_elem if _local(c) == "CdtTrfTxInf"):
             parties = list(header_parties)
             _collect_parties(tx, parties)
             amount, currency = _extract_amount(tx)
+            reglement = _child_text(tx, "IntrBkSttlmDt") or reglement_lot
             result["transactions"].append({
                 "end_to_end_id": _child_text(tx, "PmtId", "EndToEndId") or _child_text(tx, "PmtId", "TxId"),
                 "amount": amount,
                 "currency": currency,
                 "remittance": _remise(tx),
+                "operation_date": reglement,
+                "operation_date_source": "IntrBkSttlmDt" if reglement else "",
                 "parties": parties,
             })
 
@@ -416,13 +449,32 @@ class MessageSansPartieCriblable(ValueError):
 # aux listes, une information obligatoire absente du message. Dans les deux
 # cas le paiement ne doit pas partir sur la foi du filtrage — c'est ce que
 # l'operateur a besoin de savoir, et la liste nommee dit quoi regarder.
+#
+# Deux verdicts s'y ajoutent, qui ne sont pas des correspondances de NOM et ne
+# touchent ni score ni statut de partie, mais interdisent le PASS pour la meme
+# raison : quelque chose demande une decision avant l'execution.
+#   - TERRITORY : le paiement est lie a un territoire sous mesures restrictives
+#     de l'Union (fiskr/territoires.py) — un signal a instruire, pas un HIT :
+#     aucune personne designee n'est en cause, et toute operation liee au
+#     territoire n'est pas interdite ;
+#   - FAILING_PSP : le transfert vient d'un prestataire identifie comme
+#     « omettant de maniere repetee » les informations requises (reglement
+#     (UE) 2023/1113, art. 8 §2, fiskr/prestataires.py), et la politique
+#     renforcee est choisie : retenir chacun de ses transferts pour decision
+#     (rejet, art. 8 §2 b, ou execution).
+# Ordre : HIT (gel des avoirs : rejeter rendrait des fonds qui doivent etre
+# geles), TERRITORY (interdiction d'operation), FAILING_PSP, INCOMPLETE, PASS.
 VERDICT_HIT = "HIT"
+VERDICT_TERRITOIRE = "TERRITORY"
+VERDICT_PRESTATAIRE_DEFAILLANT = "FAILING_PSP"
 VERDICT_INCOMPLET = "INCOMPLETE"
 VERDICT_PASS = "PASS"
 # Libelles d'un seul tenant (pas de concatenation) : l'ecran les affiche et
 # fiskr/static/i18n.js les traduit par correspondance exacte.
 VERDICTS = {
     VERDICT_HIT: "Au moins une correspondance en alerte : alerte(s) ouverte(s).",
+    VERDICT_TERRITOIRE: "Paiement lié à un territoire sous mesures restrictives de l'Union (Crimée, Sébastopol, zones non contrôlées de Donetsk, Louhansk, Kherson, Zaporija) : à instruire avant exécution. Ce n'est pas une correspondance de sanction.",
+    VERDICT_PRESTATAIRE_DEFAILLANT: "Transfert d'un prestataire défaillant (règlement (UE) 2023/1113, art. 8 §2), politique renforcée : à retenir jusqu'à décision — rejet ou exécution.",
     VERDICT_INCOMPLET: "Filtrage incomplet : partie non criblée ou information obligatoire manquante. À revoir avant exécution.",
     VERDICT_PASS: "Toutes les parties criblées sans correspondance, message complet.",
 }
@@ -640,17 +692,31 @@ def manques_de_completude(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     } for code in MANQUES if code in par_code]
 
 
+def manques_par_transaction(parsed: Dict[str, Any]) -> List[Tuple[Dict[str, Any], List[str]]]:
+    """(transaction, codes manquants sous son regime) — la meme lecture que
+    `manques_de_completude`, transaction par transaction : c'est elle que le
+    registre des prestataires impute (fiskr/prestataires.py)."""
+    return [(tx, _manques_transaction(tx, regime_de_completude(tx))) for tx in parsed["transactions"]]
+
+
 def transactions_sous_art_5(parsed: Dict[str, Any]) -> int:
     """Nombre de transactions auxquelles la derogation intra-Union s'applique."""
     return sum(1 for tx in parsed["transactions"] if regime_de_completude(tx)["article"] == "5")
 
 
-def verdict_du_message(en_alerte: bool, non_criblees: int, manques: List[Dict[str, Any]]) -> str:
+def verdict_du_message(en_alerte: bool, non_criblees: int, manques: List[Dict[str, Any]],
+                       territoires: Optional[List[Dict[str, Any]]] = None,
+                       prestataire_retenu: bool = False) -> str:
     """HIT l'emporte (une alerte est ouverte, le paiement est arrete de toute
-    facon) ; puis INCOMPLETE ; PASS seulement quand tout a ete compare et que
-    rien d'obligatoire ne manque."""
+    facon) ; puis TERRITORY, FAILING_PSP, INCOMPLETE ; PASS seulement quand
+    tout a ete compare, que rien d'obligatoire ne manque, et que rien d'autre
+    n'appelle une decision."""
     if en_alerte:
         return VERDICT_HIT
+    if territoires:
+        return VERDICT_TERRITOIRE
+    if prestataire_retenu:
+        return VERDICT_PRESTATAIRE_DEFAILLANT
     if non_criblees or manques:
         return VERDICT_INCOMPLET
     return VERDICT_PASS
@@ -1107,7 +1173,7 @@ def _parties_texte_libre(parsed: Dict[str, Any], parties: List[Dict[str, Any]],
                 "role_tag": "RmtInf", "role": ROLE_TEXTE_LIBRE, "roles": [ROLE_TEXTE_LIBRE],
                 "name": sequence, "has_name": True, "country": "", "town": "", "address": "",
                 "bic": "", "lei": "", "other_ids": [], "account": "",
-                "birth_date": "", "birth_city": "", "birth_country": "", "is_agent": False,
+                "birth_date": "", "birth_city": "", "birth_country": "", "lieux": [], "is_agent": False,
                 "free_text": {"field": "RmtInf/Ustrd", "sequence": sequence,
                               "excerpt": texte[:140], "transactions": [],
                               "candidates": candidats},
@@ -1342,11 +1408,21 @@ def screen_payment_message(db, parsed: Dict[str, Any],
     hits = [p for p in party_results if p["status"] == "ALERT"]
     non_criblees = sum(1 for p in party_results if p["status"] == STATUT_NON_CRIBLEE)
     manques = manques_de_completude(parsed)
-    verdict = verdict_du_message(en_alerte, non_criblees, manques)
+    # Hors du moteur de score, comme le risque pays : ni score ni statut de
+    # partie ne changent ; seul le verdict du message dit qu'il y a a decider.
+    from fiskr import prestataires, territoires
+    territoire = territoires.signaux_du_message(parsed, ROLE_TEXTE_LIBRE)
+    # Imputation au prestataire qui transmet (art. 8 §2) : lue sur les manques
+    # transaction par transaction, quel que soit le verdict — un HIT incomplet
+    # reste une omission du prestataire.
+    psp = prestataires.consigner(db, parsed, manques_par_transaction(parsed), username)
+    verdict = verdict_du_message(en_alerte, non_criblees, manques,
+                                 territoire["signals"], psp["retain"])
     logger.info(
         f"Filtrage transactionnel {parsed['message_type']} {msg_id} : "
         f"{len(party_results) - non_criblees} partie(s) criblée(s), {non_criblees} non criblée(s), "
-        f"{len(manques)} information(s) obligatoire(s) manquante(s), {len(hits)} hit(s) — verdict {verdict}."
+        f"{len(manques)} information(s) obligatoire(s) manquante(s), {len(hits)} hit(s), "
+        f"{len(territoire['signals'])} signal(aux) territorial(aux) — verdict {verdict}."
     )
     return {
         "verdict": verdict,
@@ -1363,4 +1439,11 @@ def screen_payment_message(db, parsed: Dict[str, Any],
         "free_text": {"screened": remises,
                       "hits": sum(1 for p in hits if p.get("free_text"))},
         "screening_lists": restriction,
+        # Territoires sous mesures restrictives (fiskr/territoires.py) : les
+        # signaux, la date de la table, et ce que la DATE de l'operation a
+        # ecarte (lieu cite avant l'entree en vigueur, ou apres sa reprise)
+        "territory_signals": territoire["signals"],
+        "territory_set_aside": territoire["set_aside_by_date"],
+        "territory_table_as_of": territoire["as_of"],
+        "payment_service_providers": psp,
     }

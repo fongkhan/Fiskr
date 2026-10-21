@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fiskr.database import (
-    ALERT_CLOSED_STATUSES, ALERT_OPEN_STATUSES, WATCHLIST_FILE_TYPES,
+    ALERT_CLOSED_STATUSES, ALERT_OPEN_STATUSES, ALERT_WORK_STATUSES, WATCHLIST_FILE_TYPES,
     Alert, AuditTrail, FpRule, Snapshot, SyncReport, WhitelistPair,
 )
 
@@ -76,7 +76,8 @@ def delai_de_declaration_secondes(ouverte_le: Optional[datetime],
     Delai entre la confirmation d'une alerte du perimetre SANCTION (ouverture
     de la mesure de gel) et sa declaration a la DG Tresor — la SEULE
     definition, lue par le registre, l'indicateur, la notification de retard
-    et le controle de mise en service.
+    et le controle de mise en service. La declaration d'homonymie la lit aussi
+    (doute -> transmission, transmission -> reponse) : meme arithmetique.
 
     Les lignes directrices DGT/ACPR (§99) font des « delais de declaration »
     un point de controle interne : il faut donc un chiffre, et un seul.
@@ -134,6 +135,61 @@ def synthese_des_gels(db, maintenant: Optional[datetime] = None) -> Dict[str, An
     }
 
 
+# ------------------ HOMONYMIE : DELAI DOUTE -> TRANSMISSION A LA DG TRESOR ------------------
+
+def homonymie_non_transmise_en_retard(statut: Optional[str], preparee_le: Optional[datetime],
+                                      transmise_le: Optional[datetime], seuil_heures: float,
+                                      maintenant: Optional[datetime] = None) -> bool:
+    """
+    Une declaration d'homonymie preparee, ENCORE a transmettre, dont le delai
+    depuis la declaration du doute depasse le seuil — la SEULE definition, lue
+    par le registre, la notification et le controle de mise en service. Le
+    delai est celui de `delai_de_declaration_secondes` (meme arithmetique :
+    debut, fin ou maintenant, jamais negatif).
+
+    L'attente de la REPONSE n'est pas un retard : la DG Tresor a son rythme,
+    et l'organisme n'y peut rien que relancer. Elle se lit dans le registre
+    (fiskr/homonymie.attente_longue), elle ne sonne pas.
+    """
+    from fiskr.homonymie import STATUT_A_TRANSMETTRE
+    if statut != STATUT_A_TRANSMETTRE or transmise_le is not None:
+        return False
+    delai = delai_de_declaration_secondes(preparee_le, None, maintenant)
+    return delai is not None and delai > seuil_heures * 3600
+
+
+def synthese_des_homonymies(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
+    """Le registre des declarations d'homonymie, tel que le pilotage le lit."""
+    from fiskr.database import DeclarationHomonymie
+    from fiskr import homonymie
+    from fiskr.settings import homonymie_transmission_delai_heures
+
+    now = maintenant or datetime.utcnow()
+    seuil = homonymie_transmission_delai_heures(db)
+    lignes = db.query(DeclarationHomonymie.statut, DeclarationHomonymie.preparee_le,
+                      DeclarationHomonymie.transmise_le, DeclarationHomonymie.reponse_le).all()
+    transmissions = [delai_de_declaration_secondes(p, t) for _s, p, t, _r in lignes
+                     if t is not None]
+    attentes = [delai_de_declaration_secondes(t, r) for _s, _p, t, r in lignes
+                if t is not None and r is not None]
+    return {
+        "to_transmit": sum(1 for s, *_ in lignes if s == homonymie.STATUT_A_TRANSMETTRE),
+        "overdue": sum(1 for s, p, t, _r in lignes
+                       if homonymie_non_transmise_en_retard(s, p, t, seuil, now)),
+        "awaiting_reply": sum(1 for s, *_ in lignes if s == homonymie.STATUT_TRANSMISE),
+        "long_wait": sum(1 for s, _p, t, _r in lignes
+                         if homonymie.attente_longue(s, t, now)),
+        "to_decide": sum(1 for s, *_ in lignes if s == homonymie.STATUT_A_DECIDER),
+        "closed": sum(1 for s, *_ in lignes if s == homonymie.STATUT_TERMINEE),
+        "avg_transmission_delay_seconds": (int(round(sum(transmissions) / len(transmissions)))
+                                           if transmissions else None),
+        "avg_reply_delay_seconds": (int(round(sum(attentes) / len(attentes)))
+                                    if attentes else None),
+        "threshold_hours": seuil,
+        "long_wait_days": homonymie.ATTENTE_LONGUE_JOURS,
+    }
+
+
 # ------------------ PPE : DELAI CONFIRMATION -> DECISION DE LA DIRECTION ------------------
 
 def delai_de_decision_ppe_secondes(ouvert_le: Optional[datetime],
@@ -175,7 +231,7 @@ def decision_ppe_en_retard(statut: Optional[str], ouvert_le: Optional[datetime],
 def synthese_des_dossiers_ppe(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
     """Les dossiers PPE, tels que le pilotage les lit."""
     from fiskr.database import DossierPPE
-    from fiskr.ppe import STATUT_A_DECIDER, STATUT_DECIDE
+    from fiskr.ppe import STATUT_A_DECIDER, STATUT_DECIDE, revue_en_retard, revues_echues
     from fiskr.settings import ppe_decision_delai_jours
 
     now = maintenant or datetime.utcnow()
@@ -184,7 +240,12 @@ def synthese_des_dossiers_ppe(db, maintenant: Optional[datetime] = None) -> Dict
                       DossierPPE.ppe_non_declaree).all()
     delais = [delai_de_decision_ppe_secondes(o, d) for _s, o, d, _n in lignes if d is not None]
     delais = [d for d in delais if d is not None]
+    # Revues de vigilance renforcee (fiskr/ppe.py) : echues, et echues depuis
+    # plus que le delai — celles-la bloquent la mise en service
+    echues = revues_echues(db, now)
     return {
+        "reviews_due": len(echues),
+        "reviews_overdue": sum(1 for d in echues if revue_en_retard(d, seuil, now)),
         "to_decide": sum(1 for s, _o, _d, _n in lignes if s == STATUT_A_DECIDER),
         "overdue": sum(1 for s, o, d, _n in lignes
                        if decision_ppe_en_retard(s, o, d, seuil, now)),
@@ -358,10 +419,11 @@ def indicateurs(db, maintenant: Optional[datetime] = None) -> Dict[str, Any]:
                    .order_by(FpRule.hit_count.desc()).limit(20).all()
     ]
 
-    # Alertes ouvertes les plus anciennes (liste « à traiter » de l'accueil)
+    # Alertes ouvertes les plus anciennes (liste « à traiter » de l'accueil) :
+    # une alerte qui attend la DG Tresor n'est pas « a traiter »
     oldest_open = (
         db.query(Alert)
-          .filter(Alert.status.in_(ALERT_OPEN_STATUSES))
+          .filter(Alert.status.in_(ALERT_WORK_STATUSES))
           .order_by(Alert.created_at.asc()).limit(5).all()
     )
 

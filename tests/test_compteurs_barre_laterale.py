@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from fiskr.api import app, ALERT_OPEN_STATUSES
+from fiskr.api import app, ALERT_OPEN_STATUSES, ALERT_WORK_STATUSES
 from fiskr.auth import get_current_user
 from fiskr.database import get_db, Alert, AuditTrail
 
@@ -37,6 +37,9 @@ JEU = [
     ("OPEN", "FILTERING", None),                              # sans echeance : jamais en retard
     ("IN_PROGRESS", "SCREENING", MAINTENANT - timedelta(days=2)),
     ("PENDING_VALIDATION", "SCREENING", None),
+    # Doute d'homonymie declare : ouverte, echeance passee, mais pas « en
+    # retard SLA » — elle attend la DG Tresor, pas l'analyste
+    ("PENDING_DGT", "SCREENING", MAINTENANT - timedelta(days=5)),
     ("CLOSED", "SCREENING", MAINTENANT - timedelta(days=3)),  # fermee : hors de tout
     ("CLOSED", "FILTERING", None),
 ]
@@ -86,8 +89,8 @@ def _reference(db) -> dict:
                                       if a.channel == "SCREENING" or a.channel is None]),
         "open_alerts_filtering": len([a for a in ouvertes if a.channel == "FILTERING"]),
         "pending_validation": len([a for a in lignes if a.status == "PENDING_VALIDATION"]),
-        "overdue_alerts": len([a for a in ouvertes
-                               if a.due_at is not None and a.due_at < maintenant]),
+        "overdue_alerts": len([a for a in ouvertes if a.status in ALERT_WORK_STATUSES
+                               and a.due_at is not None and a.due_at < maintenant]),
     }
 
 

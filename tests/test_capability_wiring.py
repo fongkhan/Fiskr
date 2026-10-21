@@ -334,6 +334,12 @@ def test_a_geographic_match_still_earns_its_bonus_when_missing_is_neutral():
 # capacites fait retomber au scoring flou une identite pourtant certaine.
 # Les noms sont volontairement DIFFERENTS, pour qu'aucun de ces cas ne puisse
 # alerter autrement que par l'identifiant.
+#
+# Passeport et piece d'identite portent leur pays sous `issuing_country`, la
+# cle que lisent le moteur et les lecteurs de listes. Ces deux cas l'ecrivaient
+# `country` : ils ne passaient que parce que deux pays ABSENTS se tenaient pour
+# egaux. Depuis que le hard match exige un pays etabli des deux cotes
+# (scoring.pays_emetteur_etabli), ils portent la cle juste.
 
 RAISON_A = {"client_type": "PM", "client_company_name": "ACME HOLDING SA"}
 RAISON_B = {"entity_type": "E", "primary_name": "ZENITH TRADING LIMITED"}
@@ -351,14 +357,14 @@ CAS_IDENTIFIANTS = [
      {"client_crypto_wallets": ["1KZbe5nEjCWJHhK6egNhSCk7BQXpXBcnr"]},
      {"crypto_wallets": [{"address": "1KZbe5nEjCWJHhK6egNhSCk7BQXpXBcnr"}]}),
     (caps.CAP_HARD_PASSPORT,
-     {"client_passport_documents": [{"number": "12AB34567", "country": "FR"}]},
-     {"passport_documents": [{"number": "12AB34567", "country": "FR"}]}),
+     {"client_passport_documents": [{"number": "12AB34567", "issuing_country": "FR"}]},
+     {"passport_documents": [{"number": "12AB34567", "issuing_country": "FR"}]}),
     (caps.CAP_HARD_NATIONAL_REGISTRY,
      {"client_national_registry_ids": [{"number": "552081317", "country": "FR"}]},
      {"national_registry_ids": [{"number": "552081317", "country": "FR"}]}),
     (caps.CAP_HARD_NATIONAL_ID,
-     {"client_national_id_documents": [{"number": "980456789", "country": "FR"}]},
-     {"national_id_documents": [{"number": "980456789", "country": "FR"}]}),
+     {"client_national_id_documents": [{"number": "980456789", "issuing_country": "FR"}]},
+     {"national_id_documents": [{"number": "980456789", "issuing_country": "FR"}]}),
     (caps.CAP_HARD_VESSEL,
      {"transaction_vessel_imo": "9074729"}, {"imo_number": "9074729"}),
     (caps.CAP_HARD_AIRCRAFT,

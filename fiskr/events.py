@@ -237,6 +237,17 @@ EVENT_CATALOG: Dict[str, Event] = {
         category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
         urgency=IMMEDIATE, link="#screening/alerts-gels",
     ),
+    "homonymie_non_transmise": Event(
+        # IMMEDIAT : un doute d'homonymie declare dans Fiskr mais pas a la DG
+        # Tresor, au-dela du delai — la declaration est due « dans les plus
+        # brefs delais » (LD DGT/ACPR 2026, §167), et sur un flux l'operation
+        # reste suspendue en attendant (§162). Une fois par declaration.
+        # L'attente de la REPONSE, elle, ne notifie pas : la DG Tresor a son
+        # rythme, et rien n'est a faire que relancer.
+        label="Déclaration d'homonymie non transmise à la DG Trésor dans le délai",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-gels",
+    ),
     "gel_radiation_a_examiner": Event(
         # IMMEDIAT : la fiche d'une mesure de gel en vigueur a disparu de sa
         # liste a la mise en production d'une version (fiskr/caducite.py). Un
@@ -255,6 +266,15 @@ EVENT_CATALOG: Dict[str, Event] = {
         # sont ces personnes dans Fiskr (fiskr/ppe.py). Une fois par dossier :
         # repete a chaque recapitulatif, il finirait filtre.
         label="Dossier PPE sans décision d'entrée ou de maintien en relation dans le délai",
+        category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#screening/alerts-ppe",
+    ),
+    "ppe_revue_echue": Event(
+        # IMMEDIAT : la revue de vigilance renforcee datee a la decision
+        # (R.561-20-2 3°) a atteint sa date. Elle n'etait signalee qu'a
+        # l'ecran, que personne n'ouvre pour cela. Une fois par echeance : la
+        # revue suivante en fixe une autre.
+        label="Dossier PPE : revue de vigilance renforcée échue",
         category=CATEGORY_SCREENING, audience=("reviewer", "admin"),
         urgency=IMMEDIATE, link="#screening/alerts-ppe",
     ),
@@ -326,6 +346,16 @@ EVENT_CATALOG: Dict[str, Event] = {
         label="Fichier de l'inbox CFT refusé",
         category=CATEGORY_FILTERING, audience=("admin",),
         urgency=IMMEDIATE, link="#batch",
+    ),
+    "prestataire_defaillant": Event(
+        # IMMEDIAT et une fois par identification (fiskr/prestataires.py) :
+        # l'art. 8 §2 du reglement (UE) 2023/1113 appelle des dispositions a
+        # l'egard du prestataire et une declaration a l'autorite, au plus tard
+        # trois mois apres l'identification (EBA/GL/2024/11, §74). Rien ne part
+        # pour un prestataire sous les seuils.
+        label="Prestataire de paiement défaillant : informations requises omises de manière répétée",
+        category=CATEGORY_FILTERING, audience=("reviewer", "admin"),
+        urgency=IMMEDIATE, link="#filtering/filtering-prestataires",
     ),
 
     # ------------------ GOUVERNANCE & EXPLOITATION ------------------

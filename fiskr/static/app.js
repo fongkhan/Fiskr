@@ -987,7 +987,8 @@ function initSortableTables() {
 const STATUS_LABELS = {
  // Alertes
  OPEN: "Ouverte", IN_PROGRESS: "En cours", ESCALATED: "Escaladée",
- PENDING_VALIDATION: "À valider (4 yeux)", CLOSED_CONFIRMED: "Vrai positif",
+ PENDING_VALIDATION: "À valider (4 yeux)", PENDING_DGT: "Attente DG Trésor",
+ CLOSED_CONFIRMED: "Vrai positif",
  CLOSED_FALSE_POSITIVE: "Faux positif", CLOSED_BY_RULE: "Close par règle",
  // Snapshots
  READY: "En production", PENDING_REVIEW: "En homologation", SUPERSEDED: "Remplacé",
@@ -1025,12 +1026,18 @@ const ALERT_EVENT_LABELS = {
  GEL_DECLARATION_EN_RETARD: "Déclaration de gel en retard",
  GEL_DRAFT_GENERATED: "Projet de déclaration de gel généré",
  DETENTION_REPUTEE: "Client réputé détenu ou contrôlé", DETENTION_NON_ETABLIE: "Détention ou contrôle non établi",
+ HOMONYMIE_DECLAREE: "Doute d'homonymie déclaré", HOMONYMIE_TRANSMISE: "Déclaration d'homonymie transmise",
+ HOMONYMIE_ECHANGE: "Échange avec la DG Trésor", HOMONYMIE_REPONSE: "Réponse de la DG Trésor",
+ HOMONYMIE_DECISION: "Décision sur le doute persistant", HOMONYMIE_TERMINEE: "Déclaration d'homonymie terminée",
+ HOMONYMIE_ABANDONNEE: "Déclaration d'homonymie abandonnée",
+ HOMONYMIE_NON_TRANSMISE: "Déclaration d'homonymie non transmise dans le délai",
  WHITELIST_STALE: "Liste blanche à réexaminer", WHITELISTED: "Mémorisée en liste blanche",
  DELISTED: "Fiche radiée", REIDENTIFIED: "Fiche ré-identifiée", LAPSED: "Caduque",
  LAPSE_CLEARED: "Caducité levée", GEL_RADIATION_A_EXAMINER: "Radiation à examiner",
  PPE_DOSSIER_OUVERT: "Dossier PPE ouvert", PPE_NON_DECLAREE: "PPE non déclarée par le SI amont",
  PPE_DOSSIER_INSTRUIT: "Dossier PPE instruit", PPE_PIECE_ORIGINE: "Pièce de l'origine des fonds",
  PPE_DECISION: "Décision sur la relation (PPE)", PPE_DECISION_EN_RETARD: "Décision PPE en retard",
+ PPE_REVUE: "Revue de vigilance renforcée (PPE)", PPE_REVUE_ECHUE: "Revue PPE échue",
 };
 
 function alertEventLabel(action) {
@@ -1950,6 +1957,16 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-10-21-homonymie-et-virements", date: "2026-10-21",
+ titre: "Le doute d'homonymie a sa procédure, et les virements sont mieux lus",
+ points: [
+ "Une correspondance qu'on ne peut ni lever ni confirmer se déclare à la DG Trésor : l'alerte attend sa réponse, et un retard de transmission vous est signalé.",
+ "Un prestataire qui omet régulièrement les informations requises sur les virements est repéré ; un virement lié à un territoire sous embargo est signalé à instruire.",
+ "Une détention indirecte au-delà du premier niveau est calculée, et la chaîne capitalistique vous est montrée.",
+ "L'historique des homologations compte aussi les décisions antérieures à leur dossier.",
+ ],
+ },
+ {
  id: "2026-10-21-parties-et-ppe", date: "2026-10-21",
  titre: "Les bénéficiaires effectifs criblés, et la suite d'une PPE",
  points: [
@@ -2658,7 +2675,7 @@ async function checkAuthUser() {
  if (syncAutomationCard) syncAutomationCard.classList.toggle("hidden", !isAdmin);
  // Cartes de reglages issues de config.yaml : administration pure
  for (const cardId of ["institution-card", "security-access-card",
- "adverse-media-card", "llm-card", "batch-inbox-card"]) {
+ "adverse-media-card", "llm-card", "batch-inbox-card", "psp-criteres-card"]) {
  const card = document.getElementById(cardId);
  if (card) card.classList.toggle("hidden", !isAdmin);
  }
@@ -2900,12 +2917,15 @@ function switchSubTab(sectionId, subTabId) {
  fetchSavedViews("SCREENING");
  } else if (subTabId === "alerts-gels") {
  fetchGels();
+ fetchHomonymies();
  } else if (subTabId === "alerts-ppe") {
  fetchDossiersPPE();
  } else if (subTabId === "alerts-filtering") {
  fetchAlerts("FILTERING");
  populateAssigneeFilters();
  fetchSavedViews("FILTERING");
+ } else if (subTabId === "filtering-prestataires") {
+ fetchPrestataires();
  } else if (subTabId === "alerts-whitelist") {
  fetchWhitelist();
  } else if (subTabId === "alerts-blocking") {
@@ -3020,7 +3040,8 @@ function toggleManualFormFields() {
  const passportGroup = document.getElementById("manual-passport-group");
  const passportCountryGroup = document.getElementById("manual-passport-country-group");
  const nationalIdGroup = document.getElementById("manual-national-id-group");
- 
+ const nationalIdCountryGroup = document.getElementById("manual-national-id-country-group");
+
  // Default: Hide all specific groups
  if (individualFields) individualFields.classList.add("hidden");
  
@@ -3030,12 +3051,14 @@ function toggleManualFormFields() {
  if (passportGroup) passportGroup.classList.add("hidden");
  if (passportCountryGroup) passportCountryGroup.classList.add("hidden");
  if (nationalIdGroup) nationalIdGroup.classList.add("hidden");
- 
+ if (nationalIdCountryGroup) nationalIdCountryGroup.classList.add("hidden");
+
  if (type === "I") {
  if (individualFields) individualFields.classList.remove("hidden");
  if (passportGroup) passportGroup.classList.remove("hidden");
  if (passportCountryGroup) passportCountryGroup.classList.remove("hidden");
  if (nationalIdGroup) nationalIdGroup.classList.remove("hidden");
+ if (nationalIdCountryGroup) nationalIdCountryGroup.classList.remove("hidden");
  } else if (type === "E") {
  if (leiGroup) leiGroup.classList.remove("hidden");
  } else if (type === "V") {
@@ -3146,7 +3169,8 @@ async function handleManualEntity(event) {
  const passportNum = document.getElementById("manual-passport-num").value.trim();
  const passportCountry = document.getElementById("manual-passport-country").value.trim();
  const nationalId = document.getElementById("manual-national-id").value.trim();
- 
+ const nationalIdCountry = document.getElementById("manual-national-id-country").value.trim();
+
  // Extra
  const gender = document.getElementById("manual-gender").value;
  const dateOfDeath = document.getElementById("manual-date-of-death").value.trim();
@@ -3180,7 +3204,11 @@ async function handleManualEntity(event) {
  gender: gender || "U",
  aircraft_tail_number: aircraft || null,
  passport_documents: passportNum ? `${passportNum}` : null,
+ // Le pays saisi était lu puis jeté : le serveur écrivait « XX » et le hard
+ // match (numéro ET pays) ne rapprochait jamais ce passeport d'un client.
+ passport_issuing_country: passportNum && passportCountry ? passportCountry : null,
  national_id_documents: nationalId ? `${nationalId}` : null,
+ national_id_issuing_country: nationalId && nationalIdCountry ? nationalIdCountry : null,
  place_of_birth: placeOfBirth || null,
  address: address || null,
  city: city || null,
@@ -3214,6 +3242,9 @@ async function handleManualEntity(event) {
  
  const data = await response.json();
  showToast(`Entité ajoutée avec succès ! ID : ${data.entity_id}`, "success");
+ if ((data.documents_sans_pays || []).length) {
+ showToast("Document enregistré sans pays émetteur : il ne déclenchera aucune correspondance exacte (hard match). Le nom reste comparé.", "warning");
+ }
  
  // Reset form
  document.getElementById("manual-entity-form").reset();
@@ -4865,8 +4896,10 @@ async function handleScreening(event) {
  client_lei_number: lei || null,
  transaction_vessel_imo: imo || null,
  transaction_aircraft_registration: aircraft || null,
- client_passport_documents: passportNum ? [{ "number": passportNum, "issuing_country": passportCountry || "XX" }] : [],
- client_national_id_documents: nationalId ? [{ "number": nationalId, "issuing_country": "XX" }] : [],
+ // Sans pays saisi, le document part SANS pays : « XX » n'est pas un pays,
+ // et le hard match ne rapproche que des documents au pays établi.
+ client_passport_documents: passportNum ? [{ "number": passportNum, "issuing_country": passportCountry ? passportCountry.toUpperCase() : null }] : [],
+ client_national_id_documents: nationalId ? [{ "number": nationalId, "issuing_country": null }] : [],
  client_other_id_documents: [],
  
  // Add new fields to payload
@@ -6331,6 +6364,8 @@ async function fetchIngestionSettings() {
  }
  const gelDelayEl = document.getElementById("setting-gel-delay");
  if (gelDelayEl) gelDelayEl.value = ingestionSettings.gel_declaration_delay_hours ?? "";
+ const homonymieDelayEl = document.getElementById("setting-homonymie-delay");
+ if (homonymieDelayEl) homonymieDelayEl.value = ingestionSettings.homonymy_transmission_delay_hours ?? "";
  const ppeDelayEl = document.getElementById("setting-ppe-delay");
  if (ppeDelayEl) ppeDelayEl.value = ingestionSettings.ppe_decision_delay_days ?? "";
  // Notifications : l'écran est généré depuis le catalogue du serveur
@@ -6460,6 +6495,9 @@ async function saveIngestionSettings() {
  // bornes est refusée par le serveur avec la raison.
  ...(document.getElementById("setting-gel-delay")?.value
    ? { gel_declaration_delay_hours: parseInt(document.getElementById("setting-gel-delay").value, 10) }
+   : {}),
+ ...(document.getElementById("setting-homonymie-delay")?.value
+   ? { homonymy_transmission_delay_hours: parseInt(document.getElementById("setting-homonymie-delay").value, 10) }
    : {}),
  ...(document.getElementById("setting-ppe-delay")?.value
    ? { ppe_decision_delay_days: parseInt(document.getElementById("setting-ppe-delay").value, 10) }
@@ -7263,6 +7301,16 @@ async function fetchReviewHistory(page = 1) {
   const pages = Math.max(1, Math.ceil(total / HISTORY_PER_PAGE));
   const countEl = document.getElementById("history-count");
   if (countEl) countEl.textContent = `${total} homologation(s)`;
+  // Les décisions antérieures au dossier d'homologation : comptées et datées,
+  // pour que l'historique ne passe pas pour complet.
+  const sansDossier = document.getElementById("history-sans-dossier");
+  const avant = data.decisions_sans_dossier || {};
+  if (sansDossier) {
+   sansDossier.classList.toggle("hidden", !avant.count);
+   if (avant.count) {
+    sansDossier.textContent = `${avant.count} décision(s) antérieure(s) au dossier d'homologation, du ${formatDate(avant.du)} au ${formatDate(avant.au)} : le lot garde son réviseur et sa date, mais ni delta ni cahier de tests figés à la décision.`;
+   }
+  }
   const label = document.getElementById("history-page-label");
   if (label) label.textContent = `Page ${historyPage} / ${pages}`;
   const prev = document.getElementById("history-prev");
@@ -8370,6 +8418,7 @@ function alertStatusBadge(status) {
  IN_PROGRESS: ["#38bdf8", "EN COURS"],
  ESCALATED: ["var(--color-alert)", "ESCALADÉE"],
  PENDING_VALIDATION: ["#c084fc", "À VALIDER (4-YEUX)"],
+ PENDING_DGT: ["var(--color-warning)", "ATTENTE DG TRÉSOR"],
  CLOSED_CONFIRMED: ["var(--color-alert)", "VRAI POSITIF"],
  CLOSED_FALSE_POSITIVE: ["var(--success-soft-text)", "FAUX POSITIF"],
  CLOSED_BY_RULE: ["#94a3b8", "CLÔTURÉE PAR RÈGLE"],
@@ -8477,7 +8526,14 @@ async function openAlertModal(alertId) {
  actionsHtml += a.following_me
  ? `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">★ Suivi — ne plus suivre</button>`
  : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="suivreAlerte(${a.id})">☆ Suivre ce dossier</button>`;
- if (a.status !== "PENDING_VALIDATION") {
+ if (a.status === "PENDING_DGT") {
+ // Doute d'homonymie déclaré : l'instruction est faite, l'alerte attend la
+ // DG Trésor. Ni proposition ni escalade — seule sa réponse la clôt (le
+ // serveur le refuse de toute façon) ; on peut encore commenter et suivre.
+ actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
+ actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
+ actionsHtml += `<span style="align-self: center; font-size: 0.85rem; color: var(--text-muted);">En attente de la DG Trésor : l'alerte se clôt à l'enregistrement de sa réponse (déclaration d'homonymie ci-dessous).</span>`;
+ } else if (a.status !== "PENDING_VALIDATION") {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="alertAction('assign')"> M'assigner</button>`;
  actionsHtml += `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="alertActionWithComment('comment', 'Commentaire')"> Commenter</button>`;
  actionsHtml += a.snoozed
@@ -8502,7 +8558,8 @@ async function openAlertModal(alertId) {
  actionsHtml = `<p class="section-desc" style="margin-top: 1rem;">Clôturée par <strong>@${escapeHtml(a.decided_by)}</strong> le ${a.decided_at ? new Date(a.decided_at).toLocaleString(uiLocale()) : ""} — ${escapeHtml(a.decision_comment || "")}</p>`;
  // Faux positif avere : proposer la mise en liste blanche (reviseurs)
  // (sauf si la paire a été posée à la validation : un second clic serait refusé)
- if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer && !(a.events || []).some(e => e.action === "WHITELISTED")) {
+ // ni si la DG Trésor n'a pas établi l'homonymie (doute persistant : LD §169)
+ if (a.status === "CLOSED_FALSE_POSITIVE" && isReviewer && !a.homonymie_liste_blanche_refus && !(a.events || []).some(e => e.action === "WHITELISTED")) {
  actionsHtml += `<button class="btn btn-sm btn-secondary" onclick="openWhitelistModal('${escapeHtml(a.client_id || "")}', '${escapeHtml(a.watchlist_entity_id)}', '${escapeHtml(a.client_name)}', '${escapeHtml(a.watchlist_name)}')"> Mettre en liste blanche</button>`;
  }
  }
@@ -8539,6 +8596,7 @@ async function openAlertModal(alertId) {
  </p>
  ${bandeauCaduciteHtml(a)}
  ${blocPartieLiee(a, roles.includes("auditor"))}
+ ${blocChaineDeDetentionHtml(a.partie_liee ? a.detention : null)}
  ${blocComparaison(a)}
  <h3 style="font-size: 0.95rem; margin: 0.75rem 0 0.5rem;">Explication du score</h3>
  <div class="table-container" style="max-height: 160px;">
@@ -8558,6 +8616,7 @@ async function openAlertModal(alertId) {
  </div>
  ${actionsHtml}
  ${blocMesuresDeGel(a, isReviewer)}
+ ${blocDeclarationsHomonymie(a, isReviewer)}
  ${blocDossiersPPE(a, isReviewer)}
  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
  <button class="btn btn-sm btn-secondary" onclick="generateAlertNarrative()"> Générer un narratif</button>
@@ -8602,6 +8661,46 @@ function blocDetentionHtml(d) {
  // un cumul nul ne dit rien à personne.
  if (!(d.parties || []).length) return "";
  return `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.3rem 0;"><span>Détention cumulée des parties confirmées</span> : ${escapeHtml(_pourcentageLisible(d.cumul_pct))} · <span>seuil</span> ${escapeHtml(_pourcentageLisible(d.seuil_pct))}</p>`;
+}
+
+// Chaîne de détention au-delà du premier niveau (fiskr/parties.py) : ACME ←
+// 60 % HOLDCO ← 70 % X. Le chemin, ce qu'il établit (cascade : une société
+// réputée détenue compte pour sa participation entière), le produit montré à
+// côté (aucun texte ne le fixe), et ce que le calcul n'a pas pu trancher.
+// Rien quand la relation n'a qu'un niveau et que tout est dit au-dessus.
+function blocChaineDeDetentionHtml(d, options) {
+ if (!d) return "";
+ const avecStructure = !(options && options.structure === false);
+ const structure = d.structure || [];
+ const indirecte = structure.some(s => s.niveau > 1 || s.partie_client_id);
+ const chaines = (d.chaines || []).filter(c => (c.niveau || 1) > 1);
+ const signaux = d.signalements || [];
+ // Calcul en direct, décision à la confirmation : réputé détenu sans mesure
+ // au registre se dit (null : aucune ; absent : la mesure elle-même).
+ const sansMesure = d.reputee && d.mesure_en_vigueur === null;
+ if (!indirecte && !chaines.length && !signaux.length && !sansMesure) return "";
+ const pct = v => v == null ? "" : `${escapeHtml(_pourcentageLisible(v))} `;
+ const lignesChaines = chaines.map(c => {
+  const bloquante = (c.etapes || []).slice(0, -1).find(e => !e.qualification);
+  const verdict = c.compte
+   ? `<strong style="color: var(--color-alert);">retenue</strong>`
+   : `<span>non retenue</span> — <strong>${escapeHtml(bloquante ? bloquante.nom : "")}</strong> <span>ni réputée détenue ni réputée contrôlée</span>`;
+  return `<li>${escapeHtml(c.racine || "")} ${(c.etapes || []).map(e => `← ${pct(e.pourcentage_detention)}<strong>${escapeHtml(e.nom)}</strong>`).join(" ")} (<span>personne désignée</span>) · ${verdict}${c.produit_pct != null ? ` · <span>par multiplication</span> ${escapeHtml(_pourcentageLisible(c.produit_pct))}` : ""}</li>`;
+ }).join("");
+ const lignesStructure = avecStructure && indirecte ? structure.map(s => `
+  <li style="padding-left: ${(s.niveau - 1) * 1.1}rem;">${s.niveau > 1 ? "← " : ""}${pct(s.pourcentage_detention)}<strong>${escapeHtml(s.nom)}</strong>${s.peut_engager_les_fonds ? ` · <span>peut engager les fonds</span>` : ""}${s.partie_client_id ? ` · <span>client du référentiel</span> ${escapeHtml(s.partie_client_id)}` : ""}${s.qualification_label ? ` · <em>${escapeHtml(s.qualification_label)}</em>` : ""}</li>`).join("") : "";
+ const cumul = chaines.length || indirecte
+  ? `<p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.2rem 0;"><span>Détention directe</span> ${pct(d.cumul_direct_pct)}· <span>par la chaîne</span> ${pct(d.cumul_indirect_pct)}· <span>par multiplication</span> ${pct(d.multiplication_pct)}· <span>seuil</span> ${pct(d.seuil_pct)}</p>`
+  : "";
+ const lignesSignaux = signaux.map(s => `<div class="anomaly-item warning" style="font-size: 0.82rem; overflow-wrap: anywhere;"><span>${escapeHtml(s.libelle)}</span>${s.texte ? ` — ${escapeHtml(s.texte)}` : ""}</div>`).join("");
+ return `<div style="margin: 0.5rem 0; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px;">
+  <p style="font-size: 0.88rem; font-weight: 600; margin: 0 0 0.3rem;">Chaîne de détention</p>
+  ${sansMesure ? `<div class="anomaly-item" style="color: var(--color-alert); font-size: 0.82rem;">Aucune mesure en vigueur au registre à ce titre.</div>` : ""}
+  ${cumul}
+  ${lignesChaines ? `<ul style="list-style: none; margin: 0 0 0.4rem; font-size: 0.82rem; overflow-wrap: anywhere;">${lignesChaines}</ul>` : ""}
+  ${lignesStructure ? `<p style="font-size: 0.8rem; color: var(--text-muted); margin: 0.3rem 0 0.2rem;">Structure déclarée</p><ul style="list-style: none; margin: 0; font-size: 0.82rem; overflow-wrap: anywhere;">${lignesStructure}</ul>` : ""}
+  ${lignesSignaux}
+ </div>`;
 }
 
 function blocPartieLiee(a, auditeur) {
@@ -8938,6 +9037,7 @@ function _blocMesure(m, vocab, isReviewer, auditeur) {
    <small style="color: var(--text-muted);"><span>ouverte à la confirmation</span> · ${formatDateTime(m.ouverte_le)} · @${escapeHtml(m.ouverte_par || "")}</small>
   </div>
   ${m.fondement ? `<p style="font-size: 0.85rem; color: var(--color-alert); font-weight: 600; margin: 0 0 0.4rem;">${escapeHtml(m.fondement_label || "")}</p>` : ""}
+  ${m.fondement ? blocChaineDeDetentionHtml(m.detention, {structure: false}) : ""}
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Gel effectif</h4>${etapeGel}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Déclaration à la DG Trésor</h4>${_etapeDeclaration(m, vocab, isReviewer, auditeur)}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Levée</h4>${m.radiation_a_examiner ? `
@@ -9104,6 +9204,370 @@ async function fetchGels() {
  }
 }
 
+// ------------------ DOUTE D'HOMONYMIE (déclaration à la DG Trésor) ------------------
+// Une alerte du périmètre SANCTION qu'on ne peut ni lever ni confirmer se
+// déclare à la DG Trésor (LD DGT/ACPR §167, fiskr/homonymie.py) : elle attend
+// sa réponse, et seule la réponse enregistrée la clôt — par le chemin de
+// clôture existant. Rien ne part tout seul vers la DG Trésor : l'écran
+// prépare, l'humain transmet puis joint la pièce. Le vocabulaire (issues,
+// décisions, rubriques du formulaire) vient du serveur : une seule définition.
+
+function badgeStatutHomonymie(d) {
+ // Ce qui demande une action est dit À CÔTÉ du statut ; l'attente longue se
+ // voit sans crier : la DG Trésor a son rythme.
+ if (d.non_transmise_en_retard) return `<span class="status-badge alert" style="white-space: nowrap;">Non transmise hors délai</span>`;
+ const longue = d.attente_longue ? ` <span class="status-badge warning" style="white-space: nowrap;">Attente longue</span>` : "";
+ const classe = { A_TRANSMETTRE: "warning", A_DECIDER: "alert", TERMINEE: "no_match" }[d.statut] || "";
+ return `<span class="status-badge ${classe}" style="white-space: nowrap;">${escapeHtml(d.statut_label)}</span>${longue}`;
+}
+
+function _lienPieceHomonymie(piece) {
+ if (!piece) return "—";
+ if (piece.file_present === false || !piece.file_name) {
+  return `<span style="text-decoration: line-through; color: var(--text-muted);">${escapeHtml(piece.file_name || "#" + piece.id)}</span> <span class="badge badge-danger" style="font-size: 0.68rem;">Fichier introuvable</span>`;
+ }
+ return `<a href="/api/alerts/attachments/${piece.id}" target="_blank" style="color: var(--color-accent);">${escapeHtml(piece.file_name)}</a>`;
+}
+
+function _formulaireDuDoute(a, vocab) {
+ const champs = (vocab.champs_operation || []).map(c => `
+  <div class="form-group" style="margin: 0; flex: 1 1 200px;"><label for="hom-op-${c.code}-${a.id}">${escapeHtml(c.label)}</label>
+   <input type="text" id="hom-op-${c.code}-${a.id}" maxlength="500"></div>`).join("");
+ return `<details style="margin-top: 0.5rem;">
+  <summary style="cursor: pointer; font-size: 0.85rem; font-weight: 600;">Je ne peux ni lever ni confirmer cette alerte : déclarer le doute à la DG Trésor</summary>
+  <p style="font-size: 0.82rem; color: var(--text-muted); margin: 0.4rem 0;">Après toutes les diligences, l'alerte qui ne peut toujours pas être levée se déclare « dans les plus brefs délais » à la DG Trésor (LD DGT/ACPR §167). Elle attendra sa réponse : rien ne la clôturera sans elle.</p>
+  <div class="form-group" style="margin: 0.4rem 0 0;"><label for="hom-diligences-${a.id}">Bilan des recherches effectuées</label>
+   <textarea id="hom-diligences-${a.id}" rows="3" maxlength="8000" placeholder="Pièces demandées au client, sources consultées (JORF, registre national, RCS…), éléments comparés"></textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-mesures-${a.id}">Mesures prises pendant le doute</label>
+   <textarea id="hom-mesures-${a.id}" rows="2" maxlength="4000" placeholder="Opération suspendue, entrée en relation différée… (selon votre procédure)"></textarea>
+   <small style="color: var(--text-muted); display: block;">Sur un flux, l'opération reste suspendue jusqu'à la réponse (LD §162). Sur la base, les LD n'imposent pas de gel conservatoire : votre procédure en décide (§87).</small></div>
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; margin-top: 0.5rem;">
+   <div class="form-group" style="margin: 0;"><label for="hom-role-${a.id}">Rôle de l'opérateur</label>
+    <select id="hom-role-${a.id}"><option value="">—</option>${_options(vocab.roles_operateur, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-objet-${a.id}">Objet de l'homonymie</label>
+    <select id="hom-objet-${a.id}"><option value="">—</option>${_options(vocab.objets, "")}</select></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-commentaire-${a.id}">Commentaire</label>
+   <textarea id="hom-commentaire-${a.id}" rows="2" maxlength="4000"></textarea></div>
+  <details style="margin-top: 0.5rem;"><summary style="cursor: pointer; font-size: 0.82rem;">Opération concernée (le cas échéant)</summary>
+   <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem;">${champs}</div></details>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="declarerDouteHomonymie(${a.id})">Déclarer le doute d'homonymie</button>
+ </details>`;
+}
+
+function _etapeTransmissionHomonymie(d, vocab, isReviewer, auditeur) {
+ const formulaire = vocab.formulaire || {};
+ const liens = `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.4rem;">
+  <a class="btn btn-sm btn-secondary" href="/api/homonymies/${d.id}/draft/print" target="_blank" title="Projet aux rubriques du formulaire de la DG Trésor — à reporter dans le classeur officiel">Projet de déclaration d'homonymie</a>
+  <a class="btn btn-sm" style="background: var(--surface-3);" href="${escapeHtml(formulaire.url || "")}" target="_blank" rel="noopener">Formulaire officiel (.xlsx)</a>
+  <small><span>À adresser à</span> <strong>${escapeHtml(vocab.adresse_dgt || "")}</strong></small>
+ </div>`;
+ if (d.statut === "ABANDONNEE") {
+  return `<p style="font-size: 0.85rem;"><span>Abandonnée le</span> <strong>${formatDateTime(d.abandonnee_le)}</strong> · @${escapeHtml(d.abandonnee_par || "")} — ${escapeHtml(d.motif_abandon || "")}</p>`;
+ }
+ if (d.statut !== "A_TRANSMETTRE") {
+  const attente = d.statut === "TRANSMISE"
+   ? `<br><span>En attente de la réponse depuis</span> <strong>${formatDuree(d.attente_secondes)}</strong>${d.attente_longue ? ` — <span>attente longue : une relance se consigne comme échange (nouvelle saisine)</span>` : ""}`
+   : "";
+  return `${liens}<p style="font-size: 0.85rem;"><span>Transmise le</span> <strong>${formatDateTime(d.transmise_le)}</strong> · @${escapeHtml(d.transmise_par || "")}
+   ${d.reference ? ` · <span>réf.</span> ${escapeHtml(d.reference)}` : ""}
+   · <span>délai depuis le doute</span> : <strong>${formatDuree(d.delai_transmission_secondes)}</strong><br>
+   <span>Pièce de transmission</span> : ${_lienPieceHomonymie(d.piece_transmission)}${attente}</p>`;
+ }
+ const delai = d.non_transmise_en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;">Délai de transmission dépassé : <span>${formatDuree(d.delai_transmission_secondes)}</span> (<span>seuil</span> ${d.seuil_heures} h).</p>`
+  : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>À transmettre dans les plus brefs délais — délai écoulé</span> : ${formatDuree(d.delai_transmission_secondes)} (<span>seuil</span> ${d.seuil_heures} h).</p>`;
+ const abandon = auditeur ? "" : `<button class="btn btn-sm" style="background: var(--surface-3);" onclick="abandonnerHomonymie(${d.id}, ${d.alert_id})">Abandonner (avant transmission)</button>`;
+ if (!isReviewer || auditeur) {
+  return `${liens}${delai}<p style="font-size: 0.82rem; color: var(--text-muted);">L'enregistrement de la transmission est réservé aux réviseurs.</p>${abandon}`;
+ }
+ return `${liens}${delai}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="hom-transmise-${d.id}">Transmise le</label>
+    <input type="datetime-local" id="hom-transmise-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-reference-${d.id}">Référence</label>
+    <input type="text" id="hom-reference-${d.id}" maxlength="255" placeholder="Référence ou objet du courriel"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-piece-envoi-${d.id}">Pièce de transmission</label>
+    <input type="file" id="hom-piece-envoi-${d.id}" title="Copie du courriel envoyé à la DG Trésor avec le formulaire, ou accusé de réception"></div>
+   <button class="btn btn-sm btn-primary" onclick="enregistrerTransmissionHomonymie(${d.id}, ${d.alert_id})">Enregistrer la transmission</button>
+   ${abandon}
+  </div>`;
+}
+
+function _etapeEchangesHomonymie(d, vocab, auditeur) {
+ const liste = (d.echanges || []).map(e => `<li>${formatDateTime(e.le)} — <span>${escapeHtml(e.sens_label || e.sens)}</span> — ${escapeHtml(e.objet)} — ${_lienPieceHomonymie(e.piece)} <small style="color: var(--text-muted);">@${escapeHtml(e.par || "")}</small></li>`).join("");
+ const html = `<ul style="list-style: none; margin: 0.3rem 0; font-size: 0.85rem;">${liste || `<li style="color: var(--text-muted);">Aucun échange consigné.</li>`}</ul>`;
+ if (auditeur || !["TRANSMISE", "A_DECIDER"].includes(d.statut)) return html;
+ return `${html}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="hom-sens-${d.id}">Sens</label>
+    <select id="hom-sens-${d.id}">${_options(vocab.sens, "RECU")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-echange-le-${d.id}">Le</label>
+    <input type="datetime-local" id="hom-echange-le-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0; flex: 1 1 220px;"><label for="hom-echange-objet-${d.id}">Objet</label>
+    <input type="text" id="hom-echange-objet-${d.id}" maxlength="1000" placeholder="Demande de complément, pièce envoyée, relance…"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-echange-piece-${d.id}">Pièce</label>
+    <input type="file" id="hom-echange-piece-${d.id}" title="Le courriel reçu ou envoyé"></div>
+   <button class="btn btn-sm btn-secondary" onclick="consignerEchangeHomonymie(${d.id}, ${d.alert_id})">Consigner l'échange</button>
+  </div>`;
+}
+
+function _etapeReponseHomonymie(d, vocab, isReviewer, auditeur) {
+ if (d.reponse_le) {
+  return `<p style="font-size: 0.85rem;"><strong>${escapeHtml(d.issue_label || d.issue || "")}</strong> · <span>reçue le</span> ${formatDateTime(d.reponse_le)} · @${escapeHtml(d.reponse_par || "")}
+   ${d.reponse_resume ? `<br>${escapeHtml(d.reponse_resume)}` : ""}<br>
+   <span>Pièce de la réponse</span> : ${_lienPieceHomonymie(d.piece_reponse)}</p>`;
+ }
+ if (d.statut !== "TRANSMISE") {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">Possible une fois la déclaration transmise.</p>`;
+ }
+ if (!isReviewer || auditeur) {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">L'enregistrement de la réponse est réservé aux réviseurs.</p>`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0; flex: 1 1 320px;"><label for="hom-issue-${d.id}">Issue</label>
+    <select id="hom-issue-${d.id}"><option value="">—</option>${_options(vocab.issues, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-recue-${d.id}">Reçue le</label>
+    <input type="datetime-local" id="hom-recue-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-piece-reponse-${d.id}">Pièce de la réponse</label>
+    <input type="file" id="hom-piece-reponse-${d.id}" title="Courriel de réponse de la DG Trésor"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-resume-${d.id}">Résumé de la réponse</label>
+   <input type="text" id="hom-resume-${d.id}" maxlength="4000"></div>
+  <small style="color: var(--text-muted); display: block;">Homonyme : clôture en faux positif motivée par la réponse. Même personne : confirmation, et la mesure de gel s'ouvre. Doute persistant : la décision revient à l'organisme.</small>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerReponseHomonymie(${d.id}, ${d.alert_id})">Enregistrer la réponse</button>`;
+}
+
+function _etapeDecisionHomonymie(d, vocab, isReviewer, auditeur) {
+ if (d.decision) {
+  return `<p style="font-size: 0.85rem;"><strong>${escapeHtml(d.decision_label || d.decision)}</strong> · ${formatDateTime(d.decidee_le)} · @${escapeHtml(d.decidee_par || "")}<br>
+   ${escapeHtml(d.decision_motif || "")}
+   ${d.vigilance ? `<br><span>Vigilance adaptée</span> : ${escapeHtml(d.vigilance)}` : ""}
+   <br><span>Tracfin</span> : <span>${escapeHtml(d.tracfin_label || "")}</span> — ${escapeHtml(d.tracfin_detail || "")}
+   ${d.piece_information ? `<br><span>Information de la DG Trésor</span> : ${_lienPieceHomonymie(d.piece_information)}` : ""}</p>`;
+ }
+ if (!isReviewer || auditeur) {
+  return `<p style="font-size: 0.82rem; color: var(--text-muted);">La décision revient à un réviseur : exécuter ou non, geler ou non (LD §167).</p>`;
+ }
+ return `<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="hom-decision-${d.id}">Décision</label>
+    <select id="hom-decision-${d.id}"><option value="">—</option>${_options(vocab.decisions, "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="hom-tracfin-${d.id}">Tracfin</label>
+    <select id="hom-tracfin-${d.id}"><option value="">—</option>${_options(vocab.tracfin, "")}</select></div>
+   <div class="form-group" style="margin: 0; flex: 1 1 260px;"><label for="hom-tracfin-detail-${d.id}">Référence ou justification</label>
+    <input type="text" id="hom-tracfin-detail-${d.id}" maxlength="1000" placeholder="Référence de la déclaration de soupçon, ou pourquoi L.561-15 ne s'applique pas"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-motif-${d.id}">Motif de la décision</label>
+   <textarea id="hom-motif-${d.id}" rows="2" maxlength="4000"></textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-vigilance-${d.id}">Vigilance adaptée (sans gel)</label>
+   <textarea id="hom-vigilance-${d.id}" rows="2" maxlength="4000"></textarea></div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="hom-piece-info-${d.id}">Information de la DG Trésor (sans gel)</label>
+   <input type="file" id="hom-piece-info-${d.id}" title="Courriel informant la DG Trésor de la décision"></div>
+  <small style="color: var(--text-muted); display: block;">Sans gel : vigilance adaptée et pièce prouvant l'information de la DG Trésor. Avec gel : la déclaration de la mesure de gel informe la DG Trésor.</small>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerDecisionHomonymie(${d.id}, ${d.alert_id})">Enregistrer la décision</button>`;
+}
+
+function _blocDeclarationHomonymie(d, vocab, isReviewer, auditeur) {
+ return `<div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem;">
+  <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+   <strong><span>Déclaration d'homonymie</span> #${d.id}</strong> ${badgeStatutHomonymie(d)}
+   <small style="color: var(--text-muted);"><span>doute déclaré le</span> ${formatDateTime(d.preparee_le)} · @${escapeHtml(d.preparee_par || "")} · <span>${escapeHtml(d.saisine_label || "")}</span></small>
+  </div>
+  <p style="font-size: 0.82rem; margin: 0 0 0.4rem;"><span>Bilan des recherches effectuées</span> : ${escapeHtml(d.diligences || "")}
+   ${d.mesures_conservatoires ? `<br><span>Mesures prises pendant le doute</span> : ${escapeHtml(d.mesures_conservatoires)}` : ""}</p>
+  <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Projet et transmission à la DG Trésor</h4>${_etapeTransmissionHomonymie(d, vocab, isReviewer, auditeur)}
+  ${d.statut === "ABANDONNEE" ? "" : `
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Échanges avec la DG Trésor</h4>${_etapeEchangesHomonymie(d, vocab, auditeur)}
+  <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Réponse de la DG Trésor</h4>${_etapeReponseHomonymie(d, vocab, isReviewer, auditeur)}`}
+  ${d.issue === "DOUTE_PERSISTANT" ? `<h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">4. Décision de l'organisme (doute persistant)</h4>${_etapeDecisionHomonymie(d, vocab, isReviewer, auditeur)}` : ""}
+ </div>`;
+}
+
+function blocDeclarationsHomonymie(a, isReviewer) {
+ const declarations = a.homonymies || [];
+ if (!declarations.length && !a.homonymie_possible) return "";
+ const vocab = a.homonymie_vocabulaire || {};
+ const auditeur = userRoles(currentUser).includes("auditor");
+ const formulaire = a.homonymie_possible && !auditeur ? _formulaireDuDoute(a, vocab) : "";
+ return `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+  <h3 style="font-size: 0.95rem; margin: 0 0 0.5rem;">Doute d'homonymie (DG Trésor)</h3>
+  ${declarations.map(d => _blocDeclarationHomonymie(d, vocab, isReviewer, auditeur)).join("")}
+  ${formulaire}
+ </div>`;
+}
+
+async function _homonymieRequete(url, options, alertId) {
+ try {
+  const response = await apiFetch(url, options);
+  const data = await response.json();
+  if (!response.ok) { showToast("Erreur : " + (data.detail || "Action refusée."), "error"); return null; }
+  showToast(data.message, "success");
+  if (alertId) openAlertModal(alertId);
+  refreshAlertQueues();
+  rafraichirSiAffichee("screening", "alerts-gels", () => { fetchGels(); fetchHomonymies(); });
+  return data;
+ } catch (e) {
+  showToast("Erreur réseau de communication.", "error");
+  return null;
+ }
+}
+
+async function declarerDouteHomonymie(alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${alertId}`)?.value ?? "";
+ const operation = {};
+ ((currentAlertData?.homonymie_vocabulaire || {}).champs_operation || []).forEach(c => {
+  const v = valeur(`hom-op-${c.code}`).trim();
+  if (v) operation[c.code] = v;
+ });
+ await _homonymieRequete(`/api/alerts/${alertId}/homonymie`, {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+   diligences: valeur("hom-diligences"), mesures_conservatoires: valeur("hom-mesures"),
+   commentaire: valeur("hom-commentaire"), role_operateur: valeur("hom-role"),
+   objet_homonymie: valeur("hom-objet"), operation,
+  }),
+ }, alertId);
+}
+
+// Formulaire avec pièce : le serveur refuse sans elle, l'écran le dit avant
+function _formAvecPiece(idPiece, message) {
+ const fichier = document.getElementById(idPiece)?.files?.[0];
+ if (!fichier && message) { showToast(message, "error"); return null; }
+ const form = new FormData();
+ if (fichier) form.append("file", fichier);
+ return form;
+}
+
+function _dateSaisie(id) {
+ const v = document.getElementById(id)?.value;
+ return v ? new Date(v).toISOString() : "";
+}
+
+async function enregistrerTransmissionHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-piece-envoi-${id}`, "Joignez la pièce de transmission : copie du courriel envoyé à la DG Trésor, ou accusé de réception.");
+ if (!form) return;
+ const quand = _dateSaisie(`hom-transmise-${id}`);
+ if (quand) form.append("transmise_le", quand);
+ form.append("reference", document.getElementById(`hom-reference-${id}`)?.value || "");
+ await _homonymieRequete(`/api/homonymies/${id}/transmission`, { method: "POST", body: form }, alertId);
+}
+
+async function consignerEchangeHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-echange-piece-${id}`, "Joignez la pièce de l'échange : le courriel reçu ou envoyé.");
+ if (!form) return;
+ form.append("sens", document.getElementById(`hom-sens-${id}`)?.value || "");
+ form.append("objet", document.getElementById(`hom-echange-objet-${id}`)?.value || "");
+ const quand = _dateSaisie(`hom-echange-le-${id}`);
+ if (quand) form.append("le", quand);
+ await _homonymieRequete(`/api/homonymies/${id}/echanges`, { method: "POST", body: form }, alertId);
+}
+
+async function enregistrerReponseHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-piece-reponse-${id}`, "Joignez la pièce de la réponse : le courriel de la DG Trésor.");
+ if (!form) return;
+ const issue = document.getElementById(`hom-issue-${id}`)?.value || "";
+ form.append("issue", issue);
+ const quand = _dateSaisie(`hom-recue-${id}`);
+ if (quand) form.append("recue_le", quand);
+ form.append("resume", document.getElementById(`hom-resume-${id}`)?.value || "");
+ if (issue && issue !== "DOUTE_PERSISTANT"
+  && !await confirmDialog("Enregistrer cette réponse ? Elle clôt l'alerte : faux positif si la DG Trésor confirme l'homonymie, vrai positif — et mesure de gel — si elle confirme la même personne.")) return;
+ await _homonymieRequete(`/api/homonymies/${id}/reponse`, { method: "POST", body: form }, alertId);
+}
+
+async function enregistrerDecisionHomonymie(id, alertId) {
+ const form = _formAvecPiece(`hom-piece-info-${id}`, null);
+ for (const [cle, champ] of [["decision", "hom-decision"], ["motif", "hom-motif"], ["vigilance", "hom-vigilance"],
+  ["tracfin", "hom-tracfin"], ["tracfin_detail", "hom-tracfin-detail"]]) {
+  form.append(cle, document.getElementById(`${champ}-${id}`)?.value || "");
+ }
+ if (!await confirmDialog("Enregistrer cette décision ? Elle clôt l'alerte.")) return;
+ await _homonymieRequete(`/api/homonymies/${id}/decision`, { method: "POST", body: form }, alertId);
+}
+
+async function abandonnerHomonymie(id, alertId) {
+ const motif = await promptDialog("Abandonner la déclaration d'homonymie", {
+  message: "Seule une déclaration non transmise s'abandonne. L'alerte retourne à l'instruction ; le motif est inscrit à son journal.",
+  textarea: true,
+  placeholder: "Ex. passeport reçu, l'alerte se lève sans la DG Trésor…",
+ });
+ if (motif === null) return;
+ await _homonymieRequete(`/api/homonymies/${id}/abandon`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ motif }),
+ }, alertId);
+}
+
+function _parametresDesHomonymies() {
+ const params = new URLSearchParams();
+ const statut = document.getElementById("homonymies-statut-filter")?.value;
+ const recherche = (document.getElementById("homonymies-recherche")?.value || "").trim();
+ if (statut) params.set("statut", statut);
+ if (recherche) params.set("q", recherche);
+ return params;
+}
+
+function exportHomonymiesCsv() {
+ window.open(`/api/export/homonymies.csv?${_parametresDesHomonymies().toString()}`, "_blank");
+}
+
+function _afficherSyntheseDesHomonymies(s) {
+ const el = document.getElementById("homonymies-synthese");
+ if (!el || !s) return;
+ // L'attente longue s'affiche, elle ne se colore pas en alerte : la DG
+ // Trésor a son rythme. La transmission hors délai, elle, est un défaut.
+ el.innerHTML = `
+  <span><strong>${s.to_transmit}</strong> <span>à transmettre</span></span>
+  <span style="${s.overdue ? "color: var(--color-alert); font-weight: 600;" : ""}"><strong>${s.overdue}</strong> <span>non transmise(s) hors délai</span> (<span>seuil</span> ${s.threshold_hours} h)</span>
+  <span><strong>${s.awaiting_reply}</strong> <span>en attente de réponse</span>${s.long_wait ? ` (<span>dont</span> ${s.long_wait} <span>depuis plus de</span> ${s.long_wait_days} j)` : ""}</span>
+  <span><strong>${s.to_decide}</strong> <span>doute(s) persistant(s) à décider</span></span>
+  <span><strong>${s.closed}</strong> <span>terminée(s)</span></span>
+  <span><span>Attente moyenne de la réponse</span> : <strong>${formatDuree(s.avg_reply_delay_seconds)}</strong></span>`;
+}
+
+async function fetchHomonymies() {
+ const tbody = document.querySelector("#homonymies-table tbody");
+ if (!tbody) return;
+ tableLoading("#homonymies-table", 11);
+ const params = _parametresDesHomonymies();
+ const filtre = params.toString() !== "";
+ params.set("page_size", "200");
+ try {
+  const response = await apiFetch(`/api/homonymies?${params.toString()}`);
+  if (!response.ok) { tableError("#homonymies-table", 11); return; }
+  const data = await response.json();
+  // Les statuts viennent du serveur ; les deux filtres d'état restent en tête
+  const select = document.getElementById("homonymies-statut-filter");
+  if (select && !select.dataset.vocabulaire) {
+   select.insertAdjacentHTML("beforeend", _options((data.vocabulaire || {}).statuts, ""));
+   select.dataset.vocabulaire = "1";
+  }
+  _afficherSyntheseDesHomonymies(data.synthese);
+  const total = document.getElementById("homonymies-total");
+  if (total) total.textContent = data.total > data.items.length ? `${data.items.length} / ${data.total}` : "";
+  if (!data.items.length) {
+   tableEmpty("#homonymies-table", 11, filtre ? "Aucune déclaration pour ces filtres." : "Aucune déclaration d'homonymie au registre.", "",
+    filtre ? "" : "Une déclaration s'ouvre depuis une alerte du périmètre SANCTION qu'on ne peut ni lever ni confirmer.");
+   return;
+  }
+  tbody.innerHTML = data.items.map(d => `
+   <tr>
+    <td>#${d.id}</td>
+    <td>${formatDateTime(d.preparee_le)}</td>
+    <td>${escapeHtml(d.client_name)}</td>
+    <td>${escapeHtml(d.watchlist_name)}</td>
+    <td>${d.list_type ? listTypeBadge(d.list_type) : "—"}</td>
+    <td><span>${escapeHtml(d.saisine_label || "")}</span></td>
+    <td>${badgeStatutHomonymie(d)}</td>
+    <td>${d.transmise_le ? formatDateTime(d.transmise_le) : "—"}</td>
+    <td>${d.attente_secondes != null ? formatDuree(d.attente_secondes) : "—"}</td>
+    <td>${d.issue_court ? `<span title="${escapeHtml(d.issue_label || "")}">${escapeHtml(d.issue_court)}</span>` : "—"}</td>
+    <td><button class="btn btn-sm btn-secondary" onclick="openAlertModal(${d.alert_id})" title="Ouvrir l'alerte et les étapes de la déclaration">Ouvrir</button></td>
+   </tr>`).join("");
+ } catch (e) {
+  tableError("#homonymies-table", 11);
+ }
+}
+
 // ------------------ DOSSIERS PPE (étapes dans l'alerte et registre) ------------------
 // Une PPE confirmée ouvre un dossier (fiskr/ppe.py) : qualité retenue,
 // fonction et fin de fonction, origine des fonds et du patrimoine, décision
@@ -9202,6 +9666,45 @@ function _etapeDecisionPPE(d, vocab, isReviewer, auditeur) {
   <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerDecisionPPE(${d.id}, ${d.alert_id})">Enregistrer la décision</button>`;
 }
 
+// Revue de vigilance renforcée (R.561-20-2 3°) d'une relation acceptée : les
+// revues tenues, puis le geste qui tient la suivante. Signalée échue à
+// l'écran, elle n'avait aucun geste — un dossier décidé ne se réécrit plus.
+function _etapeRevuePPE(d, vocab, isReviewer, auditeur) {
+ const accepte = (vocab.decisions || []).some(x => x.code === d.decision && x.accepte);
+ if (d.statut !== "DECIDE" || !accepte) return "";
+ const tenues = (d.revues || []).map(r => `<li>${formatDate(r.le)} · @${escapeHtml(r.par || "")} · <strong>${escapeHtml(r.conclusion_label || r.conclusion || "")}</strong>${r.reference ? ` · <span>réf.</span> ${escapeHtml(r.reference)}` : ""}<br>${escapeHtml(r.motif || "")}</li>`).join("");
+ const historique = tenues ? `<ul style="list-style: none; margin: 0.3rem 0; font-size: 0.85rem;">${tenues}</ul>` : "";
+ if (!d.prochaine_revue_le) {
+  return `${historique}<p style="font-size: 0.85rem; color: var(--text-muted);">La relation a pris fin à la dernière revue : plus de revue à tenir.</p>`;
+ }
+ const echeance = d.revue_en_retard
+  ? `<p style="color: var(--color-alert); font-weight: 600; font-size: 0.85rem;"><span>Revue échue depuis plus que le délai</span> (<span>seuil</span> ${d.seuil_jours} j) : ${formatDate(d.prochaine_revue_le)}.</p>`
+  : d.revue_echue
+   ? `<p style="color: var(--color-warning); font-weight: 600; font-size: 0.85rem;"><span>Revue échue le</span> ${formatDate(d.prochaine_revue_le)}.</p>`
+   : `<p style="font-size: 0.85rem; color: var(--text-muted);"><span>Prochaine revue</span> : ${formatDate(d.prochaine_revue_le)}.</p>`;
+ const moi = currentUser ? currentUser.username : "";
+ if (!isReviewer || auditeur) {
+  return `${historique}${echeance}<p style="font-size: 0.82rem; color: var(--text-muted);">La revue revient à une personne habilitée (rôle réviseur) qui n'a pas instruit l'alerte.</p>`;
+ }
+ if ((d.instruit_par || []).includes(moi)) {
+  return `${historique}${echeance}<p style="font-size: 0.82rem; color: var(--text-muted);">Vous avez proposé ou validé la confirmation : la revue revient à une autre personne habilitée.</p>`;
+ }
+ return `${historique}${echeance}
+  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end;">
+   <div class="form-group" style="margin: 0;"><label for="ppe-conclusion-${d.id}">Conclusion de la revue</label>
+    <select id="ppe-conclusion-${d.id}">${_options(vocab.conclusions_de_revue || [], "")}</select></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-le-${d.id}">Revue tenue le</label>
+    <input type="datetime-local" id="ppe-revue-le-${d.id}" value="${_versSaisieLocale(new Date().toISOString())}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-suivante-${d.id}">Revue suivante</label>
+    <input type="date" id="ppe-revue-suivante-${d.id}" value="${_dansUnAn()}"></div>
+   <div class="form-group" style="margin: 0;"><label for="ppe-revue-reference-${d.id}">Référence</label>
+    <input type="text" id="ppe-revue-reference-${d.id}" maxlength="255" placeholder="Comité, procès-verbal…"></div>
+  </div>
+  <div class="form-group" style="margin: 0.5rem 0 0;"><label for="ppe-revue-motif-${d.id}">Motif de la revue</label>
+   <textarea id="ppe-revue-motif-${d.id}" rows="2" maxlength="4000" placeholder="Ce qui a été revu, et sur quelles pièces"></textarea></div>
+  <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;" onclick="enregistrerRevuePPE(${d.id}, ${d.alert_id})">Enregistrer la revue</button>`;
+}
+
 function _blocDossierPPE(d, vocab, isReviewer, auditeur) {
  const liens = _liensPPE(d.liens_source);
  const nonDeclaree = d.ppe_non_declaree
@@ -9223,6 +9726,7 @@ function _blocDossierPPE(d, vocab, isReviewer, auditeur) {
   ${echue}
   <h4 style="font-size: 0.85rem; margin: 0.5rem 0 0.3rem;">1. Instruction</h4>${_etapeInstructionPPE(d, vocab, auditeur)}
   <h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">2. Décision d'entrer ou de rester en relation</h4>${_etapeDecisionPPE(d, vocab, isReviewer, auditeur)}
+  ${(revue => revue ? `<h4 style="font-size: 0.85rem; margin: 0.75rem 0 0.3rem;">3. Revue de vigilance renforcée</h4>${revue}` : "")(_etapeRevuePPE(d, vocab, isReviewer, auditeur))}
  </div>`;
 }
 
@@ -9301,6 +9805,20 @@ async function enregistrerDecisionPPE(dossierId, alertId) {
  }, alertId);
 }
 
+async function enregistrerRevuePPE(dossierId, alertId) {
+ const valeur = (prefixe) => document.getElementById(`${prefixe}-${dossierId}`)?.value || "";
+ const payload = { conclusion: valeur("ppe-conclusion"), motif: valeur("ppe-revue-motif"),
+  reference: valeur("ppe-revue-reference") };
+ if (valeur("ppe-revue-le")) payload.revue_le = new Date(valeur("ppe-revue-le")).toISOString();
+ // La revue suivante ne vaut que pour un maintien : le serveur l'ignore pour
+ // une fin de relation
+ if (valeur("ppe-revue-suivante")) payload.prochaine_revue_le = new Date(valeur("ppe-revue-suivante") + "T12:00:00").toISOString();
+ if (!await confirmDialog("Enregistrer cette revue ? Elle s'ajoute au dossier et ne se réécrit plus.")) return;
+ await _ppeRequete(`/api/ppe/${dossierId}/revue`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+ }, alertId);
+}
+
 function _parametresDesDossiersPPE() {
  const params = new URLSearchParams();
  const statut = document.getElementById("ppe-statut-filter")?.value;
@@ -9324,7 +9842,8 @@ function _afficherSyntheseDesDossiersPPE(s) {
   <span><strong>${s.decided}</strong> <span>décidé(s)</span></span>
   <span><span>Délai moyen confirmation → décision</span> : <strong>${formatDuree(s.avg_decision_delay_seconds)}</strong></span>
   ${s.undeclared_by_upstream ? `<span style="color: var(--color-alert);"><strong>${s.undeclared_by_upstream}</strong> <span>PPE non déclarée(s) par le SI amont</span></span>` : ""}
-  ${s.decided_late ? `<span style="color: var(--color-warning);"><strong>${s.decided_late}</strong> <span>décidé(s) hors délai</span></span>` : ""}`;
+  ${s.decided_late ? `<span style="color: var(--color-warning);"><strong>${s.decided_late}</strong> <span>décidé(s) hors délai</span></span>` : ""}
+  ${s.reviews_due ? `<span style="color: ${s.reviews_overdue ? "var(--color-alert)" : "var(--color-warning)"};"><strong>${s.reviews_due}</strong> <span>revue(s) de vigilance renforcée échue(s)</span>${s.reviews_overdue ? ` (<strong>${s.reviews_overdue}</strong> <span>au-delà du délai</span>)` : ""}</span>` : ""}`;
 }
 
 async function fetchDossiersPPE() {
@@ -9678,6 +10197,13 @@ async function fetchWhitelist(page = null) {
  }
 }
 
+// L'identité qu'une paire couvre (fiskr/parties.py) : une partie liée du
+// client, ou le client lui-même — rien n'est alors ajouté.
+function partieDeLaPaire(p) {
+ if (p.partie_liee_id === null || p.partie_liee_id === undefined) return "";
+ return `<br><small><span>Partie liée du client</span> : <strong>${escapeHtml(p.partie_nom || "#" + p.partie_liee_id)}</strong></small>`;
+}
+
 function renderWhitelistTable(items) {
  const tbody = document.querySelector("#whitelist-table tbody");
  if (!tbody) return;
@@ -9704,7 +10230,7 @@ function renderWhitelistTable(items) {
  // attend une décision.
  tbody.innerHTML = items.map(p => `
  <tr ${p.state !== "ACTIVE" && p.state !== "STALE" ? 'style="opacity: 0.55;"' : ""}>
- <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small></td>
+ <td><strong>${escapeHtml(p.client_name || p.client_id)}</strong><br><small style="color:var(--text-muted)">${escapeHtml(p.client_id)}</small>${partieDeLaPaire(p)}</td>
  <td>${escapeHtml(p.watchlist_name || p.watchlist_entity_id)}<br><small style="color:var(--text-muted)">${escapeHtml(p.watchlist_entity_id)}</small></td>
  <td>${listTypeBadge(p.list_type)}</td>
  <td style="max-width: 260px;"><small>${escapeHtml(p.justification || "—")}</small>${p.evidence_file_name ? (p.evidence_file_present === false
@@ -9979,7 +10505,7 @@ function renderListsBarChart(containerId, byType) {
 const _DONUT_STATUS_COLORS = {
  OPEN: "var(--color-warning)", IN_PROGRESS: "var(--color-primary)",
  ESCALATED: "var(--color-alert)", PENDING_VALIDATION: "var(--color-secondary)",
- CLOSED_CONFIRMED: "#b91c1c", CLOSED_FALSE_POSITIVE: "var(--color-safe)",
+ PENDING_DGT: "#b45309", CLOSED_CONFIRMED: "#b91c1c", CLOSED_FALSE_POSITIVE: "var(--color-safe)",
  CLOSED_BY_RULE: "var(--text-muted)",
 };
 
@@ -10600,6 +11126,11 @@ function renderTransactionResult(data) {
  const verdictLine = document.getElementById("txn-verdict-line");
  if (data.verdict === "HIT") {
  verdictLine.innerHTML = `Verdict : <span class="status-badge alert">HIT — ${data.hits_count} partie(s) en alerte</span>`;
+ } else if (data.verdict === "TERRITORY" || data.verdict === "FAILING_PSP") {
+ // Ni correspondance de nom ni PASS : une décision attend (territoire sous
+ // mesures restrictives, prestataire défaillant). Libellé du serveur.
+ const classe = data.verdict === "TERRITORY" ? "alert" : "warning";
+ verdictLine.innerHTML = `Verdict : <span class="status-badge ${classe}">${escapeHtml(data.verdict)}</span> <small>${escapeHtml(data.verdict_label || "")}</small>`;
  } else if (data.verdict === "INCOMPLETE") {
  // Ni HIT ni PASS : le filtrage n'a pas pu établir le PASS. Le libellé est
  // celui du serveur (fiskr/transactions.py VERDICTS), jamais recopié ici.
@@ -10636,6 +11167,39 @@ function renderTransactionResult(data) {
  </ul>
  </div>` : "";
 
+ // Territoires sous mesures restrictives (fiskr/territoires.py) : nommés
+ // seulement quand il y en a — lieu tel qu'écrit, champ, partie, régime et
+ // date d'effet. Pas une correspondance de sanction : un signal à instruire.
+ const signaux = data.territory_signals || [];
+ document.getElementById("txn-territory-info").innerHTML = signaux.length ? `
+ <div class="card" style="border-left: 3px solid var(--color-alert); margin: 0.5rem 0; padding: 0.75rem 1rem;">
+ <strong>Territoires sous mesures restrictives de l'Union</strong> <small style="color:var(--text-muted)">Pas une correspondance de sanction : à instruire avant exécution</small>
+ <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${signaux.map(s => `
+ <li><strong>${escapeHtml(s.place)}</strong> <small><code>${escapeHtml(s.text || s.matched)}</code></small> — <span>${escapeHtml(s.territory_label)}</span>
+ <br><small><span>${escapeHtml(s.regime)}</span> · <span>en vigueur depuis le</span> ${escapeHtml(formatDate(s.in_force_since))} · <span>opération du</span> ${escapeHtml(formatDate(s.operation_date))}</small>
+ <br><small style="color:var(--text-muted)"><code>${escapeHtml(s.field)}</code>${s.role ? ` · <span>${escapeHtml(s.role)}</span>` : ""}${s.party ? ` · ${escapeHtml(s.party)}` : ""} · <code>${escapeHtml((s.transactions || []).join(", "))}</code></small></li>`).join("")}
+ </ul>
+ </div>` : "";
+
+ // Prestataire défaillant (art. 8 §2) : seulement s'il l'est, ou si une
+ // omission n'a pu être imputée à personne. Un prestataire sous les seuils
+ // ne dit rien ici — son compte se lit dans « Prestataires défaillants ».
+ const psp = data.payment_service_providers || {};
+ const defaillants = (psp.imputed || []).filter(p => p.failing || p.failing_before);
+ const nonImputes = psp.not_imputed || [];
+ document.getElementById("txn-psp-info").innerHTML = (defaillants.length || nonImputes.length) ? `
+ <div class="card" style="border-left: 3px solid var(--color-warning); margin: 0.5rem 0; padding: 0.75rem 1rem;">
+ ${defaillants.length ? `<strong>Prestataire défaillant</strong> <small style="color:var(--text-muted)">Règlement (UE) 2023/1113, art. 8 §2</small>
+ <ul style="margin: 0.5rem 0 0; padding-left: 1.2rem;">${defaillants.map(p => `
+ <li>${p.name ? `<strong>${escapeHtml(p.name)}</strong> ` : ""}<code>${escapeHtml(p.identifier)}</code> <small>${escapeHtml(p.country || "")}</small>
+ ${p.newly_identified ? ` <span class="status-badge alert" style="white-space: nowrap;">Identifié par ce message</span>` : ""}
+ <br><small><strong>${p.window.incomplete}</strong> <span>transfert(s) incomplet(s)</span> / <strong>${p.window.transfers}</strong> <span>reçu(s)</span> (${p.window.rate_pct} %) · <strong>${p.window.window_days}</strong> <span>jours glissants</span></small>
+ <br><small><span>Politique</span> : <span>${escapeHtml(psp.policy_label || "")}</span></small></li>`).join("")}
+ </ul>
+ <a href="#" onclick="switchSubTab('filtering', 'filtering-prestataires'); return false;"><small>Ouvrir le suivi des prestataires</small></a>` : ""}
+ ${nonImputes.map(n => `<div><small style="color:var(--text-muted)">${escapeHtml(n.label)} <code>${escapeHtml((n.transactions || []).join(", "))}</code></small></div>`).join("")}
+ </div>` : "";
+
  const tbody = document.querySelector("#txn-results-table tbody");
  tbody.innerHTML = parties.map(p => {
  let badge;
@@ -10661,6 +11225,117 @@ function renderTransactionResult(data) {
  <td>${p.alert_id ? `<a href="#" onclick="switchTab('filtering'); switchSubTab('filtering', 'alerts-filtering'); openAlertModal(${p.alert_id}); return false;">#${p.alert_id}</a>` : "—"}</td>
  </tr>`;
  }).join("");
+}
+
+// ------------------ PRESTATAIRES DÉFAILLANTS (2023/1113, art. 8 §2) ------------------
+// Chaque pacs.008 filtré est imputé au prestataire qui le transmet
+// (fiskr/prestataires.py). L'écran ne liste que ceux qui ont omis : la
+// définition de la défaillance et les libellés viennent du serveur.
+
+function _badgePrestataire(p) {
+ if (p.episode_open) {
+ const echeance = p.report_overdue
+  ? `<br><small style="color: var(--color-alert); font-weight: 600;"><span>Signalement en retard</span> — <span>à signaler avant le</span> ${escapeHtml(formatDate(p.report_before))}</small>`
+  : `<br><small><span>à signaler avant le</span> ${escapeHtml(formatDate(p.report_before))}</small>`;
+ return `<span class="status-badge alert" style="white-space: nowrap;">Défaillant</span><br><small><span>identifié le</span> ${escapeHtml(formatDate(p.identified_on))}</small>${echeance}`;
+ }
+ if (p.failing) return `<span class="status-badge warning" style="white-space: nowrap;">Au-dessus des seuils</span>`;
+ return `<small style="color: var(--text-muted);">Sous les seuils</small>`;
+}
+
+async function fetchPrestataires() {
+ const tbody = document.querySelector("#psp-table tbody");
+ if (!tbody) return;
+ tableLoading("#psp-table", 10);
+ try {
+ const response = await apiFetch("/api/filtrage/prestataires");
+ if (!response.ok) { tableError("#psp-table", 10); return; }
+ const data = await response.json();
+ const c = data.criteria || {};
+ const criteres = document.getElementById("psp-criteres");
+ if (criteres) {
+  criteres.innerHTML = `
+  <span><span>Période</span> : <strong>${c.fenetre_jours}</strong> <span>jours glissants</span></span>
+  <span><span>Seuils</span> : <strong>${c.seuil_transferts}</strong> <span>transfert(s) incomplet(s)</span> <span>et</span> <strong>${c.seuil_taux_pct} %</strong> <span>des transferts reçus</span></span>
+  <span><span>Politique</span> : <span>${escapeHtml(data.policy_label || "")}</span></span>
+  ${(c.bic_etablissement || []).length ? "" : `<span style="color: var(--color-warning);">BIC de l'établissement non renseigné : un pacs.008 sortant serait imputé à l'établissement lui-même.</span>`}
+  ${data.criteria_error ? `<span style="color: var(--color-alert);"><span>Critères enregistrés illisibles, défauts appliqués</span> : ${escapeHtml(data.criteria_error)}</span>` : ""}`;
+ }
+ // Formulaire (admin) : l'état effectif servi par l'API
+ const politique = document.getElementById("psp-politique");
+ if (politique) {
+  politique.innerHTML = Object.entries(data.policies || {}).map(([code, libelle]) =>
+   `<option value="${escapeHtml(code)}"${code === c.politique ? " selected" : ""}>${escapeHtml(libelle)}</option>`).join("");
+ }
+ const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ""; };
+ setVal("psp-fenetre", c.fenetre_jours); setVal("psp-seuil", c.seuil_transferts);
+ setVal("psp-taux", c.seuil_taux_pct); setVal("psp-bics", (c.bic_etablissement || []).join(", "));
+ const items = data.items || [];
+ if (!items.length) {
+  tableEmpty("#psp-table", 10, "Aucun prestataire n'a transmis de transfert incomplet sur la période.", "",
+   "Chaque pacs.008 filtré est imputé au prestataire qui le transmet ; ceux qui omettent apparaissent ici.");
+  return;
+ }
+ tbody.innerHTML = items.map(p => `
+  <tr>
+  <td>${escapeHtml(p.name || "—")}</td>
+  <td><code>${escapeHtml(p.identifier)}</code></td>
+  <td>${escapeHtml(p.country || "—")}</td>
+  <td>${p.window.transfers}</td>
+  <td>${p.window.incomplete}</td>
+  <td>${p.window.rate_pct} %</td>
+  <td><small>${escapeHtml(formatDate(p.window.first_failure))} → ${escapeHtml(formatDate(p.window.last_failure))}</small></td>
+  <td><small>${(p.missing || []).map(m => `<span>${escapeHtml(m.label)}</span> (${m.count})`).join("<br>")}</small></td>
+  <td>${_badgePrestataire(p)}</td>
+  <td><button class="btn btn-sm btn-secondary" onclick="afficherManquementsPrestataire('${escapeHtml(p.identifier)}')">Détail</button></td>
+  </tr>`).join("");
+ } catch (e) {
+ tableError("#psp-table", 10);
+ }
+}
+
+async function afficherManquementsPrestataire(identifiant) {
+ const bloc = document.getElementById("psp-detail");
+ const tbody = document.querySelector("#psp-detail-table tbody");
+ if (!bloc || !tbody) return;
+ bloc.classList.remove("hidden");
+ document.getElementById("psp-detail-titre").innerHTML = `<span>Transferts incomplets reçus de</span> <code>${escapeHtml(identifiant)}</code>`;
+ tableLoading("#psp-detail-table", 6);
+ try {
+ const response = await apiFetch(`/api/filtrage/prestataires/${encodeURIComponent(identifiant)}/manquements`);
+ if (!response.ok) { tableError("#psp-detail-table", 6); return; }
+ const data = await response.json();
+ if (!(data.items || []).length) { tableEmpty("#psp-detail-table", 6, "Aucun transfert incomplet sur la période."); return; }
+ tbody.innerHTML = data.items.map(l => `
+  <tr>
+  <td>${escapeHtml(formatDateTime(l.received_at))}</td>
+  <td><small>${escapeHtml(l.message_type)} <code>${escapeHtml(l.msg_id || "—")}</code></small></td>
+  <td>${l.transfers}</td>
+  <td>${l.incomplete}</td>
+  <td><small>${(l.missing || []).map(m => `<span>${escapeHtml(m.label)}</span> (${m.count})`).join("<br>")}</small></td>
+  <td><small><code>${escapeHtml((l.transactions || []).join(", "))}</code></small></td>
+  </tr>`).join("");
+ } catch (e) {
+ tableError("#psp-detail-table", 6);
+ }
+}
+
+function exportSignalementPrestataires() {
+ // La pièce entière, côté serveur : une ligne par prestataire défaillant
+ window.open("/api/export/prestataires-defaillants.csv", "_blank");
+}
+
+function savePspCriteria() {
+ // Pas de repli silencieux : une valeur hors bornes est refusée par le
+ // serveur avec la raison, jamais ramenée sur une autre.
+ const nombre = id => document.getElementById(id)?.value;
+ saveSettingsFamily({ prestataires_defaillants: {
+ fenetre_jours: parseInt(nombre("psp-fenetre"), 10),
+ seuil_transferts: parseInt(nombre("psp-seuil"), 10),
+ seuil_taux_pct: parseFloat(nombre("psp-taux")),
+ politique: document.getElementById("psp-politique")?.value || "",
+ bic_etablissement: (document.getElementById("psp-bics")?.value || "").split(",").map(b => b.trim()).filter(Boolean),
+ } }, "Critères de défaillance enregistrés.").then(() => fetchPrestataires());
 }
 
 // ------------------ P3 : NARRATIF D'ALERTE & ADVERSE MEDIA ------------------
@@ -12618,6 +13293,16 @@ function campaignStatusBadge(status) {
  return `<span style="color: ${color}; font-weight: 700; font-size: 0.78rem;">${label}</span>`;
 }
 
+// Parties liées des clients d'une campagne (fiskr/parties.py), comptées à
+// part des lignes du fichier. Rien pour une campagne antérieure (null) ou
+// sans partie : une absence ne s'affiche pas comme un zéro mesuré.
+function partiesDeLaCampagne(c) {
+ if (!c.parties_screened) return "";
+ const refusees = c.parties_rejected_count
+  ? ` · <span style="color: var(--color-alert);">${c.parties_rejected_count} <span>refusée(s) par le contrôle qualité</span></span>` : "";
+ return `<br><small title="Bénéficiaires effectifs, mandataires, dirigeants et associés des clients du fichier, criblés avec eux."><strong style="color: ${c.parties_alert_count ? "var(--color-alert)" : "var(--text-muted)"};">${c.parties_alert_count}</strong> <span>partie(s) liée(s) en alerte</span> / ${c.parties_screened} <span>criblée(s)</span>${refusees}</small>`;
+}
+
 async function fetchBatchCampaigns() {
  const tbody = document.querySelector("#batch-campaigns-table tbody");
  if (!tbody) return;
@@ -12636,7 +13321,7 @@ async function fetchBatchCampaigns() {
  <td>${c.trigger === "inbox" ? '<span class="badge-secondary"> CFT</span>' : '<span class="badge-secondary">Manuel</span>'}</td>
  <td>${campaignStatusBadge(c.status)}${c.error_message ? `<br><small style="color: var(--color-alert);">${escapeHtml(c.error_message)}</small>` : ""}</td>
  <td>${c.processed_clients} / ${c.total_clients}</td>
- <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong></td>
+ <td><strong style="color: ${c.alert_count ? "var(--color-alert)" : "var(--text-muted)"};" title="Clients déclenchant au moins une correspondance.">${c.alert_count}</strong>${partiesDeLaCampagne(c)}</td>
  <td title="Correspondances au-dessus du seuil, liste blanche et règles comprises. Entre parenthèses : les alertes réellement ouvertes — l'écart est ce que le dispositif a absorbé.">${c.hits_count ?? "—"}${typeof c.opened_count === "number" ? ` <small style="color: var(--text-muted);">(${c.opened_count} ouverte(s))</small>` : ""}</td>
  <td>${c.rejected_count || 0}</td>
  <td>${formatDateTime(c.created_at)}</td>
@@ -12694,7 +13379,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  const rows = (c.results || []).map(r => `
  <tr>
  <td>${escapeHtml(r.client_id || "—")}</td>
- <td><strong>${escapeHtml(r.client_name || "—")}</strong></td>
+ <td><strong>${escapeHtml(r.client_name || "—")}</strong>${r.partie_liee_id ? `<br><small style="color: var(--text-muted);"><span>Partie liée du client</span> : ${escapeHtml(r.via_partie || "#" + r.partie_liee_id)}</small>` : ""}</td>
  <td>${escapeHtml(statusLabel(r.status))}</td>
  <td>${r.final_score !== null && r.final_score !== undefined ? r.final_score.toFixed(1) + " %" : "—"}</td>
  <td>${r.watchlist_name ? `${escapeHtml(r.watchlist_name)}<br><small style="color: var(--text-muted);">${escapeHtml(r.watchlist_entity_id || "")}</small>` : (r.error ? `<small style="color: var(--color-alert);">${escapeHtml(r.error)}</small>` : "—")}</td>
@@ -12707,6 +13392,7 @@ async function openBatchCampaign(campaignId, statusFilter = "") {
  ${c.processed_clients}/${c.total_clients} client(s) criblé(s) ·
  <strong style="color: var(--color-alert);">${c.alert_count} client(s) en alerte</strong>${c.hits_count ? ` · <strong>${c.hits_count} correspondance(s)</strong>` : ""}${typeof c.opened_count === "number" ? ` · <strong>${c.opened_count} alerte(s) ouverte(s)</strong>` : ""} ·
  ${c.no_match_count} sans match · ${c.rejected_count} rejet(s) quality gate
+ ${partiesDeLaCampagne(c)}
  </p>
  <div class="filter-bar" style="margin-bottom: 0.5rem;">
  <button class="btn btn-sm ${statusFilter === "" ? "btn-secondary" : ""}" style="${statusFilter === "" ? "" : "background: var(--surface-3);"}" onclick="openBatchCampaign(${c.id}, '')">Tous (${c.results_total})</button>
@@ -13690,13 +14376,14 @@ async function openClient360(clientId) {
  </tr>`).join("");
 
  const pairsHtml = (d.whitelist_pairs || []).map(p => `
- <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.state === "STALE" && p.stale_reason_label ? " (" + escapeHtml(p.stale_reason_label) + ")" : ""}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}</li>`).join("");
+ <li style="font-size: 0.83rem;"> ${escapeHtml(p.watchlist_name || p.watchlist_entity_id)} — ${escapeHtml(p.state)}${p.state === "STALE" && p.stale_reason_label ? " (" + escapeHtml(p.stale_reason_label) + ")" : ""}${p.expires_at ? " · expire " + formatDate(p.expires_at) : ""}${partieDeLaPaire(p)}</li>`).join("");
 
  body.innerHTML = `
  ${kycHtml}
  <div class="modal-section">
  <h4><span>Parties liées</span> (${(d.parties || []).length})</h4>
  ${blocDetentionHtml(d.detention)}
+ ${blocChaineDeDetentionHtml(d.detention)}
  ${partiesHtml ? `<div class="table-container" style="max-height: 190px;"><table>
  <thead><tr><th>Rôle</th><th>Nom</th><th>Naissance</th><th>Détention</th><th>Peut engager les fonds</th><th>Alertes ouvertes</th></tr></thead>
  <tbody>${partiesHtml}</tbody></table></div>`

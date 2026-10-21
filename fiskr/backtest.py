@@ -222,6 +222,9 @@ def _active_whitelist_keys(db) -> Dict[Tuple[str, str], Any]:
                     WhitelistPair.id, WhitelistPair.entity_checksum,
                     WhitelistPair.client_fingerprint, WhitelistPair.stale_since,
                     WhitelistPair.stale_reason).filter(
+        # Le cahier crible des clients, pas leurs parties liees : une paire
+        # posee sur un mandataire (fiskr/parties.py) ne couvre pas son client
+        WhitelistPair.partie_liee_id.is_(None),
         WhitelistPair.revoked_at.is_(None),
         (WhitelistPair.expires_at.is_(None)) | (WhitelistPair.expires_at > now)
     ).order_by(WhitelistPair.id).all()

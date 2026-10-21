@@ -57,9 +57,17 @@ CE QUI N'EST PAS FAIT
 ---------------------
 Une partie de paiement (« TXN:… ») n'ouvre pas de dossier : il n'y a pas de
 relation d'affaires avec elle, et R.561-20-2 vise le client ou son
-beneficiaire effectif. Le dossier le dit au lieu de se taire. La revue
-periodique (prochaine revue) est datee et signalee echue a l'ecran ; elle ne
-declenche pas de notification.
+beneficiaire effectif. Le dossier le dit au lieu de se taire.
+
+LA REVUE DE VIGILANCE RENFORCEE
+-------------------------------
+Datee a la decision, elle etait signalee echue a l'ecran et c'etait tout. Elle
+leve desormais une notification immediate `ppe_revue_echue`, une fois par
+echeance ; echue depuis plus que le delai de decision, elle bloque le controle
+de mise en service (rejoue par la sonde, sans nom de personne). Elle se tient
+par un geste (`enregistrer_revue`) : maintien avec la revue suivante datee, ou
+fin de la relation — par une personne habilitee qui n'a pas instruit l'alerte.
+La revue n'exige pas de piece nouvelle : son motif dit ce qui a ete revu.
 """
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -528,6 +536,140 @@ def revue_echue(dossier: DossierPPE, maintenant: Optional[datetime] = None) -> b
             and dossier.prochaine_revue_le <= (maintenant or datetime.utcnow()))
 
 
+# ------------------------------------------------------------ revue de vigilance renforcee
+#
+# La revue datee a la decision (R.561-20-2 3°) etait signalee echue a l'ecran,
+# et c'est tout : aucune notification, aucun controle. Un dossier dont la revue
+# a passe sa date ne se voyait qu'en ouvrant le registre, filtre « revue
+# echue » — la vigilance renforcee se tenait a une date que personne n'etait
+# prevenu d'atteindre. Et rien ne permettait de la tenir : un dossier decide
+# ne se reecrit plus, la revue n'avait aucun geste.
+
+CONCLUSION_MAINTIEN = "MAINTIEN"
+CONCLUSION_FIN = "FIN_DE_RELATION"
+CONCLUSIONS_DE_REVUE = {
+    CONCLUSION_MAINTIEN: "Relation maintenue après revue",
+    CONCLUSION_FIN: "Fin de la relation décidée à la revue",
+}
+
+
+def revue_en_retard(dossier: DossierPPE, seuil_jours: float,
+                    maintenant: Optional[datetime] = None) -> bool:
+    """Une revue echue DEPUIS plus que le delai de decision PPE : la meme
+    tolerance que la decision, parce que c'est le meme travail — interroger le
+    client, renouveler les pieces de l'origine des fonds, presenter le tout a
+    la personne habilitee. Au-dela, la revue n'attend plus une instruction,
+    elle attend que quelqu'un s'en saisisse. La seule definition : le
+    controle de mise en service, l'indicateur et l'ecran la lisent."""
+    now = maintenant or datetime.utcnow()
+    return (revue_echue(dossier, now)
+            and dossier.prochaine_revue_le < now - timedelta(days=seuil_jours))
+
+
+def revues_echues(db, maintenant: Optional[datetime] = None) -> List[DossierPPE]:
+    """Dossiers decides dont la revue a atteint sa date (meme definition que
+    `revue_echue`, en SQL pour la detection de chaque minute)."""
+    now = maintenant or datetime.utcnow()
+    return db.query(DossierPPE).filter(
+        DossierPPE.statut == STATUT_DECIDE, DossierPPE.prochaine_revue_le.isnot(None),
+        DossierPPE.prochaine_revue_le <= now).order_by(DossierPPE.prochaine_revue_le.asc()).all()
+
+
+def revues_en_retard(db, maintenant: Optional[datetime] = None) -> List[DossierPPE]:
+    from fiskr.settings import ppe_decision_delai_jours
+    now = maintenant or datetime.utcnow()
+    seuil = ppe_decision_delai_jours(db)
+    return [d for d in revues_echues(db, now) if revue_en_retard(d, seuil, now)]
+
+
+def detecter_revues_echues(db, maintenant: Optional[datetime] = None) -> int:
+    """
+    Signale UNE fois chaque revue echue : evenement immediat `ppe_revue_echue`
+    et trace au journal de l'alerte. Une fois par ECHEANCE, pas a chaque tic :
+    la marque (`revue_signalee_le`) n'est levee que par la revue suivante, qui
+    fixe une nouvelle date.
+    """
+    from fiskr.gels import _duree
+    from fiskr.notifier import emit
+    now = maintenant or datetime.utcnow()
+    signales = 0
+    for dossier in revues_echues(db, now):
+        if dossier.revue_signalee_le is not None:
+            continue
+        dossier.revue_signalee_le = now
+        echeance = dossier.prochaine_revue_le
+        _journal(db, dossier, "systeme", "PPE_REVUE_ECHUE",
+                 f"Dossier PPE #{dossier.id} : revue de vigilance renforcée échue depuis le "
+                 f"{echeance.strftime('%d/%m/%Y')} ({_duree(int((now - echeance).total_seconds()))}). "
+                 f"La relation court sans la revue datée à la décision (CMF R.561-20-2 3°).")
+        db.commit()
+        emit(db, "ppe_revue_echue", {
+            "Dossier": f"#{dossier.id}", "Alerte": dossier.alert_id,
+            "Client": dossier.client_name, "Fiche listée": dossier.watchlist_name,
+            "Qualité": QUALITES.get(dossier.qualite_retenue or dossier.qualite_source or "", "—"),
+            "Décision": DECISIONS.get(dossier.decision or "", "—"),
+            "Revue prévue le": echeance.strftime("%d/%m/%Y"),
+            "Obligation": ("Vigilance renforcée de la relation avec une personne politiquement "
+                           "exposée : revue à tenir et maintien à décider par une personne "
+                           "habilitée (CMF R.561-20-2 1° et 3°)."),
+        })
+        signales += 1
+    return signales
+
+
+def enregistrer_revue(db, dossier: DossierPPE, *, username: str, conclusion: str, motif: str,
+                      reference: Optional[str] = None, revue_le: Any = None,
+                      prochaine_revue_le: Any = None) -> None:
+    """
+    La revue de vigilance renforcee d'une relation acceptee. Maintenir la
+    relation, c'est la decision de R.561-20-2 1° : memes regles que la
+    decision — une personne habilitee (role verifie par l'endpoint) qui n'a pas
+    instruit l'alerte, un motif, et la revue suivante datee. Mettre fin a la
+    relation n'a pas de revue suivante. La decision d'origine ne se reecrit
+    pas : la revue s'ajoute a la suite (`revues`), et leve le signalement de
+    l'echeance qu'elle tient.
+    """
+    if dossier.statut != STATUT_DECIDE or dossier.decision not in DECISIONS_QUI_ACCEPTENT:
+        raise RefusPPE("Seule une relation acceptée (entrée ou maintien) se revoit : décidez "
+                       "d'abord le dossier.", 409)
+    if dossier.prochaine_revue_le is None:
+        raise RefusPPE("La relation a pris fin à une revue précédente : il n'y a plus de "
+                       "revue à tenir.", 409)
+    if username in instruit_par(dossier):
+        raise RefusPPE("Le maintien de la relation revient à une personne habilitée qui n'a pas "
+                       "instruit l'alerte : vous en avez proposé ou validé la confirmation.", 403)
+    code = (conclusion or "").strip().upper()
+    if code not in CONCLUSIONS_DE_REVUE:
+        raise RefusPPE(f"Conclusion de revue inconnue ({', '.join(CONCLUSIONS_DE_REVUE)}).")
+    texte = (motif or "").strip()
+    if not texte:
+        raise RefusPPE("Le motif de la revue est obligatoire : ce qui a été revu, et sur quelles "
+                       "pièces.")
+    date_revue = _date_saisie(revue_le, "Date de la revue") or datetime.utcnow()
+    suivante = None
+    if code == CONCLUSION_MAINTIEN:
+        suivante = _date_saisie(prochaine_revue_le, "Prochaine revue", futur=True)
+        if suivante is None:
+            raise RefusPPE("Datez la prochaine revue : la vigilance renforcée (R.561-20-2 3°) "
+                           "se tient à une date, pas à une intention.")
+    echeance = dossier.prochaine_revue_le
+    dossier.revues = list(dossier.revues or []) + [{
+        "le": date_revue.isoformat(), "par": username, "conclusion": code,
+        "motif": texte[:_MAX_TEXTE], "reference": (reference or "").strip()[:255] or None,
+        "echeance_tenue": echeance.isoformat() if echeance else None,
+        "prochaine_revue_le": suivante.isoformat() if suivante else None,
+    }]
+    dossier.prochaine_revue_le = suivante
+    dossier.revue_signalee_le = None
+    _journal(db, dossier, username, "PPE_REVUE",
+             f"Dossier PPE #{dossier.id} : revue de vigilance renforcée du "
+             f"{date_revue.strftime('%d/%m/%Y')} par @{username} — {CONCLUSIONS_DE_REVUE[code]}"
+             + (f" (réf. {reference.strip()[:255]})" if (reference or "").strip() else "")
+             + f" — {texte}"
+             + (f" — prochaine revue le {suivante.strftime('%d/%m/%Y')}" if suivante else "")
+             + (f" — échéance tenue : {echeance.strftime('%d/%m/%Y')}." if echeance else "."))
+
+
 # ------------------------------------------------------------ lecture
 
 def serialiser(db, dossier: DossierPPE, seuil_jours: Optional[int] = None,
@@ -583,6 +725,12 @@ def serialiser(db, dossier: DossierPPE, seuil_jours: Optional[int] = None,
         "decidee_le": iso(dossier.decidee_le), "decidee_par": dossier.decidee_par,
         "prochaine_revue_le": iso(dossier.prochaine_revue_le),
         "revue_echue": revue_echue(dossier, now),
+        # Echue depuis plus que le delai de decision : le controle de mise en
+        # service la compte (`revue_en_retard`, une seule definition)
+        "revue_en_retard": revue_en_retard(dossier, seuil, now),
+        "revue_signalee_le": iso(dossier.revue_signalee_le),
+        "revues": [{**r, "conclusion_label": CONCLUSIONS_DE_REVUE.get(r.get("conclusion"))}
+                   for r in (dossier.revues or [])],
         "delai_decision_secondes": delai_de_decision_ppe_secondes(
             dossier.ouvert_le, dossier.decidee_le, now),
         "en_retard": decision_ppe_en_retard(dossier.statut, dossier.ouvert_le,
@@ -605,4 +753,5 @@ def vocabulaire() -> Dict[str, Any]:
         "qualites": [{"code": c, "label": QUALITES[c]} for c in QUALITES_RETENUES],
         "decisions": [{"code": c, "label": l, "accepte": c in DECISIONS_QUI_ACCEPTENT}
                       for c, l in DECISIONS.items()],
+        "conclusions_de_revue": [{"code": c, "label": l} for c, l in CONCLUSIONS_DE_REVUE.items()],
     }

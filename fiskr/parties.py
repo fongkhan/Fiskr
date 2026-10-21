@@ -54,23 +54,86 @@ CE QUI EST FAIT
 - Chaque partie est criblee par le MEME cœur que son client (journal d'audit,
   liste blanche, regles, alertes), a chaque fois que le client l'est : temps
   reel, re-criblage apres mise a jour de liste, lookback, clients nouveaux ou
-  modifies. L'alerte est celle du CLIENT — c'est sa relation qui est en cause
+  modifies, campagnes batch (les parties de chaque client du fichier, comptees
+  a part). L'alerte est celle du CLIENT — c'est sa relation qui est en cause
   — et nomme la partie : « via le beneficiaire effectif X (35 %) du client
-  ACME ».
+  ACME ». Le rapport d'alerte, le dossier d'investigation, le narratif et les
+  projets de declaration la decrivent (`partie_de_l_alerte`) ; une paire de
+  liste blanche couvre l'identite qu'elle a vue, client ou partie.
 - Les parties confirmees (vrai positif sur le perimetre SANCTION) sont lues
   pour dire si le client est REPUTE DETENU (cumul >= 50 %, §131) ou CONTROLE
   (une partie designee peut engager ses fonds, §133, §144) par une personne
-  designee (`evaluer_la_detention`). Le registre des gels (fiskr/gels.py) en
-  tire la mesure.
+  designee (`evaluer_la_detention`), directement ou par la chaine de
+  detention (ci-dessous). Le registre des gels (fiskr/gels.py) en tire la
+  mesure.
+
+LA CHAINE DE DETENTION (au-dela du premier niveau)
+--------------------------------------------------
+Le premier lot ne lisait que le premier niveau : ACME <- 60 % HOLDCO <- 100 %
+d'une personne designee n'etait pas reputee detenue — HOLDCO n'est pas
+designee, et la personne designee n'est pas une partie d'ACME. Or §131 :
+« il appartient aux organismes financiers d'identifier toute la chaine
+capitalistique et de determiner si la personne [...] designee detient, au sens
+defini ci-dessus, une ou plusieurs personnes, groupes ou entites ».
+
+D'ou viennent les maillons (deux portes, facultatives : sans elles, le jeu
+d'un client est exactement celui du premier lot) :
+  - `partie_de` : la ligne est la partie d'une personne morale du MEME jeu
+    (« X, associe a 70 % de HOLDCO ») — sa detention et son pouvoir d'engager
+    les fonds portent sur HOLDCO. C'est la porte du cas courant : la holding
+    n'est pas cliente, et le SI qui a calcule les beneficiaires effectifs
+    (CMF R.561-1 : detention « directe ou indirecte ») connait sa chaine.
+    Ces personnes sont criblees avec le client, comme ses autres parties.
+  - `partie_client_id` : la partie EST ce client du referentiel (la holding
+    est cliente) ; ses propres parties, criblees avec elle, continuent la
+    chaine, et une alerte confirmee sur elle-meme la rend designee.
+Les liens entre fiches LISTEES (EntityRelationship, regle des 50 % de
+fiskr/api.py) ne sont PAS relies a cette chaine : ils ne portent que des
+fiches de listes ; une partie confirmee comme l'une d'elles est deja
+designee (premier niveau), et ce graphe ne peut rien dire d'une holding non
+listee — rapprocher les deux par le nom fabriquerait des liens.
+
+La regle de calcul, LUE (et ou elle ne dit rien) :
+  - LD §131 et meilleures pratiques de l'UE (doc. du Conseil 11623/24,
+    3 juillet 2024, §63) : detenir, c'est 50 % ou plus des droits de
+    propriete ou une participation majoritaire, et la propriete s'AGREGE
+    (30 % + 25 %). Commission europeenne, FAQ « Asset freeze and prohibition
+    to make funds available » (reglement 269/2014, version du 25 septembre
+    2026), n° 8 : meme agregation ; n° 9 : le controle etabli sur une entite
+    « would impact its own subsidiaries ». Meilleures pratiques §62 : les
+    avoirs des entites detenues ou controlees par une personne listee sont
+    geles — dont les parts qu'elles detiennent.
+  - Donc, en CASCADE : une entite reputee detenue (ou controlee) par des
+    personnes designees compte pour sa participation ENTIERE dans celle
+    qu'elle detient — ACME <- 60 % HOLDCO <- 70 % X : HOLDCO est detenue
+    (70 %), ses 60 % comptent, ACME est reputee detenue. Une participation
+    portee par une entite qui ne l'est pas ne compte pas. Les participations
+    d'entites differentes dans la meme societe s'additionnent (deux chaines
+    de 30 % vers le meme designe : 60 %) ; la meme personne designee
+    declaree deux fois dans la meme societe ne compte qu'une fois.
+  - Le CONTROLE se propage de meme (FAQ n° 9, meilleures pratiques §64 c :
+    la majorite des droits de vote) : une entite controlee — une partie
+    designee peut engager ses fonds (§133, §144) — compte pour le controle,
+    pas pour la detention. En aval, c'est la suspension et l'interrogation
+    de la DG Tresor (§144), pas le gel.
+  - AMBIGU, dit et non tranche en silence : aucun texte lu ne prescrit ni
+    n'ecarte la MULTIPLICATION le long d'une chaine (60 % x 70 % = 42 %).
+    Elle est calculee et montree ; quand elle atteint le seuil sans que la
+    cascade l'atteigne (30 % en direct + 60 % x 40 % = 54 %), la decision le
+    nomme comme un doute — « en cas de doute, il s'abstient [...] et
+    interroge la DG Tresor » (§144). L'OFAC, qui ne lie pas un etablissement
+    francais, ecrit la meme cascade sans multiplication (FAQ 401, exemples
+    1 a 5). Les participations croisees (cycles) et la profondeur ne sont
+    traitees par aucun texte : le calcul s'arrete au cycle et a
+    `PROFONDEUR_MAXIMALE` niveaux, et le DIT — jamais tronque en silence.
+    Le capital et les droits de vote ne sont pas distingues :
+    `pourcentage_detention` vaut pour les deux.
 
 CE QUI N'EST PAS FAIT
 ---------------------
-- La chaine capitalistique au-dela du premier niveau (§131 : « identifier
-  toute la chaine ») : une partie personne morale est criblee pour elle-meme,
-  mais ses propres beneficiaires ne sont pas parcourus — le SI qui les connait
-  les declare directement comme beneficiaires effectifs du client.
-- Les campagnes de criblage batch ne criblent pas les parties : elles criblent
-  des profils deposes par fichier, sans referentiel derriere eux.
+- Une chaine declaree APRES la confirmation de la personne designee n'ouvre
+  aucune mesure d'elle-meme : le point de decision reste la confirmation
+  (fiskr/gels.py, `ouvrir_si_due`). La vue 360 calcule en direct et le dit.
 """
 import logging
 import re
@@ -118,6 +181,39 @@ FONDEMENT_CONTROLE = "CONTROLE"
 FONDEMENTS = {
     FONDEMENT_DETENTION: "Réputé détenu par une personne désignée (50 % ou plus cumulés, LD §131)",
     FONDEMENT_CONTROLE: "Réputé contrôlé par une personne désignée qui peut engager ses fonds (LD §133, §144)",
+}
+
+# Chaine de detention (« LA CHAINE DE DETENTION » ci-dessus). Les textes ne
+# bornent pas la profondeur ; une chaine plus longue n'est plus une chaine
+# qu'un humain relit, et le parcours doit finir quoi que declare la source.
+# Au-dela, le calcul s'arrete et le DIT (signalement PROFONDEUR).
+PROFONDEUR_MAXIMALE = 10
+# Liens parcourus au plus pour une evaluation : un graphe tres ramifie (la
+# meme holding atteinte par des centaines de chemins) ne fige pas une
+# confirmation. Au-dela, meme signalement que la profondeur.
+_LIENS_MAXIMAUX = 5000
+
+# Ce que la chaine etablit d'un maillon. Libelles rendus tels quels par l'API
+# et traduits par fiskr/static/i18n.js.
+QUALIFICATION_DESIGNEE = "DESIGNEE"
+QUALIFICATION_DETENUE = "DETENUE"
+QUALIFICATION_CONTROLEE = "CONTROLEE"
+QUALIFICATIONS = {
+    QUALIFICATION_DESIGNEE: "personne désignée",
+    QUALIFICATION_DETENUE: "réputée détenue",
+    QUALIFICATION_CONTROLEE: "réputée contrôlée",
+}
+
+# Ce que le calcul ne peut pas trancher seul : nomme, jamais tu.
+SIGNAL_CYCLE = "CYCLE"
+SIGNAL_PROFONDEUR = "PROFONDEUR"
+SIGNAL_HORS_REFERENTIEL = "HORS_REFERENTIEL"
+SIGNAL_MULTIPLICATION = "MULTIPLICATION"
+SIGNALEMENTS = {
+    SIGNAL_CYCLE: "Participation circulaire : le calcul s'arrête au cycle",
+    SIGNAL_PROFONDEUR: "Chaîne non parcourue au-delà de la profondeur maximale : calcul incomplet",
+    SIGNAL_HORS_REFERENTIEL: "Client lié absent du référentiel en production : ses parties ne sont pas criblées",
+    SIGNAL_MULTIPLICATION: "Par multiplication le long des chaînes, le seuil serait atteint : en cas de doute, suspendre et interroger la DG Trésor",
 }
 
 # Cle d'un profil de partie qui porte son contexte (fiskr/rescreen.py) : la
@@ -223,25 +319,47 @@ def _pourcentage_lisible(valeur: Optional[float]) -> str:
     return f"{valeur:g}".replace(".", ",") + " %"
 
 
-def chaine(roles: Sequence[str], nom: str, pourcentage: Optional[float],
-           peut_engager: bool, client_name: str) -> str:
-    """« via le bénéficiaire effectif X (35 %) du client ACME » : ce qui
-    rattache la correspondance au client, en une phrase."""
-    qualite = " et ".join(ROLES.get(r, r).lower() for r in roles) or "partie liée"
-    article = "l'" if qualite[:1] in "aeiouéèêh" else "le "
+def _qualite(roles: Sequence[str]) -> str:
+    return " et ".join(ROLES.get(r, r).lower() for r in roles) or "partie liée"
+
+
+def _precisions(pourcentage: Optional[float], peut_engager: bool) -> str:
     precisions = []
     if pourcentage is not None:
         precisions.append(_pourcentage_lisible(pourcentage))
     if peut_engager:
         precisions.append("peut engager les fonds")
-    suite = f" ({', '.join(precisions)})" if precisions else ""
-    return f"via {article}{qualite} {nom}{suite} du client {client_name}"
+    return f" ({', '.join(precisions)})" if precisions else ""
+
+
+def chaine(roles: Sequence[str], nom: str, pourcentage: Optional[float],
+           peut_engager: bool, client_name: str,
+           intermediaires: Sequence["PartieLiee"] = ()) -> str:
+    """« via le bénéficiaire effectif X (35 %) du client ACME » : ce qui
+    rattache la correspondance au client, en une phrase. Une partie d'une
+    holding du client nomme la holding : « via l'associé X (70 %) de HOLDCO,
+    associé (60 %) du client ACME » — `intermediaires` va de la personne
+    morale dont elle est la partie jusqu'au client exclu."""
+    qualite = _qualite(roles)
+    article = "l'" if qualite[:1] in "aeiouéèêh" else "le "
+    suite = _precisions(pourcentage, peut_engager)
+    entre = "".join(
+        f" de {p.nom}, {_qualite(p.roles or [])}"
+        f"{_precisions(p.pourcentage_detention, bool(p.peut_engager_les_fonds))}"
+        for p in intermediaires)
+    return f"via {article}{qualite} {nom}{suite}{entre} du client {client_name}"
 
 
 # ------------------------------------------------------------ lecture
 
+def _reference(valeur: Any) -> Optional[str]:
+    texte = str(valeur or "").strip()
+    return texte[:100] or None
+
+
 def lire_une_partie(identite: Dict[str, Any], *, roles: Any, pourcentage: Any = None,
                     peut_engager: Any = None, partie_id: Any = None,
+                    partie_de: Any = None, partie_client_id: Any = None,
                     champs_inconnus_refuses: bool = True) -> Dict[str, Any]:
     """
     Une partie telle qu'elle sera enregistree, ou un refus qui dit pourquoi.
@@ -256,6 +374,11 @@ def lire_une_partie(identite: Dict[str, Any], *, roles: Any, pourcentage: Any = 
     « autorise a agir au nom » du client (LD §117), c'est le pouvoir d'engager
     ses fonds (procuration, §132). Le doute penche vers ce qui ne fait rien
     perdre ; un « non » explicite est respecte.
+
+    Chaine de detention : `partie_de` (partie_id d'une personne morale du meme
+    jeu : la detention et le pouvoir d'engager portent sur elle) et
+    `partie_client_id` (la partie EST ce client du referentiel). Leur
+    coherence se juge sur le jeu entier (`verifier_la_structure`).
     """
     from fiskr.identification import identifiant_calcule
     from fiskr.quality import evaluate_and_clean
@@ -294,7 +417,67 @@ def lire_une_partie(identite: Dict[str, Any], *, roles: Any, pourcentage: Any = 
         "nom": nom_d_affichage(propre)[:1000] or reference,
         "pourcentage_detention": lire_pourcentage(pourcentage),
         "peut_engager_les_fonds": bool(engage),
+        "partie_de": _reference(partie_de),
+        "partie_client_id": _reference(partie_client_id),
     }
+
+
+def verifier_la_structure(client_id: str, lues: Sequence[Dict[str, Any]]) -> None:
+    """
+    La chaine que le jeu COMPLET d'un client declare tient-elle debout ? Refus
+    franc sinon — une chaine a moitie lue serait un calcul faux qui se presente
+    comme juste :
+      - `partie_de` doit nommer une personne morale DU JEU, autre que la ligne
+        elle-meme : une personne physique ne se detient pas, et une reference
+        absente laisserait une detention suspendue a rien ;
+      - les `partie_de` d'un jeu ne tournent pas en rond : une ligne porte une
+        seule detention, donc un cycle ne mene jamais au client — c'est une
+        declaration incoherente, pas une participation croisee (celle-ci se
+        declare entre clients, par `partie_client_id`, et se signale au calcul) ;
+      - une partie liee a un client (`partie_client_id`) a SES detenteurs dans
+        le jeu de ce client : les declarer aussi ici les compterait deux fois ;
+        deux parties ne designent pas le meme client, et aucune n'est le client
+        lui-meme.
+    """
+    par_id = {l["partie_id"]: l for l in lues}
+    for lue in lues:
+        parent = lue.get("partie_de")
+        if parent is None:
+            continue
+        if parent == lue["partie_id"]:
+            raise RefusDePartie(f"la partie {lue['partie_id']} se déclare partie d'elle-même.")
+        cible = par_id.get(parent)
+        if cible is None:
+            raise RefusDePartie(
+                f"la partie {lue['partie_id']} est déclarée partie de « {parent} », absente du "
+                f"jeu déclaré pour ce client : déclarez cette personne morale dans le même jeu.")
+        if (cible["identite"].get("client_type") or "PP") != "PM":
+            raise RefusDePartie(
+                f"la partie {lue['partie_id']} est déclarée partie de {parent}, une personne "
+                f"physique : seule une personne morale a des associés ou des dirigeants.")
+        if cible.get("partie_client_id"):
+            raise RefusDePartie(
+                f"{parent} est le client {cible['partie_client_id']} du référentiel : ses parties "
+                f"sont celles de ce client — les déclarer aussi ici ({lue['partie_id']}) les "
+                f"compterait deux fois.")
+    for lue in lues:
+        vus = [lue["partie_id"]]
+        courant = lue.get("partie_de")
+        while courant is not None:
+            if courant in vus:
+                raise RefusDePartie(
+                    "détentions circulaires dans le jeu déclaré : " + " → ".join(vus + [courant])
+                    + " — aucune ne mène au client.")
+            vus.append(courant)
+            courant = par_id[courant].get("partie_de")
+    lies = [l["partie_client_id"] for l in lues if l.get("partie_client_id")]
+    if client_id in lies:
+        raise RefusDePartie(f"une partie est déclarée être le client {client_id} lui-même.")
+    doublons = sorted({c for c in lies if lies.count(c) > 1})
+    if doublons:
+        raise RefusDePartie(
+            f"plusieurs parties déclarées être le même client ({', '.join(doublons)}) : sa "
+            f"détention compterait plusieurs fois.")
 
 
 def _identite_comparable(identite: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -313,8 +496,8 @@ def remplacer_les_parties(db, client_id: str, lues: Sequence[Dict[str, Any]], *,
 
     Rend le bilan, dont `identite_changee` : vrai si une identite de partie a
     ete creee, modifiee, retiree ou reactivee — c'est ce qui demande de
-    recribler la relation (LD §141). Un pourcentage ou un role modifie ne
-    change aucun criblage. Commit par l'appelant.
+    recribler la relation (LD §141). Un pourcentage, un role ou un maillon de
+    la chaine modifie ne change aucun criblage. Commit par l'appelant.
     """
     vus = [l["partie_id"] for l in lues]
     doublons = sorted({p for p in vus if vus.count(p) > 1})
@@ -322,6 +505,7 @@ def remplacer_les_parties(db, client_id: str, lues: Sequence[Dict[str, Any]], *,
         raise RefusDePartie(
             f"deux déclarations pour la même partie ({', '.join(doublons)}) : déclarez "
             f"ses rôles ensemble, sur une seule ligne.")
+    verifier_la_structure(client_id, lues)
     now = maintenant or datetime.utcnow()
     existantes = {p.partie_id: p for p in db.query(PartieLiee).filter(
         PartieLiee.client_id == client_id).all()}
@@ -335,6 +519,7 @@ def remplacer_les_parties(db, client_id: str, lues: Sequence[Dict[str, Any]], *,
                 identite=lue["identite"], nom=lue["nom"],
                 pourcentage_detention=lue["pourcentage_detention"],
                 peut_engager_les_fonds=lue["peut_engager_les_fonds"],
+                partie_de=lue.get("partie_de"), partie_client_id=lue.get("partie_client_id"),
                 source=source, source_ref=source_ref, created_at=now, created_by=username,
                 updated_at=now, updated_by=username))
             bilan["creees"] += 1
@@ -346,7 +531,9 @@ def remplacer_les_parties(db, client_id: str, lues: Sequence[Dict[str, Any]], *,
                    or list(partie.roles or []) != lue["roles"]
                    or partie.nom != lue["nom"]
                    or partie.pourcentage_detention != lue["pourcentage_detention"]
-                   or bool(partie.peut_engager_les_fonds) != lue["peut_engager_les_fonds"])
+                   or bool(partie.peut_engager_les_fonds) != lue["peut_engager_les_fonds"]
+                   or partie.partie_de != lue.get("partie_de")
+                   or partie.partie_client_id != lue.get("partie_client_id"))
         if not differe:
             bilan["inchangees"] += 1
             continue
@@ -355,6 +542,8 @@ def remplacer_les_parties(db, client_id: str, lues: Sequence[Dict[str, Any]], *,
         partie.nom = lue["nom"]
         partie.pourcentage_detention = lue["pourcentage_detention"]
         partie.peut_engager_les_fonds = lue["peut_engager_les_fonds"]
+        partie.partie_de = lue.get("partie_de")
+        partie.partie_client_id = lue.get("partie_client_id")
         partie.source, partie.source_ref = source, source_ref
         partie.updated_at, partie.updated_by = now, username
         if reactivee:
@@ -399,9 +588,35 @@ def parties_actives(db, client_ids: Iterable[str]) -> Dict[str, List[PartieLiee]
     return sortie
 
 
-def contexte(partie: PartieLiee, client_name: str) -> Dict[str, Any]:
+def intermediaires(partie: PartieLiee,
+                   parties_du_client: Optional[Iterable[PartieLiee]]) -> List[PartieLiee]:
+    """Les personnes morales du jeu entre la partie et son client (`partie_de`
+    remonte), de la plus proche a la plus lointaine. Borne et sans boucle
+    quoi que porte la base : `verifier_la_structure` refuse les cycles a
+    l'entree, ce parcours ne leur fait pas confiance pour terminer."""
+    if not partie.partie_de or parties_du_client is None:
+        return []
+    par_reference = {p.partie_id: p for p in parties_du_client}
+    sortie: List[PartieLiee] = []
+    courant = par_reference.get(partie.partie_de)
+    while courant is not None and courant not in sortie and len(sortie) < PROFONDEUR_MAXIMALE:
+        sortie.append(courant)
+        courant = par_reference.get(courant.partie_de) if courant.partie_de else None
+    return sortie
+
+
+def contexte(partie: PartieLiee, client_name: str,
+             parties_du_client: Optional[Iterable[PartieLiee]] = None) -> Dict[str, Any]:
     """Ce que la decision et l'alerte figent de la partie : qui, a quel
-    titre, pour quel client — et la chaine qui le dit."""
+    titre, pour quel client — et la chaine qui le dit. `parties_du_client`
+    (les parties actives du meme client) nomme les holdings entre la partie et
+    le client ; sans elles, une partie de holding ne se dirait pas « du
+    client » : la holding est nommee par sa reference."""
+    entre = intermediaires(partie, parties_du_client)
+    texte = chaine(partie.roles or [], partie.nom, partie.pourcentage_detention,
+                   bool(partie.peut_engager_les_fonds), client_name or partie.client_id, entre)
+    if partie.partie_de and not entre:
+        texte = texte.replace(" du client ", f" de la partie {partie.partie_de} du client ", 1)
     return {
         "id": partie.id,
         "partie_id": partie.partie_id,
@@ -411,8 +626,9 @@ def contexte(partie: PartieLiee, client_name: str) -> Dict[str, Any]:
         "nom": partie.nom,
         "pourcentage_detention": partie.pourcentage_detention,
         "peut_engager_les_fonds": bool(partie.peut_engager_les_fonds),
-        "chaine": chaine(partie.roles or [], partie.nom, partie.pourcentage_detention,
-                         bool(partie.peut_engager_les_fonds), client_name or partie.client_id),
+        "partie_de": partie.partie_de,
+        "partie_client_id": partie.partie_client_id,
+        "chaine": texte,
     }
 
 
@@ -440,7 +656,7 @@ def joindre_les_parties(db, fiches: List[Dict[str, Any]]) -> None:
         if not parties:
             continue
         nom = nom_d_affichage(fiche) or fiche.get("client_id")
-        fiche[CLE_DES_PARTIES] = [profil_de_criblage(p, contexte(p, nom)) for p in parties]
+        fiche[CLE_DES_PARTIES] = [profil_de_criblage(p, contexte(p, nom, parties)) for p in parties]
 
 
 def profils_des_parties(db, client_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -466,19 +682,452 @@ def vue(partie: PartieLiee) -> Dict[str, Any]:
         "nationalites": list(pays.get("nationality") or []) if isinstance(pays, dict) else [],
         "pourcentage_detention": partie.pourcentage_detention,
         "peut_engager_les_fonds": bool(partie.peut_engager_les_fonds),
+        # Chaine de detention : la detention porte sur cette personne morale
+        # du jeu (NULL : le client) ; la partie est ce client du referentiel
+        "partie_de": partie.partie_de,
+        "partie_client_id": partie.partie_client_id,
         "source": partie.source,
         "mise_a_jour_le": partie.updated_at.isoformat() if partie.updated_at else None,
         "retiree_le": partie.retiree_le.isoformat() if partie.retiree_le else None,
     }
 
 
+# ------------------------------------------------------------ pieces et declarations
+
+def partie_de_l_alerte(db, alert, audit=None) -> Optional[Dict[str, Any]]:
+    """
+    La partie liee sur laquelle porte une alerte, telle que la decrivent les
+    pieces imprimables (rapport d'alerte, dossier d'investigation, narratif)
+    et les projets de declaration (TRACFIN, DG Tresor) : qui, a quel titre,
+    quelle detention, quel pouvoir sur les fonds, pour quel client. None : la
+    correspondance porte sur le client lui-meme.
+
+    Ces pieces ne le disaient pas : une alerte nee « via le beneficiaire
+    effectif X (35 %) du client ACME » s'imprimait comme une correspondance
+    entre ACME et la personne listee — la declaration aurait decrit une
+    identite qui n'a pas ete comparee.
+
+    Ce que le CRIBLAGE a vu fait foi : l'arbre journalise fige la partie
+    (`contexte`) et l'identite comparee avec la decision. Une declaration
+    decrit la correspondance instruite, pas la partie telle que la source l'a
+    redeclaree depuis. La ligne actuelle complete ce que l'arbre ne porte pas
+    et dit si la source a retire la partie. `db` peut manquer (narratif) : la
+    ligne n'est alors pas lue.
+    """
+    if alert is None or getattr(alert, "partie_liee_id", None) is None:
+        return None
+    arbre = (getattr(audit, "decision_tree", None) or {}) if audit is not None else {}
+    criblee = arbre.get("partie_liee") or {}
+    ligne = db.get(PartieLiee, alert.partie_liee_id) if db is not None else None
+    identite = arbre.get("client_identification") or (ligne.identite if ligne is not None else None) or {}
+    roles = list(criblee.get("roles") or (ligne.roles if ligne is not None else None) or [])
+    pourcentage = (criblee.get("pourcentage_detention") if "pourcentage_detention" in criblee
+                   else (ligne.pourcentage_detention if ligne is not None else None))
+    engage = (criblee.get("peut_engager_les_fonds") if "peut_engager_les_fonds" in criblee
+              else (ligne.peut_engager_les_fonds if ligne is not None else None))
+    pays = identite.get("client_countries") or {}
+    return {
+        "partie_liee_id": alert.partie_liee_id,
+        "partie_id": criblee.get("partie_id") or (ligne.partie_id if ligne is not None else None),
+        "nom": criblee.get("nom") or (ligne.nom if ligne is not None else None)
+               or nom_d_affichage(identite) or None,
+        "roles": roles,
+        "roles_libelles": [ROLES.get(r, r) for r in roles],
+        "pourcentage_detention": pourcentage,
+        "peut_engager_les_fonds": None if engage is None else bool(engage),
+        "client_id": alert.client_id,
+        "client_name": criblee.get("client_name") or alert.client_name,
+        "chaine": getattr(alert, "via_partie", None) or criblee.get("chaine"),
+        "type": identite.get("client_type"),
+        "date_naissance": identite.get("client_dob"),
+        "nationalites": list(pays.get("nationality") or []) if isinstance(pays, dict) else [],
+        "retiree_le": (ligne.retiree_le.isoformat()
+                       if ligne is not None and ligne.retiree_le else None),
+    }
+
+
+def rubriques_de_la_partie(partie: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """(libelle, valeur) d'une partie, dans l'ordre ou chaque piece les
+    imprime : une seule definition pour le rapport, le dossier et les deux
+    projets de declaration."""
+    if not partie:
+        return []
+    pct = partie.get("pourcentage_detention")
+    engage = partie.get("peut_engager_les_fonds")
+    rubriques = [
+        ("Partie liée", partie.get("nom") or "—"),
+        ("Rôle(s)", ", ".join(partie.get("roles_libelles") or []) or "—"),
+        ("Détention", _pourcentage_lisible(pct) if pct is not None else "non renseignée"),
+        ("Peut engager les fonds du client",
+         "non renseigné" if engage is None else ("oui" if engage else "non")),
+        ("Client", f"{partie.get('client_name') or '—'} ({partie.get('client_id') or '—'})"),
+        ("Rattachement", partie.get("chaine") or "—"),
+    ]
+    if partie.get("date_naissance"):
+        rubriques.append(("Date de naissance", str(partie["date_naissance"])))
+    if partie.get("nationalites"):
+        rubriques.append(("Nationalité(s)", ", ".join(str(n) for n in partie["nationalites"])))
+    if partie.get("retiree_le"):
+        rubriques.append(("Retirée par la source le", partie["retiree_le"][:10]))
+    return rubriques
+
+
+def phrase_de_la_partie(partie: Optional[Dict[str, Any]]) -> str:
+    """La partie en une phrase, pour un narratif ou un resume de declaration :
+    « Viktor ZOLOTAREV, bénéficiaire effectif (35 %) du client ACME »."""
+    if not partie:
+        return ""
+    qualite = " et ".join(l.lower() for l in partie.get("roles_libelles") or []) or "partie liée"
+    precisions = []
+    if partie.get("pourcentage_detention") is not None:
+        precisions.append(_pourcentage_lisible(partie["pourcentage_detention"]))
+    if partie.get("peut_engager_les_fonds"):
+        precisions.append("peut engager les fonds")
+    suite = f" ({', '.join(precisions)})" if precisions else ""
+    return (f"« {partie.get('nom') or '—'} », {qualite}{suite} du client "
+            f"« {partie.get('client_name') or partie.get('client_id') or '—'} »")
+
+
 # ------------------------------------------------------------ detention reputee
 
+def _par_tranches(ids: Iterable[Any]) -> Iterable[List[Any]]:
+    tries = sorted(set(ids))
+    for debut in range(0, len(tries), _TRANCHE):
+        yield tries[debut:debut + _TRANCHE]
+
+
+def _clients_au_referentiel(db, client_ids: Iterable[str]) -> set:
+    """Ceux de ces clients que le referentiel en production porte : les
+    seuls dont les parties sont criblees (fiskr/rescreen.py)."""
+    from fiskr.database import ClientEntity, Snapshot
+    presents: set = set()
+    for tranche in _par_tranches(c for c in client_ids if c):
+        presents.update(cid for (cid,) in db.query(ClientEntity.client_id).join(
+            Snapshot, Snapshot.snapshot_id == ClientEntity.snapshot_id).filter(
+            Snapshot.file_type == "CLIENT_BASE", Snapshot.status == "READY",
+            ClientEntity.client_id.in_(tranche)).distinct().all())
+    return presents
+
+
+def nom_du_client(db, client_id: Optional[str]) -> str:
+    """Le nom d'un client tel que sa ligne la plus recente du referentiel en
+    production le porte ; son identifiant s'il n'y est pas."""
+    from fiskr.database import ClientEntity, Snapshot
+    if not client_id:
+        return ""
+    ligne = db.query(ClientEntity).join(
+        Snapshot, Snapshot.snapshot_id == ClientEntity.snapshot_id).filter(
+        ClientEntity.client_id == client_id, Snapshot.file_type == "CLIENT_BASE",
+        Snapshot.status == "READY").order_by(ClientEntity.id.desc()).first()
+    if ligne is None:
+        return client_id
+    return nom_d_affichage({
+        "client_type": ligne.client_type, "client_first_name": ligne.client_first_name,
+        "client_last_name": ligne.client_last_name,
+        "client_company_name": ligne.client_company_name}) or client_id
+
+
+def clients_detenus_par(db, client_id: Optional[str]) -> List[str]:
+    """Les clients dont la chaine de detention passe par ce client — une de
+    leurs parties EST ce client (`partie_client_id`) —, de proche en proche :
+    ceux que sa designation, ou celle d'une de ses parties, peut rendre
+    reputes detenus. Borne a `PROFONDEUR_MAXIMALE`, chaque client une fois."""
+    if not client_id:
+        return []
+    sortie: List[str] = []
+    vus = {client_id}
+    front = [client_id]
+    for _ in range(PROFONDEUR_MAXIMALE):
+        if not front:
+            break
+        suivants = set()
+        for tranche in _par_tranches(front):
+            suivants.update(cid for (cid,) in db.query(PartieLiee.client_id).filter(
+                PartieLiee.partie_client_id.in_(tranche),
+                PartieLiee.retiree_le.is_(None)).distinct().all() if cid not in vus)
+        front = sorted(suivants)
+        vus.update(front)
+        sortie.extend(front)
+    return sortie
+
+
+def _est_personne_morale(partie: PartieLiee) -> bool:
+    return ((partie.identite or {}).get("client_type") or "PP") == "PM"
+
+
+class _Parcours:
+    """
+    UNE evaluation de la chaine d'un client : les jeux de parties charges une
+    fois (le client, puis les clients que ses parties SONT, de proche en
+    proche), les designations relevees une fois, puis la cascade.
+
+    Un noeud est le client lui-meme (`("C", client_id)`) ou une partie
+    (`PartieLiee`). Les detenteurs d'un noeud : les parties de premier niveau
+    du client ; pour une partie personne morale, les parties du jeu declarees
+    `partie_de` elle et, si elle EST un client du referentiel, les parties de
+    premier niveau de ce client. Un noeud deja sur le chemin est un CYCLE : le
+    lien n'est pas suivi, et c'est dit.
+    """
+
+    def __init__(self, db, client_id: str, surcharges: Optional[Dict[str, str]],
+                 client_name: Optional[str]):
+        self.db = db
+        self.racine = ("C", client_id)
+        self.surcharges = surcharges
+        self._nom_du_client = client_name
+        self.jeux: Dict[str, List[PartieLiee]] = {}
+        self.signalements: List[Dict[str, Any]] = []
+        self._signales: set = set()
+        self.liens = 0
+        self.chaines: List[List[Any]] = []
+        self.structure: List[Dict[str, Any]] = []
+        self._vus_structure: set = set()
+        self.qualifications: Dict[Tuple[Any, ...], Optional[str]] = {}
+        self._charger(client_id)
+        self._designer()
+
+    # -------------------------------------------------- graphe et designations
+
+    def _charger(self, client_id: str) -> None:
+        a_charger = [client_id]
+        for _ in range(PROFONDEUR_MAXIMALE + 1):
+            if not a_charger:
+                break
+            lus = parties_actives(self.db, a_charger)
+            for cid in a_charger:
+                self.jeux[cid] = lus.get(cid, [])
+            a_charger = sorted({p.partie_client_id for cid in a_charger for p in self.jeux[cid]
+                                if p.partie_client_id and p.partie_client_id not in self.jeux})
+        self.lies = sorted({p.partie_client_id for jeu in self.jeux.values() for p in jeu
+                            if p.partie_client_id})
+        self.au_referentiel = _clients_au_referentiel(self.db, self.lies) if self.lies else set()
+
+    def _designer(self) -> None:
+        """Les parties designees : une alerte CONFIRMEE (vrai positif) sur une
+        liste du perimetre SANCTION, surcharges comprises — sur la partie, ou,
+        pour une partie qui EST un client, sur ce client lui-meme. Une
+        homonymie non instruite n'est pas une personne designee, un PEP non
+        plus."""
+        from fiskr.perimeters import est_sanction
+        self.alertes_de_partie: Dict[int, List[Alert]] = {}
+        ids = [p.id for jeu in self.jeux.values() for p in jeu]
+        for tranche in _par_tranches(ids):
+            for a in self.db.query(Alert).filter(
+                    Alert.partie_liee_id.in_(tranche), Alert.status == "CLOSED_CONFIRMED") \
+                    .order_by(Alert.id.asc()).all():
+                if est_sanction(a.list_type, self.surcharges):
+                    self.alertes_de_partie.setdefault(a.partie_liee_id, []).append(a)
+        self.alertes_de_client: Dict[str, List[Alert]] = {}
+        for tranche in _par_tranches(self.lies):
+            for a in self.db.query(Alert).filter(
+                    Alert.client_id.in_(tranche), Alert.partie_liee_id.is_(None),
+                    Alert.status == "CLOSED_CONFIRMED").order_by(Alert.id.asc()).all():
+                if est_sanction(a.list_type, self.surcharges):
+                    self.alertes_de_client.setdefault(a.client_id, []).append(a)
+        # Une personne designee, UNE part par societe : la meme personne
+        # confirmee sur deux listes (deux fiches, une partie) ou declaree deux
+        # fois (deux parties, une fiche) ne s'additionne pas a elle-meme. Le
+        # premier lot indexait la part sur la fiche : un beneficiaire a 30 %
+        # confirme sur la liste DGT et sur la liste UE comptait 60 %.
+        parent: Dict[Any, Any] = {}
+
+        def racine(x):
+            while parent.setdefault(x, x) != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for jeu in self.jeux.values():
+            for p in jeu:
+                for a in self.alertes(p):
+                    parent[racine(("P", p.id))] = racine(("F", a.watchlist_entity_id))
+        self.personne = {p.id: racine(("P", p.id)) for jeu in self.jeux.values() for p in jeu
+                         if self.alertes(p)}
+
+    def alertes(self, partie: PartieLiee) -> List[Alert]:
+        return (self.alertes_de_partie.get(partie.id, [])
+                + (self.alertes_de_client.get(partie.partie_client_id, [])
+                   if partie.partie_client_id else []))
+
+    # -------------------------------------------------- parcours
+
+    def _cles(self, noeud: Any) -> set:
+        if isinstance(noeud, tuple):
+            return {noeud}
+        cles = {("P", noeud.id)}
+        if noeud.partie_client_id:
+            cles.add(("C", noeud.partie_client_id))
+        return cles
+
+    def _nom(self, noeud: Any) -> str:
+        if not isinstance(noeud, tuple):
+            return noeud.nom
+        # Lu seulement quand un texte le demande : un client sans partie
+        # s'evalue sans requete de plus.
+        if self._nom_du_client is None:
+            self._nom_du_client = nom_du_client(self.db, self.racine[1])
+        return self._nom_du_client
+
+    def _cle_de_chemin(self, chemin: Sequence[Any]) -> Tuple[Any, ...]:
+        return tuple(n if isinstance(n, tuple) else ("P", n.id) for n in chemin)
+
+    def _detenteurs(self, noeud: Any) -> List[PartieLiee]:
+        if isinstance(noeud, tuple):
+            return [p for p in self.jeux.get(noeud[1], []) if not p.partie_de]
+        sortie = [p for p in self.jeux.get(noeud.client_id, []) if p.partie_de == noeud.partie_id]
+        if noeud.partie_client_id:
+            sortie += [p for p in self.jeux.get(noeud.partie_client_id, []) if not p.partie_de]
+        return sortie
+
+    def _a_des_detenteurs(self, partie: PartieLiee) -> bool:
+        if not _est_personne_morale(partie):
+            return False
+        return bool(partie.partie_client_id) or any(
+            p.partie_de == partie.partie_id for p in self.jeux.get(partie.client_id, []))
+
+    def texte_du_chemin(self, chemin: Sequence[Any]) -> str:
+        """« ACME ← 60 % HOLDCO ← 70 % X » : du client vers ses detenteurs."""
+        morceaux = [self._nom(chemin[0])]
+        for n in chemin[1:]:
+            pct = f"{_pourcentage_lisible(n.pourcentage_detention)} " \
+                if n.pourcentage_detention is not None else ""
+            engage = " (peut engager les fonds)" if n.peut_engager_les_fonds else ""
+            morceaux.append(f"{pct}{n.nom}{engage}")
+        return " ← ".join(morceaux)
+
+    def _signaler(self, code: str, chemin: Sequence[Any], suite: str = "") -> None:
+        texte = self.texte_du_chemin(chemin) + suite
+        if (code, texte) in self._signales:
+            return
+        self._signales.add((code, texte))
+        self.signalements.append({"type": code, "libelle": SIGNALEMENTS[code],
+                                  "chemin": [self._nom(n) for n in chemin], "texte": texte})
+
+    def _noter_structure(self, noeud: Any, partie: PartieLiee, niveau: int) -> Dict[str, Any]:
+        """Le lien, note AVANT de descendre (l'ordre de lecture d'une
+        arborescence) ; sa qualification est posee au retour. Un lien deja
+        note (la meme holding atteinte par deux chemins) ne se repete pas."""
+        cle = (tuple(sorted(self._cles(noeud))), partie.id)
+        if cle in self._vus_structure:
+            return {}
+        self._vus_structure.add(cle)
+        entree = {
+            "niveau": niveau, "partie_liee_id": partie.id, "client_id": partie.client_id,
+            "nom": partie.nom, "roles": list(partie.roles or []),
+            "pourcentage_detention": partie.pourcentage_detention,
+            "peut_engager_les_fonds": bool(partie.peut_engager_les_fonds),
+            "de": self._nom(noeud), "partie_client_id": partie.partie_client_id,
+            "qualification": None, "qualification_label": None,
+        }
+        self.structure.append(entree)
+        return entree
+
+    def evaluer(self, noeud: Any, chemin: List[Any], niveau: int) -> Dict[str, Any]:
+        """
+        La cascade sur un noeud (au niveau `niveau`, le client a 0) : ses
+        detenteurs designes comptent pour leur part ; un detenteur personne
+        morale compte pour sa part ENTIERE s'il est lui-meme repute detenu
+        (detention) ou controle (controle), et pour rien sinon. Rend la
+        qualification du noeud, ses cumuls et l'interet par multiplication.
+        """
+        sur_le_chemin = set().union(*(self._cles(n) for n in chemin))
+        if (not isinstance(noeud, tuple) and noeud.partie_client_id
+                and noeud.partie_client_id not in self.au_referentiel):
+            self._signaler(SIGNAL_HORS_REFERENTIEL, chemin,
+                           f" — client {noeud.partie_client_id}")
+        detention: Dict[Any, float] = {}
+        controle: Dict[Any, float] = {}
+        designees: Dict[Any, float] = {}
+        interet: Dict[Any, float] = {}
+        engage = False
+        for partie in self._detenteurs(noeud):
+            self.liens += 1
+            if self.liens > _LIENS_MAXIMAUX:
+                self._signaler(SIGNAL_PROFONDEUR, chemin + [partie],
+                               f" — plus de {_LIENS_MAXIMAUX} liens parcourus")
+                break
+            entree = self._noter_structure(noeud, partie, niveau + 1)
+            if self._cles(partie) & sur_le_chemin:
+                self._signaler(SIGNAL_CYCLE, chemin + [partie])
+                continue
+            pct = float(partie.pourcentage_detention or 0.0)
+            qualification, sous_interet = None, 0.0
+            if partie.id in self.personne:
+                qualification, sous_interet = QUALIFICATION_DESIGNEE, 1.0
+                cle = ("personne", self.personne[partie.id])
+                designees[cle] = max(designees.get(cle, 0.0), pct)
+                self.chaines.append(chemin + [partie])
+            else:
+                cle = ("entite", partie.id)
+                if self._a_des_detenteurs(partie):
+                    lie_non_charge = bool(partie.partie_client_id) and partie.partie_client_id not in self.jeux
+                    if niveau + 2 > PROFONDEUR_MAXIMALE or lie_non_charge:
+                        self._signaler(SIGNAL_PROFONDEUR, chemin + [partie],
+                                       f" ← … (au-delà de {PROFONDEUR_MAXIMALE} niveaux)")
+                    else:
+                        sous = self.evaluer(partie, chemin + [partie], niveau + 1)
+                        qualification, sous_interet = sous["qualification"], sous["interet"]
+            if entree:
+                entree["qualification"] = qualification
+                entree["qualification_label"] = QUALIFICATIONS.get(qualification or "")
+            if qualification in (QUALIFICATION_DESIGNEE, QUALIFICATION_DETENUE):
+                detention[cle] = max(detention.get(cle, 0.0), pct)
+            if qualification is not None:
+                controle[cle] = max(controle.get(cle, 0.0), pct)
+                engage = engage or bool(partie.peut_engager_les_fonds)
+            interet[cle] = max(interet.get(cle, 0.0), pct / 100.0 * sous_interet)
+        cumul = round(float(sum(detention.values())), 4)
+        cumul_controle = round(float(sum(controle.values())), 4)
+        if cumul >= SEUIL_DE_DETENTION_PCT:
+            qualification = QUALIFICATION_DETENUE
+        elif cumul_controle >= SEUIL_DE_DETENTION_PCT or engage:
+            qualification = QUALIFICATION_CONTROLEE
+        else:
+            qualification = None
+        self.qualifications[self._cle_de_chemin(chemin)] = qualification
+        return {"qualification": qualification, "cumul": cumul, "cumul_controle": cumul_controle,
+                "direct": round(float(sum(designees.values())), 4), "engage": engage,
+                "interet": min(1.0, sum(interet.values()))}
+
+    def chaines_lisibles(self) -> List[Dict[str, Any]]:
+        """Chaque chemin du client vers une partie designee, avec ce qu'il
+        etablit : il compte si chaque societe intermediaire est reputee
+        detenue ou controlee ; sinon, la premiere qui ne l'est pas est nommee."""
+        sortie = []
+        for chemin in self.chaines:
+            designee = chemin[-1]
+            etapes, motif, produit = [], None, 1.0
+            for i, n in enumerate(chemin[1:], start=1):
+                qualification = (QUALIFICATION_DESIGNEE if n is designee
+                                 else self.qualifications.get(self._cle_de_chemin(chemin[:i + 1])))
+                if n is not designee and qualification is None and motif is None:
+                    motif = f"{n.nom} : ni réputée détenue ni réputée contrôlée"
+                produit = None if produit is None or n.pourcentage_detention is None \
+                    else produit * float(n.pourcentage_detention) / 100.0
+                etapes.append({"nom": n.nom, "partie_liee_id": n.id, "client_id": n.client_id,
+                               "partie_client_id": n.partie_client_id,
+                               "pourcentage_detention": n.pourcentage_detention,
+                               "peut_engager_les_fonds": bool(n.peut_engager_les_fonds),
+                               "qualification": qualification,
+                               "qualification_label": QUALIFICATIONS.get(qualification or "")})
+            alertes = self.alertes(designee)
+            sortie.append({
+                "racine": self._nom(self.racine), "etapes": etapes, "niveau": len(etapes),
+                "texte": self.texte_du_chemin(chemin) + " (personne désignée)",
+                "compte": motif is None, "motif": motif,
+                "produit_pct": round(produit * 100.0, 4) if produit is not None else None,
+                "alertes": [a.id for a in alertes],
+                "personnes_designees": list(dict.fromkeys(a.watchlist_name for a in alertes)),
+            })
+        return sortie
+
+
 def evaluer_la_detention(db, client_id: Optional[str],
-                         surcharges: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                         surcharges: Optional[Dict[str, str]] = None,
+                         client_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Le client est-il repute detenu ou controle par une personne designee, au
-    vu de ses parties CONFIRMEES ?
+    vu de ses parties CONFIRMEES — directement ou par la chaine de detention ?
 
     Ne comptent que les parties dont une alerte est CONFIRMEE (vrai positif)
     sur une liste du perimetre SANCTION (fiskr/perimeters.py, surcharges
@@ -487,55 +1136,74 @@ def evaluer_la_detention(db, client_id: Optional[str],
     la source ne la declare plus.
 
     - DETENTION (§131) : les parts des personnes designees s'agregent ; une
-      seule part par personne designee — deux declarations de la meme
-      detention ne se somment pas (meme regle que les liens entre fiches
-      listees, fiskr/api.py). Seuil : 50 % ou plus.
-    - CONTROLE (§133, §144) : une partie designee peut engager les fonds du
-      client (representant legal, statuts, delegation de signature,
-      procuration).
+      seule part par personne designee dans une meme societe — deux
+      declarations de la meme detention ne se somment pas (meme regle que les
+      liens entre fiches listees, fiskr/api.py). Une societe intermediaire
+      reputee detenue compte pour sa participation entiere (cascade : « LA
+      CHAINE DE DETENTION » en tete de module). Seuil : 50 % ou plus.
+    - CONTROLE (§133, §144) : une partie designee — ou une societe reputee
+      detenue ou controlee — peut engager les fonds du client (representant
+      legal, statuts, delegation de signature, procuration), ou 50 % ou plus
+      de ses parts sont portes par des societes reputees controlees.
 
     Rend {"reputee", "fondement", "cumul_pct", "seuil_pct", "controle",
-    "parties"} — `parties` detaille chaque partie retenue et son alerte : un
-    reviseur doit pouvoir refaire le calcul.
+    "parties"} comme au premier niveau — `parties` detaille chaque partie
+    designee retenue et son alerte : un reviseur doit pouvoir refaire le
+    calcul — et, pour la chaine : `cumul_direct_pct`, `cumul_indirect_pct`,
+    `cumul_avec_controle_pct`, `multiplication_pct` (interet economique par
+    produit des pourcentages, montre et non retenu : les textes ne le fixent
+    pas), `chaines` (chaque chemin vers une partie designee, et s'il compte),
+    `structure` (les liens parcourus) et `signalements` (cycle, profondeur,
+    client lie hors referentiel, multiplication qui franchirait le seuil).
     """
-    from fiskr.perimeters import est_sanction
-    evaluation = {"reputee": False, "fondement": None, "cumul_pct": 0.0,
-                  "seuil_pct": SEUIL_DE_DETENTION_PCT, "controle": False, "parties": []}
+    evaluation: Dict[str, Any] = {
+        "reputee": False, "fondement": None, "cumul_pct": 0.0,
+        "seuil_pct": SEUIL_DE_DETENTION_PCT, "controle": False, "parties": [],
+        "cumul_direct_pct": 0.0, "cumul_indirect_pct": 0.0, "cumul_avec_controle_pct": 0.0,
+        "multiplication_pct": 0.0, "chaines": [], "structure": [], "signalements": [],
+        "profondeur_maximale": PROFONDEUR_MAXIMALE}
     if not client_id:
         return evaluation
-    confirmees = [a for a in db.query(Alert).filter(
-        Alert.client_id == client_id, Alert.partie_liee_id.isnot(None),
-        Alert.status == "CLOSED_CONFIRMED").order_by(Alert.id.asc()).all()
-        if est_sanction(a.list_type, surcharges)]
-    if not confirmees:
-        return evaluation
-    ids = sorted({a.partie_liee_id for a in confirmees})
-    parties = {p.id: p for p in db.query(PartieLiee).filter(PartieLiee.id.in_(ids)).all()}
-    parts: Dict[str, float] = {}
+    parcours = _Parcours(db, client_id, surcharges, client_name)
+    racine = parcours.evaluer(parcours.racine, [parcours.racine], 0)
+    chaines = parcours.chaines_lisibles()
+    multiplication = round(racine["interet"] * 100.0, 4)
+    if racine["qualification"] is None and multiplication >= SEUIL_DE_DETENTION_PCT:
+        parcours.signalements.append({
+            "type": SIGNAL_MULTIPLICATION, "libelle": SIGNALEMENTS[SIGNAL_MULTIPLICATION],
+            "chemin": [], "texte": f"{_pourcentage_lisible(multiplication)} par multiplication"})
     retenues: Dict[int, Dict[str, Any]] = {}
-    for alerte in confirmees:
-        partie = parties.get(alerte.partie_liee_id)
-        if partie is None or partie.retiree_le is not None:
+    references = {(p.client_id, p.partie_id): p.nom for jeu in parcours.jeux.values() for p in jeu}
+    for chaine_lue, chemin in zip(chaines, parcours.chaines):
+        partie = chemin[-1]
+        if partie.id in retenues:
             continue
-        if partie.pourcentage_detention:
-            parts[alerte.watchlist_entity_id] = max(parts.get(alerte.watchlist_entity_id, 0.0),
-                                                    float(partie.pourcentage_detention))
-        if partie.peut_engager_les_fonds:
-            evaluation["controle"] = True
-        entree = retenues.setdefault(partie.id, {
-            "partie_liee_id": partie.id, "nom": partie.nom, "roles": list(partie.roles or []),
+        retenues[partie.id] = {
+            "partie_liee_id": partie.id, "nom": partie.nom,
+            "roles": list(partie.roles or []), "client_id": partie.client_id,
             "pourcentage_detention": partie.pourcentage_detention,
             "peut_engager_les_fonds": bool(partie.peut_engager_les_fonds),
-            "alertes": [], "personnes_designees": []})
-        entree["alertes"].append(alerte.id)
-        if alerte.watchlist_name not in entree["personnes_designees"]:
-            entree["personnes_designees"].append(alerte.watchlist_name)
-    cumul = round(sum(parts.values()), 4)
-    evaluation["cumul_pct"] = cumul
-    evaluation["parties"] = list(retenues.values())
-    if cumul >= SEUIL_DE_DETENTION_PCT:
+            # La societe dont elle est la partie (NULL : le client evalue)
+            "partie_de": (references.get((partie.client_id, partie.partie_de))
+                          if partie.partie_de else
+                          (None if partie.client_id == client_id else
+                           parcours._nom(chemin[-2]))),
+            "niveau": len(chemin) - 1, "chemin": chaine_lue["texte"],
+            "alertes": chaine_lue["alertes"],
+            "personnes_designees": chaine_lue["personnes_designees"]}
+    cumul = racine["cumul"]
+    evaluation.update({
+        "cumul_pct": cumul, "cumul_direct_pct": racine["direct"],
+        "cumul_indirect_pct": round(cumul - racine["direct"], 4),
+        "cumul_avec_controle_pct": racine["cumul_controle"],
+        "multiplication_pct": multiplication,
+        "controle": bool(racine["engage"]
+                         or racine["cumul_controle"] >= SEUIL_DE_DETENTION_PCT),
+        "parties": list(retenues.values()), "chaines": chaines,
+        "structure": parcours.structure, "signalements": parcours.signalements})
+    if racine["qualification"] == QUALIFICATION_DETENUE:
         evaluation["fondement"] = FONDEMENT_DETENTION
-    elif evaluation["controle"]:
+    elif racine["qualification"] == QUALIFICATION_CONTROLEE:
         evaluation["fondement"] = FONDEMENT_CONTROLE
     evaluation["reputee"] = evaluation["fondement"] is not None
     return evaluation
@@ -543,23 +1211,43 @@ def evaluer_la_detention(db, client_id: Optional[str],
 
 def phrase_de_detention(evaluation: Dict[str, Any], client_name: str) -> str:
     """Ce que l'evaluation etablit, en une phrase qui se relit : le cumul, le
-    seuil, et les parties qui le forment."""
+    seuil, les parties qui le forment — et, au-dela du premier niveau, les
+    chaines qui y menent et ce que le calcul n'a pas pu trancher."""
     detail = ", ".join(
         f"{p['nom']}"
         + (f" {_pourcentage_lisible(p['pourcentage_detention'])}" if p.get("pourcentage_detention") else "")
+        + (f" de {p['partie_de']}" if p.get("partie_de") else "")
         + (" (peut engager les fonds)" if p.get("peut_engager_les_fonds") else "")
         + f" — alerte(s) #{', #'.join(str(a) for a in p['alertes'])}"
         for p in evaluation.get("parties") or []) or "aucune"
     cumul = _pourcentage_lisible(evaluation.get("cumul_pct") or 0.0)
     seuil = _pourcentage_lisible(evaluation.get("seuil_pct") or SEUIL_DE_DETENTION_PCT)
+    indirect = evaluation.get("cumul_indirect_pct") or 0.0
+    dont = f", dont {_pourcentage_lisible(indirect)} par la chaîne de détention" if indirect else ""
+    indirectes = [c for c in evaluation.get("chaines") or [] if c.get("niveau", 1) > 1]
+    chaines = (" Chaîne(s) : " + " ; ".join(
+        c["texte"] + (" — retenue" if c.get("compte") else f" — non retenue ({c.get('motif')})")
+        + (f", {_pourcentage_lisible(c['produit_pct'])} par multiplication"
+           if c.get("produit_pct") is not None else "")
+        for c in indirectes) + " (cascade : une société réputée détenue compte pour sa "
+        "participation entière ; aucun texte lu ne fixe la multiplication).") if indirectes else ""
+    signaux = (" À vérifier : " + " ; ".join(
+        f"{s['libelle']} — {s['texte']}" for s in evaluation.get("signalements") or []) + ".") \
+        if evaluation.get("signalements") else ""
     if evaluation.get("fondement") == FONDEMENT_DETENTION:
         return (f"Client {client_name} réputé détenu par une ou des personnes désignées : "
-                f"{cumul} cumulés par les parties confirmées ({detail}), seuil {seuil} "
-                f"(LD DGT/ACPR §131).")
+                f"{cumul} cumulés par les parties confirmées{dont} ({detail}), seuil {seuil} "
+                f"(LD DGT/ACPR §131).{chaines}{signaux}")
     if evaluation.get("fondement") == FONDEMENT_CONTROLE:
-        return (f"Client {client_name} réputé contrôlé par une personne désignée qui peut "
-                f"engager ses fonds ({detail}) ; détention cumulée {cumul}, sous le seuil de "
-                f"{seuil} (LD DGT/ACPR §133, §144).")
+        controle = evaluation.get("cumul_avec_controle_pct") or 0.0
+        if controle >= (evaluation.get("seuil_pct") or SEUIL_DE_DETENTION_PCT):
+            par = (f"{_pourcentage_lisible(controle)} de ses parts sont portés par des sociétés "
+                   f"réputées contrôlées par des personnes désignées ({detail})")
+        else:
+            par = f"une personne désignée peut engager ses fonds ({detail})"
+        return (f"Client {client_name} réputé contrôlé par une ou des personnes désignées : "
+                f"{par} ; détention cumulée {cumul}, sous le seuil de {seuil} "
+                f"(LD DGT/ACPR §133, §144).{chaines}{signaux}")
     return (f"Client {client_name} ni réputé détenu ni réputé contrôlé : {cumul} cumulés par "
-            f"les parties confirmées ({detail}), sous le seuil de {seuil}, et aucune partie "
-            f"confirmée ne peut engager ses fonds (LD DGT/ACPR §131, §144).")
+            f"les parties confirmées{dont} ({detail}), sous le seuil de {seuil}, et aucune partie "
+            f"confirmée ne peut engager ses fonds (LD DGT/ACPR §131, §144).{chaines}{signaux}")

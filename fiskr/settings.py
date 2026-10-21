@@ -164,6 +164,40 @@ def gel_declaration_delai_heures(db) -> int:
     return heures if bas <= heures <= haut else DEFAULT_GEL_DELAI_HEURES
 
 
+# Delai (heures) au-dela duquel une declaration d'homonymie preparee mais NON
+# TRANSMISE a la DG Tresor leve une notification immediate et un controle de
+# mise en service BLOQUANT (fiskr/homonymie.py).
+#
+# Le texte ne donne pas de chiffre : « dans les plus brefs delais » (LD
+# DGT/ACPR du 18 mars 2026, §167 — les memes mots que la declaration de gel,
+# §182). Vingt-quatre heures, parce que le doute ne se declare qu'une fois
+# « toutes les diligences necessaires » faites : les pieces que la DG Tresor
+# attend (copie de pieces d'identite, message SWIFT, demandes au client) sont
+# deja au dossier, et il reste a reporter le projet dans son classeur et a
+# l'envoyer — une journee ouvree. Pendant ce temps, sur un flux, l'operation
+# est suspendue (§162) et personne n'a saisi la seule autorite qui peut
+# trancher. Le delai court depuis la declaration du doute dans Fiskr.
+SETTING_HOMONYMIE_DELAI = "homonymie.transmission_delai_heures"
+DEFAULT_HOMONYMIE_DELAI_HEURES = 24
+# Bornes : en dessous d'une heure, chaque doute sonnerait avant qu'on ait
+# ouvert le formulaire ; au-dela de cinq jours, « les plus brefs delais » ne
+# decrirait plus ce qui s'est passe.
+HOMONYMIE_DELAI_BORNES_HEURES = (1, 120)
+
+
+def homonymie_transmission_delai_heures(db) -> int:
+    """Delai de transmission d'une declaration d'homonymie (heures), borne.
+    Une valeur illisible retombe sur le defaut : jamais sur « aucun delai »."""
+    valeur = get_setting_with_source(db, SETTING_HOMONYMIE_DELAI,
+                                     DEFAULT_HOMONYMIE_DELAI_HEURES)["value"]
+    try:
+        heures = int(valeur)
+    except (TypeError, ValueError):
+        return DEFAULT_HOMONYMIE_DELAI_HEURES
+    bas, haut = HOMONYMIE_DELAI_BORNES_HEURES
+    return heures if bas <= heures <= haut else DEFAULT_HOMONYMIE_DELAI_HEURES
+
+
 # Delai (jours) au-dela duquel un dossier PPE sans decision d'entrer ou de
 # rester en relation leve une notification immediate et un controle de mise
 # en service BLOQUANT (fiskr/ppe.py).
@@ -179,6 +213,9 @@ def gel_declaration_delai_heures(db) -> int:
 # publication ACPR « Les personnes politiquement exposees », juillet 2024),
 # puis les presenter a la personne habilitee. Au-dela d'un mois, le dossier
 # n'attend plus une instruction : il attend que quelqu'un s'en saisisse.
+# Le meme delai borne la revue de vigilance renforcee echue (fiskr/ppe.py,
+# `revue_en_retard`) : la revue est le meme travail — interroger le client,
+# renouveler les pieces, decider du maintien avec la personne habilitee.
 SETTING_PPE_DELAI = "ppe.decision_delai_jours"
 DEFAULT_PPE_DELAI_JOURS = 30
 # Bornes : en dessous d'un jour, chaque confirmation sonnerait avant que le
@@ -197,6 +234,117 @@ def ppe_decision_delai_jours(db) -> int:
         return DEFAULT_PPE_DELAI_JOURS
     bas, haut = PPE_DELAI_BORNES_JOURS
     return jours if bas <= jours <= haut else DEFAULT_PPE_DELAI_JOURS
+
+
+# Prestataire de paiement « defaillant » : celui qui « omet de maniere
+# repetee » les informations requises sur le donneur d'ordre ou le
+# beneficiaire (reglement (UE) 2023/1113, art. 8 §2 et 12 §2 ;
+# fiskr/prestataires.py).
+#
+# Le texte ne donne pas de chiffre, et l'ABE a refuse d'en fixer : ses
+# orientations (EBA/GL/2024/11 du 4 juillet 2024, §67) laissent chaque
+# etablissement ecrire ses criteres dans ses procedures — un repondant le lui
+# demandait, reponse : « No change » (rapport final, retour sur la
+# consultation, §59). Elles imposent en revanche la FORME du critere
+# quantitatif : « le pourcentage de transferts dont les informations sont
+# manquantes ou incompletes envoyes par un prestataire donne sur une periode
+# donnee » (§68 a). D'ou trois reglages, pas un compteur :
+#   - la periode : 90 jours glissants. Assez longue pour qu'un correspondant a
+#     faible volume puisse « repeter » une omission, assez courte pour qu'un
+#     prestataire qui se corrige sorte du constat ; un trimestre est aussi
+#     l'horizon que les orientations donnent au signalement (§74 : au plus
+#     trois mois apres l'identification) ;
+#   - le pourcentage : 10 %, un transfert sur dix. En dessous, l'omission
+#     releve de l'incident que l'art. 8 §1 traite transfert par transfert
+#     (rejet ou demande d'information) ; au-dessus, c'est une pratique ;
+#   - un nombre minimal : 5. « Repetee » exclut l'omission isolee — sans lui,
+#     un prestataire qui envoie un transfert par trimestre, incomplet, serait
+#     a 100 % sur une seule omission.
+# Ces trois chiffres sont un REGLAGE INITIAL, pas une mesure : la procedure de
+# l'etablissement les fixe (§67), et le signalement donne les valeurs
+# constatees, que l'autorite juge. Le second critere quantitatif des
+# orientations (§68 b, demandes de complement restees sans reponse) n'est pas
+# calcule : Fiskr n'envoie pas ces demandes et n'en connait pas le sort.
+#
+# Politique pour les transferts SUIVANTS d'un prestataire defaillant. Le
+# minimum que l'art. 8 §2 impose est le point a) — des dispositions qui
+# « peuvent, dans un premier temps, comporter l'emission d'avertissements et
+# la fixation d'echeances » — et, dans tous les cas, le signalement a
+# l'autorite : SIGNALER, par defaut (le transfert garde son verdict, la
+# reponse dit que son prestataire est defaillant). RETENIR applique le point
+# b) — rejet de « tout nouveau transfert », restriction de la relation — en
+# retenant chacun de ses transferts pour decision (verdict FAILING_PSP).
+#
+# `bic_etablissement` : les BIC de l'etablissement lui-meme. Un pacs.008 dont
+# l'instructeur est l'etablissement est un message SORTANT : son incompletude
+# est un manquement de l'etablissement (art. 4), pas d'un prestataire qui la
+# lui transmet — il n'est impute a personne.
+SETTING_PRESTATAIRES_DEFAILLANTS = "filtrage.prestataires_defaillants"
+POLITIQUE_SIGNALER = "SIGNALER"
+POLITIQUE_RETENIR = "RETENIR"
+POLITIQUES_PRESTATAIRE_DEFAILLANT = {
+    POLITIQUE_SIGNALER: "Signaler : avertissement et échéance (art. 8 §2 a), le transfert garde son verdict",
+    POLITIQUE_RETENIR: "Retenir chaque transfert pour décision : rejet ou restriction (art. 8 §2 b)",
+}
+DEFAULT_PRESTATAIRES_DEFAILLANTS = {
+    "fenetre_jours": 90, "seuil_transferts": 5, "seuil_taux_pct": 10.0,
+    "politique": POLITIQUE_SIGNALER, "bic_etablissement": [],
+}
+# Bornes : une semaine ne voit rien se « repeter » chez un correspondant a
+# faible volume ; au-dela d'un an, le constat decrit un passe que le
+# prestataire a pu corriger. Deux omissions au moins : une seule n'est pas
+# une repetition.
+PRESTATAIRES_BORNES = {"fenetre_jours": (7, 365), "seuil_transferts": (2, 1000),
+                       "seuil_taux_pct": (0.0, 100.0)}
+
+
+def _bic8(valeur: Any) -> str:
+    propre = "".join(c for c in str(valeur or "").upper() if c.isalnum())
+    return propre[:8] if len(propre) in (8, 11) else ""
+
+
+def valider_criteres_prestataires(valeurs: Dict[str, Any]) -> Dict[str, Any]:
+    """Criteres de defaillance verifies et bornes. Leve ValueError avec la
+    raison : un reglage hors bornes est REFUSE a l'ecriture, jamais ramene
+    en silence sur une autre valeur."""
+    inconnues = [k for k in valeurs if k not in DEFAULT_PRESTATAIRES_DEFAILLANTS]
+    if inconnues:
+        raise ValueError(f"prestataires_defaillants — champ(s) inconnu(s) : {', '.join(inconnues)}.")
+    sortie = dict(DEFAULT_PRESTATAIRES_DEFAILLANTS)
+    sortie.update(valeurs)
+    for cle, (bas, haut) in PRESTATAIRES_BORNES.items():
+        try:
+            nombre = float(sortie[cle]) if cle == "seuil_taux_pct" else int(sortie[cle])
+        except (TypeError, ValueError):
+            raise ValueError(f"{cle} doit être un nombre.")
+        if not (bas <= nombre <= haut):
+            raise ValueError(f"{cle} : entre {bas:g} et {haut:g}.")
+        sortie[cle] = nombre
+    if sortie["politique"] not in POLITIQUES_PRESTATAIRE_DEFAILLANT:
+        raise ValueError(f"politique : {' ou '.join(POLITIQUES_PRESTATAIRE_DEFAILLANT)}.")
+    bics = sortie.get("bic_etablissement") or []
+    if isinstance(bics, str):
+        bics = [b for b in bics.replace(";", ",").split(",")]
+    lus = [_bic8(b) for b in bics if str(b).strip()]
+    if any(not b for b in lus):
+        raise ValueError("bic_etablissement : BIC de 8 ou 11 caractères attendus.")
+    sortie["bic_etablissement"] = sorted(set(lus))
+    return sortie
+
+
+def prestataires_defaillants_criteres(db) -> Dict[str, Any]:
+    """Criteres effectifs (base > config.yaml > defaut). Une valeur stockee
+    illisible retombe sur le defaut ET le dit (`erreur`) : jamais sur
+    « aucun critere »."""
+    valeur = get_setting_with_source(db, SETTING_PRESTATAIRES_DEFAILLANTS, None)
+    brut = valeur["value"] if isinstance(valeur["value"], dict) else {}
+    try:
+        criteres = valider_criteres_prestataires(brut)
+        criteres["erreur"] = None
+    except ValueError as e:
+        criteres = dict(DEFAULT_PRESTATAIRES_DEFAILLANTS, erreur=str(e))
+    criteres["source"] = valeur["source"] if brut else "défaut"
+    return criteres
 
 # Motifs de cloture proposes a la saisie d'une decision d'alerte. Une
 # bibliotheque, pas un carcan : le motif choisi s'insere dans le commentaire

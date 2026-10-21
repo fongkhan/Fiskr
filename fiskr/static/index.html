@@ -309,7 +309,7 @@
  <option value="CLIENT_PARTIES">Parties liées des clients : bénéficiaires effectifs, mandataires, dirigeants, associés (CSV)</option>
  </select>
  </div>
- <p id="aide-parties-liees" class="section-desc hidden">Une ligne par partie : client_id (le client dont elle est la partie), partie_id (facultatif), role (BENEFICIAIRE_EFFECTIF, MANDATAIRE, DIRIGEANT, ASSOCIE — plusieurs séparés par une virgule), son identité dans les colonnes du référentiel clients (client_type, client_first_name, client_last_name, client_company_name, client_dob, nationality…), pourcentage_detention et peut_engager_les_fonds (oui ou non). Pour chaque client qu'il nomme, le fichier remplace toutes ses parties ; un client absent du fichier garde les siennes.</p>
+ <p id="aide-parties-liees" class="section-desc hidden">Une ligne par partie : client_id (le client dont elle est la partie), partie_id (facultatif), role (BENEFICIAIRE_EFFECTIF, MANDATAIRE, DIRIGEANT, ASSOCIE — plusieurs séparés par une virgule), son identité dans les colonnes du référentiel clients (client_type, client_first_name, client_last_name, client_company_name, client_dob, nationality…), pourcentage_detention et peut_engager_les_fonds (oui ou non). Pour chaque client qu'il nomme, le fichier remplace toutes ses parties ; un client absent du fichier garde les siennes. <span>Chaîne de détention : partie_de (le partie_id d'une personne morale du même client dont la ligne est la partie — sa détention porte alors sur elle ; vide : le client) et partie_client_id (le client du référentiel que la partie est : ses propres parties continuent la chaîne).</span></p>
  <div id="ssie-options" class="hidden">
  <p class="section-desc">Pipeline SSIE en 3 phases (Découverte → Résolution → Restitution) : les balises pivots sont configurables pour supporter tout flux XML référencé par ID (OFAC Advanced, SWIFT SLD, etc.).</p>
  <div class="form-group">
@@ -584,6 +584,12 @@
  <div class="form-group" id="manual-national-id-group">
  <label for="manual-national-id">CNI : Numéro</label>
  <input type="text" id="manual-national-id" placeholder="Ex: 9901421298">
+ </div>
+ </div>
+ <div class="form-row">
+ <div class="form-group" id="manual-national-id-country-group">
+ <label for="manual-national-id-country">CNI : Pays d'émission (ISO2)</label>
+ <input type="text" id="manual-national-id-country" placeholder="Ex: RU" maxlength="2">
  </div>
  </div>
  </div>
@@ -985,6 +991,7 @@
  <tbody><tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Chargement…</td></tr></tbody>
  </table>
  </div>
+ <p id="history-sans-dossier" class="section-desc hidden" style="margin-top: 0.75rem;"></p>
  <div class="filter-bar" style="margin-top: 1rem;">
  <button id="history-prev" class="btn btn-sm btn-secondary" onclick="fetchReviewHistory(historyPage - 1)">Précédent</button>
  <span id="history-page-label" style="color: var(--text-muted); font-size: 0.85rem;"></span>
@@ -1459,6 +1466,7 @@
  <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('SCREENING','')">Toutes</button>
  <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('SCREENING','OPEN,IN_PROGRESS,ESCALATED')" style="background: var(--surface-3);">À traiter</button>
  <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('SCREENING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
+ <button class="btn btn-sm" data-filter="PENDING_DGT" onclick="setAlertFilter('SCREENING','PENDING_DGT')" style="background: var(--surface-3);" title="Doute d'homonymie déclaré : l'alerte attend la réponse de la DG Trésor">Attente DG Trésor</button>
  <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('SCREENING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
  <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('SCREENING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
  <button class="btn btn-sm" data-filter="LAPSED" onclick="setAlertFilter('SCREENING','LAPSED')" style="background: var(--surface-3);" title="Alertes ouvertes dont la correspondance ne tient plus : fiche radiée, ou couple re-criblé sous le seuil">Caduques</button>
@@ -1549,6 +1557,33 @@
  </table>
  </div>
  <p id="gels-total" class="section-desc" style="margin-top: 0.5rem;"></p>
+ </div>
+ <!-- DÉCLARATIONS D'HOMONYMIE (registre frère, fiskr/homonymie.py) -->
+ <div class="card result-card">
+ <h2>Déclarations d'homonymie (DG Trésor)</h2>
+ <p class="section-desc">Les alertes du périmètre SANCTION qu'on ne peut ni lever ni confirmer (LD DGT/ACPR §167) : déclarées à la DG Trésor, elles attendent sa réponse, qui seule les clôt. Une déclaration préparée et non transmise dans le délai est un défaut (notification, mise en service) ; l'attente de la réponse se lit ici, sans alarme — la DG Trésor a son rythme.</p>
+ <div id="homonymies-synthese" style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;"></div>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <select id="homonymies-statut-filter" onchange="fetchHomonymies()" aria-label="Filtrer les déclarations d'homonymie par statut" style="width: auto; min-width: 220px;">
+ <option value="">Tous les statuts</option>
+ <option value="NON_TRANSMISE_HORS_DELAI">Non transmise hors délai</option>
+ <option value="ATTENTE_LONGUE">Attente longue de la réponse</option>
+ </select>
+ <input type="text" id="homonymies-recherche" onchange="fetchHomonymies()" placeholder="Client ou fiche listée…" aria-label="Rechercher une déclaration par client ou fiche listée" style="width: auto; min-width: 220px;">
+ <button class="btn btn-sm btn-secondary" onclick="exportHomonymiesCsv()" title="Exporter les déclarations filtrées en CSV" style="margin-left: auto;">⬇ CSV</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="homonymies-table">
+ <thead>
+ <tr>
+ <th>Déclaration</th><th>Doute déclaré le</th><th>Client</th><th>Listé</th><th>Liste</th>
+ <th>Saisine</th><th>Statut</th><th>Transmise le</th><th>Attente</th><th>Issue</th><th>Dossier</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <p id="homonymies-total" class="section-desc" style="margin-top: 0.5rem;"></p>
  </div>
  </div>
  </div>
@@ -1797,6 +1832,9 @@
  <button id="sub-btn-alerts-filtering" class="sub-tab-btn" onclick="switchSubTab('filtering', 'alerts-filtering')">
  Alertes <span id="alerts-filtering-badge" class="status-badge alert hidden" style="margin-left: 0.35rem;">0</span>
  </button>
+ <button id="sub-btn-filtering-prestataires" class="sub-tab-btn" title="Prestataires qui omettent de manière répétée les informations requises (règlement (UE) 2023/1113, art. 8 §2)" onclick="switchSubTab('filtering', 'filtering-prestataires')">
+ Prestataires défaillants
+ </button>
  <button id="sub-btn-filtering-blocking" class="sub-tab-btn hidden" title="Paramétrage moteur" onclick="switchSubTab('filtering', 'filtering-blocking')">
  Paramétrage moteur
  </button>
@@ -1814,7 +1852,7 @@
 <div id="sub-sec-screening-transactions" class="sub-tab-content active">
  <div class="card">
  <h2>Filtrage Transactionnel ISO 20022</h2>
- <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques et intermédiaires — sont criblées contre les listes en production, sur leur nom ou leur identifiant exact (BIC, LEI), ainsi que le texte libre des informations de remise. Verdict <strong>HIT</strong>, <strong>INCOMPLETE</strong> (une partie n'a pu être criblée, ou une information obligatoire du règlement (UE) 2023/1113 manque) ou <strong>PASS</strong> ; chaque partie, criblée ou non, est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
+ <p class="section-desc">Soumettez un message de paiement <strong>pain.001</strong> (ordre de virement client) ou <strong>pacs.008</strong> (virement interbancaire) : toutes les parties du message — donneur d'ordre, bénéficiaire, ultimes, banques et intermédiaires — sont criblées contre les listes en production, sur leur nom ou leur identifiant exact (BIC, LEI), ainsi que le texte libre des informations de remise ; adresses et remise sont aussi lues contre les territoires sous mesures restrictives de l'Union. Verdict <strong>HIT</strong>, <strong>TERRITORY</strong> (lien avec un territoire sous mesures restrictives : à instruire), <strong>FAILING_PSP</strong> (prestataire défaillant, politique renforcée), <strong>INCOMPLETE</strong> (une partie n'a pu être criblée, ou une information obligatoire du règlement (UE) 2023/1113 manque) ou <strong>PASS</strong> ; chaque partie, criblée ou non, est tracée dans le journal d'audit et chaque hit ouvre une alerte de travail.</p>
  <div class="form-row" style="align-items: flex-end;">
  <div class="form-group" style="flex: 1;">
  <label for="txn-file-input">Message de paiement (XML ISO 20022)</label>
@@ -1828,7 +1866,9 @@
  <hr>
  <h3 id="txn-verdict-line" style="margin-bottom: 0.5rem;"></h3>
  <p class="section-desc" id="txn-message-info"></p>
+ <div id="txn-territory-info"></div>
  <div id="txn-missing-info"></div>
+ <div id="txn-psp-info"></div>
  <div class="table-container max-height-table">
  <table id="txn-results-table">
  <thead>
@@ -1849,7 +1889,63 @@
  </div>
  </div>
  </div>
- 
+
+<!-- PRESTATAIRES DÉFAILLANTS (règlement (UE) 2023/1113, art. 8 §2) -->
+<div id="sub-sec-filtering-prestataires" class="sub-tab-content hidden">
+ <div class="grid-layout une-colonne">
+ <div class="card result-card">
+ <h2>Prestataires défaillants</h2>
+ <p class="section-desc">Prestataires de paiement qui omettent de manière répétée les informations requises sur le donneur d'ordre ou le bénéficiaire (règlement (UE) 2023/1113, art. 8 §2). Chaque pacs.008 filtré est imputé au prestataire qui le transmet — l'agent instructeur, à défaut la banque du donneur d'ordre. Au-delà des seuils, le prestataire est défaillant : avertissement et échéance, ou rejet de ses transferts, et signalement à l'autorité compétente au plus tard trois mois après l'identification (EBA/GL/2024/11 §74). Fiskr mesure, date et prépare le signalement ; la transmission reste humaine.</p>
+ <div id="psp-criteres" style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;"></div>
+ <div class="alerts-status-filters" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center;">
+ <button class="btn btn-sm btn-secondary" onclick="fetchPrestataires()">Actualiser</button>
+ <button class="btn btn-sm btn-secondary" onclick="exportSignalementPrestataires()" title="Une ligne par prestataire défaillant : nom, pays, fréquence, période, informations manquantes (EBA/GL/2024/11 §75)" style="margin-left: auto;">⬇ Signalement à l'autorité (CSV)</button>
+ </div>
+ <div class="table-container max-height-table">
+ <table id="psp-table">
+ <thead>
+ <tr>
+ <th>Prestataire</th><th>BIC / LEI</th><th>Pays</th><th>Transferts reçus</th><th>Incomplets</th><th>Taux</th>
+ <th>Période des omissions</th><th>Informations manquantes</th><th>Statut</th><th>Détail</th>
+ </tr>
+ </thead>
+ <tbody><!-- Populated dynamically --></tbody>
+ </table>
+ </div>
+ <div id="psp-detail" class="hidden" style="margin-top: 1rem;">
+ <h3 id="psp-detail-titre" style="font-size: 0.95rem;"></h3>
+ <div class="table-container max-height-table">
+ <table id="psp-detail-table">
+ <thead>
+ <tr><th>Reçu le</th><th>Message</th><th>Transferts</th><th>Incomplets</th><th>Informations manquantes</th><th>Transactions</th></tr>
+ </thead>
+ <tbody></tbody>
+ </table>
+ </div>
+ </div>
+ </div>
+ <div class="card form-card hidden" id="psp-criteres-card">
+ <h2>Critères de défaillance (Admin)</h2>
+ <p class="section-desc">Ni le règlement ni les orientations de l'ABE ne donnent de chiffre : la procédure de l'établissement les fixe (EBA/GL/2024/11 §67). Le critère est un pourcentage de transferts incomplets sur une période (§68 a), avec un nombre minimal : une omission isolée n'est pas « répétée ».</p>
+ <div class="form-row" style="max-width: 760px;">
+ <div class="form-group"><label for="psp-fenetre">Période glissante (jours)</label><input type="number" id="psp-fenetre" min="7" max="365" step="1"></div>
+ <div class="form-group"><label for="psp-seuil">Transferts incomplets, au moins</label><input type="number" id="psp-seuil" min="2" max="1000" step="1"></div>
+ <div class="form-group"><label for="psp-taux">Et au moins (% des transferts reçus)</label><input type="number" id="psp-taux" min="0" max="100" step="0.1"></div>
+ </div>
+ <div class="form-group" style="max-width: 640px;">
+ <label for="psp-politique">Politique pour les transferts suivants d'un prestataire défaillant</label>
+ <select id="psp-politique"></select>
+ </div>
+ <div class="form-group" style="max-width: 480px;">
+ <label for="psp-bics">BIC de l'établissement (séparés par des virgules)</label>
+ <input type="text" id="psp-bics" placeholder="BNPAFRPP, BNPAFRPPXXX">
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Un pacs.008 dont l'instructeur est l'établissement lui-même est un message sortant : son omission n'est imputée à personne.</small>
+ </div>
+ <button class="btn btn-primary" onclick="savePspCriteria()">Enregistrer les critères</button>
+ </div>
+ </div>
+</div>
+
 <div id="sub-sec-alerts-filtering" class="sub-tab-content hidden">
  <div class="grid-layout une-colonne">
  <div class="card result-card">
@@ -1859,6 +1955,7 @@
  <button class="btn btn-sm btn-secondary" data-filter="" onclick="setAlertFilter('FILTERING','')">Toutes</button>
  <button class="btn btn-sm" data-filter="OPEN,IN_PROGRESS,ESCALATED" onclick="setAlertFilter('FILTERING','OPEN,IN_PROGRESS,ESCALATED')" style="background: var(--surface-3);">À traiter</button>
  <button class="btn btn-sm" data-filter="PENDING_VALIDATION" onclick="setAlertFilter('FILTERING','PENDING_VALIDATION')" style="background: var(--surface-3);">À valider (4-yeux)</button>
+ <button class="btn btn-sm" data-filter="PENDING_DGT" onclick="setAlertFilter('FILTERING','PENDING_DGT')" style="background: var(--surface-3);" title="Doute d'homonymie déclaré : l'alerte attend la réponse de la DG Trésor">Attente DG Trésor</button>
  <button class="btn btn-sm" data-filter="CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE" onclick="setAlertFilter('FILTERING','CLOSED_CONFIRMED,CLOSED_FALSE_POSITIVE')" style="background: var(--surface-3);">Closes</button>
  <button class="btn btn-sm" data-filter="CLOSED_BY_RULE" onclick="setAlertFilter('FILTERING','CLOSED_BY_RULE')" style="background: var(--surface-3);">Clôturées par règle</button>
  <select id="filtering-priority-filter" onchange="fetchAlerts('FILTERING', 1)" title="Filtrer par priorité" style="margin-left: auto;">
@@ -2672,9 +2769,14 @@
  <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La déclaration est due « immédiatement » après la confirmation (CMF L.562-4). Au-delà de ce délai, une mesure non déclarée déclenche une notification immédiate et bloque la mise en service. De 1 à 72 heures.</small>
  </div>
  <div class="form-group" style="margin-top: 0.75rem; max-width: 640px;">
+ <label for="setting-homonymie-delay">Délai de transmission d'une déclaration d'homonymie à la DG Trésor (heures)</label>
+ <input type="number" id="setting-homonymie-delay" min="1" max="120" step="1" style="max-width: 120px;">
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">Le doute d'homonymie se déclare « dans les plus brefs délais » (LD DGT/ACPR §167). Au-delà de ce délai, une déclaration préparée et non transmise déclenche une notification immédiate et bloque la mise en service. L'attente de la réponse, elle, ne sonne pas. De 1 à 120 heures.</small>
+ </div>
+ <div class="form-group" style="margin-top: 0.75rem; max-width: 640px;">
  <label for="setting-ppe-delay">Délai de décision d'un dossier PPE (jours)</label>
  <input type="number" id="setting-ppe-delay" min="1" max="90" step="1" style="max-width: 120px;">
- <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La décision d'entrer ou de rester en relation avec une PPE revient à une personne habilitée (CMF R.561-20-2). Au-delà de ce délai, un dossier sans décision déclenche une notification immédiate et bloque la mise en service. De 1 à 90 jours.</small>
+ <small style="color: var(--text-muted); display: block; margin-top: 0.3rem;">La décision d'entrer ou de rester en relation avec une PPE revient à une personne habilitée (CMF R.561-20-2). Au-delà de ce délai, un dossier sans décision déclenche une notification immédiate et bloque la mise en service ; une revue de vigilance renforcée échue depuis plus longtemps la bloque aussi (sa notification part dès l'échéance). De 1 à 90 jours.</small>
  </div>
  <div class="form-group" style="margin-top: 0.75rem;">
  <label for="setting-close-reasons-fp">Motifs de clôture : faux positif</label>

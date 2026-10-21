@@ -317,6 +317,14 @@ class PartieLiee(Base):
     nom = Column(String(1000), nullable=False)
     pourcentage_detention = Column(Float, nullable=True)
     peut_engager_les_fonds = Column(Boolean, nullable=False, default=False)
+    # Chaine capitalistique (fiskr/parties.py, « LA CHAINE DE DETENTION ») :
+    # `partie_de` est le partie_id d'une personne morale du MEME jeu dont
+    # cette ligne est la partie — la detention et le pouvoir d'engager les
+    # fonds portent alors sur elle, pas sur le client ; NULL : le client.
+    # `partie_client_id` dit que la partie EST ce client du referentiel :
+    # ses propres parties continuent la chaine.
+    partie_de = Column(String(100), nullable=True)
+    partie_client_id = Column(String(100), nullable=True)
     # IMPORT (fichier de parties liees) | WEBHOOK (client-upsert)
     source = Column(String(20), nullable=False)
     source_ref = Column(String(100), nullable=True)
@@ -574,7 +582,9 @@ class Alert(Base):
     """
     Alerte de criblage : objet de travail avec cycle de vie et decision 4-yeux.
     OPEN -> IN_PROGRESS (assignee) -> PENDING_VALIDATION (decision proposee)
-    -> CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE ; ESCALATED en derivation.
+    -> CLOSED_CONFIRMED | CLOSED_FALSE_POSITIVE ; ESCALATED en derivation ;
+    PENDING_DGT quand le doute d'homonymie est declare a la DG Tresor
+    (fiskr/homonymie.py) — seule sa reponse enregistree l'en fait sortir.
     Le journal immuable reste compliance_audit_trail (audit_id).
     """
     __tablename__ = "alerts"
@@ -734,6 +744,84 @@ class MesureDeGel(Base):
     detention = Column(JSON, nullable=True)
 
 
+class DeclarationHomonymie(Base):
+    """
+    Registre des declarations d'homonymie a la DG Tresor (fiskr/homonymie.py),
+    frere du registre des gels : une alerte du perimetre SANCTION qu'on ne
+    peut ni lever ni confirmer (LD DGT/ACPR du 18 mars 2026, §167). Avant lui,
+    une alerte se closait en faux positif ou en vrai positif ; le doute n'avait
+    ni forme, ni piece, ni attente. La ligne s'ouvre au doute, « a
+    transmettre », passe « transmise » sur la piece d'envoi, et se termine sur
+    la reponse de la DG Tresor — piece jointe, datee (§168).
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "homonymie_declarations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    statut = Column(String(20), nullable=False, default="A_TRANSMETTRE", index=True)
+    # Saisine initiale ou nouvelle saisine (rubrique du formulaire de la DG
+    # Tresor) : derivee du registre — une declaration anterieure sur le meme
+    # couple client x fiche fait de celle-ci une relance.
+    saisine = Column(String(20), nullable=False, default="INITIALE")
+    # Identite figee a l'ouverture : le registre se lit sans rejouer l'alerte
+    client_id = Column(String(100), nullable=True, index=True)
+    client_name = Column(String(1000), nullable=False)
+    watchlist_entity_id = Column(String(100), nullable=False)
+    watchlist_name = Column(String(1000), nullable=False)
+    list_type = Column(String(30), nullable=True)
+    channel = Column(String(20), nullable=True)
+    # Statut de l'alerte avant le doute, rendu si la declaration est abandonnee
+    # avant transmission
+    statut_alerte_avant = Column(String(30), nullable=True)
+    # Le doute : diligences (« bilan des recherches effectuees », rubrique du
+    # formulaire, exigee par §167), mesures conservatoires declarees, et les
+    # rubriques que le formulaire demande a l'organisme
+    preparee_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    preparee_par = Column(String(100), nullable=False)
+    diligences = Column(Text, nullable=False)
+    mesures_conservatoires = Column(Text, nullable=True)
+    commentaire = Column(Text, nullable=True)
+    role_operateur = Column(String(30), nullable=True)
+    objet_homonymie = Column(String(20), nullable=True)
+    operation = Column(JSON, nullable=True)
+    # Transmission (hors de Fiskr) et la piece qui la prouve
+    transmise_le = Column(DateTime, nullable=True)
+    transmise_par = Column(String(100), nullable=True)
+    reference = Column(String(255), nullable=True)
+    piece_transmission_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    # Retard de transmission signale une fois (notification immediate)
+    retard_signale_le = Column(DateTime, nullable=True)
+    # Echanges intermediaires avec la DG Tresor (§168) : [{le, sens, objet,
+    # piece_id, par}] — chacun appuye d'une piece jointe de l'alerte
+    echanges = Column(JSON, nullable=True)
+    # Reponse de la DG Tresor : date, issue (une des trois de §167), resume,
+    # piece (son courriel), et qui l'a enregistree
+    reponse_le = Column(DateTime, nullable=True)
+    reponse_par = Column(String(100), nullable=True)
+    issue = Column(String(20), nullable=True)
+    reponse_resume = Column(Text, nullable=True)
+    piece_reponse_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    # Doute persistant : la decision revient a l'organisme (§167) — geler ou
+    # non, motif, vigilance adaptee, Tracfin, et l'information de la DG Tresor
+    decision = Column(String(20), nullable=True)
+    decision_motif = Column(Text, nullable=True)
+    vigilance = Column(Text, nullable=True)
+    tracfin = Column(String(20), nullable=True)
+    tracfin_detail = Column(Text, nullable=True)
+    piece_information_id = Column(Integer, ForeignKey("alert_attachments.id"), nullable=True)
+    decidee_le = Column(DateTime, nullable=True)
+    decidee_par = Column(String(100), nullable=True)
+    # Fin : alerte close par le chemin existant (`_close_alert`), ou abandon
+    # AVANT transmission (motif obligatoire, ligne conservee)
+    terminee_le = Column(DateTime, nullable=True)
+    abandonnee_le = Column(DateTime, nullable=True)
+    abandonnee_par = Column(String(100), nullable=True)
+    motif_abandon = Column(Text, nullable=True)
+
+
 class DossierPPE(Base):
     """
     Dossier PPE : ce qui SUIT une correspondance confirmee sur une liste de
@@ -790,6 +878,82 @@ class DossierPPE(Base):
     prochaine_revue_le = Column(DateTime, nullable=True)
     # Retard de decision signale une fois (notification immediate)
     retard_signale_le = Column(DateTime, nullable=True)
+    # Revue echue signalee une fois par echeance (notification immediate,
+    # fiskr/ppe.py `detecter_revues_echues`) ; levee par la revue suivante
+    revue_signalee_le = Column(DateTime, nullable=True)
+    # Revues de vigilance renforcee tenues apres la decision, dans l'ordre :
+    # [{le, par, conclusion, motif, reference, prochaine_revue_le}]. La
+    # decision ne se reecrit pas ; chaque revue s'ajoute a la suite.
+    revues = Column(JSON, nullable=True)
+
+
+class ReceptionPrestataire(Base):
+    """
+    Ce qu'un message de paiement recu d'un prestataire portait : combien de
+    transferts, combien incomplets, lesquels, et ce qui leur manquait
+    (fiskr/prestataires.py). Une ligne par message et par prestataire impute.
+
+    Le reglement (UE) 2023/1113, art. 8 §2, oblige le prestataire du
+    beneficiaire a agir contre un prestataire qui « omet de maniere repetee »
+    les informations requises ; ses orientations (EBA/GL/2024/11, §67-68)
+    demandent de « documenter tous les transferts » incomplets et de juger la
+    repetition sur un POURCENTAGE par periode. Les transferts complets sont
+    donc comptes aussi : sans eux, pas de denominateur. Aucune donnee de
+    personne : un BIC de banque, des identifiants de message, des comptes.
+
+    Conservee comme le journal de criblage (fiskr/retention.py, famille
+    `audit_trail`, plancher legal de cinq ans de fiskr/conservation.py) ; le
+    reglement fixe la meme duree (art. 26 §1).
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "prestataires_receptions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    recu_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    # Prestataire impute : BIC sur 8 caracteres (l'etablissement, pas
+    # l'agence), a defaut LEI ; nom et pays tels que le message les donne
+    identifiant = Column(String(20), nullable=False, index=True)
+    bic = Column(String(11), nullable=True)
+    nom = Column(String(140), nullable=True)
+    pays = Column(String(2), nullable=True)
+    role = Column(String(20), nullable=False)          # InstgAgt | DbtrAgt
+    # Prestataire du donneur d'ordre, quand ce n'est pas lui qui transmet
+    prestataire_du_donneur_d_ordre = Column(String(20), nullable=True)
+    message_type = Column(String(10), nullable=False)
+    msg_id = Column(String(100), nullable=True)
+    transferts = Column(Integer, nullable=False, default=0)
+    incomplets = Column(Integer, nullable=False, default=0)
+    # {code de MANQUES (fiskr/transactions.py): nombre de transferts}
+    manques = Column(JSON, nullable=True)
+    # Identifiants de bout en bout des transferts incomplets (20 au plus)
+    transactions = Column(JSON, nullable=True)
+    filtre_par = Column(String(100), nullable=True)
+
+
+class PrestataireDefaillant(Base):
+    """
+    Un prestataire identifie comme defaillant : de son identification (seuils
+    franchis) a sa levee (repasse sous les seuils). La date d'identification
+    fait courir le delai du signalement a l'autorite — « au plus tard trois
+    mois apres » (EBA/GL/2024/11, §74) ; le constat fige ce qui a ete mesure.
+    Un nouvel episode s'ouvre s'il franchit de nouveau les seuils.
+
+    Table neuve : `create_all` la cree sur une base existante (SQLite comme
+    PostgreSQL) sans rien toucher d'autre — c'est toute la migration.
+    """
+    __tablename__ = "prestataires_defaillants"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    identifiant = Column(String(20), nullable=False, index=True)
+    nom = Column(String(140), nullable=True)
+    pays = Column(String(2), nullable=True)
+    identifie_le = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    constat = Column(JSON, nullable=True)
+    notifie_le = Column(DateTime, nullable=True)
+    leve_le = Column(DateTime, nullable=True, index=True)
+    constat_levee = Column(JSON, nullable=True)
 
 
 class AdminAuditLog(Base):
@@ -818,7 +982,19 @@ def log_admin_action(db, username, action, target=None,
                          before=before, after=after, detail=detail))
 
 
-ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION")
+# Doute d'homonymie declare a la DG Tresor (fiskr/homonymie.py) : l'alerte
+# « ne peut toujours pas etre levee » (LD DGT/ACPR du 18 mars 2026, §167). Elle
+# n'est pas close — rien ne la clot sans la reponse enregistree —, mais son
+# instruction est faite : elle attend la DG Tresor, pas l'analyste.
+ALERT_STATUS_ATTENTE_DGT = "PENDING_DGT"
+ALERT_OPEN_STATUSES = ("OPEN", "IN_PROGRESS", "ESCALATED", "PENDING_VALIDATION",
+                       ALERT_STATUS_ATTENTE_DGT)
+# Ce que l'analyste a encore a instruire : les ouvertes, moins l'attente de la
+# DG Tresor. Une echeance SLA ne s'y « depasse » pas — la DG Tresor a son
+# rythme, et le seul delai qui reste a l'organisme (transmettre la
+# declaration) a son propre controle. Sans cette distinction, chaque doute
+# declare finissait en rouge dans la file et en « retard SLA » au courriel.
+ALERT_WORK_STATUSES = tuple(s for s in ALERT_OPEN_STATUSES if s != ALERT_STATUS_ATTENTE_DGT)
 # CLOSED_CONFIRMED clot l'INSTRUCTION, pas l'affaire : sur une liste du
 # perimetre SANCTION, la suite (gel, declaration DG Tresor, levee) vit dans
 # le registre des mesures de gel (MesureDeGel, fiskr/gels.py).
@@ -1132,6 +1308,14 @@ class BatchCampaign(Base):
     opened_count = Column(Integer, nullable=True, default=0)
     no_match_count = Column(Integer, default=0)
     rejected_count = Column(Integer, default=0)      # lignes refusees par le quality gate
+    # Parties liees des clients de la campagne (fiskr/parties.py), criblees
+    # avec eux, comptees A PART : les compteurs ci-dessus restent ceux des
+    # lignes du fichier. `hits_count` et `opened_count` comptent tout ce que la
+    # campagne a trouve et ouvert, parties comprises — c'est le travail produit.
+    # NULL sur les campagnes anterieures : elles n'en criblaient aucune.
+    parties_screened = Column(Integer, nullable=True)
+    parties_alert_count = Column(Integer, nullable=True)
+    parties_rejected_count = Column(Integer, nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)
@@ -1152,6 +1336,10 @@ class BatchResult(Base):
     audit_id = Column(Integer, nullable=True)
     alert_id = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)              # motif de rejet quality gate
+    # Resultat d'une PARTIE LIEE du client de la ligne (fiskr/parties.py) :
+    # laquelle, et la chaine qui la rattache. NULL : le client lui-meme.
+    partie_liee_id = Column(Integer, nullable=True)
+    via_partie = Column(Text, nullable=True)
 
 class SavedView(Base):
     """
@@ -1355,6 +1543,12 @@ class WhitelistPair(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     client_id = Column(String(100), nullable=False, index=True)
     watchlist_entity_id = Column(String(100), nullable=False, index=True)
+    # L'identite que la decision a vue (fiskr/parties.py) : une partie liee du
+    # client, ou NULL pour le client lui-meme — ce que sont toutes les paires
+    # anterieures. Cle (client, fiche) seule, la paire posee sur le mandataire
+    # homonyme d'un client etait lue pour le client : empreinte differente,
+    # « a reexaminer », et plus rien d'absorbe, pas meme le mandataire.
+    partie_liee_id = Column(Integer, nullable=True)
     client_name = Column(String(1000), nullable=True)
     watchlist_name = Column(String(1000), nullable=True)
     # Type de liste d'origine du liste (NULL sur les paires anterieures)
@@ -1760,6 +1954,22 @@ def init_db():
                 ("total_hint", "INTEGER"),
                 ("phase", "VARCHAR(30)"),
             ],
+            # Parties liees criblees par les campagnes (fiskr/parties.py) :
+            # NULL sur les campagnes et resultats existants (aucune partie)
+            "batch_campaigns": [
+                ("parties_screened", "INTEGER"),
+                ("parties_alert_count", "INTEGER"),
+                ("parties_rejected_count", "INTEGER"),
+            ],
+            "batch_results": [
+                ("partie_liee_id", "INTEGER"),
+                ("via_partie", "TEXT"),
+            ],
+            # Revue de vigilance renforcee d'un dossier PPE (fiskr/ppe.py)
+            "ppe_dossiers": [
+                ("revue_signalee_le", "TIMESTAMP"),
+                ("revues", "JSON"),
+            ],
             "watchlist_entities": [
                 ("excluded", "BOOLEAN"),
                 ("exclusion_justification", "TEXT"),
@@ -1843,6 +2053,11 @@ def init_db():
             "review_records": [
                 ("backtest_validity", "JSON"),
             ],
+            "parties_liees": [
+                # Chaine capitalistique au-dela du premier niveau (fiskr/parties.py)
+                ("partie_de", "VARCHAR(100)"),
+                ("partie_client_id", "VARCHAR(100)"),
+            ],
             "compliance_audit_trail": [
                 ("list_type", "VARCHAR(30)"),
                 ("watchlist_composition", "JSON"),
@@ -1859,6 +2074,9 @@ def init_db():
                 ("fingerprinted_at", "TIMESTAMP"),
                 ("stale_since", "TIMESTAMP"),
                 ("stale_reason", "VARCHAR(30)"),
+                # Partie liee couverte (fiskr/parties.py) : NULL sur les paires
+                # existantes, qui sont celles du client lui-meme
+                ("partie_liee_id", "INTEGER"),
             ],
             "users": [
                 ("failed_login_count", "INTEGER"),
