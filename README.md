@@ -146,8 +146,8 @@ L'onglet **Gestion des Watchlists → Sources Automatiques** permet de récupér
 * **🇫🇷 DGT — Registre national des gels des avoirs** : Téléchargement du registre officiel de la Direction générale du Trésor via son **API publique** ([gels-avoirs.dgtresor.gouv.fr](https://gels-avoirs.dgtresor.gouv.fr/)), ingestion en snapshot (personnes physiques → I, personnes morales → E, navires → V, avec normalisation ISO2 des nationalités françaises pour le blocking), **delta** et remplacement de la liste DGT active. La mise en œuvre des mesures de gel nationales étant une **obligation autonome** des établissements assujettis (lignes directrices ACPR/DGT), ce connecteur couvre nativement l'exigence française. Compatible mode homologation et planification quotidienne.
 * **🇺🇳 ONU — Liste consolidée du Conseil de sécurité** : Téléchargement du XML officiel public ([scsanctions.un.org](https://scsanctions.un.org/resources/xml/en/consolidated.xml)), ingestion (individus → I, entités → E, alias Good/Low → priorités haute/basse, pays anglais normalisés en ISO2), **delta** et remplacement de la liste ONU active.
 * **🇪🇺 UE — Liste consolidée officielle (fichiers FSF)** : Téléchargement du XML consolidé des sanctions financières publié par la Commission (webgate FSD) — la source qui **fait autorité** sur le scraping du JO, avec des **radiations fiables**. Nécessite un token gratuit : créez un compte sur le webgate FSD puis renseignez `sync.eu_fsf.token` dans `config.yaml` et passez `sync.eu_fsf.enabled` à `true`. Partage le type `WATCHLIST_EU` : le snapshot FSF remplace la liste scrapée, et le scraping quotidien du JO (ci-dessous) reste un complément « fraîcheur J+0 » optionnel qui fusionne par-dessus.
-* **🇬🇧 UK OFSI — Liste consolidée HM Treasury** *(opt-in)* : Téléchargement du fichier officiel `ConList.csv` (format 2022) publié par l'Office of Financial Sanctions Implementation, regroupement des lignes par Group ID (nom principal + alias), typage Individual → I / Ship → V / autres → E, conversion des dates `jj/mm/aaaa` et normalisation ISO2 des nationalités. À activer (`sync.ofsi.enabled`) selon l'exposition UK de l'établissement.
-* **🇺🇸 US CSL — Consolidated Screening List** *(opt-in)* : Téléchargement de l'agrégat officiel du gouvernement américain publié par l'International Trade Administration ([api.trade.gov](https://api.trade.gov/static/consolidated_screening_list/consolidated.json)), public et **sans clé**. Son intérêt n'est pas de redonner la SDN — Fiskr la récupère déjà à sa source — mais d'apporter les listes de **contrôle des exportations**, absentes de toutes les autres sources branchées : **Entity List**, **Denied Persons**, **Unverified** et **Military End User** du Bureau of Industry and Security, **ITAR Debarred** et **Nonproliferation** du Département d'État. Ces listes conditionnent le financement du commerce international : une contrepartie de trade finance peut y figurer sans être sur aucune liste de gel. Les listes déjà récupérées à leur source sont **écartées à la lecture** (`sync.csl.exclude_sources`, par défaut la SDN) pour ne pas doubler les alertes — si `ofac_nonsdn` est aussi activé, y ajouter ses libellés. La liste américaine qui désigne la contrepartie est conservée dans `designation_reasons`, et l'exigence de licence BIS dans les informations complémentaires : c'est ce qui permet à l'analyste de trancher. À activer (`sync.csl.enabled`).
+* **🇬🇧 UK OFSI — Liste consolidée HM Treasury** *(fermée le 28 janvier 2026)* : depuis cette date, la UK Sanctions List du FCDO est la seule liste des désignations britanniques — activez la source **Royaume-Uni — liste de sanctions FCDO** (`GBFCDO`) à la place. Laissée active, la synchronisation OFSI n'interroge plus le stockage fermé (qui répond `409 Public access is not permitted`) et rend une erreur qui dit pourquoi et vers quelle source se tourner. Le lecteur du fichier `ConList.csv` (format 2022 : regroupement par Group ID, typage Individual → I / Ship → V / autres → E, dates `jj/mm/aaaa`, nationalités ISO2) reste disponible pour l'import manuel d'un fichier archivé.
+* **🇺🇸 US CSL — Consolidated Screening List** *(opt-in)* : Téléchargement de l'agrégat officiel du gouvernement américain publié par l'International Trade Administration ([api.trade.gov](https://api.trade.gov/static/consolidated_screening_list/consolidated.json)), public et **sans clé**. Son intérêt n'est pas de redonner la SDN — Fiskr la récupère déjà à sa source — mais d'apporter les listes de **contrôle des exportations**, absentes de toutes les autres sources branchées : **Entity List**, **Denied Persons**, **Unverified** et **Military End User** du Bureau of Industry and Security, **ITAR Debarred** et **Nonproliferation** du Département d'État. Ces listes conditionnent le financement du commerce international : une contrepartie de trade finance peut y figurer sans être sur aucune liste de gel. Les listes déjà récupérées à leur source sont **écartées à la lecture** (`sync.csl.exclude_sources`, par défaut la SDN) pour ne pas doubler les alertes — si `ofac_nonsdn` est aussi activé, y ajouter ses libellés. La liste américaine qui désigne la contrepartie est conservée dans `designation_reasons`, et l'exigence de licence BIS dans les informations complémentaires : c'est ce qui permet à l'analyste de trancher. Le fichier est **lu en flux**, entrée par entrée (`iterer_tableau_json`) : il pèse 113 Mo depuis novembre 2026, au-delà du plafond de 64 Mo d'un lecteur qui construit l'arbre entier — à cause d'**une seule** entrée de l'Entity List, sans nom, dont le champ `addresses` fait 79 Mo (la suivante : 20 Ko). Une entrée de plus de 8 Mo est sautée sans être construite, et signalée au journal ; mesuré sur le fichier réel : 6 709 fiches, identiques à une lecture complète, en 6 s et 81 Mo de mémoire au lieu de 450. À activer (`sync.csl.enabled`).
 * **🇨🇦 Canada SEMA — Sanctions autonomes** *(opt-in)* : Téléchargement de la liste consolidée d'Affaires mondiales Canada (*Special Economic Measures Act*). Le Canada **désigne de façon autonome** : son périmètre ne recoupe ni celui de l'UE ni celui de l'OFAC. Le fichier existe en anglais **et en français** — les deux jeux d'intitulés de colonnes sont acceptés, pour qu'un téléchargement depuis la page francophone ne donne pas une liste vide. Le CSV ne portant **aucun identifiant technique**, la clé de rapprochement est reconstruite depuis la référence réglementaire (annexe + article) : sans clé stable, chaque publication paraîtrait remplacer intégralement la précédente et le delta serait illisible. À activer (`sync.canada.enabled`).
 * **🇦🇺 Australie DFAT — Liste consolidée** *(opt-in)* : Téléchargement de la liste du *Department of Foreign Affairs and Trade*, qui réunit les sanctions **onusiennes transposées** et les **désignations autonomes** australiennes — l'origine est conservée dans `designating_state` selon la présence d'un comité ONU. Les lignes se répètent par variante de nom et sont regroupées par référence, comme le `ConList` britannique. L'extension de l'URL choisit le lecteur : **CSV en natif**, **XLSX** si le paquet optionnel `openpyxl` est installé — son absence produit un rapport d'erreur qui dit quoi installer, pas une pile d'appels. À activer (`sync.dfat.enabled`).
 * **🇭🇰 Hong Kong SFC — Liste d'alerte** *(opt-in)* : Entités non autorisées, sites frauduleux et usurpations d'identité d'intermédiaires agréés recensés par la *Securities and Futures Commission*. **Ce n'est pas une liste de sanctions** : une touche est un signal de risque à instruire, pas une obligation de gel — d'où un type de liste distinct (`WATCHLIST_HK_SFC`), à seuiller à part via `scoring.cut_off_overrides`. Hong Kong n'ayant pas de régime de sanctions autonome, c'est cette liste qui apporte une couverture propre. À activer (`sync.hk_sfc.enabled`).
@@ -579,6 +579,31 @@ Processus API (×N, Passenger/uvicorn)      Démon travailleur (×1, verrou floc
   laissé RUNNING par une incarnation morte est repris en une minute, sans
   redémarrage. La sérialisation ne compte que les jobs au **cœur frais** :
   un zombie ne bloque jamais son groupe.
+- **Un travail figé se déclare, et dit où** : le battement de cœur est
+  rafraîchi pour tous les jobs du démon par un fil indépendant, il ne voit
+  donc pas un fil bloqué. La progression se date à part (`progress_at`, que
+  seule une progression réelle rajeunit) ; au-delà de `jobs.stall_after_hours`
+  (6 h) sans progression, le job passe en ERROR (« Figé : … »), sa clé
+  d'exclusivité est libérée, la notification `job_fige` part et le démon se
+  recycle (`jobs.recycle_on_stall`). L'erreur porte la **pile du fil bloqué**
+  (« Fil bloqué dans : sync.py:… ← … »), lisible en lecture seule par
+  `GET /api/diagnostic/jobs` : déclarer un travail figé sans dire où, c'est le
+  relancer pour qu'il se fige au même endroit — la synchronisation PEP s'est
+  figée le 23 septembre puis le 23 octobre 2026, sans une trace de l'appel.
+- **Un import interrompu n'est pas une liste** (`fiskr/completude.py`) : la
+  reprise remet d'aplomb les instantanés restés en `PROCESSING` plus d'une
+  heure, mais **ne touche pas** celui dont le travail d'import vit encore (la
+  synchronisation désigne son instantané dès sa création), et ne le **promeut**
+  (READY / PENDING_REVIEW) que si son achèvement est **attesté** : travail
+  d'import terminé, ou rapport de synchronisation abouti. Sinon il passe en
+  ERROR, avec le nombre de fiches écrites. Avant cette règle, cinq imports PEP
+  interrompus avaient été promus avec leur compte du moment (625 000, 548 000,
+  61 000 et 297 000 fiches pour ~713 000, plus un à 0 mis en erreur) ; celui de
+  548 000 est devenu la liste PEP en production. Un lot ainsi promu est
+  **refusé à l'homologation** (400, la dernière version complète est citée),
+  la file le marque « Import interrompu », et la mise en service bloque
+  (`listes_completes`, rejoué par la sonde de conformité) tant qu'une liste en
+  production en est issue.
 - **Le démon est unique par construction** : verrou `flock` sur
   `fiskr-worker.lock`, rendu par le noyau à la mort du processus — pas de
   fichier de PID fantôme. Il héberge aussi **tous les planificateurs
@@ -742,7 +767,8 @@ la mise en service le dit, **200** sinon. Elle rejoue, sans les recalculer,
 les contrôles capables de bloquer qui ne coûtent que quelques lectures
 d'index : fraîcheur des listes (une version plus récente attend depuis plus
 de 7 jours), démon travailleur (arrêté avec du travail en attente, ou bat sur
-un travail figé), aucune liste en production, liste de sanctions sans sa
+un travail figé), aucune liste en production, liste en production issue
+d'un import interrompu, liste de sanctions sans sa
 source de référence (ex. liste UE sans la consolidée `eu_fsf`), secrets restés
 ceux du code source, dossiers PPE sans décision au-delà du délai (le constat
 transmis ne nomme personne). Un contrôle illisible donne 503 : une sonde qui ne peut
@@ -866,7 +892,7 @@ L'interface n'utilise **aucun popup natif** du navigateur : confirmations et sai
 Chaque utilisateur peut également cliquer sur son profil en bas de la barre latérale pour modifier son nom complet ou changer son mot de passe en autonomie.
 
 ### 2. Lancer la Suite de Tests
-Exécutez la suite complète — **2 226 fonctions de test** réparties sur 210
+Exécutez la suite complète — **2 246 fonctions de test** réparties sur 211
 fichiers — avec pytest :
 ```bash
 python -m pytest
