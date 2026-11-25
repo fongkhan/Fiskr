@@ -215,7 +215,10 @@ sync:
   pep:
     enabled: false
     url: "https://data.opensanctions.org/datasets/latest/peps/targets.simple.csv"
-  # Liste consolidee UK OFSI (HM Treasury) - opt-in selon l'exposition UK
+  # Liste consolidee UK OFSI (HM Treasury) - FERMEE le 28 janvier 2026 : la UK
+  # Sanctions List du FCDO est depuis la seule liste britannique. Activez la
+  # source OpenSanctions gb_fcdo (GBFCDO) a la place ; celle-ci repond en erreur
+  # explicite si on la laisse active.
   ofsi:
     enabled: false
     url: "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"

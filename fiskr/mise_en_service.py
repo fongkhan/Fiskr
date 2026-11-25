@@ -309,6 +309,46 @@ def _listes_en_production(db) -> Dict[str, Any]:
         "#watchlist-mgmt/watchlist-sync")
 
 
+def _listes_issues_d_imports_interrompus(db) -> Dict[str, Any]:
+    """
+    Une liste en production dont l'import s'est INTERROMPU, et que la
+    reparation des imports bloques a declaree aboutie sans preuve (cf.
+    fiskr/completude.py). Releve en production le 25 novembre 2026 : la liste
+    PEP y comptait 548 000 fiches, promues le 1er septembre, quand une liste
+    complete en compte environ 713 000 — pres d'une PPE sur quatre absente du
+    criblage depuis, sans un signe a l'ecran.
+    """
+    from fiskr import completude
+    constats = completude.productions_sans_preuve(db)
+    titre = "Listes en production complètes"
+    if not constats:
+        return _controle(
+            "listes_completes", "Listes", titre, OK,
+            "Aucune liste en production n'a été promue par la réparation d'un "
+            "import interrompu.",
+            lien="#watchlist-mgmt/watchlist-review")
+    parties = []
+    for c in constats:
+        date = (c["reparee_le"] or "")[:10]
+        if len(date) == 10:
+            date = f"{date[8:10]}/{date[5:7]}/{date[0:4]}"
+        phrase = (f"{c['file_type']} : {completude.milliers(c['fiches'])} fiches, "
+                  f"déclarée complète le {date} sans preuve que l'import soit allé au bout")
+        if c["fiches_version_complete"]:
+            phrase += (f" (la dernière version complète en compte "
+                       f"{completude.milliers(c['fiches_version_complete'])})")
+        parties.append(phrase)
+    return _controle(
+        "listes_completes", "Listes", titre, BLOQUANT,
+        f"{len(constats)} liste(s) en production issue(s) d'un import interrompu — "
+        + " ; ".join(parties) + ". Le criblage contre elle ignore toutes les fiches "
+        "que l'import n'a jamais écrites, et répond « aucune correspondance » pour elles.",
+        "Homologuez la version complète la plus récente de chaque liste concernée : "
+        "elle remplace la version tronquée. Les lots interrompus encore en attente "
+        "sont refusés à l'approbation ; rejetez-les.",
+        "#watchlist-mgmt/watchlist-review")
+
+
 def _sources_de_reference(db) -> Dict[str, Any]:
     """
     Une liste de sanctions en production dont la source de reference ne
@@ -1088,7 +1128,8 @@ def _sources_en_echec_repete(db) -> Dict[str, Any]:
         "#watchlists/watchlists-sources")
 
 
-_CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production, _sources_de_reference,
+_CONTROLES_BASE = (_base_de_donnees, _demon, _listes_en_production,
+                   _listes_issues_d_imports_interrompus, _sources_de_reference,
                    _sources_automatiques, _sources_en_echec_repete,
                    _homologation, _fraicheur_des_listes, _referentiel_clients,
                    _seuils, _comptes, _conservation, _couverture_du_criblage,
@@ -1154,8 +1195,11 @@ _CONTROLES_DE_LA_SONDE_SANS_BASE = (_secrets,)
 # Les dossiers PPE aussi : quelques lectures d'index (dossiers sans decision,
 # PPE confirmees sans dossier, filtrees en SQL sur les types PEP), et leur
 # constat public ne nomme personne. Les declarations d'homonymie de meme : une
-# lecture d'index sur le statut, un constat public sans nom.
-_CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production, _sources_de_reference,
+# lecture d'index sur le statut, un constat public sans nom. Les listes issues
+# d'imports interrompus : deux lectures groupees, et un constat qui ne nomme
+# que des listes.
+_CONTROLES_DE_LA_SONDE = (_demon, _listes_en_production,
+                          _listes_issues_d_imports_interrompus, _sources_de_reference,
                           _fraicheur_des_listes, _declarations_de_gel,
                           _declarations_d_homonymie, _dossiers_ppe,
                           _couverture_du_criblage)

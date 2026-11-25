@@ -197,10 +197,21 @@ def _stuck_snapshot(db, file_type, entities, age_hours=3):
 
 
 def test_repair_promotes_snapshot_that_really_has_entities(db):
+    """
+    Réécrit le 25 novembre 2026, et le dit : ce test promouvait un instantané
+    sur la seule présence de ses fiches. C'est la règle qui a mis en
+    production une liste PEP interrompue à 548 000 fiches sur ~713 000 (cf.
+    tests/test_import_interrompu.py). Le défaut d'origine — un import TERMINÉ
+    dont le statut ne s'était pas persisté — reste réparé, mais sur preuve :
+    son rapport de synchronisation atteste qu'il est allé au bout.
+    """
     from fiskr.api import _repair_stuck_snapshots
-    from fiskr.database import AdminAuditLog
+    from fiskr.database import AdminAuditLog, SyncReport
 
     snap_id = _stuck_snapshot(db, "WATCHLIST_UN", entities=42)
+    db.add(SyncReport(source="UN", status="SUCCESS", snapshot_id=snap_id,
+                      added_count=42, modified_count=0, removed_count=0))
+    db.commit()
     summary = _repair_stuck_snapshots(db)
 
     assert summary["repaired"] == 1

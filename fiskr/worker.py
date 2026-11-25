@@ -142,7 +142,7 @@ def reprise(session) -> None:
     if bilan.get("repaired") or bilan.get("failed"):
         logger.warning(
             f"Reprise : {bilan['repaired']} instantane(s) remis en production, "
-            f"{bilan['failed']} marque(s) en erreur (aucune fiche).")
+            f"{bilan['failed']} marque(s) en erreur (import interrompu ou vide).")
 
 
 def _heartbeat_loop():

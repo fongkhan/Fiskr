@@ -21,10 +21,13 @@ import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Any, Callable, Dict, Optional
 
 from sqlalchemy import update as sa_update
@@ -399,6 +402,7 @@ def run_job(job_id: int) -> None:
 
     beat = threading.Thread(target=_beat, daemon=True)
     beat.start()
+    _FILS_DES_JOBS[job_id] = threading.get_ident()
     try:
         fn = TASKS.get(kind)
         if fn is None:
@@ -413,6 +417,33 @@ def run_job(job_id: int) -> None:
         finish_job(job_id, "DONE", result=ctx.result)
     finally:
         stop_beat.set()
+        _FILS_DES_JOBS.pop(job_id, None)
+
+
+# Fil d'execution de chaque job en cours DANS CE processus. Declarer un job
+# fige sans dire ou son fil est bloque, c'est le relancer pour qu'il se fige au
+# meme endroit : releve en production, la synchronisation PEP s'est figee le
+# 23 septembre (avant sa premiere ecriture) puis le 23 octobre (a 297 000
+# fiches), et aucune trace ne disait sur quel appel.
+_FILS_DES_JOBS: Dict[int, int] = {}
+PILE_MAX_APPELS = 12
+
+
+def pile_du_job(job_id: int) -> Optional[str]:
+    """
+    Ou le fil de ce job se trouve, du plus recent au plus ancien appel
+    (« sync.py:1178 persist_pivot_items ← ... »), ou None si son fil ne vit
+    pas dans ce processus. Lu par le meme processus que celui qui l'execute :
+    c'est le demon qui juge ses propres jobs (cf. declarer_figes).
+    """
+    ident = _FILS_DES_JOBS.get(job_id)
+    if ident is None:
+        return None
+    cadre = sys._current_frames().get(ident)
+    if cadre is None:
+        return None
+    appels = traceback.extract_stack(cadre)[-PILE_MAX_APPELS:]
+    return " ← ".join(f"{Path(a.filename).name}:{a.lineno} {a.name}" for a in reversed(appels))
 
 
 def finish_job(job_id: int, status: str, *, error: Optional[str] = None,
@@ -538,6 +569,11 @@ def declarer_figes(session, claimer: Optional[str] = None,
                      f"(phase {job.phase or '?'}, {int(job.processed or 0)} traité(s)). "
                      f"Le travail a été arrêté pour libérer la file ; il sera "
                      f"relancé à son prochain horaire.")
+        # Ou le fil est bloque : sur la ligne du job, que le diagnostic sert
+        # en lecture seule — c'est la seule trace qui survit au recyclage.
+        pile = pile_du_job(job.id)
+        if pile:
+            job.error += f" Fil bloqué dans : {pile}"
         figes.append(job)
     if figes:
         session.commit()

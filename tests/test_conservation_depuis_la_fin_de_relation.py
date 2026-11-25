@@ -480,16 +480,26 @@ def test_apres_la_levee_de_la_mesure_l_upsert_s_applique(base, client_admin):
 
 def test_un_referentiel_repare_au_demarrage_ne_degele_personne(base):
     """Un import resté en PROCESSING et réparé au démarrage entre en
-    production comme un import abouti : il ne dégèle personne non plus."""
+    production comme un import abouti : il ne dégèle personne non plus.
+    (Réparé sur preuve depuis le 25 novembre 2026 : le travail d'import qui
+    l'a écrit s'est terminé — cf. tests/test_import_interrompu.py.)"""
     from fiskr.api import _repair_stuck_snapshots
+    from fiskr.database import Job
     cid = f"{P}_repare"
     base.referentiel((cid, None, gels.STATUT_CLIENT_GELE))
     base.mesure_en_vigueur(base.alerte(cid, datetime.utcnow(), "WATCHLIST_DGT"))
     coince = base.referentiel((cid, None, "ACTIF"), status="PROCESSING",
                               uploaded_at=datetime.utcnow() - timedelta(hours=3))
-    _repair_stuck_snapshots(base.db)
-    assert base.db.get(Snapshot, coince).status == "READY"
-    assert base.fiche(coince, cid).client_status == gels.STATUT_CLIENT_GELE
+    preuve = Job(token=f"ingest-{coince}", kind="ingest", status="DONE", snapshot_id=coince)
+    base.db.add(preuve)
+    base.db.commit()
+    try:
+        _repair_stuck_snapshots(base.db)
+        assert base.db.get(Snapshot, coince).status == "READY"
+        assert base.fiche(coince, cid).client_status == gels.STATUT_CLIENT_GELE
+    finally:
+        base.db.delete(preuve)
+        base.db.commit()
 
 
 # --------------------------------------------------------------- migration

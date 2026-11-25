@@ -862,17 +862,30 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
     installations deja touchees, au demarrage.
 
     Chaque snapshot ancien est recompte depuis ses entites REELLES puis
-    rebascule (READY / PENDING_REVIEW s'il en contient, ERROR sinon), et la
-    correction est tracee au journal d'administration. N'echoue jamais : un
-    demarrage ne doit pas tomber sur une reparation.
+    rebascule, et la correction est tracee au journal d'administration.
+    N'echoue jamais : un demarrage ne doit pas tomber sur une reparation.
+
+    Compter les fiches ne dit pas si l'import est alle au bout (cf.
+    fiskr/completude.py). Releve en production : cinq imports PEP
+    INTERROMPUS promus avec leur compte du moment, dont un de 548 000 fiches
+    sur ~713 000 devenu la liste PEP en production. D'ou trois regles :
+    - un instantane dont le travail d'import vit encore (en file, en cours)
+      n'est pas bloque, il s'ecrit : on n'y touche pas ;
+    - il ne se promeut (READY / PENDING_REVIEW) que si son achevement est
+      ATTESTE — travail termine sans erreur, ou rapport de synchronisation
+      abouti : c'est le defaut d'origine, un import termine dont le statut
+      n'avait pas ete persiste ;
+    - sinon c'est un import interrompu : ERROR, avec le nombre de fiches
+      ecrites, et jamais la production.
     """
+    from fiskr import completude
     summary = {"repaired": 0, "failed": 0}
     try:
         cutoff = datetime.utcnow() - timedelta(hours=_STUCK_SNAPSHOT_AFTER_HOURS)
-        stuck = db.query(Snapshot).filter(
+        stuck = [s for s in db.query(Snapshot).filter(
             Snapshot.status == "PROCESSING",
             Snapshot.uploaded_at < cutoff,
-        ).all()
+        ).all() if completude.travail_vivant(db, s.snapshot_id) is None]
         if not stuck:
             return summary
         staging = require_approval_enabled(db)
@@ -880,8 +893,8 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
             model = ClientEntity if snap.file_type == "CLIENT_BASE" else WatchlistEntity
             real_count = db.query(model).filter(model.snapshot_id == snap.snapshot_id).count()
             before = {"status": snap.status, "record_count": snap.record_count}
-            if real_count:
-                # Les fiches sont la : l'import avait bien abouti
+            if real_count and completude.achevement_prouve(db, snap.snapshot_id):
+                # Les fiches sont la ET l'import est atteste termine
                 snap.record_count = real_count
                 snap.processed_count = real_count
                 snap.phase = "DONE"
@@ -892,16 +905,23 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
                     # import abouti : il ne degele personne non plus.
                     registre_des_gels.reappliquer_aux_clients(db, snap.snapshot_id)
                 summary["repaired"] += 1
+                detail = ("Import resté en PROCESSING (défaut de session corrigé) : "
+                          f"{real_count} fiche(s) réellement présentes, import attesté terminé.")
             else:
                 snap.status = "ERROR"
                 snap.phase = None
                 summary["failed"] += 1
+                detail = (f"Import interrompu : {real_count} fiche(s) écrite(s) avant l'arrêt, "
+                          "sans preuve que l'import soit allé au bout. Liste incomplète : "
+                          "elle n'entre ni en homologation ni en production.")
+            # Action ecrite en toutes lettres : le journal se lit (et se
+            # verifie) au point d'ecriture ; completude.ACTION_REPARATION la relit.
             log_admin_action(
                 db, "systeme", "SNAPSHOT_REPAIRED", target=snap.snapshot_id,
                 before=before,
-                after={"status": snap.status, "record_count": snap.record_count},
-                detail=("Import resté en PROCESSING (défaut de session corrigé) : "
-                        f"{real_count} fiche(s) réellement présentes."),
+                after={"status": snap.status, "record_count": snap.record_count,
+                       "fiches_ecrites": real_count},
+                detail=detail,
             )
         db.commit()
         if any(s.status == "READY" and s.file_type in WATCHLIST_FILE_TYPES for s in stuck):
@@ -911,7 +931,7 @@ def _repair_stuck_snapshots(db: Session) -> Dict[str, int]:
             bump_watchlist_epoch(db)
         logger.warning(
             f"Snapshots réparés au démarrage : {summary['repaired']} remis en production, "
-            f"{summary['failed']} marqués en erreur (aucune fiche)."
+            f"{summary['failed']} marqués en erreur (import interrompu ou vide)."
         )
     except Exception as e:
         db.rollback()
@@ -11194,6 +11214,8 @@ async def list_pending_reviews(
     productions = _latest_ready_by_type(db, types)
     rapports = _stored_sync_deltas(db, ids)
     validites = validites_des_cahiers(db, snaps)
+    from fiskr import completude
+    interrompus = completude.promotions_sans_preuve(db, ids)
 
     pending = []
     for snap in snaps:
@@ -11212,6 +11234,9 @@ async def list_pending_reviews(
         row["delta_summary"] = stored["summary"] if stored else None
         row["delta_available"] = stored is not None
         row["is_first_import"] = production is None
+        # Import interrompu promu par la reparation (fiskr/completude.py) :
+        # la liste est tronquee, son approbation est refusee.
+        row["import_interrompu"] = interrompus.get(snap.snapshot_id)
         pending.append(row)
     return {"pending": pending}
 
@@ -11743,6 +11768,26 @@ def _approve_one_snapshot(db: Session, snapshot_id: str, reviewer: Dict[str, Any
                    f"version en production : l'approuver retirerait de la "
                    f"production tout ce qui a paru depuis. Il est périmé — "
                    f"rejetez-le, ou approuvez la version la plus récente.")
+
+    # Un import INTERROMPU que la reparation des instantanes a declare abouti
+    # (fiskr/completude.py) n'est pas une liste : c'en est le debut. Releve en
+    # production : la version PEP la plus recente en attente comptait 297 000
+    # fiches sur ~713 000 — « homologuer la derniere version de chaque liste »
+    # l'aurait mise en production.
+    from fiskr import completude
+    interrompu = completude.promotion_sans_preuve(db, snap.snapshot_id)
+    if interrompu is not None:
+        complete = completude.derniere_version_complete(db, snap.file_type,
+                                                         sauf=snap.snapshot_id)
+        reference = (f" La dernière version complète de cette liste compte "
+                     f"{completude.milliers(complete.record_count)} fiches."
+                     if complete is not None and complete.record_count else "")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ce lot ({snap.file_type}, {completude.milliers(interrompu['fiches'] or 0)} fiches) "
+                   f"n'est pas une liste complète : son import s'est interrompu, et la "
+                   f"réparation des imports bloqués l'a déclaré abouti sans preuve."
+                   f"{reference} Rejetez-le, puis approuvez une version complète.")
 
     # Filet de securite : si les exigences de justification ont durci depuis la
     # pose des exclusions, on refuse la promotion tant qu'elles ne sont pas conformes.

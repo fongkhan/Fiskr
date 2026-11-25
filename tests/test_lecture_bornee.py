@@ -59,8 +59,12 @@ def test_un_fichier_au_dela_du_plafond_est_refuse_avant_lecture(tmp_path, monkey
 
 
 def test_le_plafond_laisse_de_la_marge_au_plus_gros_fichier_reel():
-    """La CSL de trade.gov pèse une vingtaine de mégaoctets : le plafond doit
-    lui laisser de la marge, sinon il casse un import légitime."""
+    """Le plafond doit laisser de la marge aux fichiers lus d'un bloc, sinon il
+    casse un import légitime. Réécrit le 25 novembre 2026, et le dit : la CSL
+    de trade.gov, qui servait d'étalon (« une vingtaine de mégaoctets »), pèse
+    désormais 108 Mo — sa synchronisation échouait chaque nuit en production
+    sur ce plafond. Elle se lit maintenant en flux (cf. plus bas) ; le
+    plafond reste celui des connecteurs JSON encore lus d'un bloc."""
     assert TAILLE_MAX_LECTURE_BLOC >= 3 * 20 * 1024 * 1024
 
 
@@ -73,9 +77,10 @@ def test_un_fichier_absent_ne_leve_pas_ici(tmp_path):
 # ------------------ LES TROIS CONNECTEURS JSON L'EMPRUNTENT ------------------
 
 @pytest.mark.parametrize("parseur", [
-    "parse_dgt_gels_json", "parse_csl_json", "parse_worldbank_debarred_json",
+    "parse_dgt_gels_json", "parse_worldbank_debarred_json",
 ])
 def test_les_connecteurs_json_passent_par_le_lecteur_borne(parseur, tmp_path, monkeypatch):
+    """(La CSL n'y est plus : elle se lit en flux, cf. plus bas.)"""
     fichier = tmp_path / "liste.json"
     fichier.write_text("{}")
     appels = []
@@ -174,3 +179,93 @@ def test_le_lecteur_html_alimente_le_parseur_par_morceaux(tmp_path):
     assert len(rendu) == 300
     assert rendu[0]["Nom"] == "SOCIETE 0"
     assert rendu[-1]["Site"] == "https://x299.example"
+
+
+# ------------------ LA CSL EST LUE EN FLUX ------------------
+
+def _csl(n, avant=None):
+    """Une CSL synthétique : chaînes à échapper, crochets dans les valeurs,
+    nombres, et des clés avant `results` comme dans le vrai fichier."""
+    lignes = [{"id": f"csl-{i}", "name": f"Société \"{i}\" [export] {{x}}",
+               "type": "Entity", "source": "Entity List (EL) - Bureau of Industry and Security",
+               "alt_names": [f"Alias, {i}"], "score": i * 1.5, "remarks": None}
+              for i in range(n)]
+    return dict(avant or {"total": n, "sources_used": [{"source": "EL", "n": n}]}, results=lignes)
+
+
+@pytest.mark.parametrize("taille_bloc", [1, 7, 64, 4096])
+def test_le_lecteur_en_flux_rend_exactement_ce_que_rend_json_load(tmp_path, taille_bloc):
+    """Des blocs d'un octet à quelques Ko : chaque élément coupé par la fin
+    d'un bloc doit être relu entier, y compris un nombre (12 pour 123)."""
+    import json as _json
+    fichier = tmp_path / "csl.json"
+    donnees = _csl(40)
+    fichier.write_text(_json.dumps(donnees, ensure_ascii=False, indent=1), encoding="utf-8")
+    lus = list(ingest.iterer_tableau_json(str(fichier), "results", taille_bloc=taille_bloc))
+    assert lus == donnees["results"]
+
+
+def test_le_lecteur_en_flux_lit_un_tableau_racine_et_ignore_une_cle_absente(tmp_path):
+    import json as _json
+    racine = tmp_path / "racine.json"
+    racine.write_text(_json.dumps([1, 22, 333, {"a": [4]}]), encoding="utf-8")
+    assert list(ingest.iterer_tableau_json(str(racine), taille_bloc=2)) == [1, 22, 333, {"a": [4]}]
+    sans = tmp_path / "sans.json"
+    sans.write_text(_json.dumps({"total": 0, "autre": [1, 2]}), encoding="utf-8")
+    assert list(ingest.iterer_tableau_json(str(sans), "results")) == []
+
+
+def test_un_json_tronque_leve_au_lieu_de_rendre_une_liste_partielle(tmp_path):
+    import json as _json
+    fichier = tmp_path / "tronque.json"
+    texte = _json.dumps(_csl(5))
+    fichier.write_text(texte[: len(texte) // 2], encoding="utf-8")
+    with pytest.raises(ValueError):
+        list(ingest.iterer_tableau_json(str(fichier), "results", taille_bloc=16))
+
+
+def test_une_csl_au_dela_du_plafond_de_lecture_en_bloc_est_lue(tmp_path, monkeypatch):
+    """La situation de production : un fichier plus gros que le plafond des
+    lecteurs en bloc. Il est lu en entier, sans jamais construire l'arbre."""
+    import json as _json
+    fichier = tmp_path / "csl.json"
+    fichier.write_text(_json.dumps(_csl(300)), encoding="utf-8")
+    monkeypatch.setattr(ingest, "TAILLE_MAX_LECTURE_BLOC", 1024)
+    monkeypatch.setattr(ingest.json, "load",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("arbre entier construit")))
+    fiches = list(ingest.parse_csl_json(str(fichier), excluded_sources=()))
+    assert len(fiches) == 300
+    assert fiches[7]["entity_id"].endswith("csl-7")
+
+
+@pytest.mark.parametrize("taille_bloc", [3, 64, 4096])
+def test_un_element_demesure_est_saute_sans_etre_construit(tmp_path, taille_bloc):
+    """
+    La CSL réelle du 24 novembre 2026 : une entrée de l'Entity List sans nom
+    dont le champ `addresses` pèse 79 Mo (la suivante : 20 Ko). Lue, elle
+    tenait ~300 Mo de mémoire pour une fiche écartée faute de nom. Elle est
+    sautée — chaînes, échappements et crochets compris — et signalée ; ses
+    voisines sont lues intactes.
+    """
+    import json as _json
+    geante = {"id": "x", "name": "", "addresses": [
+        {"address": f'rue "{i}" [{i}] {{{i}}} \\ fin', "city": "é" * 3} for i in range(400)]}
+    donnees = {"total": 3, "results": [{"id": "a", "name": "Avant"}, geante,
+                                       {"id": "b", "name": 'Après ["] \\'}]}
+    fichier = tmp_path / "csl.json"
+    fichier.write_text(_json.dumps(donnees, ensure_ascii=False), encoding="utf-8")
+    sautes = []
+    lus = list(ingest.iterer_tableau_json(str(fichier), "results", taille_bloc=taille_bloc,
+                                          taille_max_element=2000, si_ecarte=sautes.append))
+    assert lus == [donnees["results"][0], donnees["results"][2]]
+    assert len(sautes) == 1 and sautes[0] >= len(_json.dumps(geante, ensure_ascii=False)) - 2
+
+
+def test_un_element_ordinaire_n_est_jamais_saute(tmp_path):
+    import json as _json
+    fichier = tmp_path / "csl.json"
+    fichier.write_text(_json.dumps(_csl(50)), encoding="utf-8")
+    sautes = []
+    lus = list(ingest.iterer_tableau_json(str(fichier), "results", taille_bloc=128,
+                                          si_ecarte=sautes.append))
+    assert len(lus) == 50 and sautes == []

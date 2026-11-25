@@ -123,6 +123,28 @@ DEFAULT_PEP_URL = "https://data.opensanctions.org/datasets/latest/peps/targets.s
 # Liste consolidee UK OFSI (HM Treasury, publique, format 2022)
 DEFAULT_OFSI_URL = "https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv"
 
+# La liste consolidee OFSI a FERME le 28 janvier 2026 : depuis 9 h (heure de
+# Londres) ce jour-la, la UK Sanctions List du FCDO est la seule liste des
+# designations britanniques (gov.uk, « Moving to a single list for UK
+# sanctions designations, 28 January 2026 » ; la page de l'ancienne liste est
+# marquee « Withdrawn »). Son stockage repond depuis « 409 Public access is
+# not permitted on this storage account » — releve en production chaque nuit,
+# une erreur que rien ne permettait de comprendre.
+OFSI_FERMEE_LE = date(2026, 1, 28)
+OFSI_HOTE_FERME = "ofsistorage.blob.core.windows.net"
+MESSAGE_OFSI_FERMEE = (
+    "Source fermée : la liste consolidée OFSI a fermé le 28 janvier 2026 ; la "
+    "UK Sanctions List du FCDO est depuis la seule liste des désignations "
+    "britanniques. Désactivez sync.ofsi et activez la source « Royaume-Uni — "
+    "liste de sanctions FCDO » (GBFCDO). La liste OFSI en production n'est plus "
+    "mise à jour depuis cette date."
+)
+
+# Sources FERMEES par leur editeur : (fermee le, hote de l'URL fermee, message).
+# Rien n'y est plus telecharge ; l'echec reste un echec — la mise en service
+# nomme les sources en echec repete — mais il dit enfin pourquoi.
+SOURCES_FERMEES = {"OFSI": (OFSI_FERMEE_LE, OFSI_HOTE_FERME, MESSAGE_OFSI_FERMEE)}
+
 # Liste consolidee suisse (SECO). Deux voies au choix, reglees par
 # `sync.seco.format` :
 #   - "xml" (defaut) : export officiel SESAM de la Confederation. Source qui
@@ -1604,6 +1626,12 @@ def _run_list_replacement_sync(
     previous_id = previous.snapshot_id if previous else None
     snap_id = None
     try:
+        fermeture = SOURCES_FERMEES.get(source)
+        if (fermeture and fetcher is None and fermeture[1] in str(url)
+                and date.today() >= fermeture[0]):
+            db.commit()
+            return _finalize_report(db, source=source, trigger=trigger,
+                                    status="ERROR", message=fermeture[2])
         # La transaction ouverte par les lectures ci-dessus se TERMINE avant
         # le telechargement, qui peut durer des minutes : une connexion restee
         # inactive en transaction est fermee par le serveur de production, et
@@ -1671,6 +1699,12 @@ def _run_list_replacement_sync(
         )
         db.add(snap)
         db.commit()
+        # Le travail designe son instantane DES SA CREATION : la reparation
+        # des instantanes bloques n'y touche pas tant qu'il vit (cf.
+        # fiskr/completude.py). Le premier reflet ne venait qu'apres 1 000
+        # fiches — releve en production : un import fige avant ce premier lot
+        # ne disait pas quel instantane il ecrivait.
+        tracker.phase("PERSIST", processed=0, snapshot_id=snap_id)
 
         record_count = persist_pivot_items(db, snap_id, parser(str(temp_file)),
                                            progress=tracker.persisting(db, snap_id))
@@ -1849,7 +1883,10 @@ def run_ofsi_sync(
 ) -> SyncReport:
     """
     Telecharge la liste consolidee UK OFSI (ConList.csv, format 2022) et
-    remplace la liste OFSI active.
+    remplace la liste OFSI active. Fermee le 28 janvier 2026 (cf.
+    MESSAGE_OFSI_FERMEE) : l'URL officielle n'est plus interrogee, le rapport
+    dit pourquoi et vers quelle source se tourner. Le lecteur reste, pour
+    l'import manuel d'un fichier archive.
     """
     cfg = get_sync_config()["ofsi"]
     return _run_list_replacement_sync(
