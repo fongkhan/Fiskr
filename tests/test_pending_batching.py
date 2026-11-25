@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
+from fiskr import completude
 from fiskr.api import app, _snapshot_summary, _stored_sync_delta
 from fiskr.auth import get_current_user
 from fiskr.database import get_db, Snapshot, SyncReport, WatchlistEntity
@@ -96,6 +97,9 @@ def _reference(db, snaps):
         row["delta_summary"] = stored["summary"] if stored else None
         row["delta_available"] = stored is not None
         row["is_first_import"] = production is None
+        # Import interrompu promu sans preuve (fiskr/completude.py), lu ligne
+        # par ligne ici, par une lecture groupee dans l'endpoint.
+        row["import_interrompu"] = completude.promotion_sans_preuve(db, snap.snapshot_id)
         sortie[snap.snapshot_id] = row
     return sortie
 

@@ -1957,6 +1957,17 @@ async function ajouterNoteDeFiche(entityId) {
 
 const FISKR_NOUVEAUTES = [
  {
+ id: "2026-11-25-imports-interrompus", date: "2026-11-25",
+ titre: "Une liste tronquée ne passe plus pour complète",
+ points: [
+ "Un import interrompu n'est plus déclaré complet : il passe en erreur, et un lot déjà promu ainsi est refusé à l'homologation.",
+ "La mise en service signale une liste en production issue d'un import interrompu.",
+ "Un travail figé dit désormais où il s'est bloqué.",
+ "La liste consolidée OFSI, fermée le 28 janvier 2026, est signalée comme telle : activez la liste de sanctions FCDO.",
+ "La liste américaine de contrôle des exportations (CSL) se synchronise de nouveau.",
+ ],
+ },
+ {
  id: "2026-10-21-homonymie-et-virements", date: "2026-10-21",
  titre: "Le doute d'homonymie a sa procédure, et les virements sont mieux lus",
  points: [
@@ -6851,6 +6862,16 @@ function pendingDeltaCell(snap) {
  + `<strong style="color: var(--color-danger);">−${d.removed_count}</strong></span>`;
 }
 
+// Import interrompu que la réparation des imports bloqués avait déclaré
+// abouti (fiskr/completude.py) : la liste est tronquée, le serveur refuse de
+// l'approuver. Le dire dans la file, avant le clic.
+function pendingInterrompuBadge(snap) {
+ if (!snap.import_interrompu) return "";
+ return ` <span class="status-badge alert" style="white-space: nowrap;"`
+ + ` title="Import interrompu : la réparation des imports bloqués l'a déclaré complet sans preuve. Son approbation est refusée ; rejetez-le.">`
+ + `Import interrompu</span>`;
+}
+
 function renderPendingTable(pending) {
  const tbody = document.querySelector("#review-pending-table tbody");
  if (!tbody) return;
@@ -6871,7 +6892,7 @@ function renderPendingTable(pending) {
  <td>${escapeHtml(dateStr)}</td>
  <td><strong>${escapeHtml(snap.file_name)}</strong><br><small style="color:var(--text-muted)">Hash: ${(snap.file_hash || "").substring(0, 8)}… ${boutonCopier(snap.file_hash || "", "Copier le hash complet")}</small></td>
  <td>${listTypeBadge(snap.file_type)}</td>
- <td>${snap.record_count}</td>
+ <td>${snap.record_count}${pendingInterrompuBadge(snap)}</td>
  <td>${pendingDeltaCell(snap)}</td>
  <td>${snap.excluded_count || 0}</td>
  <td>${pendingBacktestCell(snap)}</td>

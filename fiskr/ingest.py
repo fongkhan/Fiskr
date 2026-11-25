@@ -85,6 +85,171 @@ def charger_json_borne(file_path: str, encoding: str = "utf-8",
         return json.load(f)
 
 
+_ECARTE = object()
+
+# Plafond d'UN element lu en flux. Mesure sur la CSL reelle (24 novembre 2026) :
+# 26 339 entrees, la plus grosse fait 79 Mo — une entree de l'Entity List SANS
+# NOM dont le champ `addresses` pese a lui seul les deux tiers du fichier (la
+# suivante : 20 Ko). Decodee, elle tient ~300 Mo de memoire pour une fiche que
+# le lecteur ecarte de toute facon faute de nom. Au-dela de ce plafond un
+# element est SAUTE sans etre construit, et compte.
+TAILLE_MAX_ELEMENT_EN_FLUX = 8 * 1024 * 1024
+
+_STRUCTURE_JSON = re.compile(r'["{}\[\]]')
+_FIN_DE_CHAINE_JSON = re.compile(r'["\\]')
+
+
+def iterer_tableau_json(file_path: str, cle: str = "results", encoding: str = "utf-8",
+                        taille_bloc: int = 1024 * 1024,
+                        taille_max_element: Optional[int] = None,
+                        si_ecarte=None) -> Generator[Any, None, None]:
+    """
+    Les elements d'un tableau JSON, UN A UN, sans construire l'arbre entier :
+    le tableau racine, ou celui de la cle `cle` d'un objet racine (les cles
+    qui precedent sont lues et ecartees ; ce qui suit le tableau n'est pas lu).
+
+    La memoire tient un element et un bloc de lecture, quelle que soit la
+    taille du fichier — la ou `json.load` en tenait quatre a seize fois la
+    taille (cf. TAILLE_MAX_LECTURE_BLOC). Releve en production le 24 novembre
+    2026 : la Consolidated Screening List americaine pese desormais 108 Mo, et
+    sa synchronisation echouait chaque nuit sur le plafond de 64 Mo — les
+    listes de controle des exportations n'etaient plus mises a jour.
+
+    Le decodeur est celui de la bibliotheque standard (`raw_decode`), applique
+    element par element : un element coupe par la fin du bloc est relu apres
+    le bloc suivant. Un element (objet ou tableau) plus gros que
+    `taille_max_element` (TAILLE_MAX_ELEMENT_EN_FLUX par defaut) est saute sans
+    etre construit ; `si_ecarte(taille)` est alors appele avec sa taille.
+    """
+    plafond = TAILLE_MAX_ELEMENT_EN_FLUX if taille_max_element is None else taille_max_element
+    decodeur = json.JSONDecoder()
+    with open(file_path, "r", encoding=encoding) as f:
+        etat = {"tampon": "", "pos": 0, "fini": False}
+
+        def sauter_compose() -> int:
+            """Avance apres l'objet ou le tableau qui commence a `pos`, sans le
+            construire, en jetant au fil de l'eau ce qui est lu. Rend le nombre
+            de caracteres sautes."""
+            profondeur, dans_chaine, saute = 0, False, 0
+            i = etat["pos"]
+            while True:
+                tampon = etat["tampon"]
+                n = len(tampon)
+                while i < n:
+                    if dans_chaine:
+                        m = _FIN_DE_CHAINE_JSON.search(tampon, i)
+                        if m is None:
+                            i = n
+                            break
+                        i = m.start()
+                        if tampon[i] == "\\":
+                            i += 2  # caractere echappe, peut deborder du bloc
+                            continue
+                        dans_chaine = False
+                        i += 1
+                        continue
+                    m = _STRUCTURE_JSON.search(tampon, i)
+                    if m is None:
+                        i = n
+                        break
+                    i = m.start()
+                    c = tampon[i]
+                    i += 1
+                    if c == '"':
+                        dans_chaine = True
+                    elif c in "{[":
+                        profondeur += 1
+                    else:
+                        profondeur -= 1
+                        if profondeur == 0:
+                            saute += i - etat["pos"]
+                            etat["pos"] = i
+                            return saute
+                saute += n - etat["pos"]
+                morceau = f.read(taille_bloc)
+                if not morceau:
+                    raise json.JSONDecodeError("élément non terminé", tampon, n)
+                i -= n  # 0, ou 1 si un echappement chevauchait la fin du bloc
+                etat["tampon"], etat["pos"] = morceau, 0
+
+        def remplir() -> bool:
+            morceau = f.read(taille_bloc)
+            if not morceau:
+                etat["fini"] = True
+                return False
+            etat["tampon"] = etat["tampon"][etat["pos"]:] + morceau
+            etat["pos"] = 0
+            return True
+
+        def caractere() -> str:
+            while True:
+                tampon, pos = etat["tampon"], etat["pos"]
+                while pos < len(tampon) and tampon[pos] in " \t\r\n":
+                    pos += 1
+                etat["pos"] = pos
+                if pos < len(tampon):
+                    return tampon[pos]
+                if not remplir():
+                    return ""
+
+        def valeur(element: bool = False) -> Any:
+            while True:
+                caractere()
+                try:
+                    v, fin = decodeur.raw_decode(etat["tampon"], etat["pos"])
+                except json.JSONDecodeError:
+                    if (element and len(etat["tampon"]) - etat["pos"] > plafond
+                            and etat["tampon"][etat["pos"]] in "{["):
+                        taille = sauter_compose()
+                        if si_ecarte is not None:
+                            si_ecarte(taille)
+                        return _ECARTE
+                    if etat["fini"] or not remplir():
+                        raise
+                    continue
+                # Un nombre coupe par la fin du bloc se decode « juste » (12
+                # pour 123) : sa fin doit etre suivie d'un delimiteur.
+                if fin >= len(etat["tampon"]) and not etat["fini"] and remplir():
+                    continue
+                etat["pos"] = fin
+                return v
+
+        def attendre(attendu: str) -> None:
+            if caractere() != attendu:
+                raise json.JSONDecodeError(f"« {attendu} » attendu", etat["tampon"], etat["pos"])
+            etat["pos"] += 1
+
+        def elements():
+            attendre("[")
+            if caractere() == "]":
+                etat["pos"] += 1
+                return
+            while True:
+                v = valeur(element=True)
+                if v is not _ECARTE:
+                    yield v
+                if caractere() == ",":
+                    etat["pos"] += 1
+                    continue
+                attendre("]")
+                return
+
+        debut = caractere()
+        if debut == "[":
+            yield from elements()
+            return
+        attendre("{")
+        while caractere() not in ("}", ""):
+            if caractere() == ",":
+                etat["pos"] += 1
+            nom = valeur()
+            attendre(":")
+            if nom == cle and caractere() == "[":
+                yield from elements()
+                return
+            valeur()
+
+
 def parse_multi_value(item: Dict[str, Any], *column_names: str,
                       separator: str = ";") -> List[str]:
     """
@@ -3216,9 +3381,13 @@ def parse_csl_json(
         ) if s
     )
 
-    payload = charger_json_borne(file_path)
-    results = payload.get("results") if isinstance(payload, dict) else payload
-    for row in results or []:
+    # Lu EN FLUX : la CSL pese 108 Mo (24 novembre 2026), au-dela du plafond
+    # d'un lecteur qui construit l'arbre entier (cf. iterer_tableau_json).
+    def _signaler(taille: int) -> None:
+        logger.warning(f"CSL : une entrée démesurée ({taille // (1024 * 1024)} Mo) "
+                       f"écartée sans être lue.")
+
+    for row in iterer_tableau_json(file_path, "results", si_ecarte=_signaler):
         if not isinstance(row, dict):
             continue
         name = _csl_text(row.get("name"))

@@ -124,15 +124,35 @@ def test_la_reprise_du_demon_repare_les_instantanes_bloques(db):
     Le job mort est remis en file ; l'instantané qu'il construisait doit l'être
     aussi. Sinon la liste reste hors production avec toutes ses fiches en base
     — l'état exact observé sur l'installation réelle.
+
+    Réécrit le 25 novembre 2026, et le dit : l'instantané réparé n'est promu
+    que si son import est ATTESTÉ terminé (ici par le travail qui l'a écrit) ;
+    sans preuve, c'est un import interrompu, en erreur — cf.
+    tests/test_import_interrompu.py.
     """
+    from fiskr import worker
+    from fiskr.database import Job
+
+    identifiant = _instantane_bloque(db, entites=17)
+    db.add(Job(token=f"ingest-{identifiant}", kind="ingest", status="DONE",
+               snapshot_id=identifiant))
+    db.commit()
+    worker.reprise(db)
+
+    instantane = db.query(Snapshot).filter(Snapshot.snapshot_id == identifiant).first()
+    assert instantane.status in ("READY", "PENDING_REVIEW")
+    assert instantane.record_count == 17
+
+
+def test_la_reprise_du_demon_ne_promeut_pas_un_import_interrompu(db):
+    """Le job tué l'a été en cours d'écriture : ses fiches sont un début de liste."""
     from fiskr import worker
 
     identifiant = _instantane_bloque(db, entites=17)
     worker.reprise(db)
 
     instantane = db.query(Snapshot).filter(Snapshot.snapshot_id == identifiant).first()
-    assert instantane.status in ("READY", "PENDING_REVIEW")
-    assert instantane.record_count == 17
+    assert instantane.status == "ERROR"
 
 
 def test_la_reprise_ne_touche_pas_un_import_en_cours(db):
